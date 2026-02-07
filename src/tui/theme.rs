@@ -123,7 +123,7 @@ impl Theme {
             crate::model::TaskState::Todo => self.text,
             crate::model::TaskState::Active => self.highlight,
             crate::model::TaskState::Blocked => self.red,
-            crate::model::TaskState::Done => self.dim,
+            crate::model::TaskState::Done => self.text,
             crate::model::TaskState::Parked => self.yellow,
         }
     }
@@ -195,7 +195,7 @@ mod tests {
         let theme = Theme::default();
         assert_eq!(theme.state_color(TaskState::Active), theme.highlight);
         assert_eq!(theme.state_color(TaskState::Blocked), theme.red);
-        assert_eq!(theme.state_color(TaskState::Done), theme.dim);
+        assert_eq!(theme.state_color(TaskState::Done), theme.text);
         assert_eq!(theme.state_color(TaskState::Parked), theme.yellow);
     }
 }

@@ -211,7 +211,7 @@ fn format_stats<'a>(stats: &TrackStats, app: &'a App, bg: ratatui::style::Color)
         (stats.blocked, "\u{2298}", app.theme.red),      // ⊘
         (stats.todo, "\u{25CB}", app.theme.text),        // ○
         (stats.parked, "\u{25C7}", app.theme.yellow),    // ◇
-        (stats.done, "\u{2713}", app.theme.dim),         // ✓
+        (stats.done, "\u{2713}", app.theme.text),         // ✓
     ];
 
     for (count, symbol, color) in items {

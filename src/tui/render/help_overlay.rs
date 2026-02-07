@@ -1,5 +1,5 @@
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
@@ -15,10 +15,6 @@ enum HelpEntry {
 
 /// Render the help overlay (toggled with ?)
 pub fn render_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
-    let overlay_area = centered_rect(72, 80, area);
-
-    frame.render_widget(Clear, overlay_area);
-
     let bg = app.theme.background;
     let text_color = app.theme.text;
     let bright = app.theme.text_bright;
@@ -71,6 +67,14 @@ pub fn render_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
 
         lines.push(Line::from(spans));
     }
+
+    // Fixed width from content: 2 columns + gap + borders
+    let popup_w = ((col_w * 2 + gap) as u16 + 2).min(area.width.saturating_sub(2));
+    // Dynamic height from content + borders
+    let popup_h = ((lines.len() as u16) + 2).min(area.height.saturating_sub(2));
+    let overlay_area = centered_rect_fixed(popup_w, popup_h, area);
+
+    frame.render_widget(Clear, overlay_area);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -220,23 +224,8 @@ fn build_recent_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
     (left, right)
 }
 
-/// Create a centered rectangle of the given percentage of the parent
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(area);
-
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(popup_layout[1])[1]
+fn centered_rect_fixed(width: u16, height: u16, area: Rect) -> Rect {
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    Rect::new(x, y, width, height)
 }

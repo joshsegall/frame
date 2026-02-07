@@ -98,20 +98,20 @@ pub fn render_recent_view(frame: &mut Frame, app: &App, area: Rect) {
         // Check mark + ID + Title
         spans.push(Span::styled(
             "\u{2713} ",
-            Style::default().fg(app.theme.dim).bg(bg),
+            Style::default().fg(app.theme.text).bg(bg),
         ));
 
         if !task.id.is_empty() {
             spans.push(Span::styled(
                 format!("{} ", task.id),
-                Style::default().fg(app.theme.dim).bg(bg),
+                Style::default().fg(app.theme.text).bg(bg),
             ));
         }
 
         let title_style = if is_cursor {
             Style::default().fg(app.theme.text_bright).bg(bg)
         } else {
-            Style::default().fg(app.theme.dim).bg(bg)
+            Style::default().fg(app.theme.text).bg(bg)
         };
         let hl_style = Style::default()
             .fg(app.theme.search_match_fg)
@@ -128,7 +128,7 @@ pub fn render_recent_view(frame: &mut Frame, app: &App, area: Rect) {
         // Track origin
         spans.push(Span::styled(
             format!("  {}", task.track_name),
-            Style::default().fg(app.theme.dim).bg(bg),
+            Style::default().fg(app.theme.text).bg(bg),
         ));
 
         // Pad cursor line
