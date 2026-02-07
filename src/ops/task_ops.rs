@@ -141,11 +141,15 @@ pub fn add_subtask(track: &mut Track, parent_id: &str, title: String) -> Result<
 
 /// Edit a task's title.
 pub fn edit_title(track: &mut Track, task_id: &str, new_title: String) -> Result<(), TaskError> {
-    let (parsed_title, tags) = parse_title_and_tags(&new_title);
+    let (parsed_title, new_tags) = parse_title_and_tags(&new_title);
     let task = find_task_mut_in_track(track, task_id)
         .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
     task.title = parsed_title;
-    task.tags = tags;
+    for tag in new_tags {
+        if !task.tags.contains(&tag) {
+            task.tags.push(tag);
+        }
+    }
     task.mark_dirty();
     Ok(())
 }
