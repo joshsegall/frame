@@ -1,0 +1,41 @@
+[project]
+name = "lace"
+
+[agent]
+cc_focus = "infra"
+default_tags = ["cc-added"]
+
+[[tracks]]
+id = "effects"
+name = "Effect System"
+state = "active"
+file = "tracks/effects.md"
+
+[[tracks]]
+id = "unique"
+name = "Unique Types"
+state = "active"
+file = "tracks/unique-types.md"
+
+[[tracks]]
+id = "infra"
+name = "Compiler Infrastructure"
+state = "active"
+file = "tracks/compiler-infra.md"
+
+[[tracks]]
+id = "modules"
+name = "Module System"
+state = "shelved"
+file = "tracks/modules.md"
+
+[clean]
+auto_clean = true
+done_threshold = 250
+archive_per_track = true
+
+[ids.prefixes]
+effects = "EFF"
+unique-types = "UNQ"
+modules = "MOD"
+infra = "INFRA"
