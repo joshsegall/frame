@@ -32,6 +32,14 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             app.should_quit = true;
         }
 
+        // Esc: clear search first, then normal behavior
+        (_, KeyCode::Esc) => {
+            if app.last_search.is_some() {
+                app.last_search = None;
+                app.search_match_idx = 0;
+            }
+        }
+
         // Help overlay
         (KeyModifiers::NONE, KeyCode::Char('?')) => {
             app.show_help = true;
@@ -46,14 +54,12 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
         // Search: n/N for next/prev match
         (KeyModifiers::NONE, KeyCode::Char('n')) => {
             if app.last_search.is_some() {
-                app.search_match_idx = app.search_match_idx.wrapping_add(1);
-                execute_search(app, app.search_match_idx);
+                search_next(app, 1);
             }
         }
         (KeyModifiers::SHIFT, KeyCode::Char('N')) => {
             if app.last_search.is_some() {
-                app.search_match_idx = app.search_match_idx.wrapping_sub(1);
-                execute_search(app, app.search_match_idx);
+                search_next(app, -1);
             }
         }
 
@@ -133,7 +139,7 @@ fn handle_search(app: &mut App, key: KeyEvent) {
             if !app.search_input.is_empty() {
                 app.last_search = Some(app.search_input.clone());
                 app.search_match_idx = 0;
-                execute_search(app, 0);
+                execute_search_dir(app, 0, 0);
             }
             app.mode = Mode::Navigate;
             app.search_input.clear();
@@ -412,10 +418,18 @@ fn count_recent_tasks(app: &App) -> usize {
         .sum()
 }
 
-/// Execute search: find matches in the current view and jump to match at `match_idx`.
+/// Advance search by `direction` (+1 = next, -1 = prev) with proper wrapping.
+fn search_next(app: &mut App, direction: i32) {
+    let current = app.search_match_idx;
+    // We pass the direction to execute_search which handles cycling internally
+    execute_search_dir(app, current, direction);
+}
+
+/// Execute search: find matches in the current view and jump to the match.
+/// `from_idx` is the current match index, `direction` is +1 (next) or -1 (prev) or 0 (first).
 /// Uses regex via ops::search for full-field matching. Auto-expands collapsed subtrees
 /// in track view to reveal matching tasks.
-fn execute_search(app: &mut App, match_idx: usize) {
+fn execute_search_dir(app: &mut App, from_idx: usize, direction: i32) {
     let pattern = match &app.last_search {
         Some(p) => p.clone(),
         None => return,
@@ -430,16 +444,30 @@ fn execute_search(app: &mut App, match_idx: usize) {
     };
 
     match app.view.clone() {
-        View::Track(idx) => search_in_track(app, idx, &re, match_idx),
-        View::Tracks => search_in_tracks_view(app, &re, match_idx),
-        View::Inbox => search_in_inbox(app, &re, match_idx),
-        View::Recent => search_in_recent(app, &re, match_idx),
+        View::Track(idx) => search_in_track(app, idx, &re, from_idx, direction),
+        View::Tracks => search_in_tracks_view(app, &re, from_idx, direction),
+        View::Inbox => search_in_inbox(app, &re, from_idx, direction),
+        View::Recent => search_in_recent(app, &re, from_idx, direction),
+    }
+}
+
+/// Compute the next index given current position, direction, and total count.
+/// direction: 0 = use from_idx as-is, +1 = next, -1 = previous.
+fn cycle_index(from_idx: usize, direction: i32, count: usize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    match direction {
+        0 => from_idx % count,
+        1 => (from_idx + 1) % count,
+        -1 => (from_idx + count - 1) % count,
+        _ => from_idx % count,
     }
 }
 
 /// Search within a single track view. Uses ops::search to find matching task IDs,
 /// then auto-expands ancestors and jumps the cursor.
-fn search_in_track(app: &mut App, view_idx: usize, re: &Regex, match_idx: usize) {
+fn search_in_track(app: &mut App, view_idx: usize, re: &Regex, from_idx: usize, direction: i32) {
     let track_id = match app.active_track_ids.get(view_idx) {
         Some(id) => id.clone(),
         None => return,
@@ -459,7 +487,7 @@ fn search_in_track(app: &mut App, view_idx: usize, re: &Regex, match_idx: usize)
         }
     }
 
-    let idx = match_idx % matched_task_ids.len();
+    let idx = cycle_index(from_idx, direction, matched_task_ids.len());
     app.search_match_idx = idx;
     let target_id = &matched_task_ids[idx];
 
@@ -545,7 +573,7 @@ fn find_task_path(tasks: &[crate::model::Task], target_id: &str) -> Option<Vec<u
     None
 }
 
-fn search_in_tracks_view(app: &mut App, re: &Regex, match_idx: usize) {
+fn search_in_tracks_view(app: &mut App, re: &Regex, from_idx: usize, direction: i32) {
     let matches: Vec<usize> = app
         .project
         .config
@@ -557,13 +585,13 @@ fn search_in_tracks_view(app: &mut App, re: &Regex, match_idx: usize) {
         .collect();
 
     if !matches.is_empty() {
-        let idx = match_idx % matches.len();
+        let idx = cycle_index(from_idx, direction, matches.len());
         app.search_match_idx = idx;
         app.tracks_cursor = matches[idx];
     }
 }
 
-fn search_in_inbox(app: &mut App, re: &Regex, match_idx: usize) {
+fn search_in_inbox(app: &mut App, re: &Regex, from_idx: usize, direction: i32) {
     let inbox = match &app.project.inbox {
         Some(inbox) => inbox,
         None => return,
@@ -582,12 +610,12 @@ fn search_in_inbox(app: &mut App, re: &Regex, match_idx: usize) {
         }
     }
 
-    let idx = match_idx % matched_indices.len();
+    let idx = cycle_index(from_idx, direction, matched_indices.len());
     app.search_match_idx = idx;
     app.inbox_cursor = matched_indices[idx];
 }
 
-fn search_in_recent(app: &mut App, re: &Regex, match_idx: usize) {
+fn search_in_recent(app: &mut App, re: &Regex, from_idx: usize, direction: i32) {
     // Search done tasks across all tracks using ops::search
     let all_hits = search_tasks(&app.project, re, None);
 
@@ -645,7 +673,7 @@ fn search_in_recent(app: &mut App, re: &Regex, match_idx: usize) {
         .collect();
 
     if !matches.is_empty() {
-        let idx = match_idx % matches.len();
+        let idx = cycle_index(from_idx, direction, matches.len());
         app.search_match_idx = idx;
         app.recent_cursor = matches[idx];
     }
