@@ -91,17 +91,17 @@ pub enum SuggestionKind {
 }
 
 // ---------------------------------------------------------------------------
-// Lightweight ID + date assignment (used by TUI on load/reload)
+// Lightweight ID + date + dedup assignment (used by TUI on load/reload)
 // ---------------------------------------------------------------------------
 
-/// Assign missing IDs and dates to all tasks in the project.
+/// Assign missing IDs and dates, and resolve duplicate IDs across the project.
 ///
-/// This runs only steps 1–2 of the clean pipeline (ID assignment + date
-/// assignment). Returns the list of track IDs that were modified, so callers
-/// can selectively save only those tracks.
+/// This runs steps 1–3 of the clean pipeline (ID assignment, date assignment,
+/// duplicate ID resolution). Returns the list of track IDs that were modified,
+/// so callers can selectively save only those tracks.
 pub fn ensure_ids_and_dates(project: &mut Project) -> Vec<String> {
     let mut result = CleanResult::default();
-    let mut modified = Vec::new();
+    let mut modified = HashSet::new();
 
     for (track_id, track) in &mut project.tracks {
         let before_ids = result.ids_assigned.len();
@@ -115,11 +115,18 @@ pub fn ensure_ids_and_dates(project: &mut Project) -> Vec<String> {
         assign_missing_dates(track, track_id, &mut result);
 
         if result.ids_assigned.len() > before_ids || result.dates_assigned.len() > before_dates {
-            modified.push(track_id.clone());
+            modified.insert(track_id.clone());
         }
     }
 
-    modified
+    // Resolve duplicate IDs (cross-track and within-track)
+    let before_dups = result.duplicates_resolved.len();
+    resolve_duplicate_ids(project, &mut result);
+    for dup in &result.duplicates_resolved[before_dups..] {
+        modified.insert(dup.track_id.clone());
+    }
+
+    modified.into_iter().collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1711,5 +1718,31 @@ mod tests {
                 .iter()
                 .any(|m| matches!(m, Metadata::Added(_)))
         );
+    }
+
+    #[test]
+    fn test_ensure_ids_and_dates_resolves_duplicates() {
+        let mut project = make_project(
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` First occurrence
+  - added: 2025-05-01
+- [ ] `M-001` Duplicate
+  - added: 2025-05-02
+
+## Done
+",
+            vec![("main", "M")],
+        );
+
+        let modified = ensure_ids_and_dates(&mut project);
+        assert!(modified.contains(&"main".to_string()));
+
+        let backlog = project.tracks[0].1.backlog();
+        assert_eq!(backlog[0].id.as_deref(), Some("M-001"));
+        assert_eq!(backlog[1].id.as_deref(), Some("M-002"));
     }
 }
