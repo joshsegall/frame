@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use regex::Regex;
 
-use crate::model::{SectionKind, Task, TaskState};
+use crate::model::{Metadata, SectionKind, Task, TaskState};
 use crate::tui::app::{App, FlatItem};
 
 use super::push_highlighted_spans;
@@ -261,6 +261,27 @@ fn render_task_line<'a>(
         }
     }
 
+    // Hidden match indicator for non-visible field matches
+    if let Some(indicator) = hidden_match_indicator(task, search_re) {
+        let indicator_width = indicator.chars().count() + 2; // "  " + indicator
+        let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+
+        // Truncate line content if needed to make room for indicator
+        if content_width + indicator_width > width {
+            truncate_spans(&mut spans, width.saturating_sub(indicator_width + 1));
+            spans.push(Span::styled(
+                "\u{2026}", // …
+                Style::default().fg(app.theme.dim).bg(bg),
+            ));
+        }
+
+        let hl_style = Style::default()
+            .fg(app.theme.text_bright)
+            .bg(app.theme.purple);
+        spans.push(Span::styled("  ", Style::default().bg(bg)));
+        spans.push(Span::styled(indicator, hl_style));
+    }
+
     // Highlight cursor line
     if is_cursor {
         let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
@@ -310,4 +331,89 @@ fn render_parked_separator<'a>(app: &'a App, width: usize, is_cursor: bool) -> L
     );
 
     Line::from(Span::styled(line_text, style))
+}
+
+/// Build a hidden match indicator for non-visible field matches on a task.
+/// Returns None if the regex doesn't match any hidden fields (note, dep, ref, spec).
+/// Returns e.g. "[2 matches: note, dep]" or "[1 match: note]".
+fn hidden_match_indicator(task: &Task, search_re: Option<&Regex>) -> Option<String> {
+    let re = search_re?;
+
+    // Count matches per hidden field type
+    let mut note_count = 0usize;
+    let mut dep_count = 0usize;
+    let mut ref_count = 0usize;
+    let mut spec_count = 0usize;
+
+    for meta in &task.metadata {
+        match meta {
+            Metadata::Note(text) => note_count += re.find_iter(text).count(),
+            Metadata::Dep(deps) => {
+                for dep in deps {
+                    dep_count += re.find_iter(dep).count();
+                }
+            }
+            Metadata::Ref(refs) => {
+                for r in refs {
+                    ref_count += re.find_iter(r).count();
+                }
+            }
+            Metadata::Spec(spec) => spec_count += re.find_iter(spec).count(),
+            _ => {}
+        }
+    }
+
+    let total = note_count + dep_count + ref_count + spec_count;
+    if total == 0 {
+        return None;
+    }
+
+    // Build field list (up to 3 names, then ...)
+    let mut fields: Vec<&str> = Vec::new();
+    if note_count > 0 {
+        fields.push("note");
+    }
+    if dep_count > 0 {
+        fields.push("dep");
+    }
+    if ref_count > 0 {
+        fields.push("ref");
+    }
+    if spec_count > 0 {
+        fields.push("spec");
+    }
+
+    let match_word = if total == 1 { "match" } else { "matches" };
+
+    let field_str = if fields.len() > 3 {
+        format!("{}, ...", fields[..3].join(", "))
+    } else {
+        fields.join(", ")
+    };
+
+    Some(format!("[{} {}: {}]", total, match_word, field_str))
+}
+
+/// Truncate spans to fit within `max_width` characters.
+fn truncate_spans(spans: &mut Vec<Span<'_>>, max_width: usize) {
+    let mut total = 0usize;
+    let mut truncate_at = spans.len();
+
+    for (i, span) in spans.iter().enumerate() {
+        let span_width = span.content.chars().count();
+        if total + span_width > max_width {
+            truncate_at = i;
+            // Truncate this span's content to fit
+            let remaining = max_width.saturating_sub(total);
+            if remaining > 0 {
+                let truncated: String = span.content.chars().take(remaining).collect();
+                spans[i] = Span::styled(truncated, span.style);
+                truncate_at = i + 1;
+            }
+            break;
+        }
+        total += span_width;
+    }
+
+    spans.truncate(truncate_at);
 }

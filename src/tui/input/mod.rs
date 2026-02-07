@@ -479,7 +479,7 @@ fn search_in_track(app: &mut App, view_idx: usize, re: &Regex, from_idx: usize, 
         return;
     }
 
-    // Deduplicate: multiple hits per task (title + tag + note) → unique task IDs in order
+    // Deduplicate: multiple hits per task → unique task IDs in order
     let mut matched_task_ids: Vec<String> = Vec::new();
     for hit in &hits {
         if !matched_task_ids.contains(&hit.task_id) {
