@@ -29,7 +29,7 @@ pub fn discover_project(start: &Path) -> Result<PathBuf, ProjectError> {
     let mut current = start.to_path_buf();
     loop {
         let frame_dir = current.join("frame");
-        if frame_dir.is_dir() {
+        if frame_dir.is_dir() && frame_dir.join("project.toml").exists() {
             return Ok(current);
         }
         if !current.pop() {

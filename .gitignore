@@ -2,6 +2,9 @@
 target/
 build/
 
+# test directory
+frame/
+
 
 # Added by cargo
 
