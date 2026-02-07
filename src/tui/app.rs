@@ -3,7 +3,10 @@ use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
-use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::event::{
+    self, Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -1232,6 +1235,20 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
+
+    // Enable Kitty keyboard protocol if the terminal supports it
+    let kitty_enabled = crossterm::terminal::supports_keyboard_enhancement()
+        .unwrap_or(false);
+    if kitty_enabled {
+        execute!(
+            stdout,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+            )
+        )?;
+    }
+
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
@@ -1240,6 +1257,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = disable_raw_mode();
+        if kitty_enabled {
+            let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+        }
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
         original_hook(panic_info);
     }));
@@ -1252,6 +1272,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // Restore terminal
     disable_raw_mode()?;
+    if kitty_enabled {
+        execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
+    }
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
