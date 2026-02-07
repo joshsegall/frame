@@ -4,12 +4,19 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::ops::track_ops::{TrackStats, task_counts};
+use crate::ops::track_ops::task_counts;
 use crate::tui::app::App;
 
 use super::push_highlighted_spans;
 
-/// Render the tracks overview: all tracks grouped by state with stats
+/// Width of each stat column (right-aligned numbers)
+const COL_W: usize = 5;
+
+/// Column headers (short names) and their markdown checkbox representations
+const HEADERS: [&str; 5] = ["todo", "act", "blk", "done", "park"];
+const CHECKBOXES: [&str; 5] = ["[ ]", "[>]", "[-]", "[x]", "[~]"];
+
+/// Render the tracks overview as a grid with state columns
 pub fn render_tracks_view(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     let cursor = app.tracks_cursor;
@@ -31,23 +38,37 @@ pub fn render_tracks_view(frame: &mut Frame, app: &App, area: Rect) {
     let cc_focus = app.project.config.agent.cc_focus.as_deref();
     let search_re = app.active_search_re();
 
+    // Calculate name column width from longest track name
+    let total_tracks = active_tracks.len() + shelved_tracks.len() + archived_tracks.len();
+    let num_width = if total_tracks >= 10 { 2 } else { 1 };
+    let max_name_len = app
+        .project
+        .config
+        .tracks
+        .iter()
+        .map(|tc| tc.name.chars().count())
+        .max()
+        .unwrap_or(10);
+
+    // name_col = " " (border) + " " (indent) + num + "  " + name + "  " (gap before stats)
+    let name_col = 1 + 1 + num_width + 2 + max_name_len;
+
+    // Top header: short state names aligned to stat columns
+    lines.push(render_col_names(app, name_col));
+
     let mut flat_idx = 0usize;
 
     // Active section
     if !active_tracks.is_empty() {
-        lines.push(Line::from(Span::styled(
-            " Active",
-            Style::default()
-                .fg(app.theme.text)
-                .bg(app.theme.background)
-                .add_modifier(Modifier::BOLD),
-        )));
-        for (i, tc) in active_tracks.iter().enumerate() {
+        lines.push(render_section_row(app, "Active", name_col, false));
+        for tc in &active_tracks {
             let is_cursor = flat_idx == cursor;
-            lines.push(render_track_line(
+            lines.push(render_track_row(
                 app,
                 tc,
-                i + 1,
+                flat_idx + 1,
+                num_width,
+                max_name_len,
                 is_cursor,
                 cc_focus,
                 area.width,
@@ -60,20 +81,15 @@ pub fn render_tracks_view(frame: &mut Frame, app: &App, area: Rect) {
 
     // Shelved section
     if !shelved_tracks.is_empty() {
-        lines.push(Line::from(Span::styled(
-            " Shelved",
-            Style::default()
-                .fg(app.theme.text)
-                .bg(app.theme.background)
-                .add_modifier(Modifier::BOLD),
-        )));
+        lines.push(render_section_row(app, "Shelved", name_col, false));
         for tc in &shelved_tracks {
             let is_cursor = flat_idx == cursor;
-            let idx = flat_idx + 1;
-            lines.push(render_track_line(
+            lines.push(render_track_row(
                 app,
                 tc,
-                idx,
+                flat_idx + 1,
+                num_width,
+                max_name_len,
                 is_cursor,
                 cc_focus,
                 area.width,
@@ -86,20 +102,15 @@ pub fn render_tracks_view(frame: &mut Frame, app: &App, area: Rect) {
 
     // Archived section
     if !archived_tracks.is_empty() {
-        lines.push(Line::from(Span::styled(
-            " Archived",
-            Style::default()
-                .fg(app.theme.dim)
-                .bg(app.theme.background)
-                .add_modifier(Modifier::BOLD),
-        )));
+        lines.push(render_section_row(app, "Archived", name_col, true));
         for tc in &archived_tracks {
             let is_cursor = flat_idx == cursor;
-            let idx = flat_idx + 1;
-            lines.push(render_track_line(
+            lines.push(render_track_row(
                 app,
                 tc,
-                idx,
+                flat_idx + 1,
+                num_width,
+                max_name_len,
                 is_cursor,
                 cc_focus,
                 area.width,
@@ -109,7 +120,8 @@ pub fn render_tracks_view(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    if lines.is_empty() {
+    if flat_idx == 0 {
+        lines.clear();
         lines.push(Line::from(Span::styled(
             " No tracks",
             Style::default().fg(app.theme.dim).bg(app.theme.background),
@@ -120,10 +132,68 @@ pub fn render_tracks_view(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-fn render_track_line<'a>(
+/// Render the top header line with short state names
+fn render_col_names<'a>(app: &'a App, name_col: usize) -> Line<'a> {
+    let bg = app.theme.background;
+    let header_style = Style::default().fg(app.theme.text).bg(bg);
+
+    let mut spans: Vec<Span> = Vec::new();
+
+    // Pad to align with stat columns
+    spans.push(Span::styled(" ".repeat(name_col), Style::default().bg(bg)));
+
+    for header in &HEADERS {
+        spans.push(Span::styled(
+            format!("{:>width$}", header, width = COL_W),
+            header_style,
+        ));
+    }
+
+    Line::from(spans)
+}
+
+/// Render a section header with name + markdown checkbox sub-headers
+fn render_section_row<'a>(app: &'a App, label: &'static str, name_col: usize, is_dim: bool) -> Line<'a> {
+    let bg = app.theme.background;
+    let label_color = if is_dim { app.theme.dim } else { app.theme.text };
+    let label_style = Style::default()
+        .fg(label_color)
+        .bg(bg)
+        .add_modifier(Modifier::BOLD);
+    let cb_style = Style::default().fg(app.theme.text).bg(bg);
+
+    let mut spans: Vec<Span> = Vec::new();
+
+    // " Label" left-aligned, then pad to name_col
+    let label_text = format!(" {}", label);
+    let label_len = label_text.chars().count();
+    spans.push(Span::styled(label_text, label_style));
+
+    if label_len < name_col {
+        spans.push(Span::styled(
+            " ".repeat(name_col - label_len),
+            Style::default().bg(bg),
+        ));
+    }
+
+    // Checkbox representations aligned to stat columns
+    for cb in &CHECKBOXES {
+        spans.push(Span::styled(
+            format!("{:>width$}", cb, width = COL_W),
+            cb_style,
+        ));
+    }
+
+    Line::from(spans)
+}
+
+/// Render a single track data row with stat counts in columns
+fn render_track_row<'a>(
     app: &'a App,
     tc: &crate::model::TrackConfig,
-    _number: usize,
+    number: usize,
+    num_width: usize,
+    max_name_len: usize,
     is_cursor: bool,
     cc_focus: Option<&str>,
     width: u16,
@@ -134,7 +204,6 @@ fn render_track_line<'a>(
     } else {
         app.theme.background
     };
-    let text_color = app.theme.text_bright;
 
     // Get stats for this track
     let stats = app
@@ -147,7 +216,7 @@ fn render_track_line<'a>(
 
     let mut spans: Vec<Span> = Vec::new();
 
-    // Column 0 reservation
+    // Column 0: cursor border
     if is_cursor {
         spans.push(Span::styled(
             "\u{258E}",
@@ -162,34 +231,59 @@ fn render_track_line<'a>(
         ));
     }
 
-    // Indent
-    spans.push(Span::styled(" ", Style::default().bg(bg)));
+    // Number (right-aligned in num_width)
+    let num_str = format!("{:>width$}", number, width = num_width);
+    spans.push(Span::styled(
+        num_str,
+        Style::default().fg(app.theme.dim).bg(bg),
+    ));
+    spans.push(Span::styled("  ", Style::default().bg(bg)));
 
-    // Track name (with search highlighting)
-    let name_style = Style::default().fg(text_color).bg(bg);
+    // Track name (with search highlighting, padded to max_name_len)
+    let name_style = Style::default().fg(app.theme.text_bright).bg(bg);
     let hl_style = Style::default()
         .fg(app.theme.search_match_fg)
         .bg(app.theme.search_match_bg)
         .add_modifier(Modifier::BOLD);
     push_highlighted_spans(&mut spans, &tc.name, name_style, hl_style, search_re);
 
-    // Stats
-    let stats_str = format_stats(&stats, app, bg);
-    spans.push(Span::styled("  ", Style::default().bg(bg)));
-    for s in stats_str {
-        spans.push(s);
+    // Pad name to max_name_len
+    let name_len = tc.name.chars().count();
+    if name_len < max_name_len {
+        spans.push(Span::styled(
+            " ".repeat(max_name_len - name_len),
+            Style::default().bg(bg),
+        ));
+    }
+
+    // Stat columns: todo, active, blocked, done, parked
+    let counts = [stats.todo, stats.active, stats.blocked, stats.done, stats.parked];
+    let colors = [
+        app.theme.text,      // todo
+        app.theme.highlight,  // active
+        app.theme.red,        // blocked
+        app.theme.text,       // done
+        app.theme.yellow,     // parked
+    ];
+
+    for (count, color) in counts.iter().zip(colors.iter()) {
+        let style = Style::default().fg(*color).bg(bg);
+        spans.push(Span::styled(
+            format!("{:>width$}", count, width = COL_W),
+            style,
+        ));
     }
 
     // cc-focus indicator
     if cc_focus == Some(tc.id.as_str()) {
         spans.push(Span::styled("  ", Style::default().bg(bg)));
         spans.push(Span::styled(
-            "\u{2605}cc",
+            "\u{2605} cc",
             Style::default().fg(app.theme.purple).bg(bg),
         ));
     }
 
-    // Pad to full width for cursor
+    // Pad to full width for cursor highlight
     if is_cursor {
         let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
         let w = width as usize;
@@ -202,25 +296,4 @@ fn render_track_line<'a>(
     }
 
     Line::from(spans)
-}
-
-fn format_stats<'a>(stats: &TrackStats, app: &'a App, bg: ratatui::style::Color) -> Vec<Span<'a>> {
-    let mut spans = Vec::new();
-    let items: Vec<(usize, &str, ratatui::style::Color)> = vec![
-        (stats.active, "\u{25D0}", app.theme.highlight), // ◐
-        (stats.blocked, "\u{2298}", app.theme.red),      // ⊘
-        (stats.todo, "\u{25CB}", app.theme.text),        // ○
-        (stats.parked, "\u{25C7}", app.theme.yellow),    // ◇
-        (stats.done, "\u{2713}", app.theme.text),         // ✓
-    ];
-
-    for (count, symbol, color) in items {
-        if count > 0 {
-            spans.push(Span::styled(
-                format!("{}{} ", count, symbol),
-                Style::default().fg(color).bg(bg),
-            ));
-        }
-    }
-    spans
 }

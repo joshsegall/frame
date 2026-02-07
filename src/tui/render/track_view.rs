@@ -10,14 +10,14 @@ use crate::tui::app::{App, EditTarget, FlatItem, Mode};
 
 use super::push_highlighted_spans;
 
-/// State symbols for each task state
+/// State symbols for each task state (markdown checkbox style)
 fn state_symbol(state: TaskState) -> &'static str {
     match state {
-        TaskState::Todo => "\u{25CB}",    // ○
-        TaskState::Active => "\u{25D0}",  // ◐
-        TaskState::Blocked => "\u{2298}", // ⊘
-        TaskState::Done => "\u{2713}",    // ✓
-        TaskState::Parked => "\u{25C7}",  // ◇
+        TaskState::Todo => "[ ]",
+        TaskState::Active => "[>]",
+        TaskState::Blocked => "[-]",
+        TaskState::Done => "[x]",
+        TaskState::Parked => "[~]",
     }
 }
 
