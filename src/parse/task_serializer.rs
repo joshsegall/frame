@@ -10,18 +10,26 @@ pub fn serialize_tasks(tasks: &[Task], indent: usize) -> Vec<String> {
     lines
 }
 
-/// Serialize a single task. If clean (not dirty), emit verbatim source.
-/// If dirty, emit canonical format.
+/// Serialize a single task.
+///
+/// The task's OWN content (task line + metadata) is emitted verbatim if clean,
+/// or in canonical format if dirty. Subtasks are ALWAYS recursed into
+/// independently — this enables selective rewrite where editing a subtask
+/// doesn't reformat the parent or siblings.
 fn serialize_task(task: &Task, indent: usize, lines: &mut Vec<String>) {
     if !task.dirty {
-        // Emit verbatim source lines
         if let Some(ref source) = task.source_text {
+            // Emit this task's own lines (task line + metadata) verbatim
             lines.extend(source.iter().cloned());
+            // Still recurse into subtasks — they have their own dirty flags
+            for subtask in &task.subtasks {
+                serialize_task(subtask, indent + 2, lines);
+            }
             return;
         }
     }
 
-    // Canonical format
+    // Canonical format for this task's own content
     let indent_str = " ".repeat(indent);
 
     // Task line: `- [X] \`ID\` Title #tag1 #tag2`
@@ -178,5 +186,53 @@ mod tests {
         let lines = serialize_tasks(&[task], 0);
         assert_eq!(lines[0], "- [ ] Test  ");
         assert_eq!(lines[1], "  - added: 2025-01-01");
+    }
+
+    #[test]
+    fn test_selective_rewrite_dirty_subtask_clean_parent() {
+        // Parent is clean (has verbatim source), but subtask is dirty.
+        // The parent's own lines should be emitted verbatim.
+        // The dirty subtask should be emitted in canonical format.
+        // The clean sibling subtask should be emitted verbatim.
+        let mut parent = Task::new(
+            TaskState::Active,
+            Some("T-001".to_string()),
+            "Parent".to_string(),
+        );
+        parent.dirty = false;
+        parent.source_text = Some(vec![
+            "- [>] `T-001` Parent  ".to_string(), // trailing spaces = verbatim
+            "  - added: 2025-05-10".to_string(),
+        ]);
+
+        let mut sub1 = Task::new(
+            TaskState::Todo,
+            Some("T-001.1".to_string()),
+            "Sub 1 original".to_string(),
+        );
+        sub1.dirty = false;
+        sub1.source_text = Some(vec![
+            "  - [ ] `T-001.1` Sub 1 original".to_string(),
+        ]);
+
+        // Sub 2 has been modified — dirty, no source_text
+        let sub2 = Task::new(
+            TaskState::Done,
+            Some("T-001.2".to_string()),
+            "Sub 2 modified".to_string(),
+        );
+        // sub2 is dirty by default from Task::new
+
+        parent.subtasks = vec![sub1, sub2];
+
+        let lines = serialize_tasks(&[parent], 0);
+
+        // Parent own lines: verbatim (note trailing spaces preserved)
+        assert_eq!(lines[0], "- [>] `T-001` Parent  ");
+        assert_eq!(lines[1], "  - added: 2025-05-10");
+        // Sub 1: verbatim (clean)
+        assert_eq!(lines[2], "  - [ ] `T-001.1` Sub 1 original");
+        // Sub 2: canonical (dirty) — state changed to done
+        assert_eq!(lines[3], "  - [x] `T-001.2` Sub 2 modified");
     }
 }

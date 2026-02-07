@@ -107,6 +107,79 @@ fn round_trip_config() {
 }
 
 // ============================================================================
+// Selective rewrite tests
+// ============================================================================
+
+/// The core property: modifying a subtask should ONLY change that subtask's
+/// lines in the output. The parent, siblings, and all other tasks must remain
+/// byte-for-byte identical to the original source.
+#[test]
+fn selective_rewrite_only_dirty_subtask_changes() {
+    let source = "\
+# Test Track
+
+## Backlog
+
+- [>] `T-001` Parent task
+  - added: 2025-05-10
+  - dep: T-000
+  - [ ] `T-001.1` First subtask
+  - [ ] `T-001.2` Second subtask
+  - [ ] `T-001.3` Third subtask
+- [ ] `T-002` Unrelated task
+  - added: 2025-05-11
+
+## Done";
+
+    let mut track = parse_track(source);
+
+    // Mutate only T-001.2: mark it done
+    let backlog = track.section_tasks_mut(frame::model::track::SectionKind::Backlog).unwrap();
+    let subtask = &mut backlog[0].subtasks[1];
+    assert_eq!(subtask.id.as_deref(), Some("T-001.2"));
+    subtask.state = frame::model::TaskState::Done;
+    subtask.dirty = true;
+    subtask.source_text = None; // force canonical rewrite
+
+    let output = serialize_track(&track);
+
+    // The only difference should be `- [ ]` → `- [x]` on the T-001.2 line
+    let expected = source.replace(
+        "  - [ ] `T-001.2` Second subtask",
+        "  - [x] `T-001.2` Second subtask",
+    );
+    assert_eq!(output, expected);
+}
+
+/// Verify that parent source_text does NOT include subtask lines.
+/// This is the precondition for selective rewrite to work.
+#[test]
+fn parent_source_text_excludes_subtasks() {
+    let source = "\
+- [>] `T-001` Parent task
+  - added: 2025-05-10
+  - [ ] `T-001.1` First subtask
+  - [ ] `T-001.2` Second subtask";
+
+    let lines: Vec<String> = source.lines().map(|l| l.to_string()).collect();
+    let (tasks, _) = frame::parse::task_parser::parse_tasks(&lines, 0, 0, 0);
+
+    let parent = &tasks[0];
+    let parent_source = parent.source_text.as_ref().unwrap();
+
+    // Parent's source_text should be ONLY its own line + metadata
+    assert_eq!(parent_source.len(), 2, "Parent source_text should be 2 lines (task + added)");
+    assert_eq!(parent_source[0], "- [>] `T-001` Parent task");
+    assert_eq!(parent_source[1], "  - added: 2025-05-10");
+
+    // Subtasks should have their own source_text
+    assert_eq!(tasks[0].subtasks.len(), 2);
+    let sub1_source = tasks[0].subtasks[0].source_text.as_ref().unwrap();
+    assert_eq!(sub1_source.len(), 1);
+    assert_eq!(sub1_source[0], "  - [ ] `T-001.1` First subtask");
+}
+
+// ============================================================================
 // Parse correctness tests
 // ============================================================================
 

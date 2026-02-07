@@ -69,21 +69,15 @@ fn parse_single_task(
     let mut idx = start_idx + 1;
     let meta_indent = indent + 2;
 
-    // Parse metadata and subtasks
+    // Parse metadata lines (before subtasks)
     while idx < lines.len() {
         let line = &lines[idx];
 
-        // Check for subtask at indent+2
+        // If we hit a subtask line at the expected indent, stop collecting metadata
         if let Some(ti) = task_indent(line) {
-            if ti == meta_indent && depth + 1 < MAX_DEPTH {
-                // Subtask
-                let (subtasks, next_idx) =
-                    parse_tasks(lines, idx, meta_indent, depth + 1);
-                task.subtasks = subtasks;
-                idx = next_idx;
-                continue;
+            if ti == meta_indent {
+                break;
             } else if ti <= indent {
-                // Back to our level or above — done
                 break;
             }
         }
@@ -100,7 +94,6 @@ fn parse_single_task(
         // in well-formed input, but stop parsing)
         let line_indent = count_indent(line);
         if line_indent > indent && !line.trim().is_empty() {
-            // Could be metadata or subtask we don't recognize — skip
             idx += 1;
             continue;
         }
@@ -109,12 +102,26 @@ fn parse_single_task(
         break;
     }
 
-    // Record source range and text
-    let end_idx = idx;
-    task.source_lines = Some(start_idx..end_idx);
-    task.source_text = Some(lines[start_idx..end_idx].to_vec());
+    // Record the task's OWN source text (task line + metadata, NOT subtask lines).
+    // This enables selective rewrite: editing a subtask doesn't reformat the parent.
+    let own_end_idx = idx;
+    task.source_text = Some(lines[start_idx..own_end_idx].to_vec());
 
-    (task, end_idx)
+    // Now parse subtasks (they get their own independent source_text)
+    if idx < lines.len() {
+        if let Some(ti) = task_indent(&lines[idx]) {
+            if ti == meta_indent && depth + 1 < MAX_DEPTH {
+                let (subtasks, next_idx) =
+                    parse_tasks(lines, idx, meta_indent, depth + 1);
+                task.subtasks = subtasks;
+                idx = next_idx;
+            }
+        }
+    }
+
+    task.source_lines = Some(start_idx..idx);
+
+    (task, idx)
 }
 
 /// Parse the task line itself: `- [x] \`ID\` Title text #tag1 #tag2`
