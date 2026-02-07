@@ -244,20 +244,17 @@ fn collect_ids_from_tasks(tasks: &[Task], ids: &mut HashSet<String>) {
     }
 }
 
-/// Find task IDs that appear in more than one track.
+/// Find task IDs that appear more than once (within or across tracks).
 fn find_duplicate_ids(project: &Project) -> Vec<(String, Vec<String>)> {
     use std::collections::HashMap;
+    // id → list of track_ids where it appears (including repeats for within-track dups)
     let mut id_to_tracks: HashMap<String, Vec<String>> = HashMap::new();
 
     for (track_id, track) in &project.tracks {
-        let mut track_ids = HashSet::new();
         for node in &track.nodes {
             if let TrackNode::Section { tasks, .. } = node {
-                collect_ids_from_tasks(tasks, &mut track_ids);
+                collect_id_locations(tasks, track_id, &mut id_to_tracks);
             }
-        }
-        for id in track_ids {
-            id_to_tracks.entry(id).or_default().push(track_id.clone());
         }
     }
 
@@ -265,6 +262,22 @@ fn find_duplicate_ids(project: &Project) -> Vec<(String, Vec<String>)> {
         .into_iter()
         .filter(|(_, tracks)| tracks.len() > 1)
         .collect()
+}
+
+fn collect_id_locations(
+    tasks: &[Task],
+    track_id: &str,
+    id_to_tracks: &mut std::collections::HashMap<String, Vec<String>>,
+) {
+    for task in tasks {
+        if let Some(ref id) = task.id {
+            id_to_tracks
+                .entry(id.clone())
+                .or_default()
+                .push(track_id.to_string());
+        }
+        collect_id_locations(&task.subtasks, track_id, id_to_tracks);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -600,6 +613,34 @@ mod tests {
         assert!(
             result.errors.iter().any(
                 |e| matches!(e, CheckError::DuplicateId { task_id, .. } if task_id == "DUP-001")
+            )
+        );
+    }
+
+    #[test]
+    fn test_check_duplicate_ids_within_track() {
+        let tmp = TempDir::new().unwrap();
+        let project = make_project_at(
+            tmp.path(),
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` First occurrence
+  - added: 2025-05-01
+- [ ] `M-001` Same ID in same track
+  - added: 2025-05-02
+
+## Done
+",
+        );
+
+        let result = check_project(&project);
+        assert!(!result.valid);
+        assert!(
+            result.errors.iter().any(
+                |e| matches!(e, CheckError::DuplicateId { task_id, track_ids } if task_id == "M-001" && track_ids.len() == 2)
             )
         );
     }

@@ -1364,6 +1364,15 @@ fn cmd_clean(args: CleanArgs) -> Result<(), Box<dyn std::error::Error>> {
             println!("  [{}] {} → {}", d.track_id, d.task_id, d.date);
         }
     }
+    if !result.duplicates_resolved.is_empty() {
+        println!("Duplicate IDs resolved:");
+        for d in &result.duplicates_resolved {
+            println!(
+                "  [{}] {} → {} \"{}\"",
+                d.track_id, d.original_id, d.new_id, d.title
+            );
+        }
+    }
     if !result.tasks_archived.is_empty() {
         println!("Tasks archived:");
         for a in &result.tasks_archived {
@@ -1412,8 +1421,10 @@ fn cmd_clean(args: CleanArgs) -> Result<(), Box<dyn std::error::Error>> {
         let active_path = project.frame_dir.join("ACTIVE.md");
         std::fs::write(&active_path, active_md)?;
 
-        let total_changes =
-            result.ids_assigned.len() + result.dates_assigned.len() + result.tasks_archived.len();
+        let total_changes = result.ids_assigned.len()
+            + result.dates_assigned.len()
+            + result.duplicates_resolved.len()
+            + result.tasks_archived.len();
         if total_changes == 0
             && result.dangling_deps.is_empty()
             && result.broken_refs.is_empty()
