@@ -1,4 +1,4 @@
-use frame::parse::{parse_track, serialize_track, parse_inbox, serialize_inbox};
+use frame::parse::{parse_inbox, parse_track, serialize_inbox, serialize_track};
 use pretty_assertions::assert_eq;
 use std::fs;
 use std::path::Path;
@@ -92,8 +92,7 @@ fn round_trip_inbox() {
 
 #[test]
 fn round_trip_config() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/project.toml");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/project.toml");
     let source = fs::read_to_string(&path).unwrap();
 
     // Parse with toml crate
@@ -134,7 +133,9 @@ fn selective_rewrite_only_dirty_subtask_changes() {
     let mut track = parse_track(source);
 
     // Mutate only T-001.2: mark it done
-    let backlog = track.section_tasks_mut(frame::model::track::SectionKind::Backlog).unwrap();
+    let backlog = track
+        .section_tasks_mut(frame::model::track::SectionKind::Backlog)
+        .unwrap();
     let subtask = &mut backlog[0].subtasks[1];
     assert_eq!(subtask.id.as_deref(), Some("T-001.2"));
     subtask.state = frame::model::TaskState::Done;
@@ -168,7 +169,11 @@ fn parent_source_text_excludes_subtasks() {
     let parent_source = parent.source_text.as_ref().unwrap();
 
     // Parent's source_text should be ONLY its own line + metadata
-    assert_eq!(parent_source.len(), 2, "Parent source_text should be 2 lines (task + added)");
+    assert_eq!(
+        parent_source.len(),
+        2,
+        "Parent source_text should be 2 lines (task + added)"
+    );
     assert_eq!(parent_source[0], "- [>] `T-001` Parent task");
     assert_eq!(parent_source[1], "  - added: 2025-05-10");
 
@@ -185,8 +190,7 @@ fn parent_source_text_excludes_subtasks() {
 
 #[test]
 fn complex_track_parse_correctness() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/complex_track.md");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/complex_track.md");
     let source = fs::read_to_string(&path).unwrap();
     let track = parse_track(&source);
 
@@ -211,10 +215,7 @@ fn complex_track_parse_correctness() {
     let eff014_2 = &eff014.subtasks[1];
     assert_eq!(eff014_2.id.as_deref(), Some("EFF-014.2"));
     assert_eq!(eff014_2.subtasks.len(), 2);
-    assert_eq!(
-        eff014_2.subtasks[0].id.as_deref(),
-        Some("EFF-014.2.1")
-    );
+    assert_eq!(eff014_2.subtasks[0].id.as_deref(), Some("EFF-014.2.1"));
 
     // Check multiple deps
     let eff012 = &backlog[2];
@@ -237,13 +238,16 @@ fn complex_track_parse_correctness() {
 
 #[test]
 fn code_in_notes_parse_correctness() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/code_in_notes.md");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/code_in_notes.md");
     let source = fs::read_to_string(&path).unwrap();
     let track = parse_track(&source);
 
     let backlog = track.backlog();
-    assert_eq!(backlog.len(), 3, "Code blocks should not be parsed as tasks");
+    assert_eq!(
+        backlog.len(),
+        3,
+        "Code blocks should not be parsed as tasks"
+    );
 
     // CN-001: check that the code block content is preserved in the note
     let cn001 = &backlog[0];
@@ -273,8 +277,7 @@ fn code_in_notes_parse_correctness() {
 
 #[test]
 fn inbox_parse_correctness() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/inbox.md");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/inbox.md");
     let source = fs::read_to_string(&path).unwrap();
     let inbox = parse_inbox(&source);
 

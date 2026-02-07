@@ -165,7 +165,10 @@ pub fn reorder_tracks(
     // Find the insertion index in the full list
     let insert_idx = if new_position >= active_indices.len() {
         // After the last active track
-        active_indices.last().map(|&i| i + 1).unwrap_or(config.tracks.len())
+        active_indices
+            .last()
+            .map(|&i| i + 1)
+            .unwrap_or(config.tracks.len())
     } else {
         active_indices[new_position]
     };
@@ -236,8 +239,12 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn setup_test_project() -> (TempDir, std::path::PathBuf, ProjectConfig, toml_edit::DocumentMut)
-    {
+    fn setup_test_project() -> (
+        TempDir,
+        std::path::PathBuf,
+        ProjectConfig,
+        toml_edit::DocumentMut,
+    ) {
         let tmp = TempDir::new().unwrap();
         let frame_dir = tmp.path().join("frame");
         fs::create_dir_all(frame_dir.join("tracks")).unwrap();

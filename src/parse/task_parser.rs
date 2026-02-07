@@ -111,8 +111,7 @@ fn parse_single_task(
     if idx < lines.len() {
         if let Some(ti) = task_indent(&lines[idx]) {
             if ti == meta_indent && depth + 1 < MAX_DEPTH {
-                let (subtasks, next_idx) =
-                    parse_tasks(lines, idx, meta_indent, depth + 1);
+                let (subtasks, next_idx) = parse_tasks(lines, idx, meta_indent, depth + 1);
                 task.subtasks = subtasks;
                 idx = next_idx;
             }
@@ -208,9 +207,7 @@ fn parse_title_and_tags(s: &str) -> (String, Vec<String>) {
 fn task_indent(line: &str) -> Option<usize> {
     let indent = count_indent(line);
     let content = &line[indent..];
-    if content.starts_with("- [")
-        && content.len() >= 5
-        && content.as_bytes().get(4) == Some(&b']')
+    if content.starts_with("- [") && content.len() >= 5 && content.as_bytes().get(4) == Some(&b']')
     {
         Some(indent)
     } else {
@@ -285,17 +282,13 @@ fn parse_metadata(lines: &[String], idx: usize, indent: usize) -> (Metadata, usi
             } else {
                 // Block note: collect indented lines
                 let block_indent = indent + 2;
-                let (note_text, next_idx) =
-                    parse_note_block(lines, idx + 1, block_indent);
+                let (note_text, next_idx) = parse_note_block(lines, idx + 1, block_indent);
                 (Metadata::Note(note_text), next_idx)
             }
         }
         _ => {
             // Unknown metadata — treat as a note
-            (
-                Metadata::Note(format!("{}: {}", key, value)),
-                idx + 1,
-            )
+            (Metadata::Note(format!("{}: {}", key, value)), idx + 1)
         }
     }
 }
@@ -443,8 +436,12 @@ mod tests {
         assert_eq!(tasks[0].metadata.len(), 4);
         assert!(matches!(&tasks[0].metadata[0], Metadata::Added(d) if d == "2025-05-10"));
         assert!(matches!(&tasks[0].metadata[1], Metadata::Dep(d) if d == &["EFF-003"]));
-        assert!(matches!(&tasks[0].metadata[2], Metadata::Spec(s) if s == "doc/spec/effects.md#closure-effects"));
-        assert!(matches!(&tasks[0].metadata[3], Metadata::Ref(r) if r == &["doc/design/effect-handlers-v2.md"]));
+        assert!(
+            matches!(&tasks[0].metadata[2], Metadata::Spec(s) if s == "doc/spec/effects.md#closure-effects")
+        );
+        assert!(
+            matches!(&tasks[0].metadata[3], Metadata::Ref(r) if r == &["doc/design/effect-handlers-v2.md"])
+        );
     }
 
     #[test]

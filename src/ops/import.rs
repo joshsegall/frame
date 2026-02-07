@@ -2,7 +2,7 @@ use chrono::Local;
 
 use crate::model::task::{Metadata, Task};
 use crate::model::track::{SectionKind, Track};
-use crate::ops::task_ops::{find_max_id_in_track, InsertPosition, TaskError};
+use crate::ops::task_ops::{InsertPosition, TaskError, find_max_id_in_track};
 use crate::parse::parse_tasks;
 
 /// Error type for import operations
@@ -331,10 +331,12 @@ Some description text here.
         assert_eq!(parent.subtasks[1].title, "Sub two");
 
         // Subtasks should also have added dates
-        assert!(parent.subtasks[0]
-            .metadata
-            .iter()
-            .any(|m| m.key() == "added"));
+        assert!(
+            parent.subtasks[0]
+                .metadata
+                .iter()
+                .any(|m| m.key() == "added")
+        );
     }
 
     // --- Headers and non-task content ---
@@ -375,20 +377,23 @@ Some description text here.
 
         let task = find_task_in_track(&track, "T-003").unwrap();
         // Should keep the existing added date
-        assert!(task
-            .metadata
-            .iter()
-            .any(|m| matches!(m, Metadata::Added(d) if d == "2025-01-15")));
+        assert!(
+            task.metadata
+                .iter()
+                .any(|m| matches!(m, Metadata::Added(d) if d == "2025-01-15"))
+        );
         // Should keep deps
-        assert!(task
-            .metadata
-            .iter()
-            .any(|m| matches!(m, Metadata::Dep(d) if d.contains(&"EXT-001".to_string()))));
+        assert!(
+            task.metadata
+                .iter()
+                .any(|m| matches!(m, Metadata::Dep(d) if d.contains(&"EXT-001".to_string())))
+        );
         // Should keep note
-        assert!(task
-            .metadata
-            .iter()
-            .any(|m| matches!(m, Metadata::Note(n) if n.contains("existing note"))));
+        assert!(
+            task.metadata
+                .iter()
+                .any(|m| matches!(m, Metadata::Note(n) if n.contains("existing note")))
+        );
 
         // Task without metadata should get today's date
         let task2 = find_task_in_track(&track, "T-004").unwrap();
@@ -509,9 +514,6 @@ Some description text here.
         assert_eq!(top.subtasks.len(), 1);
         assert_eq!(top.subtasks[0].id.as_deref(), Some("T-003.1"));
         assert_eq!(top.subtasks[0].subtasks.len(), 1);
-        assert_eq!(
-            top.subtasks[0].subtasks[0].id.as_deref(),
-            Some("T-003.1.1")
-        );
+        assert_eq!(top.subtasks[0].subtasks[0].id.as_deref(), Some("T-003.1.1"));
     }
 }

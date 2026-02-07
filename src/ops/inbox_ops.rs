@@ -17,12 +17,7 @@ pub enum InboxError {
 }
 
 /// Add a new item to the inbox.
-pub fn add_inbox_item(
-    inbox: &mut Inbox,
-    title: String,
-    tags: Vec<String>,
-    body: Option<String>,
-) {
+pub fn add_inbox_item(inbox: &mut Inbox, title: String, tags: Vec<String>, body: Option<String>) {
     let mut item = InboxItem::new(title);
     item.tags = tags;
     item.body = body;
@@ -157,7 +152,12 @@ mod tests {
         assert_eq!(tasks[2].title, "Parser crash on empty blocks");
         assert!(tasks[2].tags.contains(&"bug".to_string()));
         // Body should become a note
-        assert!(tasks[2].metadata.iter().any(|m| matches!(m, Metadata::Note(n) if n.contains("Saw this"))));
+        assert!(
+            tasks[2]
+                .metadata
+                .iter()
+                .any(|m| matches!(m, Metadata::Note(n) if n.contains("Saw this")))
+        );
     }
 
     #[test]

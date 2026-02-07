@@ -40,7 +40,9 @@ pub fn parse_inbox(source: &str) -> Inbox {
             while idx < lines.len() {
                 let cont_line = &lines[idx];
                 let cont_trimmed = cont_line.trim();
-                if cont_trimmed.is_empty() || (!cont_line.starts_with(' ') && cont_trimmed.starts_with("- ")) {
+                if cont_trimmed.is_empty()
+                    || (!cont_line.starts_with(' ') && cont_trimmed.starts_with("- "))
+                {
                     break;
                 }
                 if is_tag_only_line(cont_trimmed) {
@@ -200,7 +202,13 @@ mod tests {
 
         assert_eq!(inbox.items[0].title, "Parser crashes on empty effect block");
         assert_eq!(inbox.items[0].tags, vec!["bug"]);
-        assert!(inbox.items[0].body.as_ref().unwrap().contains("Saw this when testing"));
+        assert!(
+            inbox.items[0]
+                .body
+                .as_ref()
+                .unwrap()
+                .contains("Saw this when testing")
+        );
 
         assert_eq!(
             inbox.items[1].title,
@@ -208,7 +216,10 @@ mod tests {
         );
         assert_eq!(inbox.items[1].tags, vec!["design"]);
 
-        assert_eq!(inbox.items[2].title, "Read the Koka paper on named handlers");
+        assert_eq!(
+            inbox.items[2].title,
+            "Read the Koka paper on named handlers"
+        );
         assert_eq!(inbox.items[2].tags, vec!["research"]);
         assert!(inbox.items[2].body.is_none());
     }

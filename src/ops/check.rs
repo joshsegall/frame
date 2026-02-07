@@ -54,28 +54,16 @@ pub enum CheckError {
 pub enum CheckWarning {
     /// Task has no ID assigned
     #[serde(rename = "missing_id")]
-    MissingId {
-        track_id: String,
-        title: String,
-    },
+    MissingId { track_id: String, title: String },
     /// Task has no `added:` date
     #[serde(rename = "missing_added_date")]
-    MissingAddedDate {
-        track_id: String,
-        task_id: String,
-    },
+    MissingAddedDate { track_id: String, task_id: String },
     /// Done task has no `resolved:` date
     #[serde(rename = "missing_resolved_date")]
-    MissingResolvedDate {
-        track_id: String,
-        task_id: String,
-    },
+    MissingResolvedDate { track_id: String, task_id: String },
     /// Done task is in the backlog section (should probably be in Done)
     #[serde(rename = "done_in_backlog")]
-    DoneInBacklog {
-        track_id: String,
-        task_id: String,
-    },
+    DoneInBacklog { track_id: String, task_id: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -153,7 +141,10 @@ fn check_task(
     }
 
     // Warning: missing added date
-    let has_added = task.metadata.iter().any(|m| matches!(m, Metadata::Added(_)));
+    let has_added = task
+        .metadata
+        .iter()
+        .any(|m| matches!(m, Metadata::Added(_)));
     if !has_added && task.id.is_some() {
         result.warnings.push(CheckWarning::MissingAddedDate {
             track_id: track_id.to_string(),
@@ -176,9 +167,7 @@ fn check_task(
     }
 
     // Warning: done task sitting in backlog
-    if task.state == TaskState::Done
-        && section == crate::model::track::SectionKind::Backlog
-    {
+    if task.state == TaskState::Done && section == crate::model::track::SectionKind::Backlog {
         result.warnings.push(CheckWarning::DoneInBacklog {
             track_id: track_id.to_string(),
             task_id: task_id.to_string(),
@@ -268,10 +257,7 @@ fn find_duplicate_ids(project: &Project) -> Vec<(String, Vec<String>)> {
             }
         }
         for id in track_ids {
-            id_to_tracks
-                .entry(id)
-                .or_default()
-                .push(track_id.clone());
+            id_to_tracks.entry(id).or_default().push(track_id.clone());
         }
     }
 
@@ -433,10 +419,7 @@ mod tests {
             root: tmp.path().to_path_buf(),
             frame_dir: tmp.path().join("frame"),
             config,
-            tracks: vec![
-                ("a".to_string(), track_a),
-                ("b".to_string(), track_b),
-            ],
+            tracks: vec![("a".to_string(), track_a), ("b".to_string(), track_b)],
             inbox: None,
         };
 
@@ -608,19 +591,17 @@ mod tests {
             root: tmp.path().to_path_buf(),
             frame_dir: tmp.path().join("frame"),
             config,
-            tracks: vec![
-                ("a".to_string(), track_a),
-                ("b".to_string(), track_b),
-            ],
+            tracks: vec![("a".to_string(), track_a), ("b".to_string(), track_b)],
             inbox: None,
         };
 
         let result = check_project(&project);
         assert!(!result.valid);
-        assert!(result
-            .errors
-            .iter()
-            .any(|e| matches!(e, CheckError::DuplicateId { task_id, .. } if task_id == "DUP-001")));
+        assert!(
+            result.errors.iter().any(
+                |e| matches!(e, CheckError::DuplicateId { task_id, .. } if task_id == "DUP-001")
+            )
+        );
     }
 
     // --- Warnings ---

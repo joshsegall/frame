@@ -102,12 +102,7 @@ pub fn clean_project(project: &mut Project) -> CleanResult {
     let all_task_ids = collect_all_task_ids(project);
 
     for (track_id, track) in &mut project.tracks {
-        let prefix = project
-            .config
-            .ids
-            .prefixes
-            .get(track_id.as_str())
-            .cloned();
+        let prefix = project.config.ids.prefixes.get(track_id.as_str()).cloned();
 
         // 1. Assign missing IDs
         if let Some(ref pfx) = prefix {
@@ -169,10 +164,17 @@ pub fn generate_active_md(project: &Project) -> String {
                 } else {
                     format!(
                         " {}",
-                        task.tags.iter().map(|t| format!("#{}", t)).collect::<Vec<_>>().join(" ")
+                        task.tags
+                            .iter()
+                            .map(|t| format!("#{}", t))
+                            .collect::<Vec<_>>()
+                            .join(" ")
                     )
                 };
-                lines.push(format!("- [{}] {}{}{}", state_char, id_str, task.title, tags_str));
+                lines.push(format!(
+                    "- [{}] {}{}{}",
+                    state_char, id_str, task.title, tags_str
+                ));
             }
         }
         lines.push(String::new());
@@ -190,12 +192,7 @@ pub fn generate_active_md(project: &Project) -> String {
 // 1. Assign missing IDs
 // ---------------------------------------------------------------------------
 
-fn assign_missing_ids(
-    track: &mut Track,
-    track_id: &str,
-    prefix: &str,
-    result: &mut CleanResult,
-) {
+fn assign_missing_ids(track: &mut Track, track_id: &str, prefix: &str, result: &mut CleanResult) {
     let prefix_dash = format!("{}-", prefix);
     let mut max = 0usize;
     find_max_id_in_track(track, &prefix_dash, &mut max);
@@ -274,7 +271,10 @@ fn assign_dates_in_tasks(
     result: &mut CleanResult,
 ) {
     for task in tasks.iter_mut() {
-        let has_added = task.metadata.iter().any(|m| matches!(m, Metadata::Added(_)));
+        let has_added = task
+            .metadata
+            .iter()
+            .any(|m| matches!(m, Metadata::Added(_)));
         if !has_added {
             task.metadata.insert(0, Metadata::Added(today.to_string()));
             task.mark_dirty();
@@ -334,12 +334,7 @@ fn validate_deps_in_tasks(
 // 4. Validate file refs
 // ---------------------------------------------------------------------------
 
-fn validate_refs(
-    track: &Track,
-    track_id: &str,
-    project_root: &Path,
-    result: &mut CleanResult,
-) {
+fn validate_refs(track: &Track, track_id: &str, project_root: &Path, result: &mut CleanResult) {
     for node in &track.nodes {
         if let TrackNode::Section { tasks, .. } = node {
             validate_refs_in_tasks(tasks, track_id, project_root, result);
@@ -449,7 +444,10 @@ fn archive_done_tasks(project: &mut Project, result: &mut CleanResult) {
         // Store archived tasks in a temporary track for serialization
         if !archived.is_empty() {
             let archive_content = serialize_archived_tasks(&archived);
-            let archive_path = project.frame_dir.join("archive").join(format!("{}.md", track_id));
+            let archive_path = project
+                .frame_dir
+                .join("archive")
+                .join(format!("{}.md", track_id));
             if let Some(parent) = archive_path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
@@ -552,7 +550,9 @@ mod tests {
                 file: "tracks/main.md".to_string(),
             }],
             clean: CleanConfig::default(),
-            ids: IdConfig { prefixes: prefix_map },
+            ids: IdConfig {
+                prefixes: prefix_map,
+            },
             ui: UiConfig::default(),
         }
     }
@@ -673,10 +673,12 @@ mod tests {
 
         // Verify the task got the date
         let backlog = project.tracks[0].1.backlog();
-        assert!(backlog[1]
-            .metadata
-            .iter()
-            .any(|m| matches!(m, Metadata::Added(_))));
+        assert!(
+            backlog[1]
+                .metadata
+                .iter()
+                .any(|m| matches!(m, Metadata::Added(_)))
+        );
     }
 
     #[test]
@@ -772,10 +774,7 @@ mod tests {
                 ];
                 cfg
             },
-            tracks: vec![
-                ("a".to_string(), track_a),
-                ("b".to_string(), track_b),
-            ],
+            tracks: vec![("a".to_string(), track_a), ("b".to_string(), track_b)],
             inbox: None,
         };
 

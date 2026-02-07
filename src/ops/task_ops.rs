@@ -115,11 +115,7 @@ pub fn add_task(
 
 /// Add a subtask to an existing task identified by `parent_id`.
 /// Returns the assigned subtask ID.
-pub fn add_subtask(
-    track: &mut Track,
-    parent_id: &str,
-    title: String,
-) -> Result<String, TaskError> {
+pub fn add_subtask(track: &mut Track, parent_id: &str, title: String) -> Result<String, TaskError> {
     let parent = find_task_mut_in_track(track, parent_id)
         .ok_or_else(|| TaskError::NotFound(parent_id.to_string()))?;
 
@@ -229,7 +225,8 @@ pub fn remove_dep(track: &mut Track, task_id: &str, dep_id: &str) -> Result<(), 
         }
     }
     // Remove empty Dep entries
-    task.metadata.retain(|m| !matches!(m, Metadata::Dep(d) if d.is_empty()));
+    task.metadata
+        .retain(|m| !matches!(m, Metadata::Dep(d) if d.is_empty()));
 
     if changed {
         task.mark_dirty();
@@ -278,7 +275,11 @@ pub fn set_spec(track: &mut Track, task_id: &str, spec: String) -> Result<(), Ta
 // ---------------------------------------------------------------------------
 
 /// Move a task within the same track's backlog (reorder).
-pub fn move_task(track: &mut Track, task_id: &str, position: InsertPosition) -> Result<(), TaskError> {
+pub fn move_task(
+    track: &mut Track,
+    task_id: &str,
+    position: InsertPosition,
+) -> Result<(), TaskError> {
     let tasks = track
         .section_tasks_mut(SectionKind::Backlog)
         .ok_or_else(|| TaskError::InvalidPosition("no backlog section".into()))?;
@@ -377,7 +378,11 @@ pub fn find_max_id_in_track(track: &Track, prefix_dash: &str, max: &mut usize) {
 }
 
 /// Insert a task at the given position in a task list.
-fn insert_at(tasks: &mut Vec<Task>, task: Task, position: &InsertPosition) -> Result<(), TaskError> {
+fn insert_at(
+    tasks: &mut Vec<Task>,
+    task: Task,
+    position: &InsertPosition,
+) -> Result<(), TaskError> {
     match position {
         InsertPosition::Bottom => tasks.push(task),
         InsertPosition::Top => tasks.insert(0, task),
@@ -442,7 +447,9 @@ fn find_task_in_list<'a>(tasks: &'a [Task], task_id: &str) -> Option<&'a Task> {
 
 /// Check if a task ID exists anywhere across the provided tracks.
 fn task_id_exists_in_tracks(task_id: &str, all_tracks: &[(String, Track)]) -> bool {
-    all_tracks.iter().any(|(_, track)| find_task_in_track(track, task_id).is_some())
+    all_tracks
+        .iter()
+        .any(|(_, track)| find_task_in_track(track, task_id).is_some())
 }
 
 /// Iterate over all tasks in a track (all sections, including subtasks).
@@ -619,7 +626,14 @@ mod tests {
         assert_eq!(id, "T-011");
         let tasks = track.backlog();
         assert_eq!(tasks.last().unwrap().title, "New task");
-        assert!(tasks.last().unwrap().metadata.iter().any(|m| m.key() == "added"));
+        assert!(
+            tasks
+                .last()
+                .unwrap()
+                .metadata
+                .iter()
+                .any(|m| m.key() == "added")
+        );
     }
 
     #[test]
@@ -711,10 +725,15 @@ mod tests {
         let tracks = vec![("test".to_string(), sample_track())];
         add_dep(&mut track, "T-003", "T-001", &tracks).unwrap();
         let task = find_task_in_track(&track, "T-003").unwrap();
-        let deps: Vec<&str> = task.metadata.iter().filter_map(|m| match m {
-            Metadata::Dep(d) => Some(d.iter().map(|s| s.as_str()).collect::<Vec<_>>()),
-            _ => None,
-        }).flatten().collect();
+        let deps: Vec<&str> = task
+            .metadata
+            .iter()
+            .filter_map(|m| match m {
+                Metadata::Dep(d) => Some(d.iter().map(|s| s.as_str()).collect::<Vec<_>>()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
         assert!(deps.contains(&"T-001"));
     }
 
@@ -731,7 +750,12 @@ mod tests {
         let mut track = sample_track();
         remove_dep(&mut track, "T-002", "T-001").unwrap();
         let task = find_task_in_track(&track, "T-002").unwrap();
-        assert!(!task.metadata.iter().any(|m| matches!(m, Metadata::Dep(d) if d.contains(&"T-001".to_string()))));
+        assert!(
+            !task
+                .metadata
+                .iter()
+                .any(|m| matches!(m, Metadata::Dep(d) if d.contains(&"T-001".to_string())))
+        );
     }
 
     #[test]
@@ -739,7 +763,11 @@ mod tests {
         let mut track = sample_track();
         set_note(&mut track, "T-001", "This is a note.".into()).unwrap();
         let task = find_task_in_track(&track, "T-001").unwrap();
-        assert!(task.metadata.iter().any(|m| matches!(m, Metadata::Note(n) if n == "This is a note.")));
+        assert!(
+            task.metadata
+                .iter()
+                .any(|m| matches!(m, Metadata::Note(n) if n == "This is a note."))
+        );
     }
 
     #[test]
@@ -747,7 +775,11 @@ mod tests {
         let mut track = sample_track();
         add_ref(&mut track, "T-001", "doc/design.md").unwrap();
         let task = find_task_in_track(&track, "T-001").unwrap();
-        assert!(task.metadata.iter().any(|m| matches!(m, Metadata::Ref(r) if r.contains(&"doc/design.md".to_string()))));
+        assert!(
+            task.metadata
+                .iter()
+                .any(|m| matches!(m, Metadata::Ref(r) if r.contains(&"doc/design.md".to_string())))
+        );
     }
 
     #[test]
@@ -755,7 +787,11 @@ mod tests {
         let mut track = sample_track();
         set_spec(&mut track, "T-001", "doc/spec.md#section".into()).unwrap();
         let task = find_task_in_track(&track, "T-001").unwrap();
-        assert!(task.metadata.iter().any(|m| matches!(m, Metadata::Spec(s) if s == "doc/spec.md#section")));
+        assert!(
+            task.metadata
+                .iter()
+                .any(|m| matches!(m, Metadata::Spec(s) if s == "doc/spec.md#section"))
+        );
     }
 
     // --- 2.4 Move ---

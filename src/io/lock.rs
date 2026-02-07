@@ -53,9 +53,7 @@ impl FileLock {
                     std::thread::sleep(Duration::from_millis(10));
                 }
                 Err(_) => {
-                    return Err(LockError::Timeout {
-                        path: lock_path,
-                    });
+                    return Err(LockError::Timeout { path: lock_path });
                 }
             }
         }

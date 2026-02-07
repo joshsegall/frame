@@ -51,11 +51,7 @@ fn find_matches(re: &Regex, text: &str) -> Vec<Range<usize>> {
 ///
 /// If `track_filter` is `Some`, only that track is searched (regardless of its
 /// state). If `None`, all **active** tracks are searched.
-pub fn search_tasks(
-    project: &Project,
-    re: &Regex,
-    track_filter: Option<&str>,
-) -> Vec<SearchHit> {
+pub fn search_tasks(project: &Project, re: &Regex, track_filter: Option<&str>) -> Vec<SearchHit> {
     let mut hits = Vec::new();
 
     for (track_id, track) in &project.tracks {
@@ -384,7 +380,10 @@ mod tests {
         let project = sample_project();
         let re = Regex::new("(?i)add").unwrap();
         let hits = search_tasks(&project, &re, None);
-        let title_hits: Vec<_> = hits.iter().filter(|h| h.field == MatchField::Title).collect();
+        let title_hits: Vec<_> = hits
+            .iter()
+            .filter(|h| h.field == MatchField::Title)
+            .collect();
         assert_eq!(title_hits.len(), 2); // EFF-002 "Add handler syntax" + INFRA-002 "Add logging framework"
     }
 
@@ -455,7 +454,10 @@ mod tests {
         let project = sample_project();
         let re = Regex::new("effects\\.md").unwrap();
         let hits = search_tasks(&project, &re, None);
-        let spec_hits: Vec<_> = hits.iter().filter(|h| h.field == MatchField::Spec).collect();
+        let spec_hits: Vec<_> = hits
+            .iter()
+            .filter(|h| h.field == MatchField::Spec)
+            .collect();
         assert_eq!(spec_hits.len(), 1);
         assert_eq!(spec_hits[0].task_id, "EFF-001");
     }
@@ -491,13 +493,19 @@ mod tests {
 
         // Only effects track
         let hits = search_tasks(&project, &re, Some("effects"));
-        let title_hits: Vec<_> = hits.iter().filter(|h| h.field == MatchField::Title).collect();
+        let title_hits: Vec<_> = hits
+            .iter()
+            .filter(|h| h.field == MatchField::Title)
+            .collect();
         assert_eq!(title_hits.len(), 1);
         assert_eq!(title_hits[0].task_id, "EFF-002");
 
         // Only infra track
         let hits = search_tasks(&project, &re, Some("infra"));
-        let title_hits: Vec<_> = hits.iter().filter(|h| h.field == MatchField::Title).collect();
+        let title_hits: Vec<_> = hits
+            .iter()
+            .filter(|h| h.field == MatchField::Title)
+            .collect();
         assert_eq!(title_hits.len(), 1);
         assert_eq!(title_hits[0].task_id, "INFRA-002");
     }
@@ -599,7 +607,10 @@ mod tests {
         let hits = search_inbox(&inbox, &re);
         // Matches in both title and body of item 0
         assert_eq!(hits.len(), 2);
-        let title_hits: Vec<_> = hits.iter().filter(|h| h.field == MatchField::Title).collect();
+        let title_hits: Vec<_> = hits
+            .iter()
+            .filter(|h| h.field == MatchField::Title)
+            .collect();
         assert_eq!(title_hits.len(), 1);
         assert_eq!(title_hits[0].item_index, 0);
     }
@@ -659,7 +670,10 @@ mod tests {
         let project = sample_project();
         let re = Regex::new("handler|logging").unwrap();
         let hits = search_tasks(&project, &re, None);
-        let title_hits: Vec<_> = hits.iter().filter(|h| h.field == MatchField::Title).collect();
+        let title_hits: Vec<_> = hits
+            .iter()
+            .filter(|h| h.field == MatchField::Title)
+            .collect();
         assert_eq!(title_hits.len(), 2);
     }
 

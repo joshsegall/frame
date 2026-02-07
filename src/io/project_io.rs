@@ -71,11 +71,10 @@ pub fn load_project(root: &Path) -> Result<Project, ProjectError> {
     // Load inbox
     let inbox_path = frame_dir.join("inbox.md");
     let inbox = if inbox_path.exists() {
-        let inbox_text =
-            fs::read_to_string(&inbox_path).map_err(|e| ProjectError::ReadError {
-                path: inbox_path.clone(),
-                source: e,
-            })?;
+        let inbox_text = fs::read_to_string(&inbox_path).map_err(|e| ProjectError::ReadError {
+            path: inbox_path.clone(),
+            source: e,
+        })?;
         Some(parse_inbox(&inbox_text))
     } else {
         None

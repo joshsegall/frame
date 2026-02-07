@@ -33,11 +33,7 @@ fn serialize_task(task: &Task, indent: usize, lines: &mut Vec<String>) {
     let indent_str = " ".repeat(indent);
 
     // Task line: `- [X] \`ID\` Title #tag1 #tag2`
-    let mut task_line = format!(
-        "{}- [{}]",
-        indent_str,
-        task.state.checkbox_char()
-    );
+    let mut task_line = format!("{}- [{}]", indent_str, task.state.checkbox_char());
 
     if let Some(ref id) = task.id {
         task_line.push_str(&format!(" `{}`", id));
@@ -166,8 +162,16 @@ mod tests {
             "Parent".to_string(),
         );
         parent.subtasks = vec![
-            Task::new(TaskState::Todo, Some("T-001.1".to_string()), "Sub 1".to_string()),
-            Task::new(TaskState::Todo, Some("T-001.2".to_string()), "Sub 2".to_string()),
+            Task::new(
+                TaskState::Todo,
+                Some("T-001.1".to_string()),
+                "Sub 1".to_string(),
+            ),
+            Task::new(
+                TaskState::Todo,
+                Some("T-001.2".to_string()),
+                "Sub 2".to_string(),
+            ),
         ];
         let lines = serialize_tasks(&[parent], 0);
         assert_eq!(lines[0], "- [>] `T-001` Parent");
@@ -211,9 +215,7 @@ mod tests {
             "Sub 1 original".to_string(),
         );
         sub1.dirty = false;
-        sub1.source_text = Some(vec![
-            "  - [ ] `T-001.1` Sub 1 original".to_string(),
-        ]);
+        sub1.source_text = Some(vec!["  - [ ] `T-001.1` Sub 1 original".to_string()]);
 
         // Sub 2 has been modified — dirty, no source_text
         let sub2 = Task::new(

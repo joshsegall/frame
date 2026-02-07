@@ -6,18 +6,18 @@ use crate::model::config::{ProjectConfig, TrackConfig};
 
 /// Read the project config, returning both the parsed config and the raw
 /// toml_edit Document for round-trip-safe editing.
-pub fn read_config(frame_dir: &Path) -> Result<(ProjectConfig, toml_edit::DocumentMut), ProjectError> {
+pub fn read_config(
+    frame_dir: &Path,
+) -> Result<(ProjectConfig, toml_edit::DocumentMut), ProjectError> {
     let config_path = frame_dir.join("project.toml");
     let config_text = fs::read_to_string(&config_path).map_err(|e| ProjectError::ReadError {
         path: config_path.clone(),
         source: e,
     })?;
     let config: ProjectConfig = toml::from_str(&config_text)?;
-    let doc: toml_edit::DocumentMut = config_text
-        .parse()
-        .map_err(|_: toml_edit::TomlError| ProjectError::ConfigParseError(
-            toml::from_str::<ProjectConfig>("").unwrap_err(),
-        ))?;
+    let doc: toml_edit::DocumentMut = config_text.parse().map_err(|_: toml_edit::TomlError| {
+        ProjectError::ConfigParseError(toml::from_str::<ProjectConfig>("").unwrap_err())
+    })?;
     Ok((config, doc))
 }
 
