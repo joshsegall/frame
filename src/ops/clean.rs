@@ -91,6 +91,38 @@ pub enum SuggestionKind {
 }
 
 // ---------------------------------------------------------------------------
+// Lightweight ID + date assignment (used by TUI on load/reload)
+// ---------------------------------------------------------------------------
+
+/// Assign missing IDs and dates to all tasks in the project.
+///
+/// This runs only steps 1–2 of the clean pipeline (ID assignment + date
+/// assignment). Returns the list of track IDs that were modified, so callers
+/// can selectively save only those tracks.
+pub fn ensure_ids_and_dates(project: &mut Project) -> Vec<String> {
+    let mut result = CleanResult::default();
+    let mut modified = Vec::new();
+
+    for (track_id, track) in &mut project.tracks {
+        let before_ids = result.ids_assigned.len();
+        let before_dates = result.dates_assigned.len();
+
+        let prefix = project.config.ids.prefixes.get(track_id.as_str()).cloned();
+
+        if let Some(ref pfx) = prefix {
+            assign_missing_ids(track, track_id, pfx, &mut result);
+        }
+        assign_missing_dates(track, track_id, &mut result);
+
+        if result.ids_assigned.len() > before_ids || result.dates_assigned.len() > before_dates {
+            modified.push(track_id.clone());
+        }
+    }
+
+    modified
+}
+
+// ---------------------------------------------------------------------------
 // Main clean entry point
 // ---------------------------------------------------------------------------
 
@@ -1593,5 +1625,91 @@ mod tests {
 
         // No broken refs (doc.md exists)
         assert!(result.broken_refs.is_empty());
+    }
+
+    // --- ensure_ids_and_dates ---
+
+    #[test]
+    fn test_ensure_ids_and_dates_basic() {
+        let mut project = make_project(
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Has ID and date
+  - added: 2025-05-01
+- [ ] Missing everything
+
+## Done
+",
+            vec![("main", "M")],
+        );
+
+        let modified = ensure_ids_and_dates(&mut project);
+        assert_eq!(modified, vec!["main".to_string()]);
+
+        let backlog = project.tracks[0].1.backlog();
+        // Second task should now have an ID
+        assert_eq!(backlog[1].id.as_deref(), Some("M-002"));
+        // Second task should now have an added date
+        assert!(
+            backlog[1]
+                .metadata
+                .iter()
+                .any(|m| matches!(m, Metadata::Added(_)))
+        );
+    }
+
+    #[test]
+    fn test_ensure_ids_and_dates_no_changes() {
+        let mut project = make_project(
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` All good
+  - added: 2025-05-01
+- [ ] `M-002` Also good
+  - added: 2025-05-02
+
+## Done
+",
+            vec![("main", "M")],
+        );
+
+        let modified = ensure_ids_and_dates(&mut project);
+        assert!(modified.is_empty());
+    }
+
+    #[test]
+    fn test_ensure_ids_and_dates_no_prefix() {
+        let mut project = make_project(
+            "\
+# Main
+
+## Backlog
+
+- [ ] No prefix configured
+
+## Done
+",
+            vec![], // no prefixes
+        );
+
+        let modified = ensure_ids_and_dates(&mut project);
+        // Should still assign dates even without a prefix
+        assert_eq!(modified, vec!["main".to_string()]);
+        // But should NOT assign IDs
+        let backlog = project.tracks[0].1.backlog();
+        assert!(backlog[0].id.is_none());
+        // Should have an added date
+        assert!(
+            backlog[0]
+                .metadata
+                .iter()
+                .any(|m| matches!(m, Metadata::Added(_)))
+        );
     }
 }

@@ -521,6 +521,12 @@ impl App {
             }
         }
 
+        // Auto-assign IDs and dates to any newly-loaded tasks
+        let modified_tracks = crate::ops::clean::ensure_ids_and_dates(&mut self.project);
+        for track_id in &modified_tracks {
+            let _ = self.save_track(track_id);
+        }
+
         // Push sync marker to undo stack
         self.undo_stack.push_sync_marker();
 
@@ -734,7 +740,26 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Discover and load project
     let cwd = std::env::current_dir()?;
     let root = discover_project(&cwd)?;
-    let project = load_project(&root)?;
+    let mut project = load_project(&root)?;
+
+    // Auto-assign IDs and dates so all tasks are interactive from the start
+    let modified_tracks = crate::ops::clean::ensure_ids_and_dates(&mut project);
+    if !modified_tracks.is_empty() {
+        let _lock = FileLock::acquire_default(&project.frame_dir)?;
+        for track_id in &modified_tracks {
+            if let Some(tc) = project.config.tracks.iter().find(|tc| tc.id == *track_id) {
+                let file = &tc.file;
+                if let Some(track) = project
+                    .tracks
+                    .iter()
+                    .find(|(id, _)| id == track_id)
+                    .map(|(_, t)| t)
+                {
+                    let _ = project_io::save_track(&project.frame_dir, file, track);
+                }
+            }
+        }
+    }
 
     let mut app = App::new(project);
 
