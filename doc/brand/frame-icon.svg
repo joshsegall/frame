@@ -1,0 +1,8 @@
+<svg width="200" height="200" viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Left bracket -->
+  <path d="M 68 16 L 46 16 Q 16 16, 16 46 L 16 154 Q 16 184, 46 184 L 68 184" stroke="#A09BFE" stroke-width="10" stroke-linecap="round" fill="none"/>
+  <!-- Right bracket -->
+  <path d="M 132 16 L 154 16 Q 184 16, 184 46 L 184 154 Q 184 184, 154 184 L 132 184" stroke="#A09BFE" stroke-width="10" stroke-linecap="round" fill="none"/>
+  <!-- Play triangle -->
+  <path d="M76 56L132 100L76 144V56Z" fill="#FB4196"/>
+</svg>
