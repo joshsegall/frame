@@ -1,3 +1,4 @@
+use crate::model::inbox::InboxItem;
 use crate::model::task::{Task, TaskState};
 use crate::model::track::{SectionKind, Track};
 use crate::ops::task_ops;
@@ -21,6 +22,10 @@ pub enum UndoNavTarget {
     /// Navigate to the tracks overview and flash a track row
     TracksView {
         track_id: String,
+    },
+    /// Navigate to the inbox view, optionally to a specific item index
+    Inbox {
+        cursor: Option<usize>,
     },
 }
 
@@ -109,6 +114,48 @@ pub fn nav_target_for_op(op: &Operation, is_undo: bool) -> Option<UndoNavTarget>
                 track_id: track_id.clone(),
             })
         }
+        Operation::InboxAdd { index } => {
+            if is_undo {
+                // Item was removed by undo — stay at same cursor
+                Some(UndoNavTarget::Inbox { cursor: Some(index.saturating_sub(1).max(0)) })
+            } else {
+                Some(UndoNavTarget::Inbox { cursor: Some(*index) })
+            }
+        }
+        Operation::InboxDelete { index, .. } => {
+            if is_undo {
+                // Item was restored
+                Some(UndoNavTarget::Inbox { cursor: Some(*index) })
+            } else {
+                Some(UndoNavTarget::Inbox { cursor: Some(index.saturating_sub(1).max(0)) })
+            }
+        }
+        Operation::InboxTitleEdit { index, .. }
+        | Operation::InboxTagsEdit { index, .. } => {
+            Some(UndoNavTarget::Inbox { cursor: Some(*index) })
+        }
+        Operation::InboxMove { old_index, new_index } => {
+            if is_undo {
+                Some(UndoNavTarget::Inbox { cursor: Some(*old_index) })
+            } else {
+                Some(UndoNavTarget::Inbox { cursor: Some(*new_index) })
+            }
+        }
+        Operation::InboxTriage { inbox_index, track_id, task_id, .. } => {
+            if is_undo {
+                // Item restored to inbox
+                Some(UndoNavTarget::Inbox { cursor: Some(*inbox_index) })
+            } else {
+                // Item triaged to track
+                Some(UndoNavTarget::Task {
+                    track_id: track_id.clone(),
+                    task_id: task_id.clone(),
+                    detail_region: None,
+                    task_removed: false,
+                    position_hint: None,
+                })
+            }
+        }
         Operation::SyncMarker => None,
     }
 }
@@ -168,6 +215,42 @@ pub enum Operation {
         old_index: usize,
         new_index: usize,
     },
+    /// An inbox item was added
+    InboxAdd {
+        /// The index where it was inserted
+        index: usize,
+    },
+    /// An inbox item was deleted
+    InboxDelete {
+        index: usize,
+        item: InboxItem,
+    },
+    /// An inbox item's title was edited
+    InboxTitleEdit {
+        index: usize,
+        old_title: String,
+        new_title: String,
+    },
+    /// An inbox item's tags were edited
+    InboxTagsEdit {
+        index: usize,
+        old_tags: Vec<String>,
+        new_tags: Vec<String>,
+    },
+    /// An inbox item was moved (reordered)
+    InboxMove {
+        old_index: usize,
+        new_index: usize,
+    },
+    /// An inbox item was triaged into a track
+    InboxTriage {
+        /// The inbox item that was removed
+        inbox_index: usize,
+        item: InboxItem,
+        /// The track and task ID it was triaged to
+        track_id: String,
+        task_id: String,
+    },
     /// External file change sync marker — undo cannot cross this
     SyncMarker,
 }
@@ -206,7 +289,7 @@ impl UndoStack {
 
     /// Undo the last operation. Returns navigation target for the UI.
     /// Applies the inverse operation to the track data. Does NOT save to disk.
-    pub fn undo(&mut self, tracks: &mut [(String, Track)]) -> Option<UndoNavTarget> {
+    pub fn undo(&mut self, tracks: &mut [(String, Track)], inbox: Option<&mut crate::model::inbox::Inbox>) -> Option<UndoNavTarget> {
         let op = self.undo.pop()?;
 
         // Can't undo past a sync marker
@@ -217,14 +300,14 @@ impl UndoStack {
         }
 
         let nav = nav_target_for_op(&op, true);
-        apply_inverse(&op, tracks);
+        apply_inverse(&op, tracks, inbox);
         // Push the forward operation onto redo
         self.redo.push(op);
         nav
     }
 
     /// Redo the last undone operation. Returns navigation target for the UI.
-    pub fn redo(&mut self, tracks: &mut [(String, Track)]) -> Option<UndoNavTarget> {
+    pub fn redo(&mut self, tracks: &mut [(String, Track)], inbox: Option<&mut crate::model::inbox::Inbox>) -> Option<UndoNavTarget> {
         let op = self.redo.pop()?;
 
         if matches!(op, Operation::SyncMarker) {
@@ -233,7 +316,7 @@ impl UndoStack {
         }
 
         let nav = nav_target_for_op(&op, false);
-        apply_forward(&op, tracks);
+        apply_forward(&op, tracks, inbox);
         self.undo.push(op);
         nav
     }
@@ -254,7 +337,7 @@ impl UndoStack {
 }
 
 /// Apply the inverse of an operation (for undo)
-fn apply_inverse(op: &Operation, tracks: &mut [(String, Track)]) -> Option<String> {
+fn apply_inverse(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&mut crate::model::inbox::Inbox>) -> Option<String> {
     match op {
         Operation::StateChange {
             track_id,
@@ -343,12 +426,73 @@ fn apply_inverse(op: &Operation, tracks: &mut [(String, Track)]) -> Option<Strin
         }
         // TrackMove is handled by the caller (needs config access)
         Operation::TrackMove { .. } => None,
+        Operation::InboxAdd { index } => {
+            // Undo add = remove the item
+            if let Some(inbox) = inbox {
+                if *index < inbox.items.len() {
+                    inbox.items.remove(*index);
+                }
+            }
+            None
+        }
+        Operation::InboxDelete { index, item } => {
+            // Undo delete = re-insert the item
+            if let Some(inbox) = inbox {
+                let idx = (*index).min(inbox.items.len());
+                inbox.items.insert(idx, item.clone());
+            }
+            None
+        }
+        Operation::InboxTitleEdit { index, old_title, .. } => {
+            if let Some(inbox) = inbox {
+                if let Some(item) = inbox.items.get_mut(*index) {
+                    item.title = old_title.clone();
+                    item.dirty = true;
+                }
+            }
+            None
+        }
+        Operation::InboxTagsEdit { index, old_tags, .. } => {
+            if let Some(inbox) = inbox {
+                if let Some(item) = inbox.items.get_mut(*index) {
+                    item.tags = old_tags.clone();
+                    item.dirty = true;
+                }
+            }
+            None
+        }
+        Operation::InboxMove { old_index, new_index } => {
+            // Undo move = move back from new_index to old_index
+            if let Some(inbox) = inbox {
+                if *new_index < inbox.items.len() {
+                    let item = inbox.items.remove(*new_index);
+                    let idx = (*old_index).min(inbox.items.len());
+                    inbox.items.insert(idx, item);
+                }
+            }
+            None
+        }
+        Operation::InboxTriage { inbox_index, item, track_id, task_id } => {
+            // Undo triage = remove task from track, re-insert item into inbox
+            let track = find_track_mut(tracks, track_id);
+            if let Some(track) = track {
+                if let Some(tasks) = track.section_tasks_mut(SectionKind::Backlog) {
+                    tasks.retain(|t| t.id.as_deref() != Some(task_id));
+                }
+            }
+            if let Some(inbox) = inbox {
+                let idx = (*inbox_index).min(inbox.items.len());
+                inbox.items.insert(idx, item.clone());
+            }
+            // Return track_id so caller knows to save
+            Some(track_id.clone())
+        }
         Operation::SyncMarker => None,
     }
 }
 
 /// Apply an operation forward (for redo)
-fn apply_forward(op: &Operation, tracks: &mut [(String, Track)]) -> Option<String> {
+fn apply_forward(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&mut crate::model::inbox::Inbox>) -> Option<String> {
     match op {
         Operation::StateChange {
             track_id,
@@ -447,6 +591,78 @@ fn apply_forward(op: &Operation, tracks: &mut [(String, Track)]) -> Option<Strin
         }
         // TrackMove is handled by the caller (needs config access)
         Operation::TrackMove { .. } => None,
+        Operation::InboxAdd { index } => {
+            // Redo add = re-insert a blank item
+            if let Some(inbox) = inbox {
+                let item = InboxItem::new(String::new());
+                let idx = (*index).min(inbox.items.len());
+                inbox.items.insert(idx, item);
+            }
+            None
+        }
+        Operation::InboxDelete { index, .. } => {
+            // Redo delete = remove the item again
+            if let Some(inbox) = inbox {
+                if *index < inbox.items.len() {
+                    inbox.items.remove(*index);
+                }
+            }
+            None
+        }
+        Operation::InboxTitleEdit { index, new_title, .. } => {
+            if let Some(inbox) = inbox {
+                if let Some(item) = inbox.items.get_mut(*index) {
+                    item.title = new_title.clone();
+                    item.dirty = true;
+                }
+            }
+            None
+        }
+        Operation::InboxTagsEdit { index, new_tags, .. } => {
+            if let Some(inbox) = inbox {
+                if let Some(item) = inbox.items.get_mut(*index) {
+                    item.tags = new_tags.clone();
+                    item.dirty = true;
+                }
+            }
+            None
+        }
+        Operation::InboxMove { old_index, new_index } => {
+            if let Some(inbox) = inbox {
+                if *old_index < inbox.items.len() {
+                    let item = inbox.items.remove(*old_index);
+                    let idx = (*new_index).min(inbox.items.len());
+                    inbox.items.insert(idx, item);
+                }
+            }
+            None
+        }
+        Operation::InboxTriage { inbox_index, track_id, task_id, item, .. } => {
+            // Redo triage = remove from inbox, add task to track
+            if let Some(inbox) = inbox {
+                if *inbox_index < inbox.items.len() {
+                    inbox.items.remove(*inbox_index);
+                }
+            }
+            // Re-create task in track
+            let track = find_track_mut(tracks, track_id);
+            if let Some(track) = track {
+                if let Some(tasks) = track.section_tasks_mut(SectionKind::Backlog) {
+                    let mut task = Task::new(TaskState::Todo, Some(task_id.clone()), item.title.clone());
+                    task.tags = item.tags.clone();
+                    task.metadata.push(crate::model::task::Metadata::Added(
+                        chrono::Local::now().format("%Y-%m-%d").to_string(),
+                    ));
+                    if let Some(body) = &item.body {
+                        if !body.is_empty() {
+                            task.metadata.push(crate::model::task::Metadata::Note(body.clone()));
+                        }
+                    }
+                    tasks.push(task);
+                }
+            }
+            Some(track_id.clone())
+        }
         Operation::SyncMarker => None,
     }
 }

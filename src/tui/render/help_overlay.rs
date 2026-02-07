@@ -219,11 +219,24 @@ fn build_inbox_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("\u{2191}\u{2193}/jk".into(), "Move cursor".into()),
         HelpEntry::Binding("g/G".into(), "Top / bottom".into()),
         HelpEntry::Binding("/".into(), "Search inbox".into()),
+        HelpEntry::Blank,
+        HelpEntry::Header("Edit".into()),
+        HelpEntry::Binding("a".into(), "Add item (bottom)".into()),
+        HelpEntry::Binding("o/-".into(), "Insert after cursor".into()),
+        HelpEntry::Binding("e".into(), "Edit title".into()),
+        HelpEntry::Binding("#".into(), "Edit tags".into()),
+        HelpEntry::Binding("x".into(), "Delete item".into()),
+        HelpEntry::Binding("m".into(), "Move mode".into()),
     ];
 
     let right = vec![
+        HelpEntry::Header("Triage".into()),
+        HelpEntry::Binding("Enter".into(), "Triage to track".into()),
+        HelpEntry::Blank,
         HelpEntry::Header("Views & Other".into()),
         HelpEntry::Binding("Tab".into(), "Next view".into()),
+        HelpEntry::Binding("z/u".into(), "Undo".into()),
+        HelpEntry::Binding("Z".into(), "Redo".into()),
         HelpEntry::Binding("?".into(), "Help".into()),
         HelpEntry::Binding("QQ".into(), "Quit".into()),
     ];
@@ -237,11 +250,16 @@ fn build_recent_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("\u{2191}\u{2193}/jk".into(), "Move cursor".into()),
         HelpEntry::Binding("g/G".into(), "Top / bottom".into()),
         HelpEntry::Binding("/".into(), "Search".into()),
+        HelpEntry::Blank,
+        HelpEntry::Header("Actions".into()),
+        HelpEntry::Binding("Space/Enter".into(), "Reopen as todo".into()),
     ];
 
     let right = vec![
         HelpEntry::Header("Views & Other".into()),
         HelpEntry::Binding("Tab".into(), "Next view".into()),
+        HelpEntry::Binding("z/u".into(), "Undo".into()),
+        HelpEntry::Binding("Z".into(), "Redo".into()),
         HelpEntry::Binding("?".into(), "Help".into()),
         HelpEntry::Binding("QQ".into(), "Quit".into()),
     ];

@@ -10,13 +10,13 @@ pub mod track_view;
 pub mod tracks_view;
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::Style;
-use ratatui::text::Span;
-use ratatui::widgets::Block;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use regex::Regex;
 
-use super::app::{App, View};
+use super::app::{App, TriageStep, View};
 
 /// Main render function — dispatches to sub-renderers
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -48,8 +48,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         View::Track(_) => track_view::render_track_view(frame, app, chunks[1]),
         View::Detail { .. } => detail_view::render_detail_view(frame, app, chunks[1]),
         View::Tracks => tracks_view::render_tracks_view(frame, app, chunks[1]),
-        View::Inbox => inbox_view::render_inbox_view(frame, app, chunks[1]),
-        View::Recent => recent_view::render_recent_view(frame, app, chunks[1]),
+        View::Inbox => {
+            inbox_view::render_inbox_view(frame, app, chunks[1]);
+        }
+        View::Recent => {
+            recent_view::render_recent_view(frame, app, chunks[1]);
+        }
     }
 
     // Help overlay (rendered on top of everything)
@@ -67,8 +71,110 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         autocomplete::render_autocomplete(frame, app, chunks[1]);
     }
 
+    // Triage position popup (rendered on top of content)
+    render_triage_position_popup(frame, app);
+
     // Status row
     status_row::render_status_row(frame, app, chunks[2]);
+}
+
+/// Render the triage position-selection popup, if in the SelectPosition step.
+fn render_triage_position_popup(frame: &mut Frame, app: &App) {
+    let ts = match &app.triage_state {
+        Some(ts) => ts,
+        None => return,
+    };
+    let track_id = match &ts.step {
+        TriageStep::SelectPosition { track_id } => track_id,
+        _ => return,
+    };
+    let (anchor_x, anchor_y) = match ts.popup_anchor {
+        Some(pos) => pos,
+        None => return,
+    };
+
+    let bg = app.theme.background;
+    let text_color = app.theme.text;
+    let bright = app.theme.text_bright;
+    let dim = app.theme.dim;
+    let highlight = app.theme.highlight;
+
+    let track_name = app.track_name(track_id);
+    let title = format!(" {} ", track_name);
+
+    let key_style = Style::default()
+        .fg(highlight)
+        .bg(bg)
+        .add_modifier(Modifier::BOLD);
+    let desc_style = Style::default().fg(text_color).bg(bg);
+    let hint_style = Style::default().fg(dim).bg(bg);
+
+    let entries: Vec<Line> = vec![
+        Line::from(vec![
+            Span::styled("  t   ", key_style),
+            Span::styled("Top of backlog  ", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  b   ", key_style),
+            Span::styled("Bottom (default)", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Esc ", hint_style),
+            Span::styled("Cancel          ", hint_style),
+        ]),
+    ];
+
+    let popup_w: u16 = 24;
+    let popup_h: u16 = entries.len() as u16 + 2; // +2 for borders
+
+    let term_area = frame.area();
+
+    // Position: same top-left as the autocomplete was
+    let cursor_bottom = anchor_y + 1;
+    let y = if cursor_bottom + popup_h <= term_area.height {
+        cursor_bottom
+    } else {
+        anchor_y.saturating_sub(popup_h)
+    };
+    let text_inset: u16 = 4;
+    let x = anchor_x.saturating_sub(text_inset).min(term_area.width.saturating_sub(popup_w));
+
+    let popup_area = Rect::new(x, y, popup_w, popup_h);
+
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(bright)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(dim).bg(bg))
+        .style(Style::default().bg(bg));
+
+    let paragraph = Paragraph::new(entries)
+        .block(block)
+        .style(Style::default().bg(bg));
+    frame.render_widget(paragraph, popup_area);
+}
+
+/// Truncate a string to fit within `max_chars`, adding "…" if truncated.
+pub(super) fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let char_count = s.chars().count();
+    if char_count <= max_chars {
+        s.to_string()
+    } else if max_chars <= 1 {
+        "\u{2026}".to_string()
+    } else {
+        let truncated: String = s.chars().take(max_chars - 1).collect();
+        format!("{}\u{2026}", truncated)
+    }
 }
 
 /// Push spans for text with regex match highlighting. If no regex or no matches,

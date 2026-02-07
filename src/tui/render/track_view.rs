@@ -282,6 +282,7 @@ fn render_task_line<'a>(
             | EditTarget::ExistingTags { task_id, .. } => {
                 task.id.as_deref() == Some(task_id)
             }
+            _ => false,
         });
     let is_editing_tags = is_cursor
         && app.mode == Mode::Edit
@@ -362,9 +363,14 @@ fn render_task_line<'a>(
             .fg(app.theme.search_match_fg)
             .bg(app.theme.search_match_bg)
             .add_modifier(Modifier::BOLD);
+        // Truncate title if it would overflow the available width
+        let prefix_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let tag_width: usize = task.tags.iter().map(|t| t.len() + 2).sum::<usize>() + if task.tags.is_empty() { 0 } else { 2 };
+        let available = width.saturating_sub(prefix_width + tag_width + 1);
+        let display_title = super::truncate_with_ellipsis(&task.title, available);
         push_highlighted_spans(
             &mut spans,
-            &task.title,
+            &display_title,
             title_style,
             highlight_style,
             search_re,

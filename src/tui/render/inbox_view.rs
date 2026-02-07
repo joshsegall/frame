@@ -4,12 +4,12 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::tui::app::App;
+use crate::tui::app::{App, EditTarget, Mode};
 
 use super::push_highlighted_spans;
 
-/// Render the inbox view (read-only display for Phase 4)
-pub fn render_inbox_view(frame: &mut Frame, app: &App, area: Rect) {
+/// Render the inbox view
+pub fn render_inbox_view(frame: &mut Frame, app: &mut App, area: Rect) {
     let inbox = match &app.project.inbox {
         Some(inbox) => inbox,
         None => {
@@ -27,8 +27,10 @@ pub fn render_inbox_view(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let cursor = app.inbox_cursor;
-    let scroll = app.inbox_scroll;
+    // Clamp cursor
+    let item_count = inbox.items.len();
+    let cursor = app.inbox_cursor.min(item_count.saturating_sub(1));
+    app.inbox_cursor = cursor;
     let visible_height = area.height as usize;
 
     let search_re = app.active_search_re();
@@ -70,28 +72,79 @@ pub fn render_inbox_view(frame: &mut Frame, app: &App, area: Rect) {
         let num_style = Style::default().fg(app.theme.dim).bg(bg);
         spans.push(Span::styled(format!("{:>2}  ", i + 1), num_style));
 
-        let title_style = if is_cursor {
-            Style::default()
+        // Check if we're editing this item's title or tags
+        let editing_title = is_cursor
+            && app.mode == Mode::Edit
+            && matches!(
+                &app.edit_target,
+                Some(EditTarget::NewInboxItem { .. })
+                    | Some(EditTarget::ExistingInboxTitle { .. })
+            );
+        let editing_tags = is_cursor
+            && app.mode == Mode::Edit
+            && matches!(&app.edit_target, Some(EditTarget::ExistingInboxTags { .. }));
+
+        if editing_title {
+            // Show edit buffer with cursor
+            let cursor_pos = app.edit_cursor.min(app.edit_buffer.len());
+            let before = &app.edit_buffer[..cursor_pos];
+            let after = &app.edit_buffer[cursor_pos..];
+            let edit_style = Style::default()
                 .fg(app.theme.text_bright)
                 .bg(bg)
-                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::BOLD);
+            spans.push(Span::styled(before.to_string(), edit_style));
+            spans.push(Span::styled(
+                "\u{258C}",
+                Style::default().fg(app.theme.highlight).bg(bg),
+            ));
+            if !after.is_empty() {
+                spans.push(Span::styled(after.to_string(), edit_style));
+            }
         } else {
-            Style::default().fg(app.theme.text_bright).bg(bg)
-        };
-        let hl_style = Style::default()
-            .fg(app.theme.search_match_fg)
-            .bg(app.theme.search_match_bg)
-            .add_modifier(Modifier::BOLD);
-        push_highlighted_spans(
-            &mut spans,
-            &item.title,
-            title_style,
-            hl_style,
-            search_re.as_ref(),
-        );
+            let title_style = if is_cursor {
+                Style::default()
+                    .fg(app.theme.text_bright)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(app.theme.text_bright).bg(bg)
+            };
+            let hl_style = Style::default()
+                .fg(app.theme.search_match_fg)
+                .bg(app.theme.search_match_bg)
+                .add_modifier(Modifier::BOLD);
+            // Truncate title at available width
+            let prefix_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+            let tag_width: usize = item.tags.iter().map(|t| t.len() + 2).sum::<usize>() + if item.tags.is_empty() { 0 } else { 2 };
+            let available = (area.width as usize).saturating_sub(prefix_width + tag_width + 1);
+            let display_title = super::truncate_with_ellipsis(&item.title, available);
+            push_highlighted_spans(
+                &mut spans,
+                &display_title,
+                title_style,
+                hl_style,
+                search_re.as_ref(),
+            );
+        }
 
         // Tags
-        if !item.tags.is_empty() {
+        if editing_tags {
+            // Show tag edit buffer with cursor
+            spans.push(Span::styled("  ", Style::default().bg(bg)));
+            let cursor_pos = app.edit_cursor.min(app.edit_buffer.len());
+            let before = &app.edit_buffer[..cursor_pos];
+            let after = &app.edit_buffer[cursor_pos..];
+            let edit_style = Style::default().fg(app.theme.highlight).bg(bg);
+            spans.push(Span::styled(before.to_string(), edit_style));
+            spans.push(Span::styled(
+                "\u{258C}",
+                Style::default().fg(app.theme.highlight).bg(bg),
+            ));
+            if !after.is_empty() {
+                spans.push(Span::styled(after.to_string(), edit_style));
+            }
+        } else if !item.tags.is_empty() {
             spans.push(Span::styled("  ", Style::default().bg(bg)));
             for (j, tag) in item.tags.iter().enumerate() {
                 if j > 0 {
@@ -131,6 +184,41 @@ pub fn render_inbox_view(frame: &mut Frame, app: &App, area: Rect) {
                 ];
                 display_lines.push((Some(i), Line::from(body_spans)));
             }
+        }
+    }
+
+    // Find the display line index of the cursor item (for autocomplete anchor + scroll)
+    let mut cursor_display_line: Option<usize> = None;
+    for (dl_idx, (item_idx, _)) in display_lines.iter().enumerate() {
+        if *item_idx == Some(cursor) {
+            if cursor_display_line.is_none() {
+                cursor_display_line = Some(dl_idx);
+            }
+        }
+    }
+
+    // Auto-adjust scroll to keep cursor visible
+    let mut scroll = app.inbox_scroll;
+    if let Some(cdl) = cursor_display_line {
+        if cdl < scroll {
+            scroll = cdl;
+        } else if cdl >= scroll + visible_height {
+            scroll = cdl.saturating_sub(visible_height - 1);
+        }
+    }
+    app.inbox_scroll = scroll;
+
+    // Set autocomplete anchor if editing tags or in triage mode
+    let needs_anchor = (app.mode == Mode::Edit
+        && matches!(&app.edit_target, Some(EditTarget::ExistingInboxTags { .. })))
+        || app.mode == Mode::Triage;
+    if needs_anchor {
+        if let Some(dl) = cursor_display_line {
+            let screen_line = dl.saturating_sub(scroll);
+            let screen_y = area.y + screen_line as u16;
+            // Anchor x: after the number prefix (col 5 roughly)
+            let screen_x = area.x + 5;
+            app.autocomplete_anchor = Some((screen_x, screen_y));
         }
     }
 

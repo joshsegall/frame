@@ -149,6 +149,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::Search => handle_search(app, key),
         Mode::Edit => handle_edit(app, key),
         Mode::Move => handle_move(app, key),
+        Mode::Triage => handle_triage(app, key),
+        Mode::Confirm => handle_confirm(app, key),
     }
 }
 
@@ -373,9 +375,15 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             jump_to_bottom(app);
         }
 
-        // Enter: open detail view (track view) or edit region (detail view)
+        // Enter: open detail view (track view), triage (inbox), reopen (recent), or edit region (detail view)
         (KeyModifiers::NONE, KeyCode::Enter) => {
-            handle_enter(app);
+            if matches!(app.view, View::Inbox) {
+                inbox_begin_triage(app);
+            } else if matches!(app.view, View::Recent) {
+                reopen_recent_task(app);
+            } else {
+                handle_enter(app);
+            }
         }
 
         // Expand/collapse (track view only)
@@ -386,12 +394,20 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             collapse_or_parent(app);
         }
 
-        // Task state changes (track view only)
+        // Task state changes (track view) or reopen (recent view)
         (KeyModifiers::NONE, KeyCode::Char(' ')) => {
-            task_state_action(app, StateAction::Cycle);
+            if matches!(app.view, View::Recent) {
+                reopen_recent_task(app);
+            } else {
+                task_state_action(app, StateAction::Cycle);
+            }
         }
         (KeyModifiers::NONE, KeyCode::Char('x')) => {
-            task_state_action(app, StateAction::Done);
+            if matches!(app.view, View::Inbox) {
+                inbox_delete_item(app);
+            } else {
+                task_state_action(app, StateAction::Done);
+            }
         }
         (KeyModifiers::NONE, KeyCode::Char('b')) => {
             task_state_action(app, StateAction::ToggleBlocked);
@@ -400,12 +416,20 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             task_state_action(app, StateAction::ToggleParked);
         }
 
-        // Add task (track view only)
+        // Add task (track view) or add inbox item (inbox view)
         (KeyModifiers::NONE, KeyCode::Char('a')) => {
-            add_task_action(app, AddPosition::Bottom);
+            if matches!(app.view, View::Inbox) {
+                inbox_add_item(app);
+            } else {
+                add_task_action(app, AddPosition::Bottom);
+            }
         }
         (KeyModifiers::NONE, KeyCode::Char('o') | KeyCode::Char('-')) => {
-            add_task_action(app, AddPosition::AfterCursor);
+            if matches!(app.view, View::Inbox) {
+                inbox_insert_after(app);
+            } else {
+                add_task_action(app, AddPosition::AfterCursor);
+            }
         }
         (KeyModifiers::NONE, KeyCode::Char('p')) => {
             add_task_action(app, AddPosition::Top);
@@ -414,19 +438,23 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             add_subtask_action(app);
         }
 
-        // Inline title edit (track view) or enter edit mode (detail view)
+        // Inline title edit (track view), edit (inbox view), or enter edit mode (detail view)
         (KeyModifiers::NONE, KeyCode::Char('e')) => {
             if matches!(app.view, View::Detail { .. }) {
                 detail_enter_edit(app);
+            } else if matches!(app.view, View::Inbox) {
+                inbox_edit_title(app);
             } else {
                 enter_title_edit(app);
             }
         }
 
-        // Tag edit: # — detail view jump to tags region, or inline tag edit in track view
+        // Tag edit: # — detail view jump to tags region, inbox tag edit, or inline tag edit in track view
         (KeyModifiers::NONE, KeyCode::Char('#')) => {
             if matches!(app.view, View::Detail { .. }) {
                 detail_jump_to_region_and_edit(app, DetailRegion::Tags);
+            } else if matches!(app.view, View::Inbox) {
+                inbox_edit_tags(app);
             } else {
                 enter_tag_edit(app);
             }
@@ -452,9 +480,13 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             set_cc_focus_current(app);
         }
 
-        // Move mode
+        // Move mode (track, tracks, or inbox view)
         (KeyModifiers::NONE, KeyCode::Char('m')) => {
-            enter_move_mode(app);
+            if matches!(app.view, View::Inbox) {
+                inbox_enter_move_mode(app);
+            } else {
+                enter_move_mode(app);
+            }
         }
 
         // Redo: Z, Ctrl+Y, or Ctrl+Shift+Z (must be checked BEFORE Ctrl+Z/z undo)
@@ -587,14 +619,16 @@ fn handle_search(app: &mut App, key: KeyEvent) {
 // ---------------------------------------------------------------------------
 
 fn perform_undo(app: &mut App) {
-    if let Some(nav) = app.undo_stack.undo(&mut app.project.tracks) {
+    let inbox = app.project.inbox.as_mut();
+    if let Some(nav) = app.undo_stack.undo(&mut app.project.tracks, inbox) {
         apply_nav_side_effects(app, &nav, true);
         navigate_to_undo_target(app, &nav);
     }
 }
 
 fn perform_redo(app: &mut App) {
-    if let Some(nav) = app.undo_stack.redo(&mut app.project.tracks) {
+    let inbox = app.project.inbox.as_mut();
+    if let Some(nav) = app.undo_stack.redo(&mut app.project.tracks, inbox) {
         apply_nav_side_effects(app, &nav, false);
         navigate_to_undo_target(app, &nav);
     }
@@ -631,6 +665,25 @@ fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo: bool) {
                     .collect();
                 save_config(app);
             }
+        }
+        UndoNavTarget::Inbox { .. } => {
+            // Inbox operations: check if a track was also affected (triage undo)
+            let triage_track_id = {
+                let op = if is_undo {
+                    app.undo_stack.peek_last_redo()
+                } else {
+                    app.undo_stack.peek_last_undo()
+                };
+                if let Some(Operation::InboxTriage { track_id, .. }) = op {
+                    Some(track_id.clone())
+                } else {
+                    None
+                }
+            };
+            if let Some(tid) = triage_track_id {
+                let _ = app.save_track(&tid);
+            }
+            let _ = app.save_inbox();
         }
     }
 }
@@ -719,6 +772,16 @@ fn navigate_to_undo_target(app: &mut App, nav: &UndoNavTarget) {
             }
 
             app.flash_track(track_id);
+        }
+        UndoNavTarget::Inbox { cursor } => {
+            if matches!(app.view, View::Detail { .. }) {
+                app.close_detail_fully();
+            }
+            app.view = View::Inbox;
+            if let Some(idx) = cursor {
+                let count = app.inbox_count();
+                app.inbox_cursor = if count > 0 { (*idx).min(count - 1) } else { 0 };
+            }
         }
     }
 }
@@ -1547,6 +1610,80 @@ fn confirm_edit(app: &mut App) {
             }
             drain_pending_for_track(app, &track_id);
         }
+        EditTarget::NewInboxItem { index } => {
+            let title = app.edit_buffer.clone();
+            if title.trim().is_empty() {
+                // Empty title: discard the placeholder
+                if let Some(inbox) = &mut app.project.inbox {
+                    if index < inbox.items.len() {
+                        inbox.items.remove(index);
+                    }
+                }
+            } else {
+                // Apply title to the inbox item
+                if let Some(inbox) = &mut app.project.inbox {
+                    if let Some(item) = inbox.items.get_mut(index) {
+                        item.title = title;
+                        item.dirty = true;
+                    }
+                    app.undo_stack.push(Operation::InboxAdd { index });
+                }
+                let _ = app.save_inbox();
+            }
+        }
+        EditTarget::ExistingInboxTitle {
+            index,
+            original_title,
+        } => {
+            let new_title = app.edit_buffer.clone();
+            if !new_title.trim().is_empty() && new_title != original_title {
+                if let Some(inbox) = &mut app.project.inbox {
+                    if let Some(item) = inbox.items.get_mut(index) {
+                        item.title = new_title.clone();
+                        item.dirty = true;
+                    }
+                }
+                app.undo_stack.push(Operation::InboxTitleEdit {
+                    index,
+                    old_title: original_title,
+                    new_title,
+                });
+                let _ = app.save_inbox();
+            }
+        }
+        EditTarget::ExistingInboxTags {
+            index,
+            original_tags,
+        } => {
+            let new_value = app.edit_buffer.clone();
+            let new_tags: Vec<String> = dedup_preserve_order(
+                new_value
+                    .split_whitespace()
+                    .map(|s| s.strip_prefix('#').unwrap_or(s).to_string())
+                    .filter(|s| !s.is_empty()),
+            );
+            let old_tags_vec: Vec<String> = original_tags
+                .split_whitespace()
+                .map(|s| s.strip_prefix('#').unwrap_or(s).to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            if let Some(inbox) = &mut app.project.inbox {
+                if let Some(item) = inbox.items.get_mut(index) {
+                    item.tags = new_tags.clone();
+                    item.dirty = true;
+                }
+            }
+
+            if new_tags != old_tags_vec {
+                app.undo_stack.push(Operation::InboxTagsEdit {
+                    index,
+                    old_tags: old_tags_vec,
+                    new_tags,
+                });
+            }
+            let _ = app.save_inbox();
+        }
     }
 }
 
@@ -1556,44 +1693,58 @@ fn cancel_edit(app: &mut App) {
     app.mode = Mode::Navigate;
     app.autocomplete = None;
 
-    // If we were creating a new task, remove the placeholder
-    if let Some(EditTarget::NewTask {
-        task_id,
-        track_id,
-        parent_id,
-    }) = target
-    {
-        if app.track_changed_on_disk(&track_id) {
-            // File changed externally — reload from disk (discards our in-memory placeholder
-            // and picks up external changes atomically)
-            if let Some(disk_track) = app.read_track_from_disk(&track_id) {
-                app.replace_track(&track_id, disk_track);
-            }
-            drain_pending_for_track(app, &track_id);
-        } else {
-            // No external changes — remove placeholder from memory and save
-            let track = match app.find_track_mut(&track_id) {
-                Some(t) => t,
-                None => return,
-            };
-            if let Some(pid) = &parent_id {
-                if let Some(parent) = task_ops::find_task_mut_in_track(track, pid) {
-                    parent.subtasks.retain(|t| t.id.as_deref() != Some(&task_id));
-                    parent.mark_dirty();
+    match target {
+        // If we were creating a new task, remove the placeholder
+        Some(EditTarget::NewTask {
+            task_id,
+            track_id,
+            parent_id,
+        }) => {
+            if app.track_changed_on_disk(&track_id) {
+                // File changed externally — reload from disk (discards our in-memory placeholder
+                // and picks up external changes atomically)
+                if let Some(disk_track) = app.read_track_from_disk(&track_id) {
+                    app.replace_track(&track_id, disk_track);
                 }
+                drain_pending_for_track(app, &track_id);
             } else {
-                remove_task_from_section(track, &task_id, SectionKind::Backlog);
+                // No external changes — remove placeholder from memory and save
+                let track = match app.find_track_mut(&track_id) {
+                    Some(t) => t,
+                    None => return,
+                };
+                if let Some(pid) = &parent_id {
+                    if let Some(parent) = task_ops::find_task_mut_in_track(track, pid) {
+                        parent.subtasks.retain(|t| t.id.as_deref() != Some(&task_id));
+                        parent.mark_dirty();
+                    }
+                } else {
+                    remove_task_from_section(track, &task_id, SectionKind::Backlog);
+                }
+                let _ = app.save_track(&track_id);
             }
-            let _ = app.save_track(&track_id);
-        }
 
-        // Restore cursor to pre-edit position
-        if let Some(cursor) = saved_cursor {
-            let state = app.get_track_state(&track_id);
-            state.cursor = cursor;
+            // Restore cursor to pre-edit position
+            if let Some(cursor) = saved_cursor {
+                let state = app.get_track_state(&track_id);
+                state.cursor = cursor;
+            }
         }
+        // If we were creating a new inbox item, remove the placeholder
+        Some(EditTarget::NewInboxItem { index }) => {
+            if let Some(inbox) = &mut app.project.inbox {
+                if index < inbox.items.len() {
+                    inbox.items.remove(index);
+                }
+            }
+            // Restore cursor
+            if let Some(cursor) = saved_cursor {
+                app.inbox_cursor = cursor;
+            }
+        }
+        // For existing title/tags edit, cancel means revert (unchanged since we didn't write)
+        _ => {}
     }
-    // For existing title edit, cancel means revert (title unchanged since we didn't write)
 }
 
 /// Move the cursor to a specific task by ID in a track view.
@@ -1729,6 +1880,7 @@ fn enter_move_mode(app: &mut App) {
 
 fn handle_move(app: &mut App, key: KeyEvent) {
     let is_track_move = matches!(&app.move_state, Some(MoveState::Track { .. }));
+    let is_inbox_move = matches!(&app.move_state, Some(MoveState::InboxItem { .. }));
 
     match (key.modifiers, key.code) {
         // Confirm
@@ -1752,6 +1904,15 @@ fn handle_move(app: &mut App, key: KeyEvent) {
                             app.undo_stack.push(Operation::TaskMove {
                                 track_id,
                                 task_id,
+                                old_index: original_index,
+                                new_index,
+                            });
+                        }
+                    }
+                    MoveState::InboxItem { original_index } => {
+                        let new_index = app.inbox_cursor;
+                        if new_index != original_index {
+                            app.undo_stack.push(Operation::InboxMove {
                                 old_index: original_index,
                                 new_index,
                             });
@@ -1833,6 +1994,19 @@ fn handle_move(app: &mut App, key: KeyEvent) {
                             let _ = app.save_track(&track_id);
                         }
                     }
+                    MoveState::InboxItem { original_index } => {
+                        // Restore original position
+                        if let Some(inbox) = &mut app.project.inbox {
+                            let cur = app.inbox_cursor;
+                            if cur < inbox.items.len() {
+                                let item = inbox.items.remove(cur);
+                                let restore = original_index.min(inbox.items.len());
+                                inbox.items.insert(restore, item);
+                            }
+                        }
+                        let _ = app.save_inbox();
+                        app.inbox_cursor = original_index;
+                    }
                     MoveState::Track {
                         track_id,
                         original_index,
@@ -1859,7 +2033,9 @@ fn handle_move(app: &mut App, key: KeyEvent) {
         }
         // Move up
         (KeyModifiers::NONE, KeyCode::Up | KeyCode::Char('k')) => {
-            if is_track_move {
+            if is_inbox_move {
+                move_inbox_item(app, -1);
+            } else if is_track_move {
                 move_track_in_list(app, -1);
             } else {
                 move_task_in_list(app, -1);
@@ -1867,7 +2043,9 @@ fn handle_move(app: &mut App, key: KeyEvent) {
         }
         // Move down
         (KeyModifiers::NONE, KeyCode::Down | KeyCode::Char('j')) => {
-            if is_track_move {
+            if is_inbox_move {
+                move_inbox_item(app, 1);
+            } else if is_track_move {
                 move_track_in_list(app, 1);
             } else {
                 move_task_in_list(app, 1);
@@ -1875,21 +2053,27 @@ fn handle_move(app: &mut App, key: KeyEvent) {
         }
         // Move to top
         (KeyModifiers::NONE, KeyCode::Char('g')) => {
-            if is_track_move {
+            if is_inbox_move {
+                move_inbox_to_boundary(app, true);
+            } else if is_track_move {
                 move_track_to_boundary(app, true);
             } else {
                 move_task_to_boundary(app, true);
             }
         }
         (m, KeyCode::Up) if m.contains(KeyModifiers::SUPER) => {
-            if is_track_move {
+            if is_inbox_move {
+                move_inbox_to_boundary(app, true);
+            } else if is_track_move {
                 move_track_to_boundary(app, true);
             } else {
                 move_task_to_boundary(app, true);
             }
         }
         (_, KeyCode::Home) => {
-            if is_track_move {
+            if is_inbox_move {
+                move_inbox_to_boundary(app, true);
+            } else if is_track_move {
                 move_track_to_boundary(app, true);
             } else {
                 move_task_to_boundary(app, true);
@@ -1897,21 +2081,27 @@ fn handle_move(app: &mut App, key: KeyEvent) {
         }
         // Move to bottom
         (KeyModifiers::SHIFT, KeyCode::Char('G')) => {
-            if is_track_move {
+            if is_inbox_move {
+                move_inbox_to_boundary(app, false);
+            } else if is_track_move {
                 move_track_to_boundary(app, false);
             } else {
                 move_task_to_boundary(app, false);
             }
         }
         (m, KeyCode::Down) if m.contains(KeyModifiers::SUPER) => {
-            if is_track_move {
+            if is_inbox_move {
+                move_inbox_to_boundary(app, false);
+            } else if is_track_move {
                 move_track_to_boundary(app, false);
             } else {
                 move_task_to_boundary(app, false);
             }
         }
         (_, KeyCode::End) => {
-            if is_track_move {
+            if is_inbox_move {
+                move_inbox_to_boundary(app, false);
+            } else if is_track_move {
                 move_track_to_boundary(app, false);
             } else {
                 move_task_to_boundary(app, false);
@@ -2014,6 +2204,51 @@ fn move_task_to_boundary(app: &mut App, to_top: bool) {
     let _ = task_ops::move_task(track, &task_id, pos);
     let _ = app.save_track(&track_id);
     move_cursor_to_task(app, &track_id, &task_id);
+}
+
+/// Move an inbox item up or down.
+fn move_inbox_item(app: &mut App, direction: i32) {
+    let inbox = match &mut app.project.inbox {
+        Some(inbox) => inbox,
+        None => return,
+    };
+
+    let cur = app.inbox_cursor;
+    let len = inbox.items.len();
+    if len == 0 || cur >= len {
+        return;
+    }
+
+    let new_idx = (cur as i32 + direction).clamp(0, len as i32 - 1) as usize;
+    if new_idx != cur {
+        inbox.items.swap(cur, new_idx);
+        app.inbox_cursor = new_idx;
+        let _ = app.save_inbox();
+    }
+}
+
+/// Move an inbox item to the top or bottom.
+fn move_inbox_to_boundary(app: &mut App, to_top: bool) {
+    let inbox = match &mut app.project.inbox {
+        Some(inbox) => inbox,
+        None => return,
+    };
+
+    let cur = app.inbox_cursor;
+    let len = inbox.items.len();
+    if len == 0 || cur >= len {
+        return;
+    }
+
+    let item = inbox.items.remove(cur);
+    if to_top {
+        inbox.items.insert(0, item);
+        app.inbox_cursor = 0;
+    } else {
+        inbox.items.push(item);
+        app.inbox_cursor = inbox.items.len() - 1;
+    }
+    let _ = app.save_inbox();
 }
 
 /// Move an active track up or down in the tracks list.
@@ -3729,4 +3964,497 @@ fn autocomplete_accept(app: &mut App) {
 
     // Re-filter after acceptance (so user can keep adding more)
     update_autocomplete_filter(app);
+}
+
+// ---------------------------------------------------------------------------
+// Inbox interactions (Phase 7.2)
+// ---------------------------------------------------------------------------
+
+/// Add a new inbox item at the bottom and enter EDIT mode for its title.
+fn inbox_add_item(app: &mut App) {
+    let inbox = match &mut app.project.inbox {
+        Some(inbox) => inbox,
+        None => return,
+    };
+
+    // Add an empty item at the end
+    let item = crate::model::inbox::InboxItem::new(String::new());
+    inbox.items.push(item);
+    let new_index = inbox.items.len() - 1;
+
+    // Move cursor to new item
+    app.inbox_cursor = new_index;
+
+    // Enter EDIT mode for the title
+    app.edit_buffer.clear();
+    app.edit_cursor = 0;
+    app.edit_target = Some(EditTarget::NewInboxItem { index: new_index });
+    app.edit_history = Some(EditHistory::new("", 0, 0));
+    app.mode = Mode::Edit;
+}
+
+/// Insert a new inbox item after the current cursor position and enter EDIT mode.
+fn inbox_insert_after(app: &mut App) {
+    let inbox = match &mut app.project.inbox {
+        Some(inbox) => inbox,
+        None => return,
+    };
+
+    let insert_at = if inbox.items.is_empty() {
+        0
+    } else {
+        (app.inbox_cursor + 1).min(inbox.items.len())
+    };
+
+    let item = crate::model::inbox::InboxItem::new(String::new());
+    inbox.items.insert(insert_at, item);
+
+    // Move cursor to the new item
+    app.inbox_cursor = insert_at;
+
+    // Enter EDIT mode for the title
+    app.edit_buffer.clear();
+    app.edit_cursor = 0;
+    app.edit_target = Some(EditTarget::NewInboxItem { index: insert_at });
+    app.edit_history = Some(EditHistory::new("", 0, 0));
+    app.mode = Mode::Edit;
+}
+
+/// Edit the title of the selected inbox item.
+fn inbox_edit_title(app: &mut App) {
+    let inbox = match &app.project.inbox {
+        Some(inbox) => inbox,
+        None => return,
+    };
+    let item = match inbox.items.get(app.inbox_cursor) {
+        Some(item) => item,
+        None => return,
+    };
+
+    let original_title = item.title.clone();
+    app.edit_buffer = original_title.clone();
+    app.edit_cursor = app.edit_buffer.len();
+    app.edit_target = Some(EditTarget::ExistingInboxTitle {
+        index: app.inbox_cursor,
+        original_title,
+    });
+    app.edit_history = Some(EditHistory::new(&app.edit_buffer, app.edit_cursor, 0));
+    app.mode = Mode::Edit;
+}
+
+/// Edit the tags of the selected inbox item.
+fn inbox_edit_tags(app: &mut App) {
+    let inbox = match &app.project.inbox {
+        Some(inbox) => inbox,
+        None => return,
+    };
+    let item = match inbox.items.get(app.inbox_cursor) {
+        Some(item) => item,
+        None => return,
+    };
+
+    let original_tags: String = item.tags.iter().map(|t| format!("#{}", t)).collect::<Vec<_>>().join(" ");
+    app.edit_buffer = if original_tags.is_empty() { String::new() } else { format!("{} ", original_tags) };
+    app.edit_cursor = app.edit_buffer.len();
+    app.edit_target = Some(EditTarget::ExistingInboxTags {
+        index: app.inbox_cursor,
+        original_tags: original_tags.clone(),
+    });
+    app.edit_history = Some(EditHistory::new(&app.edit_buffer, app.edit_cursor, 0));
+
+    // Activate tag autocomplete
+    let candidates = app.collect_all_tags();
+    app.autocomplete = Some(AutocompleteState::new(AutocompleteKind::Tag, candidates));
+    update_autocomplete_filter(app);
+
+    app.mode = Mode::Edit;
+}
+
+/// Delete the selected inbox item (with confirmation).
+fn inbox_delete_item(app: &mut App) {
+    let inbox = match &app.project.inbox {
+        Some(inbox) => inbox,
+        None => return,
+    };
+    if inbox.items.is_empty() || app.inbox_cursor >= inbox.items.len() {
+        return;
+    }
+
+    let title = &inbox.items[app.inbox_cursor].title;
+    let short_title = if title.len() > 30 {
+        format!("{}...", &title[..30])
+    } else {
+        title.clone()
+    };
+
+    app.confirm_state = Some(super::app::ConfirmState {
+        message: format!("Delete \"{}\"? (y/n)", short_title),
+        action: super::app::ConfirmAction::DeleteInboxItem { index: app.inbox_cursor },
+    });
+    app.mode = Mode::Confirm;
+}
+
+/// Enter MOVE mode for inbox items.
+fn inbox_enter_move_mode(app: &mut App) {
+    let count = app.inbox_count();
+    if count == 0 || app.inbox_cursor >= count {
+        return;
+    }
+
+    app.move_state = Some(MoveState::InboxItem {
+        original_index: app.inbox_cursor,
+    });
+    app.mode = Mode::Move;
+}
+
+/// Begin the triage flow for the selected inbox item.
+fn inbox_begin_triage(app: &mut App) {
+    let count = app.inbox_count();
+    if count == 0 || app.inbox_cursor >= count {
+        return;
+    }
+
+    // Activate track selection autocomplete
+    let active_tracks: Vec<String> = app
+        .project
+        .config
+        .tracks
+        .iter()
+        .filter(|t| t.state == "active")
+        .map(|t| format!("{} ({})", t.name, t.id))
+        .collect();
+
+    if active_tracks.is_empty() {
+        app.status_message = Some("No active tracks to triage to".to_string());
+        return;
+    }
+
+    app.edit_buffer.clear();
+    app.edit_cursor = 0;
+    app.autocomplete = Some(AutocompleteState::new(AutocompleteKind::Tag, active_tracks));
+    if let Some(ac) = &mut app.autocomplete {
+        ac.filter(""); // Show all
+    }
+
+    app.triage_state = Some(super::app::TriageState {
+        inbox_index: app.inbox_cursor,
+        step: super::app::TriageStep::SelectTrack,
+        popup_anchor: None,
+    });
+    app.mode = Mode::Triage;
+}
+
+// ---------------------------------------------------------------------------
+// Triage mode handler (Phase 7.3)
+// ---------------------------------------------------------------------------
+
+fn handle_triage(app: &mut App, key: KeyEvent) {
+    let step = match &app.triage_state {
+        Some(ts) => ts.step.clone(),
+        None => {
+            app.mode = Mode::Navigate;
+            return;
+        }
+    };
+
+    match step {
+        super::app::TriageStep::SelectTrack => handle_triage_select_track(app, key),
+        super::app::TriageStep::SelectPosition { track_id } => {
+            handle_triage_select_position(app, key, &track_id.clone())
+        }
+    }
+}
+
+fn handle_triage_select_track(app: &mut App, key: KeyEvent) {
+    match (key.modifiers, key.code) {
+        // Cancel
+        (_, KeyCode::Esc) => {
+            app.mode = Mode::Navigate;
+            app.triage_state = None;
+            app.autocomplete = None;
+            app.edit_buffer.clear();
+        }
+
+        // Navigate autocomplete
+        (KeyModifiers::NONE, KeyCode::Up) => {
+            if let Some(ac) = &mut app.autocomplete {
+                ac.move_up();
+            }
+        }
+        (KeyModifiers::NONE, KeyCode::Down) => {
+            if let Some(ac) = &mut app.autocomplete {
+                ac.move_down();
+            }
+        }
+
+        // Select track
+        (_, KeyCode::Enter) => {
+            let selected = app.autocomplete.as_ref().and_then(|ac| ac.selected_entry().map(|s| s.to_string()));
+            if let Some(entry) = selected {
+                // Extract track_id from "Track Name (track_id)"
+                let track_id = entry
+                    .rsplit('(')
+                    .next()
+                    .and_then(|s| s.strip_suffix(')'))
+                    .unwrap_or(&entry)
+                    .to_string();
+
+                // Verify track exists
+                let valid = app.project.config.tracks.iter().any(|t| t.id == track_id);
+                if valid {
+                    // Capture anchor from autocomplete before clearing it
+                    let anchor = app.autocomplete_anchor;
+                    app.autocomplete = None;
+                    app.edit_buffer.clear();
+                    if let Some(ts) = &mut app.triage_state {
+                        ts.popup_anchor = anchor;
+                        ts.step = super::app::TriageStep::SelectPosition { track_id };
+                    }
+                }
+            }
+        }
+
+        // Filter by typing
+        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+            app.edit_buffer.push(c);
+            app.edit_cursor = app.edit_buffer.len();
+            if let Some(ac) = &mut app.autocomplete {
+                ac.filter(&app.edit_buffer);
+            }
+        }
+
+        // Backspace
+        (_, KeyCode::Backspace) => {
+            app.edit_buffer.pop();
+            app.edit_cursor = app.edit_buffer.len();
+            if let Some(ac) = &mut app.autocomplete {
+                ac.filter(&app.edit_buffer);
+            }
+        }
+
+        _ => {}
+    }
+}
+
+fn handle_triage_select_position(app: &mut App, key: KeyEvent, track_id: &str) {
+    match (key.modifiers, key.code) {
+        // Cancel
+        (_, KeyCode::Esc) => {
+            app.mode = Mode::Navigate;
+            app.triage_state = None;
+            app.autocomplete = None;
+            app.edit_buffer.clear();
+        }
+
+        // t = top, b = bottom (default), Enter = bottom
+        (KeyModifiers::NONE, KeyCode::Char('t')) => {
+            execute_triage(app, track_id, InsertPosition::Top);
+        }
+        (KeyModifiers::NONE, KeyCode::Char('b')) | (_, KeyCode::Enter) => {
+            execute_triage(app, track_id, InsertPosition::Bottom);
+        }
+
+        _ => {}
+    }
+}
+
+fn execute_triage(app: &mut App, track_id: &str, position: InsertPosition) {
+    let inbox_index = match &app.triage_state {
+        Some(ts) => ts.inbox_index,
+        None => return,
+    };
+
+    // Get the item before triaging (for undo)
+    let inbox_item = match &app.project.inbox {
+        Some(inbox) => match inbox.items.get(inbox_index) {
+            Some(item) => item.clone(),
+            None => return,
+        },
+        None => return,
+    };
+
+    let prefix = app.track_prefix(track_id).unwrap_or("").to_string();
+
+    let inbox = match &mut app.project.inbox {
+        Some(inbox) => inbox,
+        None => return,
+    };
+    let track = match app.project.tracks.iter_mut().find(|(id, _)| id == track_id) {
+        Some((_, track)) => track,
+        None => return,
+    };
+
+    let task_id = match crate::ops::inbox_ops::triage(inbox, inbox_index, track, position, &prefix) {
+        Ok(id) => id,
+        Err(_) => return,
+    };
+
+    // Push undo operation
+    app.undo_stack.push(Operation::InboxTriage {
+        inbox_index,
+        item: inbox_item,
+        track_id: track_id.to_string(),
+        task_id,
+    });
+
+    // Save both inbox and track
+    let _ = app.save_inbox();
+    let _ = app.save_track(track_id);
+
+    // Advance cursor (or clamp to last item)
+    let count = app.inbox_count();
+    if count == 0 {
+        app.inbox_cursor = 0;
+    } else {
+        app.inbox_cursor = app.inbox_cursor.min(count - 1);
+    }
+
+    // Return to navigate mode
+    app.mode = Mode::Navigate;
+    app.triage_state = None;
+    app.autocomplete = None;
+    app.edit_buffer.clear();
+
+    let track_name = app.track_name(track_id).to_string();
+    app.status_message = Some(format!("Triaged to {}", track_name));
+}
+
+// ---------------------------------------------------------------------------
+// Confirm mode handler
+// ---------------------------------------------------------------------------
+
+fn handle_confirm(app: &mut App, key: KeyEvent) {
+    match (key.modifiers, key.code) {
+        // Confirm: y
+        (KeyModifiers::NONE, KeyCode::Char('y')) => {
+            let state = app.confirm_state.take();
+            app.mode = Mode::Navigate;
+            if let Some(state) = state {
+                match state.action {
+                    super::app::ConfirmAction::DeleteInboxItem { index } => {
+                        confirm_inbox_delete(app, index);
+                    }
+                }
+            }
+        }
+        // Cancel: n or Esc
+        (KeyModifiers::NONE, KeyCode::Char('n')) | (_, KeyCode::Esc) => {
+            app.confirm_state = None;
+            app.mode = Mode::Navigate;
+        }
+        _ => {}
+    }
+}
+
+fn confirm_inbox_delete(app: &mut App, index: usize) {
+    let inbox = match &mut app.project.inbox {
+        Some(inbox) => inbox,
+        None => return,
+    };
+
+    if index >= inbox.items.len() {
+        return;
+    }
+
+    let item = inbox.items.remove(index);
+    app.undo_stack.push(Operation::InboxDelete {
+        index,
+        item,
+    });
+    let _ = app.save_inbox();
+
+    // Clamp cursor
+    let count = app.inbox_count();
+    if count == 0 {
+        app.inbox_cursor = 0;
+    } else {
+        app.inbox_cursor = app.inbox_cursor.min(count - 1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Recent view interactions (Phase 7.4)
+// ---------------------------------------------------------------------------
+
+/// Reopen a done task from the recent view (set state back to todo).
+fn reopen_recent_task(app: &mut App) {
+    // Rebuild the sorted done-task list to find the task at current cursor
+    let mut done_tasks: Vec<(String, String, String)> = Vec::new(); // (track_id, task_id, resolved)
+
+    for (track_id, track) in &app.project.tracks {
+        for task in track.section_tasks(SectionKind::Done) {
+            let resolved = task
+                .metadata
+                .iter()
+                .find_map(|m| {
+                    if let crate::model::task::Metadata::Resolved(d) = m {
+                        Some(d.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
+            if let Some(ref id) = task.id {
+                done_tasks.push((track_id.clone(), id.clone(), resolved));
+            }
+        }
+    }
+
+    // Sort by resolved date, most recent first (matching render order)
+    done_tasks.sort_by(|a, b| b.2.cmp(&a.2));
+
+    let cursor = app.recent_cursor;
+    let (track_id, task_id) = match done_tasks.get(cursor) {
+        Some((tid, taskid, _)) => (tid.clone(), taskid.clone()),
+        None => return,
+    };
+
+    // Capture old state for undo
+    let track = match app.find_track_mut(&track_id) {
+        Some(t) => t,
+        None => return,
+    };
+    let task = match task_ops::find_task_mut_in_track(track, &task_id) {
+        Some(t) => t,
+        None => return,
+    };
+
+    let old_state = task.state;
+    let old_resolved = task
+        .metadata
+        .iter()
+        .find_map(|m| {
+            if let crate::model::task::Metadata::Resolved(d) = m {
+                Some(d.clone())
+            } else {
+                None
+            }
+        });
+
+    // Set state to Todo
+    task.state = crate::model::task::TaskState::Todo;
+    task.metadata.retain(|m| m.key() != "resolved");
+    task.mark_dirty();
+
+    app.undo_stack.push(Operation::StateChange {
+        track_id: track_id.clone(),
+        task_id: task_id.clone(),
+        old_state,
+        new_state: crate::model::task::TaskState::Todo,
+        old_resolved,
+        new_resolved: None,
+    });
+
+    let _ = app.save_track(&track_id);
+
+    // Clamp recent cursor
+    let count = count_recent_tasks(app);
+    if count == 0 {
+        app.recent_cursor = 0;
+    } else {
+        app.recent_cursor = app.recent_cursor.min(count - 1);
+    }
+
+    let track_name = app.track_name(&track_id).to_string();
+    app.status_message = Some(format!("Reopened in {}", track_name));
 }

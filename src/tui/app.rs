@@ -253,6 +253,41 @@ pub struct DetailState {
     pub multiline_selection_anchor: Option<(usize, usize)>,
 }
 
+/// State for the triage flow (inbox item → track task)
+#[derive(Debug, Clone)]
+pub enum TriageStep {
+    /// Step 1: selecting which track to send the item to
+    SelectTrack,
+    /// Step 2: selecting position within the track (t=top, b=bottom, a=after)
+    SelectPosition {
+        track_id: String,
+    },
+}
+
+/// State for the triage flow
+#[derive(Debug, Clone)]
+pub struct TriageState {
+    /// Which inbox item index is being triaged
+    pub inbox_index: usize,
+    /// Current step
+    pub step: TriageStep,
+    /// Screen position for the position-selection popup (set when transitioning from track selection)
+    pub popup_anchor: Option<(u16, u16)>,
+}
+
+/// Confirmation prompt state
+#[derive(Debug, Clone)]
+pub struct ConfirmState {
+    pub message: String,
+    pub action: ConfirmAction,
+}
+
+/// What to do when confirmation is accepted
+#[derive(Debug, Clone)]
+pub enum ConfirmAction {
+    DeleteInboxItem { index: usize },
+}
+
 /// Current interaction mode
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
@@ -262,6 +297,10 @@ pub enum Mode {
     Edit,
     /// Task/track reordering mode
     Move,
+    /// Triage mode (inbox → track)
+    Triage,
+    /// Confirmation prompt (e.g., delete inbox item)
+    Confirm,
 }
 
 /// What kind of edit operation is in progress
@@ -286,6 +325,21 @@ pub enum EditTarget {
         track_id: String,
         original_tags: String,
     },
+    /// Creating a new inbox item (title edit)
+    NewInboxItem {
+        /// Index where the placeholder was inserted
+        index: usize,
+    },
+    /// Editing an existing inbox item's title
+    ExistingInboxTitle {
+        index: usize,
+        original_title: String,
+    },
+    /// Editing an existing inbox item's tags
+    ExistingInboxTags {
+        index: usize,
+        original_tags: String,
+    },
 }
 
 /// State for MOVE mode
@@ -300,6 +354,10 @@ pub enum MoveState {
     /// Moving an active track in the tracks list
     Track {
         track_id: String,
+        original_index: usize,
+    },
+    /// Moving an inbox item
+    InboxItem {
         original_index: usize,
     },
 }
@@ -412,6 +470,10 @@ pub struct App {
     /// Selection anchor for text selection in edit mode (None = no selection)
     /// Selection range is from min(anchor, edit_cursor) to max(anchor, edit_cursor)
     pub edit_selection_anchor: Option<usize>,
+    /// Triage flow state (active during Mode::Triage)
+    pub triage_state: Option<TriageState>,
+    /// Confirmation prompt state (active during Mode::Confirm)
+    pub confirm_state: Option<ConfirmState>,
     /// Task ID to flash-highlight after undo/redo navigation
     pub flash_task_id: Option<String>,
     /// Track ID to flash-highlight in tracks view after undo/redo
@@ -505,6 +567,8 @@ impl App {
             autocomplete_anchor: None,
             edit_history: None,
             edit_selection_anchor: None,
+            triage_state: None,
+            confirm_state: None,
             flash_task_id: None,
             flash_track_id: None,
             flash_started: None,
@@ -853,6 +917,26 @@ impl App {
         }
     }
 
+    /// Show a save error as a status message, if any.
+    pub fn show_save_error(&mut self, result: Result<(), Box<dyn std::error::Error>>) {
+        if let Err(e) = result {
+            self.status_message = Some(format!("Save error: {}", e));
+        }
+    }
+
+    /// Save the inbox to disk with file locking. Records save time.
+    pub fn save_inbox(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let inbox = self
+            .project
+            .inbox
+            .as_ref()
+            .ok_or("no inbox loaded")?;
+        let _lock = FileLock::acquire_default(&self.project.frame_dir)?;
+        project_io::save_inbox(&self.project.frame_dir, inbox)?;
+        self.last_save_at = Some(Instant::now());
+        Ok(())
+    }
+
     /// Save a track to disk with file locking. Records save time and mtime.
     pub fn save_track(&mut self, track_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         let file = self
@@ -899,13 +983,13 @@ impl App {
             Some(EditTarget::NewTask { task_id, .. })
             | Some(EditTarget::ExistingTitle { task_id, .. })
             | Some(EditTarget::ExistingTags { task_id, .. }) => Some(task_id.clone()),
-            None => None,
+            _ => None,
         };
         let editing_track_id = match &self.edit_target {
             Some(EditTarget::NewTask { track_id, .. })
             | Some(EditTarget::ExistingTitle { track_id, .. })
             | Some(EditTarget::ExistingTags { track_id, .. }) => Some(track_id.clone()),
-            None => None,
+            _ => None,
         };
 
         for path in paths {
@@ -1423,8 +1507,8 @@ fn run_event_loop(
                     app.last_save_at = None; // consume the suppression
                 } else if !all_paths.is_empty() {
                     // External change detected
-                    if app.mode == Mode::Edit || app.mode == Mode::Move {
-                        // Queue reload for when we leave EDIT/MOVE mode
+                    if matches!(app.mode, Mode::Edit | Mode::Move | Mode::Triage | Mode::Confirm) {
+                        // Queue reload for when we leave modal mode
                         app.pending_reload_paths.extend(all_paths);
                     } else {
                         handle_external_reload(app, &all_paths);
@@ -1474,6 +1558,8 @@ fn handle_external_reload(app: &mut App, paths: &[std::path::PathBuf]) {
         app.edit_buffer.clear();
         app.edit_cursor = 0;
     }
+    // Auto-clean after external reload
+    run_auto_clean(app);
 }
 
 /// Handle a pending reload using the stored changed paths
@@ -1487,4 +1573,44 @@ fn handle_pending_reload(app: &mut App, paths: &[PathBuf]) {
     }
     // This is after EDIT/MOVE completed, so no conflict possible — just reload
     app.reload_changed_files(&deduped);
+    // Auto-clean after reload
+    run_auto_clean(app);
+}
+
+/// Run auto-clean on the project after external changes are detected.
+/// Assigns missing IDs/dates and saves affected tracks. Shows status message if anything changed.
+fn run_auto_clean(app: &mut App) {
+    use crate::ops::clean::clean_project;
+
+    let result = clean_project(&mut app.project);
+
+    let has_changes = !result.ids_assigned.is_empty()
+        || !result.dates_assigned.is_empty()
+        || !result.duplicates_resolved.is_empty();
+
+    if has_changes {
+        // Collect affected track IDs
+        let mut affected_tracks: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for id_a in &result.ids_assigned {
+            affected_tracks.insert(id_a.track_id.clone());
+        }
+        for date_a in &result.dates_assigned {
+            affected_tracks.insert(date_a.track_id.clone());
+        }
+        for dup in &result.duplicates_resolved {
+            affected_tracks.insert(dup.track_id.clone());
+        }
+
+        // Save affected tracks
+        for track_id in &affected_tracks {
+            let _ = app.save_track(track_id);
+        }
+
+        // Add sync marker to undo stack so user can't undo past the external change
+        app.undo_stack.push(crate::tui::undo::Operation::SyncMarker);
+
+        // Show subtle status message
+        let count = result.ids_assigned.len() + result.dates_assigned.len() + result.duplicates_resolved.len();
+        app.status_message = Some(format!("Auto-cleaned: {} fix{}", count, if count == 1 { "" } else { "es" }));
+    }
 }

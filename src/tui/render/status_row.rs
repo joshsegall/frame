@@ -75,17 +75,79 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
             );
             let hint = "\u{2191}\u{2193} move  Enter \u{2713}  Esc \u{2717}";
             let mut spans = vec![Span::styled(" ", Style::default().bg(bg)), mode_label];
-            let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-            let hint_width = hint.chars().count();
-            if content_width + hint_width < width {
-                let padding = width - content_width - hint_width;
+            build_mode_hint(&mut spans, hint, width, bg, app.theme.text_bright);
+            Line::from(spans)
+        }
+        Mode::Triage => {
+            let is_select_track = matches!(
+                &app.triage_state,
+                Some(ts) if matches!(ts.step, crate::tui::app::TriageStep::SelectTrack)
+            );
+            let step_text = if is_select_track {
+                "Select track:"
+            } else {
+                "Select position:"
+            };
+            let mode_label = Span::styled(
+                "-- TRIAGE --",
+                Style::default()
+                    .fg(app.theme.highlight)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
+            );
+            let mut spans = vec![
+                Span::styled(" ", Style::default().bg(bg)),
+                mode_label,
+                Span::styled("  ", Style::default().bg(bg)),
+            ];
+            // In track selection step, show the edit buffer with cursor
+            if is_select_track {
                 spans.push(Span::styled(
-                    " ".repeat(padding),
-                    Style::default().bg(bg),
+                    step_text,
+                    Style::default().fg(app.theme.text_bright).bg(bg),
+                ));
+                spans.push(Span::styled(" ", Style::default().bg(bg)));
+                spans.push(Span::styled(
+                    app.edit_buffer.clone(),
+                    Style::default().fg(app.theme.text_bright).bg(bg),
                 ));
                 spans.push(Span::styled(
-                    hint,
+                    "\u{258C}",
+                    Style::default().fg(app.theme.highlight).bg(bg),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    step_text,
                     Style::default().fg(app.theme.text_bright).bg(bg),
+                ));
+            }
+            // Pad to full width
+            let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+            if content_width < width {
+                spans.push(Span::styled(
+                    " ".repeat(width - content_width),
+                    Style::default().bg(bg),
+                ));
+            }
+            Line::from(spans)
+        }
+        Mode::Confirm => {
+            let message = app.confirm_state.as_ref().map(|s| s.message.as_str()).unwrap_or("Confirm?");
+            let mut spans = vec![
+                Span::styled(" ", Style::default().bg(bg)),
+                Span::styled(
+                    message.to_string(),
+                    Style::default()
+                        .fg(Color::LightMagenta)
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ];
+            let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+            if content_width < width {
+                spans.push(Span::styled(
+                    " ".repeat(width - content_width),
+                    Style::default().bg(bg),
                 ));
             }
             Line::from(spans)
@@ -180,6 +242,29 @@ fn match_count_message(app: &App, bg: Color) -> Option<(String, Style)> {
         Style::default().fg(app.theme.text_bright).bg(bg)
     };
     Some((text, style))
+}
+
+/// Append right-aligned hint text to a span list.
+fn build_mode_hint<'a>(
+    spans: &mut Vec<Span<'a>>,
+    hint: &'a str,
+    width: usize,
+    bg: Color,
+    text_bright: Color,
+) {
+    let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let hint_width = hint.chars().count();
+    if content_width + hint_width < width {
+        let padding = width - content_width - hint_width;
+        spans.push(Span::styled(
+            " ".repeat(padding),
+            Style::default().bg(bg),
+        ));
+        spans.push(Span::styled(
+            hint,
+            Style::default().fg(text_bright).bg(bg),
+        ));
+    }
 }
 
 /// Render a centered status message spanning the full width.

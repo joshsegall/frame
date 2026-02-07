@@ -9,8 +9,8 @@ use crate::tui::app::App;
 
 use super::push_highlighted_spans;
 
-/// Render the recent completed tasks view (read-only for Phase 4)
-pub fn render_recent_view(frame: &mut Frame, app: &App, area: Rect) {
+/// Render the recent completed tasks view
+pub fn render_recent_view(frame: &mut Frame, app: &mut App, area: Rect) {
     // Collect all done tasks across active tracks, with their resolved dates
     let mut done_tasks: Vec<RecentTask> = Vec::new();
 
@@ -47,13 +47,16 @@ pub fn render_recent_view(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let cursor = app.recent_cursor;
-    let scroll = app.recent_scroll;
+    // Clamp cursor
+    let task_count = done_tasks.len();
+    let cursor = app.recent_cursor.min(task_count.saturating_sub(1));
+    app.recent_cursor = cursor;
     let visible_height = area.height as usize;
 
     let search_re = app.active_search_re();
     let mut lines: Vec<Line> = Vec::new();
     let mut current_date = String::new();
+    let mut cursor_line: Option<usize> = None;
 
     for (flat_idx, task) in done_tasks.iter().enumerate() {
         // Date header (group by date)
@@ -72,6 +75,9 @@ pub fn render_recent_view(frame: &mut Frame, app: &App, area: Rect) {
         }
 
         let is_cursor = flat_idx == cursor;
+        if is_cursor {
+            cursor_line = Some(lines.len());
+        }
         let bg = if is_cursor {
             app.theme.selection_bg
         } else {
@@ -117,9 +123,14 @@ pub fn render_recent_view(frame: &mut Frame, app: &App, area: Rect) {
             .fg(app.theme.search_match_fg)
             .bg(app.theme.search_match_bg)
             .add_modifier(Modifier::BOLD);
+        // Truncate title at available width
+        let prefix_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let track_suffix_width = task.track_name.len() + 2; // "  trackname"
+        let available = (area.width as usize).saturating_sub(prefix_width + track_suffix_width + 1);
+        let display_title = super::truncate_with_ellipsis(&task.title, available);
         push_highlighted_spans(
             &mut spans,
-            &task.title,
+            &display_title,
             title_style,
             hl_style,
             search_re.as_ref(),
@@ -145,6 +156,17 @@ pub fn render_recent_view(frame: &mut Frame, app: &App, area: Rect) {
 
         lines.push(Line::from(spans));
     }
+
+    // Auto-adjust scroll to keep cursor visible
+    let mut scroll = app.recent_scroll;
+    if let Some(cl) = cursor_line {
+        if cl < scroll {
+            scroll = cl;
+        } else if cl >= scroll + visible_height {
+            scroll = cl.saturating_sub(visible_height - 1);
+        }
+    }
+    app.recent_scroll = scroll;
 
     // Apply scroll
     let visible_lines: Vec<Line> = lines
