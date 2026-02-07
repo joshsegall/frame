@@ -59,6 +59,8 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut active_region_line: Option<usize> = None;
+    let mut edit_anchor_col: Option<u16> = None;
+    let mut edit_anchor_line: Option<usize> = None;
 
     // Blank line at top for breathing room
     lines.push(Line::from(""));
@@ -119,6 +121,8 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
         spans.push(Span::styled("tags: ", dim_style));
 
         if is_active && editing && app.mode == Mode::Edit {
+            edit_anchor_col = Some(spans.iter().map(|s| s.content.chars().count() as u16).sum());
+            edit_anchor_line = Some(lines.len());
             render_edit_inline(&mut spans, app, bright_style);
         } else if task.tags.is_empty() {
             spans.push(Span::styled("(none)", dim_style));
@@ -164,6 +168,8 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             let mut spans: Vec<Span> = Vec::new();
             spans.push(region_indicator(is_active, region_indicator_style, bg));
             spans.push(Span::styled("dep: ", dim_style));
+            edit_anchor_col = Some(spans.iter().map(|s| s.content.chars().count() as u16).sum());
+            edit_anchor_line = Some(lines.len());
             render_edit_inline(&mut spans, app, bright_style);
             lines.push(Line::from(spans));
         } else if !deps.is_empty() {
@@ -214,6 +220,8 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             let mut spans: Vec<Span> = Vec::new();
             spans.push(region_indicator(is_active, region_indicator_style, bg));
             spans.push(Span::styled("spec: ", dim_style));
+            edit_anchor_col = Some(spans.iter().map(|s| s.content.chars().count() as u16).sum());
+            edit_anchor_line = Some(lines.len());
             render_edit_inline(&mut spans, app, bright_style);
             lines.push(Line::from(spans));
         } else if let Some(spec_val) = &spec {
@@ -246,6 +254,8 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             let mut spans: Vec<Span> = Vec::new();
             spans.push(region_indicator(is_active, region_indicator_style, bg));
             spans.push(Span::styled("ref: ", dim_style));
+            edit_anchor_col = Some(spans.iter().map(|s| s.content.chars().count() as u16).sum());
+            edit_anchor_line = Some(lines.len());
             render_edit_inline(&mut spans, app, bright_style);
             lines.push(Line::from(spans));
         } else if !refs.is_empty() {
@@ -400,6 +410,16 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
         .style(Style::default().bg(bg))
         .scroll((scroll as u16, 0));
     frame.render_widget(paragraph, area);
+
+    // Set autocomplete anchor for detail view edits
+    if let (Some(prefix_w), Some(line_idx)) = (edit_anchor_col, edit_anchor_line) {
+        let word_offset = app.autocomplete.as_ref()
+            .map(|ac| ac.word_start_in_buffer(&app.edit_buffer) as u16)
+            .unwrap_or(0);
+        let screen_y = area.y + line_idx.saturating_sub(scroll) as u16;
+        let screen_x = area.x + prefix_w + word_offset;
+        app.autocomplete_anchor = Some((screen_x, screen_y));
+    }
 }
 
 /// Render the edit buffer inline with a cursor that highlights the current character

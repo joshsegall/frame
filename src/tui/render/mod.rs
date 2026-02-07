@@ -39,6 +39,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // Render tab bar
     tab_bar::render_tab_bar(frame, app, chunks[0]);
 
+    // Clear autocomplete anchor before rendering content (will be set by track/detail view if editing)
+    app.autocomplete_anchor = None;
+
     // Render content area (clone view to avoid borrow conflict)
     let view = app.view.clone();
     match &view {

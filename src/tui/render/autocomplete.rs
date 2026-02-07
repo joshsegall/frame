@@ -9,11 +9,24 @@ use crate::tui::app::App;
 /// Maximum number of visible entries in the dropdown
 const MAX_VISIBLE: usize = 8;
 
-/// Render the autocomplete dropdown floating below the edit cursor
-pub fn render_autocomplete(frame: &mut Frame, app: &App, edit_area: Rect) {
+/// Render the autocomplete dropdown anchored to the edit cursor position.
+///
+/// Positioning rules:
+/// - Left edge aligned with the start of the edit text (autocomplete_anchor.x),
+///   shifted left if the popup would overflow the right edge of the screen.
+/// - If there is enough room below the cursor line, the popup appears just below it
+///   with the top edge fixed; the bottom grows/shrinks with the entry count.
+/// - If there is NOT enough room below, the popup appears above the cursor line
+///   with the bottom edge fixed just above the cursor; the top grows/shrinks.
+pub fn render_autocomplete(frame: &mut Frame, app: &App, content_area: Rect) {
     let ac = match &app.autocomplete {
         Some(ac) if ac.visible && !ac.filtered.is_empty() => ac,
         _ => return,
+    };
+
+    let (anchor_x, anchor_y) = match app.autocomplete_anchor {
+        Some(pos) => pos,
+        None => return,
     };
 
     let bg = app.theme.background;
@@ -23,31 +36,39 @@ pub fn render_autocomplete(frame: &mut Frame, app: &App, edit_area: Rect) {
 
     let count = ac.filtered.len().min(MAX_VISIBLE);
 
-    // Determine the widest entry (+ padding)
-    let max_width = ac
+    // Width = widest entry across ALL filtered entries + chrome (borders + prefix + padding)
+    // Chrome: 1 (left border) + 3 (prefix " ▸ ") + 1 (right padding) + 1 (right border) = 6
+    let max_entry_width = ac
         .filtered
         .iter()
-        .take(MAX_VISIBLE)
         .map(|s| s.len())
         .max()
-        .unwrap_or(10)
-        + 4; // padding
+        .unwrap_or(8);
+    let max_width = max_entry_width + 6;
 
-    let popup_w = (max_width as u16).min(edit_area.width.saturating_sub(2)).max(12);
+    let term_area = frame.area();
+    let max_popup_w: u16 = 40;
+    let popup_w = (max_width as u16)
+        .max(12)
+        .min(max_popup_w)
+        .min(content_area.width.saturating_sub(2));
     let popup_h = (count as u16) + 2; // +2 for borders
 
-    // Position: below the edit area, offset from left
-    // If not enough room below, show above
-    let term_area = frame.area();
-    let y = if edit_area.y + edit_area.height + popup_h <= term_area.height {
-        edit_area.y + edit_area.height
+    // Vertical: prefer below the cursor line, fall back to above
+    let cursor_bottom = anchor_y + 1; // row just below the edit line
+    let y = if cursor_bottom + popup_h <= term_area.height {
+        // Enough room below: top of popup is just below cursor line
+        cursor_bottom
     } else {
-        edit_area.y.saturating_sub(popup_h)
+        // Not enough room below: bottom of popup is just above cursor line
+        anchor_y.saturating_sub(popup_h)
     };
 
-    // Horizontal: align with cursor position in edit buffer
-    let cursor_offset = app.edit_cursor.min(edit_area.width as usize);
-    let x = (edit_area.x + cursor_offset as u16).min(term_area.width.saturating_sub(popup_w));
+    // Horizontal: align entry text with the cursor insertion point.
+    // The entry text is inset by 1 (left border) + 3 (prefix " ▸ ") = 4 chars,
+    // so shift the popup left by that amount. Clamp to screen bounds.
+    let text_inset: u16 = 4;
+    let x = anchor_x.saturating_sub(text_inset).min(term_area.width.saturating_sub(popup_w));
 
     let popup_area = Rect::new(x, y, popup_w, popup_h);
 

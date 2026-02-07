@@ -68,6 +68,7 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
     let search_re = app.active_search_re();
     let end = flat_items.len().min(scroll + visible_height);
     let mut lines: Vec<Line> = Vec::with_capacity(visible_height);
+    let mut edit_anchor: Option<(u16, u16)> = None;
 
     for (item, row) in flat_items[scroll..end].iter().zip(scroll..end) {
         let is_cursor = row == cursor;
@@ -83,7 +84,7 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 ancestor_last,
             } => {
                 if let Some(task) = resolve_task(track, *section, path) {
-                    let line = render_task_line(
+                    let (line, col) = render_task_line(
                         app,
                         task,
                         &TaskLineInfo {
@@ -97,6 +98,14 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
                         area.width as usize,
                         search_re.as_ref(),
                     );
+                    if let Some(prefix_w) = col {
+                        let word_offset = app.autocomplete.as_ref()
+                            .map(|ac| ac.word_start_in_buffer(&app.edit_buffer) as u16)
+                            .unwrap_or(0);
+                        let screen_y = area.y + (row - scroll) as u16;
+                        let screen_x = area.x + prefix_w + word_offset;
+                        edit_anchor = Some((screen_x, screen_y));
+                    }
                     lines.push(line);
                 }
             }
@@ -108,6 +117,11 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let paragraph = Paragraph::new(lines).style(Style::default().bg(app.theme.background));
     frame.render_widget(paragraph, area);
+
+    // Set autocomplete anchor now that immutable borrows are released
+    if let Some(anchor) = edit_anchor {
+        app.autocomplete_anchor = Some(anchor);
+    }
 }
 
 /// Resolve a task from a path through the track's sections
@@ -137,7 +151,9 @@ struct TaskLineInfo<'a> {
     ancestor_last: &'a [bool],
 }
 
-/// Render a single task line with all decorations
+/// Render a single task line with all decorations.
+/// Returns the line and optionally the column offset where an edit buffer starts
+/// (used for autocomplete anchor positioning).
 fn render_task_line<'a>(
     app: &'a App,
     task: &Task,
@@ -145,8 +161,9 @@ fn render_task_line<'a>(
     is_cursor: bool,
     width: usize,
     search_re: Option<&Regex>,
-) -> Line<'a> {
+) -> (Line<'a>, Option<u16>) {
     let mut spans: Vec<Span> = Vec::new();
+    let mut edit_col: Option<u16> = None;
     let bg = app.theme.background;
     let dim_style = Style::default().fg(app.theme.dim).bg(bg);
     let state_color = app.theme.state_color(task.state);
@@ -265,6 +282,8 @@ fn render_task_line<'a>(
     };
 
     if is_editing && !is_editing_tags {
+        // Record prefix width for autocomplete anchor
+        edit_col = Some(spans.iter().map(|s| s.content.chars().count() as u16).sum());
         // Render edit buffer with cursor/selection highlighting
         let buf = &app.edit_buffer;
         let cursor_pos = app.edit_cursor.min(buf.len());
@@ -337,6 +356,8 @@ fn render_task_line<'a>(
     // Tags (inline edit buffer when editing tags, otherwise normal rendering)
     if is_editing_tags {
         spans.push(Span::styled("  ", Style::default().bg(bg)));
+        // Record prefix width for autocomplete anchor (after the "  " spacer)
+        edit_col = Some(spans.iter().map(|s| s.content.chars().count() as u16).sum());
         let buf = &app.edit_buffer;
         let cursor_pos = app.edit_cursor.min(buf.len());
         let cursor_style = Style::default()
@@ -455,7 +476,7 @@ fn render_task_line<'a>(
         }
     }
 
-    Line::from(spans)
+    (Line::from(spans), edit_col)
 }
 
 /// Get the abbreviated ID for a subtask (e.g., ".1", ".2.1")

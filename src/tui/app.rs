@@ -155,6 +155,34 @@ impl AutocompleteState {
         }
     }
 
+    /// Compute the byte offset within the edit buffer where the current completion
+    /// word starts. This is the position where accepted text will be inserted,
+    /// and is used to align the autocomplete popup horizontally.
+    pub fn word_start_in_buffer(&self, buffer: &str) -> usize {
+        match self.kind {
+            AutocompleteKind::Tag => {
+                // Last word starts after the last space (the word may begin with #)
+                buffer.rfind(' ').map(|i| i + 1).unwrap_or(0)
+            }
+            AutocompleteKind::TaskId => {
+                // Last entry starts after the last comma or whitespace
+                buffer
+                    .rfind(|c: char| c == ',' || c.is_whitespace())
+                    .map(|i| {
+                        // Skip any trailing whitespace after the delimiter
+                        let rest = &buffer[i + 1..];
+                        let trimmed = rest.len() - rest.trim_start().len();
+                        i + 1 + trimmed
+                    })
+                    .unwrap_or(0)
+            }
+            AutocompleteKind::FilePath => {
+                // Last entry starts after the last space
+                buffer.rfind(' ').map(|i| i + 1).unwrap_or(0)
+            }
+        }
+    }
+
     /// Filter candidates based on the current input fragment
     pub fn filter(&mut self, input: &str) {
         let query = input.to_lowercase();
@@ -366,6 +394,8 @@ pub struct App {
     pub detail_state: Option<DetailState>,
     /// Autocomplete state (active during EDIT mode for certain fields)
     pub autocomplete: Option<AutocompleteState>,
+    /// Screen position (x, y) where the edit text area starts, used to anchor autocomplete dropdown
+    pub autocomplete_anchor: Option<(u16, u16)>,
     /// Inline edit history for undo/redo within an editing session
     pub edit_history: Option<EditHistory>,
     /// Selection anchor for text selection in edit mode (None = no selection)
@@ -454,6 +484,7 @@ impl App {
             track_mtimes,
             detail_state: None,
             autocomplete: None,
+            autocomplete_anchor: None,
             edit_history: None,
             edit_selection_anchor: None,
         }
