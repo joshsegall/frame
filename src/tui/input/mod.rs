@@ -26,10 +26,32 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    // Clear any transient status message on keypress
+    app.status_message = None;
+
+    // QQ quit: second Q confirms, any other key cancels
+    if app.quit_pending {
+        if matches!(
+            (key.modifiers, key.code),
+            (KeyModifiers::SHIFT, KeyCode::Char('Q'))
+        ) {
+            app.should_quit = true;
+            return;
+        } else {
+            app.quit_pending = false;
+        }
+    }
+
     match (key.modifiers, key.code) {
         // Quit: Ctrl+Q
         (m, KeyCode::Char('q')) if m.contains(KeyModifiers::CONTROL) => {
             app.should_quit = true;
+        }
+
+        // Quit: Q (first press shows confirmation)
+        (KeyModifiers::SHIFT, KeyCode::Char('Q')) => {
+            app.quit_pending = true;
+            app.status_message = Some("press Q again to quit".to_string());
         }
 
         // Esc: clear search first, then normal behavior

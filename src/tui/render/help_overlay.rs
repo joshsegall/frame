@@ -139,7 +139,8 @@ pub fn render_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
     // Global keys
     lines.push(Line::from(Span::styled(" Global", header_style)));
     add_binding(&mut lines, " ?", "Toggle this help", key_style, desc_style);
-    add_binding(&mut lines, " Ctrl+Q", "Quit", key_style, desc_style);
+    add_binding(&mut lines, " QQ", "Quit", key_style, desc_style);
+    add_binding(&mut lines, " Ctrl+Q", "Quit (immediate)", key_style, desc_style);
 
     let block = Block::default()
         .borders(Borders::ALL)

@@ -12,6 +12,9 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
     let width = area.width as usize;
 
     let line = match app.mode {
+        Mode::Navigate if app.status_message.is_some() => {
+            render_centered_message(app.status_message.as_deref().unwrap(), width, bg)
+        }
         Mode::Navigate => {
             if let Some(ref pattern) = app.last_search {
                 let mut spans = vec![Span::styled(
@@ -127,4 +130,22 @@ fn match_count_message(app: &App, bg: Color) -> Option<(String, Style)> {
         Style::default().fg(app.theme.text_bright).bg(bg)
     };
     Some((text, style))
+}
+
+/// Render a centered status message spanning the full width.
+fn render_centered_message<'a>(msg: &str, width: usize, bg: Color) -> Line<'a> {
+    let msg_len = msg.chars().count();
+    let left_pad = width.saturating_sub(msg_len) / 2;
+    let right_pad = width.saturating_sub(msg_len + left_pad);
+    Line::from(vec![
+        Span::styled(" ".repeat(left_pad), Style::default().bg(bg)),
+        Span::styled(
+            msg.to_string(),
+            Style::default()
+                .fg(Color::LightMagenta)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" ".repeat(right_pad), Style::default().bg(bg)),
+    ])
 }

@@ -110,6 +110,10 @@ pub struct App {
     pub search_match_count: Option<usize>,
     /// True when user hit Enter with 0 matches (for red background highlight)
     pub search_zero_confirmed: bool,
+    /// True after first Q press; second Q quits
+    pub quit_pending: bool,
+    /// Transient centered status message (cleared on next keypress)
+    pub status_message: Option<String>,
 }
 
 impl App {
@@ -168,6 +172,8 @@ impl App {
             search_wrap_message: None,
             search_match_count: None,
             search_zero_confirmed: false,
+            quit_pending: false,
+            status_message: None,
         }
     }
 
