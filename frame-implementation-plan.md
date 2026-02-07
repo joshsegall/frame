@@ -1,14 +1,15 @@
 # Frame — Implementation Plan
 
-## Resolved Design Gaps
-
-Before the task breakdown, here are the resolutions for every open design
-question identified in the spec review. These decisions are binding for
-implementation.
+This document covers the implementation architecture, project structure,
+and phased task breakdown for Frame. The design specification
+(`frame-design-v3_3.md`) is the authoritative reference for all behavior,
+format, and interaction details.
 
 ---
 
-### 1. Language & Stack
+## Implementation Architecture
+
+### Language & Stack
 
 **Rust.** Single binary, crossterm + ratatui for TUI, clap for CLI, toml
 crate for config, regex crate for search.
@@ -22,7 +23,7 @@ Key dependencies:
 - `notify` — file watching (for detecting external changes)
 - `chrono` — dates
 
-### 2. Markdown Round-Tripping Strategy
+### Markdown Round-Tripping Strategy
 
 This is the hardest technical problem in the project. The approach:
 
@@ -69,7 +70,7 @@ preserved as-is when the note hasn't been edited.
 **Test strategy**: A corpus of test files with various edge cases. Parse →
 serialize → diff against original. Any diff on unmodified nodes is a bug.
 
-### 3. Concurrency & File Coordination
+### Concurrency & File Coordination
 
 **Architecture**: The TUI and CLI share no runtime — both are just
 processes that read/write the same markdown files. Coordination is at the
@@ -106,7 +107,7 @@ filesystem level.
      EDIT mode and paste their work back in on top of the externally
      modified version. No user input is ever silently discarded.
 
-### 4. Undo Model
+### Undo Model
 
 **Two-level undo:**
 
@@ -137,193 +138,6 @@ an agent's changes. Sync markers also clear the redo stack.
 
 **Session-only**: The undo stack is not persisted. On TUI restart, the
 stack is empty. Git serves as cross-session undo.
-
-### 5. Inbox Triage
-
-Resolved in v3.2 spec. The triage flow is:
-1. `Enter` on inbox item
-2. Track selection autocomplete
-3. Position selection (t/b/a)
-4. Item promoted to task with auto-assigned ID
-
-One addition for CLI: `fr triage <inbox-index> --track <track> [--top|--bottom|--after <id>]`
-
-### 6. CLI Title Editing
-
-Add: `fr title <id> "new title"`
-
-This sets the title text, preserving ID, state, and tags.
-
-### 7. ID Numbering Scheme
-
-**Auto-assignment rules:**
-
-- **Top-level tasks**: `fr clean` (or any write operation that creates a
-  task) scans the track for the highest existing number with that track's
-  prefix, then assigns `max + 1`. E.g., if the highest is `EFF-018`, the
-  next is `EFF-019`.
-
-- **Subtask IDs**: Always `parent_number.N` where N is the sequential
-  child index (1-based). E.g., children of `EFF-014` are `EFF-014.1`,
-  `EFF-014.2`, `EFF-014.3`. Children of `EFF-014.2` are `EFF-014.2.1`,
-  `EFF-014.2.2`.
-
-- **Renumbering on move**: When a subtask is promoted to a top-level task
-  (e.g., moved out of its parent), it gets a new top-level ID. When a
-  top-level task becomes a subtask, it gets a new dotted ID. Children are
-  renumbered recursively.
-
-- **Cross-track move**: Task gets a new ID with the target track's prefix.
-  The old ID is not reused. Deps pointing to the old ID are updated
-  across all tracks.
-
-- **Numbering gaps are fine**: If EFF-005 is deleted/archived and EFF-006
-  exists, the next new task is still `max + 1`, not gap-filling.
-
-### 8. State Transition Rules
-
-```
-        ┌──────────────────────────────────────┐
-        │                                      │
-        ▼                                      │
-  ┌──────────┐  Space   ┌──────────┐  Space   ┌──────────┐
-  │   todo   │ ──────── │  active  │ ──────── │   done   │
-  └──────────┘          └──────────┘          └──────────┘
-    ▲  ▲                  │      │              │
-    │  │     b            │  b   │  ~           │ Space
-    │  │  ┌───────────────┘      │              │ (wraps)
-    │  │  ▼                      ▼              │
-    │  │ ┌──────────┐     ┌──────────┐         │
-    │  └─│ blocked  │     │  parked  │         │
-    │    └──────────┘     └──────────┘         │
-    │                                          │
-    └──────────────────────────────────────────┘
-```
-
-- **Space**: Cycles `todo → active → done → todo`
-- **b**: Sets blocked from any state. If already blocked, sets todo.
-- **~**: Sets parked from any state. If already parked, sets todo.
-- **x**: Sets done from any state (direct shortcut).
-
-### 9. Metadata Canonicalization
-
-**Comma-separated on a single line.** The parser accepts both comma-separated
-and multiple lines, but the serializer always emits:
-
-```markdown
-  - dep: EFF-003, INFRA-007
-  - ref: doc/design/effects.md, doc/spec/effects.md
-```
-
-Multiple `dep:` or `ref:` lines on input are merged into one comma-separated
-line on the next write.
-
-### 10. `fr ready` Semantics
-
-`fr ready` returns tasks that are **actionable now**:
-
-- State is `todo` or `active`
-- AND (has no deps, OR all deps are in state `done`)
-- Scoped to active tracks by default
-- `--track` scopes to a specific track
-- `--cc` filters to tasks tagged `cc` on the cc-focus track
-- `--tag` adds an additional tag filter
-
-Subtasks are included in the output (nested under their parent) but a
-parent is not excluded just because some subtasks are incomplete — the
-parent's own deps determine its readiness. A blocked subtask doesn't
-block the parent unless the parent explicitly has a dep on that subtask's
-ID.
-
-### 11. Task Deletion
-
-No hard delete. Use conventional tags:
-
-- `#duplicate` — mark as duplicate, then `x` to mark done
-- `#wontdo` — decided not to do this, then `x` to mark done
-
-These get archived with the done tasks. The done+archived flow is the
-only removal mechanism. This preserves audit trail via git.
-
-### 12. `found:` Metadata → Note Convention
-
-`found:` is removed as a first-class metadata key. Instead, use the note
-field:
-
-```markdown
-  - note:
-    Found while working on EFF-002.
-    The desugaring needs to handle three cases...
-```
-
-The `--found-from <id>` CLI flag still exists for convenience — it adds a
-note line like "Found while working on <id>." automatically.
-
----
-
-## Additional Resolutions
-
-### ACTIVE.md
-
-Generated by `fr clean`. Contains all non-done, non-parked tasks across
-all active tracks, grouped by track, in priority order. Read-only
-convenience file for agent orientation. Format:
-
-```markdown
-# Active Tasks
-
-## Effect System (3 active, 1 blocked, 3 todo)
-
-- [>] EFF-014 Implement effect inference for closures #ready
-  - dep: EFF-003 ✓
-- [ ] EFF-015 Effect handler optimization pass #ready
-  - dep: EFF-014
-...
-
-## Compiler Infrastructure (2 active, 3 todo)
-...
-```
-
-### Archive Format
-
-Flat list of done tasks, reverse-chronological, with resolved dates.
-No section headers. Just the tasks:
-
-```markdown
-- [x] `EFF-003` Implement effect handler desugaring #ready
-  - resolved: 2025-05-14
-- [x] `EFF-002` Parse effect declarations #ready
-  - resolved: 2025-05-12
-```
-
-### Nesting Limit
-
-Maximum 3 levels deep: `EFF-014` → `EFF-014.2` → `EFF-014.2.1`.
-The parser rejects deeper nesting with a warning. The TUI never renders
-more than 3 levels.
-
-### Platform Key Bindings
-
-The spec uses `Cmd+` for macOS. On Linux/Windows, these map to `Ctrl+`:
-
-| macOS       | Linux/Windows |
-|-------------|---------------|
-| `Cmd+C`     | `Ctrl+C`      |
-| `Cmd+V`     | `Ctrl+V`      |
-| `Cmd+X`     | `Ctrl+X`      |
-| `Cmd+Z`     | `Ctrl+Z`      |
-| `Cmd+↑`     | `Ctrl+↑` (or `Home` where applicable) |
-| `Cmd+↓`     | `Ctrl+↓` (or `End` where applicable)  |
-| `Cmd+←`     | `Home`        |
-| `Cmd+→`     | `End`         |
-| `Cmd+Q`     | `Ctrl+Q`      |
-| `Opt+←`     | `Ctrl+←`      |
-| `Opt+→`     | `Ctrl+→`      |
-| `Opt+Bksp`  | `Ctrl+Bksp`   |
-
-Detection is automatic via `cfg!(target_os)` at compile time, but the
-crossterm backend reports modifier keys abstractly, so the mapping is
-mostly handled by crossterm's `KeyModifiers`.
 
 ---
 
