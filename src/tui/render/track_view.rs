@@ -6,7 +6,7 @@ use ratatui::widgets::Paragraph;
 use regex::Regex;
 
 use crate::model::{Metadata, SectionKind, Task, TaskState};
-use crate::tui::app::{App, FlatItem};
+use crate::tui::app::{App, EditTarget, FlatItem, Mode};
 
 use super::push_highlighted_spans;
 
@@ -238,7 +238,16 @@ fn render_task_line<'a>(
         spans.push(Span::styled(id_text, id_style));
     }
 
-    // Title (with search highlighting)
+    // Check if this task is being edited inline
+    let is_editing = is_cursor
+        && app.mode == Mode::Edit
+        && app.edit_target.as_ref().is_some_and(|et| match et {
+            EditTarget::NewTask { task_id, .. } | EditTarget::ExistingTitle { task_id, .. } => {
+                task.id.as_deref() == Some(task_id)
+            }
+        });
+
+    // Title (with search highlighting, or edit buffer if editing)
     let title_style = if is_cursor {
         Style::default()
             .fg(app.theme.text_bright)
@@ -249,17 +258,35 @@ fn render_task_line<'a>(
     } else {
         Style::default().fg(app.theme.text_bright).bg(bg)
     };
-    let highlight_style = Style::default()
-        .fg(app.theme.search_match_fg)
-        .bg(app.theme.search_match_bg)
-        .add_modifier(Modifier::BOLD);
-    push_highlighted_spans(
-        &mut spans,
-        &task.title,
-        title_style,
-        highlight_style,
-        search_re,
-    );
+
+    if is_editing {
+        // Render edit buffer with cursor
+        let buf = &app.edit_buffer;
+        let cursor_pos = app.edit_cursor;
+        let before = &buf[..cursor_pos.min(buf.len())];
+        let after = &buf[cursor_pos.min(buf.len())..];
+        spans.push(Span::styled(before.to_string(), title_style));
+        // Block cursor
+        spans.push(Span::styled(
+            "\u{258C}",
+            Style::default().fg(app.theme.highlight).bg(bg),
+        ));
+        if !after.is_empty() {
+            spans.push(Span::styled(after.to_string(), title_style));
+        }
+    } else {
+        let highlight_style = Style::default()
+            .fg(app.theme.search_match_fg)
+            .bg(app.theme.search_match_bg)
+            .add_modifier(Modifier::BOLD);
+        push_highlighted_spans(
+            &mut spans,
+            &task.title,
+            title_style,
+            highlight_style,
+            search_re,
+        );
+    }
 
     // Tags
     if !task.tags.is_empty() {

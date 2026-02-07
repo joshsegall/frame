@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::execute;
@@ -12,12 +12,16 @@ use ratatui::backend::CrosstermBackend;
 
 use regex::Regex;
 
-use crate::io::project_io::{discover_project, load_project};
+use crate::io::lock::FileLock;
+use crate::io::project_io::{self, discover_project, load_project};
+use crate::io::watcher::{FileEvent, FrameWatcher};
 use crate::model::{Project, SectionKind, Task, Track};
+use crate::parse::{parse_inbox, parse_track};
 
 use super::input;
 use super::render;
 use super::theme::Theme;
+use super::undo::UndoStack;
 
 /// Which view is currently displayed
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,10 +37,48 @@ pub enum View {
 }
 
 /// Current interaction mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
     Navigate,
     Search,
+    /// Inline title editing (for new tasks or editing existing)
+    Edit,
+    /// Task/track reordering mode
+    Move,
+}
+
+/// What kind of edit operation is in progress
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EditTarget {
+    /// Creating a new task (title edit). Stores the assigned task ID and track_id.
+    /// `parent_id` is Some for subtasks.
+    NewTask {
+        task_id: String,
+        track_id: String,
+        parent_id: Option<String>,
+    },
+    /// Editing an existing task's title
+    ExistingTitle {
+        task_id: String,
+        track_id: String,
+        original_title: String,
+    },
+}
+
+/// State for MOVE mode
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MoveState {
+    /// Moving a task within a track's backlog
+    Task {
+        track_id: String,
+        task_id: String,
+        original_index: usize,
+    },
+    /// Moving an active track in the tracks list
+    Track {
+        track_id: String,
+        original_index: usize,
+    },
 }
 
 /// Per-track UI state (cursor, scroll, expand/collapse)
@@ -114,6 +156,22 @@ pub struct App {
     pub quit_pending: bool,
     /// Transient centered status message (cleared on next keypress)
     pub status_message: Option<String>,
+    /// Edit mode: text buffer for inline editing
+    pub edit_buffer: String,
+    /// Edit mode: cursor position within the buffer
+    pub edit_cursor: usize,
+    /// Edit mode: what is being edited
+    pub edit_target: Option<EditTarget>,
+    /// Move mode state
+    pub move_state: Option<MoveState>,
+    /// Undo/redo stack (session-only, not persisted)
+    pub undo_stack: UndoStack,
+    /// Pending external file reload (queued while in EDIT/MOVE mode)
+    pub pending_reload: bool,
+    /// Conflict text shown when external change conflicts with in-progress edit
+    pub conflict_text: Option<String>,
+    /// Timestamp of last save we performed (used to ignore our own write notifications)
+    pub last_save_at: Option<Instant>,
 }
 
 impl App {
@@ -174,6 +232,14 @@ impl App {
             search_zero_confirmed: false,
             quit_pending: false,
             status_message: None,
+            edit_buffer: String::new(),
+            edit_cursor: 0,
+            edit_target: None,
+            move_state: None,
+            undo_stack: UndoStack::new(),
+            pending_reload: false,
+            conflict_text: None,
+            last_save_at: None,
         }
     }
 
@@ -207,8 +273,8 @@ impl App {
     /// Get the active search regex for highlighting.
     /// In Search mode: compiles from current input. In Navigate: compiles from last_search.
     pub fn active_search_re(&self) -> Option<Regex> {
-        let pattern = match self.mode {
-            Mode::Search if !self.search_input.is_empty() => &self.search_input,
+        let pattern = match &self.mode {
+            Mode::Search if !self.search_input.is_empty() => self.search_input.as_str(),
             Mode::Navigate => self.last_search.as_deref()?,
             _ => return None,
         };
@@ -240,6 +306,160 @@ impl App {
         self.track_states.get_mut(track_id).unwrap()
     }
 
+    /// Get the ID prefix for a track (e.g., "EFF" for "effects")
+    pub fn track_prefix(&self, track_id: &str) -> Option<&str> {
+        self.project
+            .config
+            .ids
+            .prefixes
+            .get(track_id)
+            .map(|s| s.as_str())
+    }
+
+    /// Get the file path for a track (relative to frame_dir)
+    fn track_file(&self, track_id: &str) -> Option<&str> {
+        self.project
+            .config
+            .tracks
+            .iter()
+            .find(|tc| tc.id == track_id)
+            .map(|tc| tc.file.as_str())
+    }
+
+    /// Find a mutable track reference by ID
+    pub fn find_track_mut(&mut self, track_id: &str) -> Option<&mut Track> {
+        self.project
+            .tracks
+            .iter_mut()
+            .find(|(id, _)| id == track_id)
+            .map(|(_, track)| track)
+    }
+
+    /// Save a track to disk with file locking. Records save time to suppress self-notification.
+    pub fn save_track(&mut self, track_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let file = self
+            .track_file(track_id)
+            .ok_or("track not found")?
+            .to_string();
+        let track = Self::find_track_in_project(&self.project, track_id)
+            .ok_or("track not found")?;
+        let _lock = FileLock::acquire_default(&self.project.frame_dir)?;
+        project_io::save_track(&self.project.frame_dir, &file, track)?;
+        self.last_save_at = Some(Instant::now());
+        Ok(())
+    }
+
+    /// Resolve the task ID from the current cursor position in a track view.
+    /// Returns (track_id, task_id, section) if the cursor is on a task.
+    pub fn cursor_task_id(&self) -> Option<(String, String, SectionKind)> {
+        let track_id = self.current_track_id()?.to_string();
+        let flat_items = self.build_flat_items(&track_id);
+        let cursor = self.track_states.get(&track_id).map_or(0, |s| s.cursor);
+        let item = flat_items.get(cursor)?;
+
+        if let FlatItem::Task { section, path, .. } = item {
+            let track = Self::find_track_in_project(&self.project, &track_id)?;
+            let task = resolve_task_from_flat(track, *section, path)?;
+            let task_id = task.id.clone()?;
+            Some((track_id, task_id, *section))
+        } else {
+            None
+        }
+    }
+
+    /// Reload changed files from disk. Returns the edit target's task_id if it was externally modified.
+    pub fn reload_changed_files(&mut self, paths: &[std::path::PathBuf]) -> Option<String> {
+        let mut edited_task_conflict = None;
+
+        // Determine which task is being edited (if any)
+        let editing_task_id = match &self.edit_target {
+            Some(EditTarget::NewTask { task_id, .. }) => Some(task_id.clone()),
+            Some(EditTarget::ExistingTitle { task_id, .. }) => Some(task_id.clone()),
+            None => None,
+        };
+        let editing_track_id = match &self.edit_target {
+            Some(EditTarget::NewTask { track_id, .. }) => Some(track_id.clone()),
+            Some(EditTarget::ExistingTitle { track_id, .. }) => Some(track_id.clone()),
+            None => None,
+        };
+
+        for path in paths {
+            let file_name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(name) => name.to_string(),
+                None => continue,
+            };
+
+            if file_name == "inbox.md" {
+                // Reload inbox
+                if let Ok(text) = std::fs::read_to_string(path) {
+                    self.project.inbox = Some(parse_inbox(&text));
+                }
+                continue;
+            }
+
+            if file_name == "project.toml" {
+                // Config changes — skip for now (would need full re-init)
+                continue;
+            }
+
+            // It's a track file — find which track it belongs to
+            if let Some((track_id, _track_file)) = self
+                .project
+                .config
+                .tracks
+                .iter()
+                .find(|tc| tc.file == file_name || tc.file.ends_with(&format!("/{}", file_name)))
+                .map(|tc| (tc.id.clone(), tc.file.clone()))
+            {
+                if let Ok(text) = std::fs::read_to_string(path) {
+                    let new_track = parse_track(&text);
+
+                    // Check if the edited task was modified externally
+                    if editing_track_id.as_deref() == Some(&track_id) {
+                        if let Some(ref edit_task_id) = editing_task_id {
+                            // Check if the task exists in the new track and has different content
+                            if let Some(old_track) =
+                                Self::find_track_in_project(&self.project, &track_id)
+                            {
+                                let old_task =
+                                    crate::ops::task_ops::find_task_in_track(old_track, edit_task_id);
+                                let new_task =
+                                    crate::ops::task_ops::find_task_in_track(&new_track, edit_task_id);
+
+                                match (old_task, new_task) {
+                                    (Some(old), Some(new)) if old.title != new.title => {
+                                        // Task was modified externally — conflict
+                                        edited_task_conflict = Some(edit_task_id.clone());
+                                    }
+                                    (Some(_), None) => {
+                                        // Task was removed externally — conflict
+                                        edited_task_conflict = Some(edit_task_id.clone());
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+
+                    // Replace the track data
+                    if let Some(entry) = self
+                        .project
+                        .tracks
+                        .iter_mut()
+                        .find(|(id, _)| id == &track_id)
+                    {
+                        entry.1 = new_track;
+                    }
+                }
+            }
+        }
+
+        // Push sync marker to undo stack
+        self.undo_stack.push_sync_marker();
+
+        edited_task_conflict
+    }
+
     /// Build the flat list of visible items for a track view
     pub fn build_flat_items(&self, track_id: &str) -> Vec<FlatItem> {
         let track = match Self::find_track_in_project(&self.project, track_id) {
@@ -266,6 +486,23 @@ impl App {
 
         items
     }
+}
+
+/// Resolve a task reference from a track using section + index path
+pub fn resolve_task_from_flat<'a>(
+    track: &'a Track,
+    section: SectionKind,
+    path: &[usize],
+) -> Option<&'a Task> {
+    let tasks = track.section_tasks(section);
+    if path.is_empty() {
+        return None;
+    }
+    let mut current = tasks.get(path[0])?;
+    for &idx in &path[1..] {
+        current = current.subtasks.get(idx)?;
+    }
+    Some(current)
 }
 
 /// Generate a unique key for a task's expand/collapse state
@@ -437,6 +674,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Restore saved UI state
     restore_ui_state(&mut app);
 
+    // Start file watcher (non-fatal if it fails)
+    let watcher = FrameWatcher::start(&app.project.frame_dir).ok();
+
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -454,7 +694,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     }));
 
     // Run event loop
-    let result = run_event_loop(&mut terminal, &mut app);
+    let result = run_event_loop(&mut terminal, &mut app, watcher.as_ref());
 
     // Save UI state before exit
     save_ui_state(&app);
@@ -470,16 +710,56 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
+    watcher: Option<&FrameWatcher>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut save_counter = 0u32;
     loop {
         terminal.draw(|frame| render::render(frame, app))?;
+
+        // Poll for file watcher events
+        if let Some(w) = watcher {
+            let events = w.poll();
+            if !events.is_empty() {
+                // Collect all changed paths, dedup
+                let mut all_paths = Vec::new();
+                for evt in events {
+                    match evt {
+                        FileEvent::Changed(paths) => all_paths.extend(paths),
+                    }
+                }
+                all_paths.sort();
+                all_paths.dedup();
+
+                // If we saved recently (within 1s), assume this is our own write notification
+                let is_self_write = app
+                    .last_save_at
+                    .is_some_and(|t| t.elapsed() < Duration::from_secs(1));
+                if is_self_write {
+                    app.last_save_at = None; // consume the suppression
+                } else if !all_paths.is_empty() {
+                    // External change detected
+                    if app.mode == Mode::Edit || app.mode == Mode::Move {
+                        // Queue reload for when we leave EDIT/MOVE mode
+                        app.pending_reload = true;
+                    } else {
+                        handle_external_reload(app, &all_paths);
+                    }
+                }
+            }
+        }
 
         if event::poll(Duration::from_millis(250))?
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
             input::handle_key(app, key);
+
+            // Process pending reload when returning to Navigate mode
+            if app.pending_reload && app.mode == Mode::Navigate {
+                app.pending_reload = false;
+                handle_pending_reload(app);
+            }
+
             // Debounced state save: every ~5 key presses
             save_counter += 1;
             if save_counter >= 5 {
@@ -493,4 +773,38 @@ fn run_event_loop(
         }
     }
     Ok(())
+}
+
+/// Handle an external file reload (when specific changed paths are known)
+fn handle_external_reload(app: &mut App, paths: &[std::path::PathBuf]) {
+    let conflict_task = app.reload_changed_files(paths);
+    if conflict_task.is_some() {
+        // Save the orphaned edit text in conflict_text
+        if !app.edit_buffer.is_empty() {
+            app.conflict_text = Some(app.edit_buffer.clone());
+        }
+        // Cancel the edit mode
+        app.mode = Mode::Navigate;
+        app.edit_target = None;
+        app.edit_buffer.clear();
+        app.edit_cursor = 0;
+    }
+}
+
+/// Handle a pending reload (full re-read of all files)
+fn handle_pending_reload(app: &mut App) {
+    // Re-read all track files and inbox
+    let mut paths = Vec::new();
+    for tc in &app.project.config.tracks {
+        let p = app.project.frame_dir.join(&tc.file);
+        if p.exists() {
+            paths.push(p);
+        }
+    }
+    let inbox_path = app.project.frame_dir.join("inbox.md");
+    if inbox_path.exists() {
+        paths.push(inbox_path);
+    }
+    // This is after EDIT/MOVE completed, so no conflict possible — just reload
+    app.reload_changed_files(&paths);
 }

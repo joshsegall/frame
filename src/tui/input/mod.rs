@@ -1,20 +1,33 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use regex::Regex;
 
+use crate::model::task::Metadata;
 use crate::model::SectionKind;
 use crate::ops::search::{search_inbox, search_tasks};
+use crate::ops::task_ops::{self, InsertPosition};
 
-use super::app::{App, FlatItem, Mode, View};
+use super::app::{App, EditTarget, FlatItem, Mode, MoveState, View, resolve_task_from_flat};
+use super::undo::Operation;
 
 /// Handle a key event in the current mode
 pub fn handle_key(app: &mut App, key: KeyEvent) {
-    match app.mode {
+    match &app.mode {
         Mode::Navigate => handle_navigate(app, key),
         Mode::Search => handle_search(app, key),
+        Mode::Edit => handle_edit(app, key),
+        Mode::Move => handle_move(app, key),
     }
 }
 
 fn handle_navigate(app: &mut App, key: KeyEvent) {
+    // Conflict popup intercepts Esc
+    if app.conflict_text.is_some() {
+        if matches!(key.code, KeyCode::Esc) {
+            app.conflict_text = None;
+        }
+        return;
+    }
+
     // Help overlay intercepts ? and Esc
     if app.show_help {
         match key.code {
@@ -152,6 +165,65 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             collapse_or_parent(app);
         }
 
+        // Task state changes (track view only)
+        (KeyModifiers::NONE, KeyCode::Char(' ')) => {
+            task_state_action(app, StateAction::Cycle);
+        }
+        (KeyModifiers::NONE, KeyCode::Char('x')) => {
+            task_state_action(app, StateAction::Done);
+        }
+        (KeyModifiers::NONE, KeyCode::Char('b')) => {
+            task_state_action(app, StateAction::ToggleBlocked);
+        }
+        (KeyModifiers::NONE, KeyCode::Char('~')) => {
+            task_state_action(app, StateAction::ToggleParked);
+        }
+
+        // Add task (track view only)
+        (KeyModifiers::NONE, KeyCode::Char('a')) => {
+            add_task_action(app, AddPosition::Bottom);
+        }
+        (KeyModifiers::NONE, KeyCode::Char('o')) => {
+            add_task_action(app, AddPosition::AfterCursor);
+        }
+        (KeyModifiers::NONE, KeyCode::Char('p')) => {
+            add_task_action(app, AddPosition::Top);
+        }
+        (KeyModifiers::SHIFT, KeyCode::Char('A')) => {
+            add_subtask_action(app);
+        }
+
+        // Inline title edit
+        (KeyModifiers::NONE, KeyCode::Char('e')) => {
+            enter_title_edit(app);
+        }
+
+        // Move mode
+        (KeyModifiers::NONE, KeyCode::Char('m')) => {
+            enter_move_mode(app);
+        }
+
+        // Redo: Z, Ctrl+Y, or Ctrl+Shift+Z (must be checked BEFORE Ctrl+Z/z undo)
+        (m, KeyCode::Char('y')) if m.contains(KeyModifiers::CONTROL) => {
+            perform_redo(app);
+        }
+        (m, KeyCode::Char('z') | KeyCode::Char('Z'))
+            if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) =>
+        {
+            perform_redo(app);
+        }
+        (KeyModifiers::SHIFT, KeyCode::Char('Z')) => {
+            perform_redo(app);
+        }
+
+        // Undo: u, z, or Ctrl+Z
+        (KeyModifiers::NONE, KeyCode::Char('u') | KeyCode::Char('z')) => {
+            perform_undo(app);
+        }
+        (m, KeyCode::Char('z')) if m.contains(KeyModifiers::CONTROL) => {
+            perform_undo(app);
+        }
+
         _ => {}
     }
 }
@@ -255,6 +327,836 @@ fn handle_search(app: &mut App, key: KeyEvent) {
         _ => {}
     }
 }
+
+// ---------------------------------------------------------------------------
+// Undo / Redo
+// ---------------------------------------------------------------------------
+
+fn perform_undo(app: &mut App) {
+    if let Some(track_id) = app.undo_stack.undo(&mut app.project.tracks) {
+        let _ = app.save_track(&track_id);
+    }
+}
+
+fn perform_redo(app: &mut App) {
+    if let Some(track_id) = app.undo_stack.redo(&mut app.project.tracks) {
+        let _ = app.save_track(&track_id);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Task state changes
+// ---------------------------------------------------------------------------
+
+enum StateAction {
+    Cycle,
+    Done,
+    ToggleBlocked,
+    ToggleParked,
+}
+
+/// Apply a state change to the task under the cursor (track view only).
+fn task_state_action(app: &mut App, action: StateAction) {
+    let info = match app.cursor_task_id() {
+        Some(info) => info,
+        None => return,
+    };
+    let (track_id, task_id, _section) = info;
+
+    let track = match app.find_track_mut(&track_id) {
+        Some(t) => t,
+        None => return,
+    };
+    let task = match task_ops::find_task_mut_in_track(track, &task_id) {
+        Some(t) => t,
+        None => return,
+    };
+
+    // Capture old state for undo
+    let old_state = task.state;
+    let old_resolved = task
+        .metadata
+        .iter()
+        .find_map(|m| {
+            if let Metadata::Resolved(d) = m {
+                Some(d.clone())
+            } else {
+                None
+            }
+        });
+
+    match action {
+        StateAction::Cycle => task_ops::cycle_state(task),
+        StateAction::Done => task_ops::set_done(task),
+        StateAction::ToggleBlocked => task_ops::set_blocked(task),
+        StateAction::ToggleParked => task_ops::set_parked(task),
+    }
+
+    let new_state = task.state;
+    let new_resolved = task
+        .metadata
+        .iter()
+        .find_map(|m| {
+            if let Metadata::Resolved(d) = m {
+                Some(d.clone())
+            } else {
+                None
+            }
+        });
+
+    // Only push undo if state actually changed
+    if old_state != new_state {
+        app.undo_stack.push(Operation::StateChange {
+            track_id: track_id.clone(),
+            task_id: task_id.clone(),
+            old_state,
+            new_state,
+            old_resolved,
+            new_resolved,
+        });
+    }
+
+    let _ = app.save_track(&track_id);
+}
+
+// ---------------------------------------------------------------------------
+// Add task
+// ---------------------------------------------------------------------------
+
+enum AddPosition {
+    Top,
+    Bottom,
+    AfterCursor,
+}
+
+/// Add a new task and enter EDIT mode for its title (track view only).
+fn add_task_action(app: &mut App, pos: AddPosition) {
+    let track_id = match app.current_track_id() {
+        Some(id) => id.to_string(),
+        None => return,
+    };
+    let prefix = match app.track_prefix(&track_id) {
+        Some(p) => p.to_string(),
+        None => return,
+    };
+
+    let insert_pos = match pos {
+        AddPosition::Top => InsertPosition::Top,
+        AddPosition::Bottom => InsertPosition::Bottom,
+        AddPosition::AfterCursor => {
+            // Insert after the cursor's task (top-level only)
+            match app.cursor_task_id() {
+                Some((_, task_id, _)) => InsertPosition::After(task_id),
+                None => InsertPosition::Bottom,
+            }
+        }
+    };
+
+    let track = match app.find_track_mut(&track_id) {
+        Some(t) => t,
+        None => return,
+    };
+
+    let task_id = match task_ops::add_task(track, String::new(), insert_pos, &prefix) {
+        Ok(id) => id,
+        Err(_) => return,
+    };
+
+    // Enter EDIT mode for the new task's title
+    app.edit_buffer.clear();
+    app.edit_cursor = 0;
+    app.edit_target = Some(EditTarget::NewTask {
+        task_id: task_id.clone(),
+        track_id: track_id.clone(),
+        parent_id: None,
+    });
+    app.mode = Mode::Edit;
+
+    // Move cursor to the new task
+    move_cursor_to_task(app, &track_id, &task_id);
+}
+
+/// Add a subtask to the selected task and enter EDIT mode.
+fn add_subtask_action(app: &mut App) {
+    let (track_id, parent_id, _) = match app.cursor_task_id() {
+        Some(info) => info,
+        None => return,
+    };
+
+    let track = match app.find_track_mut(&track_id) {
+        Some(t) => t,
+        None => return,
+    };
+
+    let sub_id = match task_ops::add_subtask(track, &parent_id, String::new()) {
+        Ok(id) => id,
+        Err(_) => return,
+    };
+
+    // Expand the parent so the new subtask is visible
+    {
+        let flat_items = app.build_flat_items(&track_id);
+        let track = App::find_track_in_project(&app.project, &track_id);
+        if let Some(track) = track {
+            for item in &flat_items {
+                if let FlatItem::Task { section, path, .. } = item {
+                    if let Some(task) = resolve_task_from_flat(track, *section, path) {
+                        if task.id.as_deref() == Some(&parent_id) {
+                            let key =
+                                crate::tui::app::task_expand_key(task, *section, path);
+                            let state = app.get_track_state(&track_id);
+                            state.expanded.insert(key);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Enter EDIT mode
+    app.edit_buffer.clear();
+    app.edit_cursor = 0;
+    app.edit_target = Some(EditTarget::NewTask {
+        task_id: sub_id.clone(),
+        track_id: track_id.clone(),
+        parent_id: Some(parent_id),
+    });
+    app.mode = Mode::Edit;
+
+    // Move cursor to the new subtask
+    move_cursor_to_task(app, &track_id, &sub_id);
+}
+
+// ---------------------------------------------------------------------------
+// Inline title editing
+// ---------------------------------------------------------------------------
+
+/// Enter EDIT mode to edit the selected task's title.
+fn enter_title_edit(app: &mut App) {
+    let (track_id, task_id, _) = match app.cursor_task_id() {
+        Some(info) => info,
+        None => return,
+    };
+
+    let track = match App::find_track_in_project(&app.project, &track_id) {
+        Some(t) => t,
+        None => return,
+    };
+
+    let task = match task_ops::find_task_in_track(track, &task_id) {
+        Some(t) => t,
+        None => return,
+    };
+
+    let original_title = task.title.clone();
+    app.edit_buffer = original_title.clone();
+    app.edit_cursor = app.edit_buffer.len();
+    app.edit_target = Some(EditTarget::ExistingTitle {
+        task_id,
+        track_id,
+        original_title,
+    });
+    app.mode = Mode::Edit;
+}
+
+// ---------------------------------------------------------------------------
+// EDIT mode input
+// ---------------------------------------------------------------------------
+
+fn handle_edit(app: &mut App, key: KeyEvent) {
+    match (key.modifiers, key.code) {
+        // Confirm edit
+        (_, KeyCode::Enter) => {
+            confirm_edit(app);
+        }
+        // Cancel edit
+        (_, KeyCode::Esc) => {
+            cancel_edit(app);
+        }
+        // Cursor movement
+        (KeyModifiers::NONE, KeyCode::Left) => {
+            if app.edit_cursor > 0 {
+                app.edit_cursor -= 1;
+            }
+        }
+        (KeyModifiers::NONE, KeyCode::Right) => {
+            if app.edit_cursor < app.edit_buffer.len() {
+                app.edit_cursor += 1;
+            }
+        }
+        // Jump to start/end of line
+        (m, KeyCode::Left) if m.contains(KeyModifiers::SUPER) => {
+            app.edit_cursor = 0;
+        }
+        (m, KeyCode::Right) if m.contains(KeyModifiers::SUPER) => {
+            app.edit_cursor = app.edit_buffer.len();
+        }
+        // Word movement
+        (m, KeyCode::Left) if m.contains(KeyModifiers::ALT) => {
+            app.edit_cursor = word_boundary_left(&app.edit_buffer, app.edit_cursor);
+        }
+        (m, KeyCode::Right) if m.contains(KeyModifiers::ALT) => {
+            app.edit_cursor = word_boundary_right(&app.edit_buffer, app.edit_cursor);
+        }
+        // Backspace
+        (KeyModifiers::NONE, KeyCode::Backspace) => {
+            if app.edit_cursor > 0 {
+                app.edit_buffer.remove(app.edit_cursor - 1);
+                app.edit_cursor -= 1;
+            }
+        }
+        // Word backspace
+        (m, KeyCode::Backspace) if m.contains(KeyModifiers::ALT) => {
+            let new_pos = word_boundary_left(&app.edit_buffer, app.edit_cursor);
+            app.edit_buffer.drain(new_pos..app.edit_cursor);
+            app.edit_cursor = new_pos;
+        }
+        // Type character
+        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+            app.edit_buffer.insert(app.edit_cursor, c);
+            app.edit_cursor += 1;
+        }
+        _ => {}
+    }
+}
+
+fn confirm_edit(app: &mut App) {
+    let target = match app.edit_target.take() {
+        Some(t) => t,
+        None => {
+            app.mode = Mode::Navigate;
+            return;
+        }
+    };
+
+    let title = app.edit_buffer.clone();
+    app.mode = Mode::Navigate;
+
+    match target {
+        EditTarget::NewTask {
+            task_id,
+            track_id,
+            parent_id,
+        } => {
+            if title.trim().is_empty() {
+                // Empty title: remove the placeholder task
+                let track = match app.find_track_mut(&track_id) {
+                    Some(t) => t,
+                    None => return,
+                };
+                if parent_id.is_some() {
+                    // Subtask: remove from parent
+                    let pid = parent_id.as_ref().unwrap();
+                    if let Some(parent) = task_ops::find_task_mut_in_track(track, pid) {
+                        parent.subtasks.retain(|t| t.id.as_deref() != Some(&task_id));
+                        parent.mark_dirty();
+                    }
+                } else {
+                    remove_task_from_section(track, &task_id, SectionKind::Backlog);
+                }
+            } else {
+                let track = match app.find_track_mut(&track_id) {
+                    Some(t) => t,
+                    None => return,
+                };
+                let _ = task_ops::edit_title(track, &task_id, title.clone());
+
+                if let Some(pid) = &parent_id {
+                    app.undo_stack.push(Operation::SubtaskAdd {
+                        track_id: track_id.clone(),
+                        parent_id: pid.clone(),
+                        task_id: task_id.clone(),
+                    });
+                } else {
+                    // Find position index for undo
+                    let pos_idx = App::find_track_in_project(&app.project, &track_id)
+                        .and_then(|t| {
+                            t.backlog()
+                                .iter()
+                                .position(|t| t.id.as_deref() == Some(&task_id))
+                        })
+                        .unwrap_or(0);
+
+                    app.undo_stack.push(Operation::TaskAdd {
+                        track_id: track_id.clone(),
+                        task_id: task_id.clone(),
+                        position_index: pos_idx,
+                    });
+                }
+            }
+            let _ = app.save_track(&track_id);
+        }
+        EditTarget::ExistingTitle {
+            task_id,
+            track_id,
+            original_title,
+        } => {
+            if !title.trim().is_empty() && title != original_title {
+                let track = match app.find_track_mut(&track_id) {
+                    Some(t) => t,
+                    None => return,
+                };
+                let _ = task_ops::edit_title(track, &task_id, title.clone());
+
+                app.undo_stack.push(Operation::TitleEdit {
+                    track_id: track_id.clone(),
+                    task_id,
+                    old_title: original_title,
+                    new_title: title,
+                });
+
+                let _ = app.save_track(&track_id);
+            }
+        }
+    }
+}
+
+fn cancel_edit(app: &mut App) {
+    let target = app.edit_target.take();
+    app.mode = Mode::Navigate;
+
+    // If we were creating a new task, remove it entirely
+    if let Some(EditTarget::NewTask {
+        task_id,
+        track_id,
+        parent_id,
+    }) = target
+    {
+        let track = match app.find_track_mut(&track_id) {
+            Some(t) => t,
+            None => return,
+        };
+        if let Some(pid) = &parent_id {
+            // Subtask: remove from parent
+            if let Some(parent) = task_ops::find_task_mut_in_track(track, pid) {
+                parent.subtasks.retain(|t| t.id.as_deref() != Some(&task_id));
+                parent.mark_dirty();
+            }
+        } else {
+            remove_task_from_section(track, &task_id, SectionKind::Backlog);
+        }
+        let _ = app.save_track(&track_id);
+    }
+    // For existing title edit, cancel means revert (title unchanged since we didn't write)
+}
+
+/// Move the cursor to a specific task by ID in a track view.
+fn move_cursor_to_task(app: &mut App, track_id: &str, target_task_id: &str) {
+    let flat_items = app.build_flat_items(track_id);
+    let track = App::find_track_in_project(&app.project, track_id);
+    if let Some(track) = track {
+        for (i, item) in flat_items.iter().enumerate() {
+            if let FlatItem::Task { section, path, .. } = item {
+                if let Some(task) = resolve_task_from_flat(track, *section, path) {
+                    if task.id.as_deref() == Some(target_task_id) {
+                        let state = app.get_track_state(track_id);
+                        state.cursor = i;
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Remove a task by ID from a specific section (hard remove, not mark-done).
+fn remove_task_from_section(
+    track: &mut crate::model::Track,
+    task_id: &str,
+    section: SectionKind,
+) {
+    if let Some(tasks) = track.section_tasks_mut(section) {
+        tasks.retain(|t| t.id.as_deref() != Some(task_id));
+    }
+}
+
+/// Find the byte offset of the previous word boundary
+fn word_boundary_left(s: &str, pos: usize) -> usize {
+    if pos == 0 {
+        return 0;
+    }
+    let bytes = s.as_bytes();
+    let mut i = pos - 1;
+    // Skip spaces
+    while i > 0 && bytes[i] == b' ' {
+        i -= 1;
+    }
+    // Skip word chars
+    while i > 0 && bytes[i - 1] != b' ' {
+        i -= 1;
+    }
+    i
+}
+
+/// Find the byte offset of the next word boundary
+fn word_boundary_right(s: &str, pos: usize) -> usize {
+    let len = s.len();
+    if pos >= len {
+        return len;
+    }
+    let bytes = s.as_bytes();
+    let mut i = pos;
+    // Skip current word
+    while i < len && bytes[i] != b' ' {
+        i += 1;
+    }
+    // Skip spaces
+    while i < len && bytes[i] == b' ' {
+        i += 1;
+    }
+    i
+}
+
+// ---------------------------------------------------------------------------
+// MOVE mode
+// ---------------------------------------------------------------------------
+
+/// Enter MOVE mode for the task under the cursor (track view only).
+fn enter_move_mode(app: &mut App) {
+    match &app.view {
+        View::Track(_) => {
+            if let Some((track_id, task_id, section)) = app.cursor_task_id() {
+                // Only allow moving top-level backlog tasks
+                if section != SectionKind::Backlog {
+                    return;
+                }
+                let track = match App::find_track_in_project(&app.project, &track_id) {
+                    Some(t) => t,
+                    None => return,
+                };
+                let backlog = track.backlog();
+                let original_index = match backlog
+                    .iter()
+                    .position(|t| t.id.as_deref() == Some(&task_id))
+                {
+                    Some(i) => i,
+                    None => return,
+                };
+
+                app.move_state = Some(MoveState::Task {
+                    track_id,
+                    task_id,
+                    original_index,
+                });
+                app.mode = Mode::Move;
+            }
+        }
+        View::Tracks => {
+            // Find which active track the cursor is on
+            let active_tracks: Vec<&str> = app
+                .project
+                .config
+                .tracks
+                .iter()
+                .filter(|t| t.state == "active")
+                .map(|t| t.id.as_str())
+                .collect();
+            let cursor = app.tracks_cursor;
+            if cursor < active_tracks.len() {
+                let track_id = active_tracks[cursor].to_string();
+                app.move_state = Some(MoveState::Track {
+                    track_id,
+                    original_index: cursor,
+                });
+                app.mode = Mode::Move;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_move(app: &mut App, key: KeyEvent) {
+    let is_track_move = matches!(&app.move_state, Some(MoveState::Track { .. }));
+
+    match (key.modifiers, key.code) {
+        // Confirm
+        (_, KeyCode::Enter) => {
+            if let Some(ms) = app.move_state.take() {
+                match ms {
+                    MoveState::Task {
+                        track_id,
+                        task_id,
+                        original_index,
+                    } => {
+                        let new_index =
+                            App::find_track_in_project(&app.project, &track_id)
+                                .and_then(|t| {
+                                    t.backlog()
+                                        .iter()
+                                        .position(|t| t.id.as_deref() == Some(&task_id))
+                                })
+                                .unwrap_or(0);
+                        if new_index != original_index {
+                            app.undo_stack.push(Operation::TaskMove {
+                                track_id,
+                                task_id,
+                                old_index: original_index,
+                                new_index,
+                            });
+                        }
+                    }
+                    MoveState::Track { track_id, original_index } => {
+                        // Persist track order to project.toml
+                        save_track_order(app);
+                        // Update active_track_ids to reflect new order
+                        app.active_track_ids = app
+                            .project
+                            .config
+                            .tracks
+                            .iter()
+                            .filter(|t| t.state == "active")
+                            .map(|t| t.id.clone())
+                            .collect();
+                        // Position cursor on the moved track
+                        let _ = (track_id, original_index);
+                    }
+                }
+            }
+            app.mode = Mode::Navigate;
+        }
+        // Cancel: restore original position
+        (_, KeyCode::Esc) => {
+            if let Some(ms) = app.move_state.take() {
+                match ms {
+                    MoveState::Task {
+                        track_id,
+                        task_id,
+                        original_index,
+                    } => {
+                        let track = match app.find_track_mut(&track_id) {
+                            Some(t) => t,
+                            None => {
+                                app.mode = Mode::Navigate;
+                                return;
+                            }
+                        };
+                        let backlog = match track.section_tasks_mut(SectionKind::Backlog) {
+                            Some(t) => t,
+                            None => {
+                                app.mode = Mode::Navigate;
+                                return;
+                            }
+                        };
+                        if let Some(cur_idx) =
+                            backlog.iter().position(|t| t.id.as_deref() == Some(&task_id))
+                        {
+                            let task = backlog.remove(cur_idx);
+                            let restore_idx = original_index.min(backlog.len());
+                            backlog.insert(restore_idx, task);
+                        }
+                        let _ = app.save_track(&track_id);
+                    }
+                    MoveState::Track {
+                        track_id,
+                        original_index,
+                    } => {
+                        // Restore original track order
+                        let _ = crate::ops::track_ops::reorder_tracks(
+                            &mut app.project.config,
+                            &track_id,
+                            original_index,
+                        );
+                        app.active_track_ids = app
+                            .project
+                            .config
+                            .tracks
+                            .iter()
+                            .filter(|t| t.state == "active")
+                            .map(|t| t.id.clone())
+                            .collect();
+                        app.tracks_cursor = original_index;
+                    }
+                }
+            }
+            app.mode = Mode::Navigate;
+        }
+        // Move up
+        (KeyModifiers::NONE, KeyCode::Up | KeyCode::Char('k')) => {
+            if is_track_move {
+                move_track_in_list(app, -1);
+            } else {
+                move_task_in_list(app, -1);
+            }
+        }
+        // Move down
+        (KeyModifiers::NONE, KeyCode::Down | KeyCode::Char('j')) => {
+            if is_track_move {
+                move_track_in_list(app, 1);
+            } else {
+                move_task_in_list(app, 1);
+            }
+        }
+        // Move to top
+        (KeyModifiers::NONE, KeyCode::Char('g')) => {
+            if is_track_move {
+                move_track_to_boundary(app, true);
+            } else {
+                move_task_to_boundary(app, true);
+            }
+        }
+        (m, KeyCode::Up) if m.contains(KeyModifiers::SUPER) => {
+            if is_track_move {
+                move_track_to_boundary(app, true);
+            } else {
+                move_task_to_boundary(app, true);
+            }
+        }
+        // Move to bottom
+        (KeyModifiers::SHIFT, KeyCode::Char('G')) => {
+            if is_track_move {
+                move_track_to_boundary(app, false);
+            } else {
+                move_task_to_boundary(app, false);
+            }
+        }
+        (m, KeyCode::Down) if m.contains(KeyModifiers::SUPER) => {
+            if is_track_move {
+                move_track_to_boundary(app, false);
+            } else {
+                move_task_to_boundary(app, false);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Move the task one position up or down in the backlog.
+fn move_task_in_list(app: &mut App, direction: i32) {
+    let (track_id, task_id) = match &app.move_state {
+        Some(MoveState::Task {
+            track_id, task_id, ..
+        }) => (track_id.clone(), task_id.clone()),
+        _ => return,
+    };
+
+    let track = match app.find_track_mut(&track_id) {
+        Some(t) => t,
+        None => return,
+    };
+
+    let backlog = match track.section_tasks_mut(SectionKind::Backlog) {
+        Some(t) => t,
+        None => return,
+    };
+
+    let cur_idx = match backlog
+        .iter()
+        .position(|t| t.id.as_deref() == Some(&task_id))
+    {
+        Some(i) => i,
+        None => return,
+    };
+
+    let new_idx = (cur_idx as i32 + direction).clamp(0, backlog.len() as i32 - 1) as usize;
+    if new_idx != cur_idx {
+        let task = backlog.remove(cur_idx);
+        backlog.insert(new_idx, task);
+        let _ = app.save_track(&track_id);
+        move_cursor_to_task(app, &track_id, &task_id);
+    }
+}
+
+/// Move task to top or bottom of the backlog.
+fn move_task_to_boundary(app: &mut App, to_top: bool) {
+    let (track_id, task_id) = match &app.move_state {
+        Some(MoveState::Task {
+            track_id, task_id, ..
+        }) => (track_id.clone(), task_id.clone()),
+        _ => return,
+    };
+
+    let pos = if to_top {
+        InsertPosition::Top
+    } else {
+        InsertPosition::Bottom
+    };
+
+    let track = match app.find_track_mut(&track_id) {
+        Some(t) => t,
+        None => return,
+    };
+
+    let _ = task_ops::move_task(track, &task_id, pos);
+    let _ = app.save_track(&track_id);
+    move_cursor_to_task(app, &track_id, &task_id);
+}
+
+/// Move an active track up or down in the tracks list.
+fn move_track_in_list(app: &mut App, direction: i32) {
+    let (track_id, _) = match &app.move_state {
+        Some(MoveState::Track { track_id, original_index }) => {
+            (track_id.clone(), *original_index)
+        }
+        _ => return,
+    };
+
+    let active_tracks: Vec<String> = app
+        .project
+        .config
+        .tracks
+        .iter()
+        .filter(|t| t.state == "active")
+        .map(|t| t.id.clone())
+        .collect();
+
+    let cur_pos = match active_tracks.iter().position(|id| id == &track_id) {
+        Some(i) => i,
+        None => return,
+    };
+
+    let new_pos =
+        (cur_pos as i32 + direction).clamp(0, active_tracks.len() as i32 - 1) as usize;
+    if new_pos != cur_pos {
+        let _ = crate::ops::track_ops::reorder_tracks(
+            &mut app.project.config,
+            &track_id,
+            new_pos,
+        );
+        app.tracks_cursor = new_pos;
+    }
+}
+
+/// Move track to top or bottom of active tracks.
+fn move_track_to_boundary(app: &mut App, to_top: bool) {
+    let (track_id, _) = match &app.move_state {
+        Some(MoveState::Track { track_id, original_index }) => {
+            (track_id.clone(), *original_index)
+        }
+        _ => return,
+    };
+
+    let active_count = app
+        .project
+        .config
+        .tracks
+        .iter()
+        .filter(|t| t.state == "active")
+        .count();
+
+    let new_pos = if to_top { 0 } else { active_count - 1 };
+    let _ = crate::ops::track_ops::reorder_tracks(
+        &mut app.project.config,
+        &track_id,
+        new_pos,
+    );
+    app.tracks_cursor = new_pos;
+}
+
+/// Save the current track order to project.toml.
+fn save_track_order(app: &mut App) {
+    let config_text = match toml::to_string_pretty(&app.project.config) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let config_path = app.project.frame_dir.join("project.toml");
+    let _ = std::fs::write(&config_path, config_text);
+    app.last_save_at = Some(std::time::Instant::now());
+}
+
+// ---------------------------------------------------------------------------
+// Cursor movement
+// ---------------------------------------------------------------------------
 
 /// Move cursor by delta in the current view
 fn move_cursor(app: &mut App, delta: i32) {

@@ -67,14 +67,20 @@ pub fn render_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
                 key_style,
                 desc_style,
             );
-            add_binding(
-                &mut lines,
-                " Enter",
-                "Open detail view",
-                key_style,
-                desc_style,
-            );
             add_binding(&mut lines, " Esc", "Back / close", key_style, desc_style);
+            lines.push(Line::from(""));
+
+            lines.push(Line::from(Span::styled(" Task Actions", header_style)));
+            add_binding(&mut lines, " Space", "Cycle state", key_style, desc_style);
+            add_binding(&mut lines, " x", "Mark done", key_style, desc_style);
+            add_binding(&mut lines, " b", "Toggle blocked", key_style, desc_style);
+            add_binding(&mut lines, " ~", "Toggle parked", key_style, desc_style);
+            add_binding(&mut lines, " e", "Edit title", key_style, desc_style);
+            add_binding(&mut lines, " a", "Add task (bottom)", key_style, desc_style);
+            add_binding(&mut lines, " o", "Insert after cursor", key_style, desc_style);
+            add_binding(&mut lines, " p", "Push to top", key_style, desc_style);
+            add_binding(&mut lines, " A", "Add subtask", key_style, desc_style);
+            add_binding(&mut lines, " m", "Move mode", key_style, desc_style);
             lines.push(Line::from(""));
 
             lines.push(Line::from(Span::styled(" Views", header_style)));
@@ -90,6 +96,8 @@ pub fn render_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
             add_binding(&mut lines, " r", "Recent view", key_style, desc_style);
             add_binding(&mut lines, " 0/`", "Tracks view", key_style, desc_style);
             add_binding(&mut lines, " /", "Search", key_style, desc_style);
+            add_binding(&mut lines, " z/u", "Undo", key_style, desc_style);
+            add_binding(&mut lines, " Z", "Redo", key_style, desc_style);
             lines.push(Line::from(""));
         }
         View::Tracks => {

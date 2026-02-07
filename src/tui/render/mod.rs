@@ -1,3 +1,4 @@
+pub mod conflict_popup;
 pub mod help_overlay;
 pub mod inbox_view;
 pub mod recent_view;
@@ -48,6 +49,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // Help overlay (rendered on top of everything)
     if app.show_help {
         help_overlay::render_help_overlay(frame, app, frame.area());
+    }
+
+    // Conflict popup (rendered on top of everything)
+    if app.conflict_text.is_some() {
+        conflict_popup::render_conflict_popup(frame, app, frame.area());
     }
 
     // Status row

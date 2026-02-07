@@ -11,7 +11,7 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
     let bg = app.theme.background;
     let width = area.width as usize;
 
-    let line = match app.mode {
+    let line = match &app.mode {
         Mode::Navigate if app.status_message.is_some() => {
             render_centered_message(app.status_message.as_deref().unwrap(), width, bg)
         }
@@ -38,6 +38,56 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
             ];
             let hint = "Enter search  Esc cancel";
             build_right_side(app, &mut spans, hint, width, bg, false);
+            Line::from(spans)
+        }
+        Mode::Edit => {
+            let mode_label = Span::styled(
+                "-- EDIT --",
+                Style::default()
+                    .fg(app.theme.highlight)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
+            );
+            let hint = "Enter confirm  Esc cancel";
+            let mut spans = vec![Span::styled(" ", Style::default().bg(bg)), mode_label];
+            let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+            let hint_width = hint.chars().count();
+            if content_width + hint_width < width {
+                let padding = width - content_width - hint_width;
+                spans.push(Span::styled(
+                    " ".repeat(padding),
+                    Style::default().bg(bg),
+                ));
+                spans.push(Span::styled(
+                    hint,
+                    Style::default().fg(app.theme.text_bright).bg(bg),
+                ));
+            }
+            Line::from(spans)
+        }
+        Mode::Move => {
+            let mode_label = Span::styled(
+                "-- MOVE --",
+                Style::default()
+                    .fg(app.theme.highlight)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
+            );
+            let hint = "\u{2191}\u{2193} move  Enter \u{2713}  Esc \u{2717}";
+            let mut spans = vec![Span::styled(" ", Style::default().bg(bg)), mode_label];
+            let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+            let hint_width = hint.chars().count();
+            if content_width + hint_width < width {
+                let padding = width - content_width - hint_width;
+                spans.push(Span::styled(
+                    " ".repeat(padding),
+                    Style::default().bg(bg),
+                ));
+                spans.push(Span::styled(
+                    hint,
+                    Style::default().fg(app.theme.text_bright).bg(bg),
+                ));
+            }
             Line::from(spans)
         }
     };
