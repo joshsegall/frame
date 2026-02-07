@@ -159,7 +159,7 @@ fn parse_task_line(line: &str, indent: usize) -> (TaskState, Option<String>, Str
 }
 
 /// Split a string into title and tags. Tags are `#word` tokens at the end.
-fn parse_title_and_tags(s: &str) -> (String, Vec<String>) {
+pub fn parse_title_and_tags(s: &str) -> (String, Vec<String>) {
     let s = s.trim_end();
     if s.is_empty() {
         return (String::new(), Vec::new());

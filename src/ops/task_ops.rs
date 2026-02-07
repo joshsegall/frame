@@ -2,6 +2,7 @@ use chrono::Local;
 
 use crate::model::task::{Metadata, Task, TaskState};
 use crate::model::track::{SectionKind, Track, TrackNode};
+use crate::parse::parse_title_and_tags;
 
 /// Error type for task operations
 #[derive(Debug, thiserror::Error)]
@@ -102,7 +103,9 @@ pub fn add_task(
     let next_num = next_id_number(track, prefix);
     let id = format!("{}-{:03}", prefix, next_num);
 
-    let mut task = Task::new(TaskState::Todo, Some(id.clone()), title);
+    let (parsed_title, tags) = parse_title_and_tags(&title);
+    let mut task = Task::new(TaskState::Todo, Some(id.clone()), parsed_title);
+    task.tags = tags;
     task.metadata.push(Metadata::Added(today_str()));
 
     let tasks = track
@@ -125,7 +128,9 @@ pub fn add_subtask(track: &mut Track, parent_id: &str, title: String) -> Result<
 
     let sub_num = parent.subtasks.len() + 1;
     let sub_id = format!("{}.{}", parent_id, sub_num);
-    let mut subtask = Task::new(TaskState::Todo, Some(sub_id.clone()), title);
+    let (parsed_title, tags) = parse_title_and_tags(&title);
+    let mut subtask = Task::new(TaskState::Todo, Some(sub_id.clone()), parsed_title);
+    subtask.tags = tags;
     subtask.depth = parent.depth + 1;
     subtask.metadata.push(Metadata::Added(today_str()));
     parent.subtasks.push(subtask);
@@ -136,9 +141,11 @@ pub fn add_subtask(track: &mut Track, parent_id: &str, title: String) -> Result<
 
 /// Edit a task's title.
 pub fn edit_title(track: &mut Track, task_id: &str, new_title: String) -> Result<(), TaskError> {
+    let (parsed_title, tags) = parse_title_and_tags(&new_title);
     let task = find_task_mut_in_track(track, task_id)
         .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
-    task.title = new_title;
+    task.title = parsed_title;
+    task.tags = tags;
     task.mark_dirty();
     Ok(())
 }
