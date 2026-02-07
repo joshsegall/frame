@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::time::{Duration, Instant};
+use std::path::PathBuf;
+use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::execute;
@@ -168,12 +169,14 @@ pub struct App {
     pub move_state: Option<MoveState>,
     /// Undo/redo stack (session-only, not persisted)
     pub undo_stack: UndoStack,
-    /// Pending external file reload (queued while in EDIT/MOVE mode)
-    pub pending_reload: bool,
+    /// Pending external file reload paths (queued while in EDIT/MOVE mode)
+    pub pending_reload_paths: Vec<PathBuf>,
     /// Conflict text shown when external change conflicts with in-progress edit
     pub conflict_text: Option<String>,
     /// Timestamp of last save we performed (used to ignore our own write notifications)
     pub last_save_at: Option<Instant>,
+    /// Last-known mtime for each track file (keyed by track_id)
+    pub track_mtimes: HashMap<String, SystemTime>,
 }
 
 impl App {
@@ -193,6 +196,17 @@ impl App {
         } else {
             View::Track(0)
         };
+
+        // Record initial mtimes for all track files
+        let mut track_mtimes = HashMap::new();
+        for tc in &project.config.tracks {
+            let path = project.frame_dir.join(&tc.file);
+            if let Ok(meta) = std::fs::metadata(&path) {
+                if let Ok(mtime) = meta.modified() {
+                    track_mtimes.insert(tc.id.clone(), mtime);
+                }
+            }
+        }
 
         // Initialize track states with default expand for first task
         let mut track_states = HashMap::new();
@@ -240,9 +254,10 @@ impl App {
             pre_edit_cursor: None,
             move_state: None,
             undo_stack: UndoStack::new(),
-            pending_reload: false,
+            pending_reload_paths: Vec::new(),
             conflict_text: None,
             last_save_at: None,
+            track_mtimes,
         }
     }
 
@@ -320,7 +335,7 @@ impl App {
     }
 
     /// Get the file path for a track (relative to frame_dir)
-    fn track_file(&self, track_id: &str) -> Option<&str> {
+    pub fn track_file(&self, track_id: &str) -> Option<&str> {
         self.project
             .config
             .tracks
@@ -338,7 +353,48 @@ impl App {
             .map(|(_, track)| track)
     }
 
-    /// Save a track to disk with file locking. Records save time to suppress self-notification.
+    /// Read and parse a single track file from disk, updating stored mtime.
+    pub fn read_track_from_disk(&mut self, track_id: &str) -> Option<Track> {
+        let file = self.track_file(track_id)?;
+        let path = self.project.frame_dir.join(file);
+        let meta = std::fs::metadata(&path).ok()?;
+        let text = std::fs::read_to_string(&path).ok()?;
+        if let Ok(mtime) = meta.modified() {
+            self.track_mtimes.insert(track_id.to_string(), mtime);
+        }
+        Some(parse_track(&text))
+    }
+
+    /// Replace a track's in-memory data.
+    pub fn replace_track(&mut self, track_id: &str, new_track: Track) {
+        if let Some(entry) = self
+            .project
+            .tracks
+            .iter_mut()
+            .find(|(id, _)| id == track_id)
+        {
+            entry.1 = new_track;
+        }
+    }
+
+    /// Check if the track file on disk has been modified since we last loaded/saved it.
+    pub fn track_changed_on_disk(&self, track_id: &str) -> bool {
+        let file = match self.track_file(track_id) {
+            Some(f) => f,
+            None => return false,
+        };
+        let path = self.project.frame_dir.join(file);
+        let disk_mtime = match std::fs::metadata(&path).and_then(|m| m.modified()) {
+            Ok(t) => t,
+            Err(_) => return false,
+        };
+        match self.track_mtimes.get(track_id) {
+            Some(known) => disk_mtime > *known,
+            None => true, // no recorded mtime — treat as changed
+        }
+    }
+
+    /// Save a track to disk with file locking. Records save time and mtime.
     pub fn save_track(&mut self, track_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         let file = self
             .track_file(track_id)
@@ -349,6 +405,11 @@ impl App {
         let _lock = FileLock::acquire_default(&self.project.frame_dir)?;
         project_io::save_track(&self.project.frame_dir, &file, track)?;
         self.last_save_at = Some(Instant::now());
+        // Record the new mtime so we know this is our write
+        let path = self.project.frame_dir.join(&file);
+        if let Ok(mtime) = std::fs::metadata(&path).and_then(|m| m.modified()) {
+            self.track_mtimes.insert(track_id.to_string(), mtime);
+        }
         Ok(())
     }
 
@@ -444,7 +505,7 @@ impl App {
                         }
                     }
 
-                    // Replace the track data
+                    // Replace the track data and update mtime
                     if let Some(entry) = self
                         .project
                         .tracks
@@ -452,6 +513,9 @@ impl App {
                         .find(|(id, _)| id == &track_id)
                     {
                         entry.1 = new_track;
+                    }
+                    if let Ok(mtime) = std::fs::metadata(path).and_then(|m| m.modified()) {
+                        self.track_mtimes.insert(track_id, mtime);
                     }
                 }
             }
@@ -743,7 +807,7 @@ fn run_event_loop(
                     // External change detected
                     if app.mode == Mode::Edit || app.mode == Mode::Move {
                         // Queue reload for when we leave EDIT/MOVE mode
-                        app.pending_reload = true;
+                        app.pending_reload_paths.extend(all_paths);
                     } else {
                         handle_external_reload(app, &all_paths);
                     }
@@ -758,9 +822,9 @@ fn run_event_loop(
             input::handle_key(app, key);
 
             // Process pending reload when returning to Navigate mode
-            if app.pending_reload && app.mode == Mode::Navigate {
-                app.pending_reload = false;
-                handle_pending_reload(app);
+            if !app.pending_reload_paths.is_empty() && app.mode == Mode::Navigate {
+                let paths = std::mem::take(&mut app.pending_reload_paths);
+                handle_pending_reload(app, &paths);
             }
 
             // Debounced state save: every ~5 key presses
@@ -794,20 +858,15 @@ fn handle_external_reload(app: &mut App, paths: &[std::path::PathBuf]) {
     }
 }
 
-/// Handle a pending reload (full re-read of all files)
-fn handle_pending_reload(app: &mut App) {
-    // Re-read all track files and inbox
-    let mut paths = Vec::new();
-    for tc in &app.project.config.tracks {
-        let p = app.project.frame_dir.join(&tc.file);
-        if p.exists() {
-            paths.push(p);
+/// Handle a pending reload using the stored changed paths
+fn handle_pending_reload(app: &mut App, paths: &[PathBuf]) {
+    // Dedup paths (may have accumulated duplicates)
+    let mut deduped: Vec<PathBuf> = Vec::new();
+    for p in paths {
+        if !deduped.contains(p) {
+            deduped.push(p.clone());
         }
     }
-    let inbox_path = app.project.frame_dir.join("inbox.md");
-    if inbox_path.exists() {
-        paths.push(inbox_path);
-    }
     // This is after EDIT/MOVE completed, so no conflict possible — just reload
-    app.reload_changed_files(&paths);
+    app.reload_changed_files(&deduped);
 }

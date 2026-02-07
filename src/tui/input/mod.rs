@@ -19,6 +19,25 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     }
 }
 
+/// Drain any pending watcher events for a specific track (already handled via mtime).
+/// Reloads remaining pending paths for other files.
+fn drain_pending_for_track(app: &mut App, handled_track_id: &str) {
+    if app.pending_reload_paths.is_empty() {
+        return;
+    }
+    let skip_file = app.track_file(handled_track_id).map(|f| f.to_string());
+    let remaining: Vec<std::path::PathBuf> = std::mem::take(&mut app.pending_reload_paths)
+        .into_iter()
+        .filter(|p| {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            skip_file.as_deref() != Some(name)
+        })
+        .collect();
+    if !remaining.is_empty() {
+        app.reload_changed_files(&remaining);
+    }
+}
+
 fn handle_navigate(app: &mut App, key: KeyEvent) {
     // Conflict popup intercepts Esc
     if app.conflict_text.is_some() {
@@ -743,23 +762,90 @@ fn confirm_edit(app: &mut App) {
             track_id,
             parent_id,
         } => {
+            // Use mtime to detect external changes (independent of watcher timing)
+            let changed = app.track_changed_on_disk(&track_id);
+
             if title.trim().is_empty() {
-                // Empty title: remove the placeholder task
-                let track = match app.find_track_mut(&track_id) {
-                    Some(t) => t,
-                    None => return,
-                };
-                if parent_id.is_some() {
-                    // Subtask: remove from parent
-                    let pid = parent_id.as_ref().unwrap();
-                    if let Some(parent) = task_ops::find_task_mut_in_track(track, pid) {
-                        parent.subtasks.retain(|t| t.id.as_deref() != Some(&task_id));
-                        parent.mark_dirty();
+                // Empty title: discard the placeholder
+                if changed {
+                    // Reload from disk — discards in-memory placeholder and picks up
+                    // any external changes atomically
+                    if let Some(disk_track) = app.read_track_from_disk(&track_id) {
+                        app.replace_track(&track_id, disk_track);
                     }
                 } else {
-                    remove_task_from_section(track, &task_id, SectionKind::Backlog);
+                    // No external changes — remove placeholder from memory and save
+                    let track = match app.find_track_mut(&track_id) {
+                        Some(t) => t,
+                        None => return,
+                    };
+                    if let Some(ref pid) = parent_id {
+                        if let Some(parent) = task_ops::find_task_mut_in_track(track, pid) {
+                            parent.subtasks.retain(|t| t.id.as_deref() != Some(&task_id));
+                            parent.mark_dirty();
+                        }
+                    } else {
+                        remove_task_from_section(track, &task_id, SectionKind::Backlog);
+                    }
+                    let _ = app.save_track(&track_id);
+                }
+            } else if changed {
+                // Non-empty title, file changed externally — merge
+                let prefix = app.track_prefix(&track_id).unwrap_or("").to_string();
+                if let Some(disk_track) = app.read_track_from_disk(&track_id) {
+                    // For subtasks: check if parent still exists on disk
+                    if let Some(ref pid) = parent_id
+                        && task_ops::find_task_in_track(&disk_track, pid).is_none()
+                    {
+                        app.conflict_text = Some(title);
+                        app.replace_track(&track_id, disk_track);
+                        drain_pending_for_track(app, &track_id);
+                        return;
+                    }
+                    // Replace in-memory with disk version, then add our new task on top
+                    app.replace_track(&track_id, disk_track);
+
+                    let track = match app.find_track_mut(&track_id) {
+                        Some(t) => t,
+                        None => return,
+                    };
+                    if let Some(ref pid) = parent_id {
+                        let _ = task_ops::add_subtask(track, pid, title.clone());
+                    } else {
+                        let _ = task_ops::add_task(
+                            track,
+                            title.clone(),
+                            InsertPosition::Bottom,
+                            &prefix,
+                        );
+                    }
+
+                    if let Some(ref pid) = parent_id {
+                        app.undo_stack.push_sync_marker();
+                        app.undo_stack.push(Operation::SubtaskAdd {
+                            track_id: track_id.clone(),
+                            parent_id: pid.clone(),
+                            task_id: task_id.clone(),
+                        });
+                    } else {
+                        app.undo_stack.push_sync_marker();
+                        let pos_idx = App::find_track_in_project(&app.project, &track_id)
+                            .and_then(|t| {
+                                t.backlog()
+                                    .iter()
+                                    .position(|t| t.id.as_deref() == Some(&task_id))
+                            })
+                            .unwrap_or(0);
+                        app.undo_stack.push(Operation::TaskAdd {
+                            track_id: track_id.clone(),
+                            task_id: task_id.clone(),
+                            position_index: pos_idx,
+                        });
+                    }
+                    let _ = app.save_track(&track_id);
                 }
             } else {
+                // No external changes — apply title to the in-memory placeholder and save
                 let track = match app.find_track_mut(&track_id) {
                     Some(t) => t,
                     None => return,
@@ -773,7 +859,6 @@ fn confirm_edit(app: &mut App) {
                         task_id: task_id.clone(),
                     });
                 } else {
-                    // Find position index for undo
                     let pos_idx = App::find_track_in_project(&app.project, &track_id)
                         .and_then(|t| {
                             t.backlog()
@@ -788,8 +873,9 @@ fn confirm_edit(app: &mut App) {
                         position_index: pos_idx,
                     });
                 }
+                let _ = app.save_track(&track_id);
             }
-            let _ = app.save_track(&track_id);
+            drain_pending_for_track(app, &track_id);
         }
         EditTarget::ExistingTitle {
             task_id,
@@ -797,21 +883,60 @@ fn confirm_edit(app: &mut App) {
             original_title,
         } => {
             if !title.trim().is_empty() && title != original_title {
-                let track = match app.find_track_mut(&track_id) {
-                    Some(t) => t,
-                    None => return,
-                };
-                let _ = task_ops::edit_title(track, &task_id, title.clone());
+                // Use mtime to detect external changes (independent of watcher timing)
+                let changed = app.track_changed_on_disk(&track_id);
 
-                app.undo_stack.push(Operation::TitleEdit {
-                    track_id: track_id.clone(),
-                    task_id,
-                    old_title: original_title,
-                    new_title: title,
-                });
+                if changed {
+                    // File changed externally — read from disk and check for conflict
+                    if let Some(disk_track) = app.read_track_from_disk(&track_id) {
+                        let disk_task = task_ops::find_task_in_track(&disk_track, &task_id);
+                        let is_conflict = match disk_task {
+                            Some(dt) => dt.title != original_title,
+                            None => true,
+                        };
 
-                let _ = app.save_track(&track_id);
+                        if is_conflict {
+                            // Don't save — reload from disk, show conflict popup
+                            app.conflict_text = Some(title);
+                            app.replace_track(&track_id, disk_track);
+                        } else {
+                            // No conflict — merge: use disk version, apply edit, save
+                            app.replace_track(&track_id, disk_track);
+                            let track = match app.find_track_mut(&track_id) {
+                                Some(t) => t,
+                                None => return,
+                            };
+                            let _ = task_ops::edit_title(track, &task_id, title.clone());
+
+                            app.undo_stack.push(Operation::TitleEdit {
+                                track_id: track_id.clone(),
+                                task_id,
+                                old_title: original_title,
+                                new_title: title,
+                            });
+
+                            let _ = app.save_track(&track_id);
+                        }
+                    }
+                } else {
+                    // No external changes — apply edit to in-memory state and save
+                    let track = match app.find_track_mut(&track_id) {
+                        Some(t) => t,
+                        None => return,
+                    };
+                    let _ = task_ops::edit_title(track, &task_id, title.clone());
+
+                    app.undo_stack.push(Operation::TitleEdit {
+                        track_id: track_id.clone(),
+                        task_id,
+                        old_title: original_title,
+                        new_title: title,
+                    });
+
+                    let _ = app.save_track(&track_id);
+                }
             }
+            drain_pending_for_track(app, &track_id);
         }
     }
 }
@@ -821,27 +946,36 @@ fn cancel_edit(app: &mut App) {
     let saved_cursor = app.pre_edit_cursor.take();
     app.mode = Mode::Navigate;
 
-    // If we were creating a new task, remove it entirely
+    // If we were creating a new task, remove the placeholder
     if let Some(EditTarget::NewTask {
         task_id,
         track_id,
         parent_id,
     }) = target
     {
-        let track = match app.find_track_mut(&track_id) {
-            Some(t) => t,
-            None => return,
-        };
-        if let Some(pid) = &parent_id {
-            // Subtask: remove from parent
-            if let Some(parent) = task_ops::find_task_mut_in_track(track, pid) {
-                parent.subtasks.retain(|t| t.id.as_deref() != Some(&task_id));
-                parent.mark_dirty();
+        if app.track_changed_on_disk(&track_id) {
+            // File changed externally — reload from disk (discards our in-memory placeholder
+            // and picks up external changes atomically)
+            if let Some(disk_track) = app.read_track_from_disk(&track_id) {
+                app.replace_track(&track_id, disk_track);
             }
+            drain_pending_for_track(app, &track_id);
         } else {
-            remove_task_from_section(track, &task_id, SectionKind::Backlog);
+            // No external changes — remove placeholder from memory and save
+            let track = match app.find_track_mut(&track_id) {
+                Some(t) => t,
+                None => return,
+            };
+            if let Some(pid) = &parent_id {
+                if let Some(parent) = task_ops::find_task_mut_in_track(track, pid) {
+                    parent.subtasks.retain(|t| t.id.as_deref() != Some(&task_id));
+                    parent.mark_dirty();
+                }
+            } else {
+                remove_task_from_section(track, &task_id, SectionKind::Backlog);
+            }
+            let _ = app.save_track(&track_id);
         }
-        let _ = app.save_track(&track_id);
 
         // Restore cursor to pre-edit position
         if let Some(cursor) = saved_cursor {
@@ -1035,28 +1169,39 @@ fn handle_move(app: &mut App, key: KeyEvent) {
                         task_id,
                         original_index,
                     } => {
-                        let track = match app.find_track_mut(&track_id) {
-                            Some(t) => t,
-                            None => {
-                                app.mode = Mode::Navigate;
-                                return;
+                        if app.track_changed_on_disk(&track_id) {
+                            // File changed externally — reload from disk instead of
+                            // restoring stale in-memory state
+                            if let Some(disk_track) = app.read_track_from_disk(&track_id) {
+                                app.replace_track(&track_id, disk_track);
                             }
-                        };
-                        let backlog = match track.section_tasks_mut(SectionKind::Backlog) {
-                            Some(t) => t,
-                            None => {
-                                app.mode = Mode::Navigate;
-                                return;
+                            drain_pending_for_track(app, &track_id);
+                        } else {
+                            let track = match app.find_track_mut(&track_id) {
+                                Some(t) => t,
+                                None => {
+                                    app.mode = Mode::Navigate;
+                                    return;
+                                }
+                            };
+                            let backlog =
+                                match track.section_tasks_mut(SectionKind::Backlog) {
+                                    Some(t) => t,
+                                    None => {
+                                        app.mode = Mode::Navigate;
+                                        return;
+                                    }
+                                };
+                            if let Some(cur_idx) = backlog
+                                .iter()
+                                .position(|t| t.id.as_deref() == Some(&task_id))
+                            {
+                                let task = backlog.remove(cur_idx);
+                                let restore_idx = original_index.min(backlog.len());
+                                backlog.insert(restore_idx, task);
                             }
-                        };
-                        if let Some(cur_idx) =
-                            backlog.iter().position(|t| t.id.as_deref() == Some(&task_id))
-                        {
-                            let task = backlog.remove(cur_idx);
-                            let restore_idx = original_index.min(backlog.len());
-                            backlog.insert(restore_idx, task);
+                            let _ = app.save_track(&track_id);
                         }
-                        let _ = app.save_track(&track_id);
                     }
                     MoveState::Track {
                         track_id,
@@ -1155,6 +1300,24 @@ fn move_task_in_list(app: &mut App, direction: i32) {
         _ => return,
     };
 
+    // Check for external changes via mtime
+    if app.track_changed_on_disk(&track_id)
+        && let Some(disk_track) = app.read_track_from_disk(&track_id)
+    {
+        if task_ops::find_task_in_track(&disk_track, &task_id).is_none() {
+            // Task deleted externally — abort move mode, show conflict
+            app.conflict_text = Some(format!("Task {} was deleted externally", task_id));
+            app.mode = Mode::Navigate;
+            app.move_state = None;
+            app.replace_track(&track_id, disk_track);
+            drain_pending_for_track(app, &track_id);
+            return;
+        }
+        // Replace in-memory with disk version, then continue with move
+        app.replace_track(&track_id, disk_track);
+        drain_pending_for_track(app, &track_id);
+    }
+
     let track = match app.find_track_mut(&track_id) {
         Some(t) => t,
         None => return,
@@ -1190,6 +1353,22 @@ fn move_task_to_boundary(app: &mut App, to_top: bool) {
         }) => (track_id.clone(), task_id.clone()),
         _ => return,
     };
+
+    // Check for external changes via mtime
+    if app.track_changed_on_disk(&track_id)
+        && let Some(disk_track) = app.read_track_from_disk(&track_id)
+    {
+        if task_ops::find_task_in_track(&disk_track, &task_id).is_none() {
+            app.conflict_text = Some(format!("Task {} was deleted externally", task_id));
+            app.mode = Mode::Navigate;
+            app.move_state = None;
+            app.replace_track(&track_id, disk_track);
+            drain_pending_for_track(app, &track_id);
+            return;
+        }
+        app.replace_track(&track_id, disk_track);
+        drain_pending_for_track(app, &track_id);
+    }
 
     let pos = if to_top {
         InsertPosition::Top
