@@ -128,9 +128,9 @@ fn build_columns(view: &View) -> (Vec<HelpEntry>, Vec<HelpEntry>) {
 fn build_track_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
     let left = vec![
         HelpEntry::Header("Navigation".into()),
-        HelpEntry::Binding("\u{2191}\u{2193}/jk".into(), "Move up/down".into()),
-        HelpEntry::Binding("\u{2190}/h".into(), "Collapse / parent".into()),
-        HelpEntry::Binding("\u{2192}/l".into(), "Expand / child".into()),
+        HelpEntry::Binding("\u{25B2}\u{25BC}/jk".into(), "Move up/down".into()),
+        HelpEntry::Binding("\u{25C0}/h".into(), "Collapse / parent".into()),
+        HelpEntry::Binding("\u{25B6}/l".into(), "Expand / child".into()),
         HelpEntry::Binding("g/G".into(), "Top / bottom".into()),
         HelpEntry::Binding("Esc".into(), "Back / close".into()),
         HelpEntry::Blank,
@@ -172,7 +172,7 @@ fn build_track_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
 fn build_detail_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
     let left = vec![
         HelpEntry::Header("Navigation".into()),
-        HelpEntry::Binding("\u{2191}\u{2193}/jk".into(), "Move between regions".into()),
+        HelpEntry::Binding("\u{25B2}\u{25BC}/jk".into(), "Move between regions".into()),
         HelpEntry::Binding("Tab".into(), "Next editable region".into()),
         HelpEntry::Binding("S-Tab".into(), "Prev editable region".into()),
         HelpEntry::Binding("g/G".into(), "Top / bottom".into()),
@@ -195,7 +195,7 @@ fn build_detail_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
 fn build_tracks_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
     let left = vec![
         HelpEntry::Header("Navigation".into()),
-        HelpEntry::Binding("\u{2191}\u{2193}/jk".into(), "Move cursor".into()),
+        HelpEntry::Binding("\u{25B2}\u{25BC}/jk".into(), "Move cursor".into()),
         HelpEntry::Binding("g/G".into(), "Top / bottom".into()),
         HelpEntry::Binding("1-9".into(), "Switch to track N".into()),
         HelpEntry::Binding("m".into(), "Reorder track".into()),
@@ -216,7 +216,7 @@ fn build_tracks_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
 fn build_inbox_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
     let left = vec![
         HelpEntry::Header("Navigation".into()),
-        HelpEntry::Binding("\u{2191}\u{2193}/jk".into(), "Move cursor".into()),
+        HelpEntry::Binding("\u{25B2}\u{25BC}/jk".into(), "Move cursor".into()),
         HelpEntry::Binding("g/G".into(), "Top / bottom".into()),
         HelpEntry::Binding("/".into(), "Search inbox".into()),
         HelpEntry::Blank,
@@ -247,7 +247,7 @@ fn build_inbox_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
 fn build_recent_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
     let left = vec![
         HelpEntry::Header("Navigation".into()),
-        HelpEntry::Binding("\u{2191}\u{2193}/jk".into(), "Move cursor".into()),
+        HelpEntry::Binding("\u{25B2}\u{25BC}/jk".into(), "Move cursor".into()),
         HelpEntry::Binding("g/G".into(), "Top / bottom".into()),
         HelpEntry::Binding("/".into(), "Search".into()),
         HelpEntry::Blank,

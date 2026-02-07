@@ -952,7 +952,7 @@ fn set_cc_focus_current(app: &mut App) {
 
     save_config(app);
     app.status_message = match &app.project.config.agent.cc_focus {
-        Some(id) => Some(format!("cc-focus \u{2192} {}", id)),
+        Some(id) => Some(format!("cc-focus \u{25B6} {}", id)),
         None => Some("cc-focus cleared".to_string()),
     };
 }

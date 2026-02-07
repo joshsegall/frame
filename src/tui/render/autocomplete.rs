@@ -37,7 +37,7 @@ pub fn render_autocomplete(frame: &mut Frame, app: &App, content_area: Rect) {
     let count = ac.filtered.len().min(MAX_VISIBLE);
 
     // Width = widest entry across ALL filtered entries + chrome (borders + prefix + padding)
-    // Chrome: 1 (left border) + 3 (prefix " ▸ ") + 1 (right padding) + 1 (right border) = 6
+    // Chrome: 1 (left border) + 3 (prefix " ▶ ") + 1 (right padding) + 1 (right border) = 6
     let max_entry_width = ac
         .filtered
         .iter()
@@ -93,7 +93,7 @@ pub fn render_autocomplete(frame: &mut Frame, app: &App, content_area: Rect) {
             Style::default().fg(text_color).bg(bg)
         };
 
-        let prefix = if is_selected { " \u{25B8} " } else { "   " };
+        let prefix = if is_selected { " \u{25B6} " } else { "   " };
         let label = format!("{:<width$}", entry, width = (popup_w as usize).saturating_sub(5));
 
         lines.push(Line::from(vec![

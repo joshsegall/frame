@@ -203,10 +203,10 @@ fn render_task_line<'a>(
         // Top-level: [expand][state] ID Title  tags
         let expand_char = if info.has_children {
             if info.is_expanded {
-                "\u{25BE}"
+                "\u{25BC}"
             } else {
-                "\u{25B8}"
-            } // ▾ / ▸
+                "\u{25B6}"
+            } // ▼ / ▶
         } else {
             " "
         };
@@ -233,9 +233,9 @@ fn render_task_line<'a>(
         // Expand indicator for subtasks with children
         if info.has_children {
             let expand_char = if info.is_expanded {
-                "\u{25BE}"
+                "\u{25BC}"
             } else {
-                "\u{25B8}"
+                "\u{25B6}"
             };
             spans.push(Span::styled(expand_char, dim_style));
         }

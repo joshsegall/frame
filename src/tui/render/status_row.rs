@@ -73,7 +73,7 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
                     .bg(bg)
                     .add_modifier(Modifier::BOLD),
             );
-            let hint = "\u{2191}\u{2193} move  Enter \u{2713}  Esc \u{2717}";
+            let hint = "\u{25B2}\u{25BC} move  Enter \u{2713}  Esc \u{2717}";
             let mut spans = vec![Span::styled(" ", Style::default().bg(bg)), mode_label];
             build_mode_hint(&mut spans, hint, width, bg, app.theme.text_bright);
             Line::from(spans)

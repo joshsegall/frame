@@ -17,16 +17,27 @@ pub fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
         ])
         .split(area);
 
-    render_tabs(frame, app, chunks[0]);
-    render_separator(frame, app, chunks[1]);
+    let sep_cols = render_tabs(frame, app, chunks[0]);
+    render_separator(frame, app, chunks[1], &sep_cols);
 }
 
-fn render_tabs(frame: &mut Frame, app: &App, area: Rect) {
+/// Render tabs and return the column positions of each separator character.
+fn render_tabs(frame: &mut Frame, app: &App, area: Rect) -> Vec<usize> {
     let mut spans: Vec<Span> = Vec::new();
+    let mut sep_cols: Vec<usize> = Vec::new();
     let sep = Span::styled(
         "\u{2502}",
         Style::default().fg(app.theme.dim).bg(app.theme.background),
     );
+
+    // Leading icon
+    let bg_style = Style::default().bg(app.theme.background);
+    spans.push(Span::styled(" ", bg_style));
+    spans.push(Span::styled(
+        "\u{25B6}",
+        Style::default().fg(app.theme.purple).bg(app.theme.background),
+    ));
+    spans.push(Span::styled(" ", bg_style));
 
     // Active track tabs
     let cc_focus = app.project.config.agent.cc_focus.as_deref();
@@ -53,38 +64,59 @@ fn render_tabs(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             spans.push(Span::styled(format!(" {} ", name), style));
         }
+        sep_cols.push(spans.iter().map(|s| s.content.chars().count()).sum());
         spans.push(sep.clone());
     }
 
-    // Tracks view tab (▸)
+    // Tracks view tab (▶)
     let is_tracks = app.view == View::Tracks;
-    spans.push(Span::styled(" \u{25B8} ", tab_style(app, is_tracks)));
+    spans.push(Span::styled(" \u{25B6} ", tab_style(app, is_tracks)));
+    sep_cols.push(spans.iter().map(|s| s.content.chars().count()).sum());
     spans.push(sep.clone());
 
-    // Inbox tab with count (🔥N)
+    // Inbox tab with count (*N)
     let inbox_count = app.inbox_count();
     let is_inbox = app.view == View::Inbox;
-    let inbox_label = if inbox_count > 0 {
-        format!(" \u{1F525}{} ", inbox_count)
+    let tab_bg = if is_inbox { app.theme.selection_bg } else { app.theme.background };
+    let style = tab_style(app, is_inbox);
+    spans.push(Span::styled(" ", style));
+    spans.push(Span::styled(
+        "*",
+        Style::default()
+            .fg(app.theme.purple)
+            .bg(tab_bg),
+    ));
+    if inbox_count > 0 {
+        spans.push(Span::styled(format!("{} ", inbox_count), style));
     } else {
-        " \u{1F525} ".to_string()
-    };
-    spans.push(Span::styled(inbox_label, tab_style(app, is_inbox)));
+        spans.push(Span::styled(" ", style));
+    }
+    sep_cols.push(spans.iter().map(|s| s.content.chars().count()).sum());
     spans.push(sep.clone());
 
     // Recent tab (✓)
     let is_recent = app.view == View::Recent;
     spans.push(Span::styled(" \u{2713} ", tab_style(app, is_recent)));
+    sep_cols.push(spans.iter().map(|s| s.content.chars().count()).sum());
     spans.push(sep.clone());
 
     let line = Line::from(spans);
     let tabs = Paragraph::new(line).style(Style::default().bg(app.theme.background));
     frame.render_widget(tabs, area);
+    sep_cols
 }
 
-fn render_separator(frame: &mut Frame, app: &App, area: Rect) {
-    let separator = "\u{2500}".repeat(area.width as usize);
-    let sep_widget = Paragraph::new(separator)
+fn render_separator(frame: &mut Frame, app: &App, area: Rect, sep_cols: &[usize]) {
+    let width = area.width as usize;
+    let mut line: String = String::with_capacity(width * 3);
+    for col in 0..width {
+        if sep_cols.contains(&col) {
+            line.push('\u{2534}'); // ┴
+        } else {
+            line.push('\u{2500}'); // ─
+        }
+    }
+    let sep_widget = Paragraph::new(line)
         .style(Style::default().fg(app.theme.dim).bg(app.theme.background));
     frame.render_widget(sep_widget, area);
 }
