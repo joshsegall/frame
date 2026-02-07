@@ -825,13 +825,15 @@ enum StateAction {
     ToggleParked,
 }
 
-/// Apply a state change to the task under the cursor (track view only).
+/// Apply a state change to the task under the cursor.
 fn task_state_action(app: &mut App, action: StateAction) {
-    let info = match app.cursor_task_id() {
-        Some(info) => info,
-        None => return,
+    let (track_id, task_id) = if let View::Detail { track_id, task_id } = &app.view {
+        (track_id.clone(), task_id.clone())
+    } else if let Some((track_id, task_id, _section)) = app.cursor_task_id() {
+        (track_id, task_id)
+    } else {
+        return;
     };
-    let (track_id, task_id, _section) = info;
 
     let track = match app.find_track_mut(&track_id) {
         Some(t) => t,
