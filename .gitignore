@@ -1,6 +1,7 @@
 .DS_Store
 target/
 build/
+frame.txt
 
 # test directory
 frame/
