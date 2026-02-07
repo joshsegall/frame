@@ -1,3 +1,6 @@
+mod init;
+pub use init::cmd_init;
+
 use std::collections::HashSet;
 
 use regex::Regex;
@@ -26,6 +29,9 @@ pub fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Some(cmd) => match cmd {
+            // Init is handled in main.rs before project discovery
+            Commands::Init(args) => cmd_init(args),
+
             // Read commands
             Commands::List(args) => cmd_list(args, json),
             Commands::Show(args) => cmd_show(args, json),

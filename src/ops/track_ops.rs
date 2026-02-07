@@ -50,9 +50,14 @@ pub fn new_track(
     let content = format!("# {}\n\n## Backlog\n\n## Done\n", name);
     fs::write(&full_path, &content).map_err(ProjectError::IoError)?;
 
-    // Update config
+    // Generate prefix and update config
+    let existing_prefixes: Vec<String> = config.ids.prefixes.values().cloned().collect();
+    let prefix = generate_prefix(track_id, &existing_prefixes);
+
     config_io::add_track_to_config(doc, &track_config);
+    config_io::set_prefix(doc, track_id, &prefix);
     config.tracks.push(track_config);
+    config.ids.prefixes.insert(track_id.to_string(), prefix);
 
     Ok(crate::parse::parse_track(&content))
 }
@@ -199,6 +204,51 @@ pub fn set_cc_focus(
     config.agent.cc_focus = Some(track_id.to_string());
     config_io::set_cc_focus(doc, track_id);
     Ok(())
+}
+
+/// Generate an uppercase prefix for a track ID.
+///
+/// Rules:
+/// 1. Take the last hyphen-separated segment of the track ID
+/// 2. Uppercase the first 3 characters
+/// 3. If the segment is shorter than 3 chars, use what's available
+/// 4. If the result collides with an existing prefix, prepend characters
+///    from earlier segments until unique
+pub fn generate_prefix(track_id: &str, existing: &[String]) -> String {
+    let segments: Vec<&str> = track_id.split('-').collect();
+    let last = segments.last().unwrap_or(&track_id);
+    let base: String = last.chars().take(3).collect::<String>().to_uppercase();
+
+    if !existing.contains(&base) {
+        return base;
+    }
+
+    // Collision — prepend chars from earlier segments to disambiguate.
+    // Build a pool of chars from all segments except the last, in order.
+    let earlier: String = segments[..segments.len().saturating_sub(1)]
+        .iter()
+        .flat_map(|s| s.chars())
+        .collect();
+
+    for i in 1..=earlier.len() {
+        let prefix_chars: String = earlier[..i].chars().collect();
+        let candidate: String = format!("{}{}", prefix_chars, last)
+            .chars()
+            .take(3)
+            .collect::<String>()
+            .to_uppercase();
+        if !existing.contains(&candidate) {
+            return candidate;
+        }
+    }
+
+    // Fallback: use full track_id chars (shouldn't happen in practice)
+    track_id
+        .replace('-', "")
+        .chars()
+        .take(3)
+        .collect::<String>()
+        .to_uppercase()
 }
 
 /// Get all tasks from a track (backlog + parked), for counting/stats.
@@ -355,6 +405,67 @@ file = "tracks/old.md"
             .map(|t| t.id.as_str())
             .collect();
         assert_eq!(active, vec!["side", "main"]);
+    }
+
+    #[test]
+    fn test_generate_prefix_basic() {
+        let existing = vec![];
+        assert_eq!(generate_prefix("effects", &existing), "EFF");
+        assert_eq!(generate_prefix("core", &existing), "COR");
+        assert_eq!(generate_prefix("modules", &existing), "MOD");
+    }
+
+    #[test]
+    fn test_generate_prefix_hyphenated() {
+        let existing = vec![];
+        assert_eq!(generate_prefix("compiler-infra", &existing), "INF");
+        assert_eq!(generate_prefix("unique-types", &existing), "TYP");
+        assert_eq!(generate_prefix("error-handling", &existing), "HAN");
+    }
+
+    #[test]
+    fn test_generate_prefix_short_segment() {
+        let existing = vec![];
+        assert_eq!(generate_prefix("ui", &existing), "UI");
+    }
+
+    #[test]
+    fn test_generate_prefix_collision() {
+        // type-inference → TYP, then unique-types would also be TYP
+        let existing = vec!["TYP".to_string()];
+        let result = generate_prefix("unique-types", &existing);
+        assert_eq!(result, "UTY");
+        assert_ne!(result, "TYP");
+    }
+
+    #[test]
+    fn test_generate_prefix_no_collision_different_tracks() {
+        let existing = vec!["EFF".to_string()];
+        assert_eq!(generate_prefix("core", &existing), "COR");
+    }
+
+    #[test]
+    fn test_generate_prefix_all_table_cases() {
+        // Verify all cases from the spec table
+        let mut existing = vec![];
+        let cases = vec![
+            ("effects", "EFF"),
+            ("compiler-infra", "INF"),
+            ("unique-types", "TYP"),
+            ("core", "COR"),
+            ("ui", "UI"),
+            ("modules", "MOD"),
+            ("error-handling", "HAN"),
+        ];
+        for (id, expected) in cases {
+            let result = generate_prefix(id, &existing);
+            assert_eq!(
+                result, expected,
+                "prefix for '{}' should be '{}'",
+                id, expected
+            );
+            existing.push(result);
+        }
     }
 
     #[test]

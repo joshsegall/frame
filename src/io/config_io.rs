@@ -55,6 +55,18 @@ pub fn add_track_to_config(doc: &mut toml_edit::DocumentMut, track: &TrackConfig
     }
 }
 
+/// Set an ID prefix for a track in the config document
+pub fn set_prefix(doc: &mut toml_edit::DocumentMut, track_id: &str, prefix: &str) {
+    if !doc.contains_key("ids") {
+        doc["ids"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let ids = doc["ids"].as_table_mut().unwrap();
+    if !ids.contains_key("prefixes") {
+        ids["prefixes"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    ids["prefixes"][track_id] = toml_edit::value(prefix);
+}
+
 /// Update a track's state in the config document
 pub fn update_track_state(doc: &mut toml_edit::DocumentMut, track_id: &str, new_state: &str) {
     if let Some(tracks) = doc["tracks"].as_array_of_tables_mut() {

@@ -13,6 +13,8 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Initialize a new Frame project in the current directory
+    Init(InitArgs),
     /// List tasks in a track
     List(ListArgs),
     /// Show task details
@@ -65,6 +67,20 @@ pub enum Commands {
     Clean(CleanArgs),
     /// Import tasks from a markdown file
     Import(ImportArgs),
+}
+
+// ---------------------------------------------------------------------------
+// Init args
+// ---------------------------------------------------------------------------
+
+#[derive(Args)]
+pub struct InitArgs {
+    /// Project name (default: inferred from directory name)
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Create an initial track: --track <id> "name" (repeatable)
+    #[arg(long, num_args = 2, value_names = ["ID", "NAME"], action = clap::ArgAction::Append)]
+    pub track: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
