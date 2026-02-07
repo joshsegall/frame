@@ -1,4 +1,4 @@
-# Frame â€” Design Specification v3.3
+# Frame Ã¢â‚¬â€ Design Specification v3.3
 
 ## Overview
 
@@ -11,7 +11,7 @@ The CLI provides programmatic access for coding agents.
 - Position in a list is priority (no priority fields)
 - Tracks organize concurrent work streams
 - The TUI is the primary human interface; the CLI is for agents
-- All writes go through `fr` â€” humans via TUI, agents via CLI
+- All writes go through `fr` Ã¢â‚¬â€ humans via TUI, agents via CLI
 - Git is the history and audit trail
 
 ---
@@ -52,7 +52,7 @@ A work stream with its own ordered backlog. Three states:
 | **shelved**  | Paused, will return to      | Tracks view           |
 | **archived** | Finished, reference only    | Tracks view (toggle)  |
 
-Active tracks are ordered â€” first is highest-priority work stream. One
+Active tracks are ordered Ã¢â‚¬â€ first is highest-priority work stream. One
 active track can be designated **cc-focus** (where CC looks for work).
 
 ### Task
@@ -75,7 +75,7 @@ Freeform labels for categorization. Conventional tags:
 | `needs-input`  | Needs human judgment to proceed          |
 
 Tags are displayed as colored text (foreground color only, no background
-pill by default â€” see UI notes).
+pill by default Ã¢â‚¬â€ see UI notes).
 
 ---
 
@@ -105,16 +105,16 @@ subtask     = INDENT task
 
 | Char | State   | Symbol | Color                 |
 |------|---------|--------|-----------------------|
-| ` `  | todo    | `â—‹`    | muted (text color)    |
-| `>`  | active  | `â—`    | highlight (pink)      |
-| `-`  | blocked | `âŠ˜`    | red                   |
-| `x`  | done    | `âœ“`    | dim                   |
-| `~`  | parked  | `â—‡`    | yellow                |
+| ` `  | todo    | `Ã¢â€”â€¹`    | muted (text color)    |
+| `>`  | active  | `Ã¢â€”Â`    | highlight (pink)      |
+| `-`  | blocked | `Ã¢Å Ëœ`    | red                   |
+| `x`  | done    | `Ã¢Å“â€œ`    | dim                   |
+| `~`  | parked  | `Ã¢â€”â€¡`    | yellow                |
 
 **Automatic metadata:**
 
-- `added:` â€” date task was created (YYYY-MM-DD), auto-set on creation
-- `resolved:` â€” date task was marked done, auto-set on state â†’ done
+- `added:` Ã¢â‚¬â€ date task was created (YYYY-MM-DD), auto-set on creation
+- `resolved:` Ã¢â‚¬â€ date task was marked done, auto-set on state Ã¢â€ â€™ done
 
 ### Examples
 
@@ -192,7 +192,7 @@ This allows multiline notes naturally:
 - Unique type inference interacts with effect handlers somehow
   #research
   Noticed this while working on EFF-014, not sure of implications
-  yet â€” could be a big deal.
+  yet Ã¢â‚¬â€ could be a big deal.
 ```
 
 Inbox items have no IDs. The first line after `-` is the title. Subsequent
@@ -201,8 +201,8 @@ indented lines (before the next blank-line-separated item) are the body
 
 ### File References
 
-- **`spec:`** â€” specification this task implements
-- **`ref:`** â€” any related file (design docs, tests, papers, links)
+- **`spec:`** Ã¢â‚¬â€ specification this task implements
+- **`ref:`** Ã¢â‚¬â€ any related file (design docs, tests, papers, links)
 
 ### Cross-track dependencies
 
@@ -369,10 +369,10 @@ tag_style = "foreground"
 
 ```
 Background:     #0C001B    (deep blue-black)
-Text:           #A09BFE    (soft purple â€” IDs, metadata, structure)
-Text bright:    #FFFFFF    (white â€” task titles, selected items)
-Highlight:      #FB4196    (hot pink â€” active state, selection, mode labels)
-Dim:            #5A5580    (muted purple â€” done items, tree lines)
+Text:           #A09BFE    (soft purple Ã¢â‚¬â€ IDs, metadata, structure)
+Text bright:    #FFFFFF    (white Ã¢â‚¬â€ task titles, selected items)
+Highlight:      #FB4196    (hot pink Ã¢â‚¬â€ active state, selection, mode labels)
+Dim:            #5A5580    (muted purple Ã¢â‚¬â€ done items, tree lines)
 Red:            #FF4444    (blocked state, bug tag)
 Yellow:         #FFD700    (parked state, needs-input tag)
 Green:          #44FF88    (ready tag)
@@ -384,7 +384,7 @@ Blue:           #4488FF    (research tag)
 **Tag rendering**: Tags use **foreground color only** by default (colored
 text, no background). This keeps the display clean and avoids visual noise.
 The `pill` style (colored background with dark text) is available as an
-option in config if preferred â€” worth prototyping both and deciding.
+option in config if preferred Ã¢â‚¬â€ worth prototyping both and deciding.
 
 ### Layout
 
@@ -395,20 +395,20 @@ Three regions:
 3. **Status row** (last row): Mode indicator + search prompt (vim-style)
 
 ```
- Effects â”‚ Unique â”‚ Infra â”‚ â–¸ â”‚ ðŸ“¥5 â”‚ âœ“ â”‚
-â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-â–¸â— EFF-014 Implement effect inference    ready
-   â”œ â—‹ .1 Add effect variables
-   â”œ â— .2 Unify effect rows              cc
-   â”” â—‹ .3 Test with nested closures
- â—‹ EFF-015 Effect handler opt pass       ready
- âŠ˜ EFF-012 Effect-aware DCE              ready
- â—‹ EFF-016 Error msgs for mismatches     ready
- â—‹ EFF-017 Research: effect composition  research
- â—‹ EFF-018 Design doc: effect aliases    design
+ Effects Ã¢â€â€š Unique Ã¢â€â€š Infra Ã¢â€â€š Ã¢â€“Â¸ Ã¢â€â€š Ã°Å¸â€œÂ¥5 Ã¢â€â€š Ã¢Å“â€œ Ã¢â€â€š
+Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+Ã¢â€“Â¸Ã¢â€”Â EFF-014 Implement effect inference    ready
+   Ã¢â€Å“ Ã¢â€”â€¹ .1 Add effect variables
+   Ã¢â€Å“ Ã¢â€”Â .2 Unify effect rows              cc
+   Ã¢â€â€ Ã¢â€”â€¹ .3 Test with nested closures
+ Ã¢â€”â€¹ EFF-015 Effect handler opt pass       ready
+ Ã¢Å Ëœ EFF-012 Effect-aware DCE              ready
+ Ã¢â€”â€¹ EFF-016 Error msgs for mismatches     ready
+ Ã¢â€”â€¹ EFF-017 Research: effect composition  research
+ Ã¢â€”â€¹ EFF-018 Design doc: effect aliases    design
 
- â”€â”€ Parked â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
- â—‡ EFF-020 Higher-order handlers         research
+ Ã¢â€â‚¬Ã¢â€â‚¬ Parked Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+ Ã¢â€”â€¡ EFF-020 Higher-order handlers         research
 
 ```
 
@@ -417,7 +417,7 @@ The last row is normally empty (no mode indicator in NAVIGATE mode).
 When a mode is active:
 
 ```
--- MOVE --                                           â†‘â†“ move  Enter âœ“  Esc âœ—
+-- MOVE --                                           Ã¢â€ â€˜Ã¢â€ â€œ move  Enter Ã¢Å“â€œ  Esc Ã¢Å“â€”
 ```
 
 ```
@@ -425,7 +425,7 @@ When a mode is active:
 ```
 
 ```
-/handler regexâ–Œ                                                n/N next/prev
+/handler regexÃ¢â€“Å’                                                n/N next/prev
 ```
 
 Mode labels are rendered in the highlight color, similar to vim's
@@ -440,24 +440,24 @@ children, but not their children).
 
 | Symbol | Meaning                     |
 |--------|-----------------------------|
-| `â–¸`    | Collapsed, has children      |
-| `â–¾`    | Expanded                     |
+| `Ã¢â€“Â¸`    | Collapsed, has children      |
+| `Ã¢â€“Â¾`    | Expanded                     |
 | (none) | Leaf node (no children)      |
 
-`â†’` or `l` expands the selected node. `â†` or `h` collapses it (or moves
+`Ã¢â€ â€™` or `l` expands the selected node. `Ã¢â€ Â` or `h` collapses it (or moves
 to parent if already collapsed). Expand/collapse state is persisted (see
 UI State Persistence below).
 
 ```
-â–¾â— EFF-014 Implement effect inference    ready
-   â”œ â—‹ .1 Add effect variables
-   â”œ â— .2 Unify effect rows              cc
-   â”” â—‹ .3 Test with nested closures
-â–¸â—‹ EFF-015 Effect handler opt pass       ready
- âŠ˜ EFF-012 Effect-aware DCE              ready
- â—‹ EFF-016 Error msgs for mismatches     ready
- â—‹ EFF-017 Research: effect composition  research
- â—‹ EFF-018 Design doc: effect aliases    design
+Ã¢â€“Â¾Ã¢â€”Â EFF-014 Implement effect inference    ready
+   Ã¢â€Å“ Ã¢â€”â€¹ .1 Add effect variables
+   Ã¢â€Å“ Ã¢â€”Â .2 Unify effect rows              cc
+   Ã¢â€â€ Ã¢â€”â€¹ .3 Test with nested closures
+Ã¢â€“Â¸Ã¢â€”â€¹ EFF-015 Effect handler opt pass       ready
+ Ã¢Å Ëœ EFF-012 Effect-aware DCE              ready
+ Ã¢â€”â€¹ EFF-016 Error msgs for mismatches     ready
+ Ã¢â€”â€¹ EFF-017 Research: effect composition  research
+ Ã¢â€”â€¹ EFF-018 Design doc: effect aliases    design
 ```
 
 ### Views
@@ -466,12 +466,12 @@ UI State Persistence below).
 Ordered backlog with collapsible hierarchy. Primary interaction view.
 
 **Inbox view** (`i`):
-The quick-capture queue. Items have no IDs and no ordering semantics â€”
+The quick-capture queue. Items have no IDs and no ordering semantics Ã¢â‚¬â€
 they're unsorted until triaged into a track.
 
 ```
- Effects â”‚ Unique â”‚ Infra â”‚ â–¸ â”‚ ðŸ“¥5 â”‚ âœ“ â”‚
-â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ Effects Ã¢â€â€š Unique Ã¢â€â€š Infra Ã¢â€â€š Ã¢â€“Â¸ Ã¢â€â€š Ã°Å¸â€œÂ¥5 Ã¢â€â€š Ã¢Å“â€œ Ã¢â€â€š
+Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
  1  Parser crashes on empty effect block         bug
     Saw this when testing with empty `handle {}`
@@ -511,7 +511,7 @@ below the title, dimmed slightly for visual hierarchy.
 | `m`     | Enter MOVE mode (reorder inbox items)        |
 | `/`     | Search within inbox                          |
 
-Standard navigation (`â†‘â†“`, `g`/`G`, `Cmd+â†‘/â†“`) works as in other views.
+Standard navigation (`Ã¢â€ â€˜Ã¢â€ â€œ`, `g`/`G`, `Cmd+Ã¢â€ â€˜/Ã¢â€ â€œ`) works as in other views.
 
 **Adding items (`a`):**
 
@@ -533,18 +533,18 @@ auto-assigned ID.
 
 1. Press `Enter` on an inbox item
 2. **Track selection**: autocomplete dropdown of active tracks appears.
-   Type to filter, `â†‘â†“` to navigate, `Enter` to select.
+   Type to filter, `Ã¢â€ â€˜Ã¢â€ â€œ` to navigate, `Enter` to select.
 3. **Position selection**: choose where in the track backlog to insert:
-   - `t` â€” top (highest priority)
-   - `b` â€” bottom (lowest priority, default)
-   - `a` â€” after a specific task (autocomplete for task ID)
+   - `t` Ã¢â‚¬â€ top (highest priority)
+   - `b` Ã¢â‚¬â€ bottom (lowest priority, default)
+   - `a` Ã¢â‚¬â€ after a specific task (autocomplete for task ID)
 4. Item is removed from inbox, added to the track with an ID and
    `added:` date. Tags carry over.
 
 `Esc` at any step cancels triage and returns to the inbox.
 
 **Bulk triage:** There is no special bulk mode. Triage items one at a
-time â€” the flow is fast enough (3 keystrokes for the common case:
+time Ã¢â‚¬â€ the flow is fast enough (3 keystrokes for the common case:
 `Enter`, select track, `Enter` for default bottom position). After
 triaging, the cursor advances to the next item automatically.
 
@@ -557,36 +557,36 @@ Manage track state, reorder, set cc-focus. Move mode (`m`) reorders
 tracks here.
 
 ```
- Effects â”‚ Unique â”‚ Infra â”‚ â–¸ â”‚ ðŸ“¥5 â”‚ âœ“ â”‚
-â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ Effects Ã¢â€â€š Unique Ã¢â€â€š Infra Ã¢â€â€š Ã¢â€“Â¸ Ã¢â€â€š Ã°Å¸â€œÂ¥5 Ã¢â€â€š Ã¢Å“â€œ Ã¢â€â€š
+Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
  Active
-  1  Effect System              3â— 1âŠ˜ 8â—‹ 2â—‡ 12âœ“
-  2  Unique Types               1â— 0âŠ˜ 5â—‹ 0â—‡  3âœ“
-  3  Compiler Infrastructure    2â— 0âŠ˜ 3â—‹ 1â—‡  8âœ“  â˜…cc
+  1  Effect System              3Ã¢â€”Â 1Ã¢Å Ëœ 8Ã¢â€”â€¹ 2Ã¢â€”â€¡ 12Ã¢Å“â€œ
+  2  Unique Types               1Ã¢â€”Â 0Ã¢Å Ëœ 5Ã¢â€”â€¹ 0Ã¢â€”â€¡  3Ã¢Å“â€œ
+  3  Compiler Infrastructure    2Ã¢â€”Â 0Ã¢Å Ëœ 3Ã¢â€”â€¹ 1Ã¢â€”â€¡  8Ã¢Å“â€œ  Ã¢Ëœâ€¦cc
 
  Shelved
-  4  Module System              0â— 1âŠ˜ 3â—‹ 0â—‡  6âœ“
+  4  Module System              0Ã¢â€”Â 1Ã¢Å Ëœ 3Ã¢â€”â€¹ 0Ã¢â€”â€¡  6Ã¢Å“â€œ
 
  Archived
-  5  Bootstrap                  0â— 0âŠ˜ 0â—‹ 0â—‡ 15âœ“
+  5  Bootstrap                  0Ã¢â€”Â 0Ã¢Å Ëœ 0Ã¢â€”â€¹ 0Ã¢â€”â€¡ 15Ã¢Å“â€œ
 ```
 
 ### Detail View
 
 `Enter` on a task opens the detail view, replacing the content area. It
-renders the task as a **structured document** â€” continuous text you navigate
+renders the task as a **structured document** Ã¢â‚¬â€ continuous text you navigate
 freely, with semantically meaningful regions.
 
 ```
- Effects â”‚ Unique â”‚ Infra â”‚ â–¸ â”‚ ðŸ“¥5 â”‚ âœ“ â”‚
-â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ Effects Ã¢â€â€š Unique Ã¢â€â€š Infra Ã¢â€â€š Ã¢â€“Â¸ Ã¢â€â€š Ã°Å¸â€œÂ¥5 Ã¢â€â€š Ã¢Å“â€œ Ã¢â€â€š
+Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
- â— EFF-014 Implement effect inference for closures
+ Ã¢â€”Â EFF-014 Implement effect inference for closures
  ready
 
  added: 2025-05-10
- dep: EFF-003 âœ“, MOD-007 â—‹
+ dep: EFF-003 Ã¢Å“â€œ, MOD-007 Ã¢â€”â€¹
  spec: doc/spec/effects.md#closure-effects
  ref: doc/design/effect-handlers-v2.md
 
@@ -606,18 +606,18 @@ freely, with semantically meaningful regions.
  ```
 
  Subtasks
-   â—‹ .1 Add effect variables to closure types
-   â— .2 Unify effect rows                        cc
-     â—‹ .2.1 Handle row polymorphism
-     â—‹ .2.2 Row simplification
-   â—‹ .3 Test with nested closures
+   Ã¢â€”â€¹ .1 Add effect variables to closure types
+   Ã¢â€”Â .2 Unify effect rows                        cc
+     Ã¢â€”â€¹ .2.1 Handle row polymorphism
+     Ã¢â€”â€¹ .2.2 Row simplification
+   Ã¢â€”â€¹ .3 Test with nested closures
 
 ```
 
 **Two modes in detail view:**
 
 **NAVIGATE mode** (default, no mode indicator):
-- `â†‘â†“` moves between regions (title, tags, dep, spec, ref, note,
+- `Ã¢â€ â€˜Ã¢â€ â€œ` moves between regions (title, tags, dep, spec, ref, note,
   subtasks)
 - `Tab` jumps to next editable region, `Shift+Tab` to previous
 - `e` or `Enter` enters EDIT mode on the current region
@@ -635,27 +635,27 @@ freely, with semantically meaningful regions.
 - `Esc` exits EDIT mode back to NAVIGATE (multiline fields)
   - For single-line fields, `Esc` cancels the edit
 - Context-appropriate autocomplete activates:
-  - `dep:` field â†’ task ID autocomplete
-  - `spec:` / `ref:` fields â†’ file path autocomplete
-  - Tags line â†’ tag autocomplete
-  - `note:` â†’ freeform text, no autocomplete
+  - `dep:` field Ã¢â€ â€™ task ID autocomplete
+  - `spec:` / `ref:` fields Ã¢â€ â€™ file path autocomplete
+  - Tags line Ã¢â€ â€™ tag autocomplete
+  - `note:` Ã¢â€ â€™ freeform text, no autocomplete
 
 For multiline fields (note), the editing area expands as needed.
 `Esc` finishes editing and returns to NAVIGATE mode. Content is saved
-on exit (not on cancel â€” there is no cancel for multiline, since you
+on exit (not on cancel Ã¢â‚¬â€ there is no cancel for multiline, since you
 can always undo).
 
 **Adding new fields from NAVIGATE mode:**
-- `@` â†’ adds a new `ref:` line (or `spec:` if none exists), enters EDIT
-- `d` â†’ focuses the `dep:` line, enters EDIT with autocomplete
-- `n` â†’ focuses the `note:` block (creates it if missing), enters EDIT
-- `#` â†’ focuses the tags line, enters EDIT with autocomplete
+- `@` Ã¢â€ â€™ adds a new `ref:` line (or `spec:` if none exists), enters EDIT
+- `d` Ã¢â€ â€™ focuses the `dep:` line, enters EDIT with autocomplete
+- `n` Ã¢â€ â€™ focuses the `note:` block (creates it if missing), enters EDIT
+- `#` Ã¢â€ â€™ focuses the tags line, enters EDIT with autocomplete
 
-These work from **anywhere** in the detail view â€” you don't navigate to
+These work from **anywhere** in the detail view Ã¢â‚¬â€ you don't navigate to
 the region first.
 
 **Dep display**: Dependencies show current state inline:
-`EFF-003 âœ“` (done), `MOD-007 â—‹` (todo), `INFRA-003 âŠ˜` (blocked).
+`EFF-003 Ã¢Å“â€œ` (done), `MOD-007 Ã¢â€”â€¹` (todo), `INFRA-003 Ã¢Å Ëœ` (blocked).
 
 ---
 
@@ -665,10 +665,10 @@ Frame uses vim-style modes, indicated in the bottom status row:
 
 | Mode       | Indicator          | How to enter       | How to exit        |
 |------------|--------------------|--------------------|--------------------|
-| NAVIGATE   | (none)             | Default            | â€”                  |
+| NAVIGATE   | (none)             | Default            | Ã¢â‚¬â€                  |
 | EDIT       | `-- EDIT --`       | `e`/`Enter` on region | `Esc` or `Enter` (single-line) |
 | MOVE       | `-- MOVE --`       | `m` on a task      | `Enter` (confirm) or `Esc` (cancel) |
-| SEARCH     | `/patternâ–Œ`        | `/`                | `Enter` (execute) or `Esc` (cancel) |
+| SEARCH     | `/patternÃ¢â€“Å’`        | `/`                | `Enter` (execute) or `Esc` (cancel) |
 
 The mode indicator is rendered in the **highlight color** in the bottom-left
 of the status row. The right side of the status row shows context-sensitive
@@ -678,11 +678,11 @@ NAVIGATE mode shows nothing in the status row (clean, like vim's normal mode).
 
 ### Mode Details
 
-**MOVE mode** â€” available in both track view (reorder tasks) and tracks
+**MOVE mode** Ã¢â‚¬â€ available in both track view (reorder tasks) and tracks
 view (reorder tracks):
 
 ```
--- MOVE --                                           â†‘â†“ move  Enter âœ“  Esc âœ—
+-- MOVE --                                           Ã¢â€ â€˜Ã¢â€ â€œ move  Enter Ã¢Å“â€œ  Esc Ã¢Å“â€”
 ```
 
 The selected item is highlighted in the highlight color. Arrow keys
@@ -690,23 +690,23 @@ physically move the item in the list. The list reflows in real time.
 `Enter` confirms the new position. `Esc` cancels and restores the
 original position.
 
-**SEARCH mode** â€” the search prompt appears in the status row (bottom of
+**SEARCH mode** Ã¢â‚¬â€ the search prompt appears in the status row (bottom of
 screen, like vim):
 
 ```
-/handlerâ–Œ                                                      n/N next/prev
+/handlerÃ¢â€“Å’                                                      n/N next/prev
 ```
 
 Type regex pattern. Matches highlight in the content area above in real
-time as you type. `Enter` executes the search â€” cursor moves to first
+time as you type. `Enter` executes the search Ã¢â‚¬â€ cursor moves to first
 match, the prompt closes, and you can use `n`/`N` to cycle through
 matches. `Esc` clears the search and returns to normal view.
 
 Search scope follows context:
-- Track view â†’ search within current track
-- Tracks view â†’ search across all tracks
-- Inbox â†’ search inbox
-- Recent â†’ search recent
+- Track view Ã¢â€ â€™ search within current track
+- Tracks view Ã¢â€ â€™ search across all tracks
+- Inbox Ã¢â€ â€™ search inbox
+- Recent Ã¢â€ â€™ search recent
 
 ---
 
@@ -729,12 +729,12 @@ Search scope follows context:
 
 | Key                    | Action                              |
 |------------------------|-------------------------------------|
-| `â†‘` / `k`             | Move cursor up                      |
-| `â†“` / `j`             | Move cursor down                    |
-| `â†` / `h`             | Collapse / go to parent             |
-| `â†’` / `l`             | Expand / go to first child          |
-| `Cmd+â†‘` / `g`         | Top of list                         |
-| `Cmd+â†“` / `G`         | Bottom of list                      |
+| `Ã¢â€ â€˜` / `k`             | Move cursor up                      |
+| `Ã¢â€ â€œ` / `j`             | Move cursor down                    |
+| `Ã¢â€ Â` / `h`             | Collapse / go to parent             |
+| `Ã¢â€ â€™` / `l`             | Expand / go to first child          |
+| `Cmd+Ã¢â€ â€˜` / `g`         | Top of list                         |
+| `Cmd+Ã¢â€ â€œ` / `G`         | Bottom of list                      |
 | `Enter`                | Open detail / drill in              |
 | `Esc`                  | Back / close / cancel               |
 
@@ -759,7 +759,7 @@ Search scope follows context:
 | `o`                    | Insert task after current           |
 | `p`                    | Push task to top of backlog         |
 | `A`                    | Add subtask to selected task        |
-| `Space`                | Cycle state: todo â†’ active â†’ done   |
+| `Space`                | Cycle state: todo Ã¢â€ â€™ active Ã¢â€ â€™ done   |
 | `x`                    | Mark done (direct)                  |
 | `b`                    | Toggle blocked                      |
 | `~`                    | Toggle parked                       |
@@ -780,7 +780,7 @@ Search scope follows context:
 
 | Key            | Action                                  |
 |----------------|-----------------------------------------|
-| `â†‘â†“`          | Move between regions                    |
+| `Ã¢â€ â€˜Ã¢â€ â€œ`          | Move between regions                    |
 | `Tab`          | Jump to next editable region            |
 | `Shift+Tab`   | Previous editable region                |
 | `e` / `Enter` | Enter EDIT mode on current region       |
@@ -798,9 +798,9 @@ single-line metadata):
 
 | Key                    | Action                              |
 |------------------------|-------------------------------------|
-| `â†` / `â†’`             | Move cursor                         |
-| `Opt+â†` / `Opt+â†’`     | Move by word                        |
-| `Cmd+â†` / `Cmd+â†’`     | Start / end of line                 |
+| `Ã¢â€ Â` / `Ã¢â€ â€™`             | Move cursor                         |
+| `Opt+Ã¢â€ Â` / `Opt+Ã¢â€ â€™`     | Move by word                        |
+| `Cmd+Ã¢â€ Â` / `Cmd+Ã¢â€ â€™`     | Start / end of line                 |
 | `Backspace`            | Delete backward                     |
 | `Opt+Backspace`        | Delete word backward                |
 | `Cmd+C/V/X`           | Copy / paste / cut                  |
@@ -816,10 +816,10 @@ Standard shift-movement selection in all text fields:
 
 | Key                          | Action                            |
 |------------------------------|-----------------------------------|
-| `Shift+←` / `Shift+→`       | Extend selection by character     |
-| `Shift+Opt+←` / `Shift+Opt+→` | Extend selection by word       |
-| `Shift+Cmd+←` / `Shift+Cmd+→` | Extend selection to start/end of line |
-| `Shift+↑` / `Shift+↓`       | Extend selection by line (multiline only) |
+| `Shift+â†` / `Shift+â†’`       | Extend selection by character     |
+| `Shift+Opt+â†` / `Shift+Opt+â†’` | Extend selection by word       |
+| `Shift+Cmd+â†` / `Shift+Cmd+â†’` | Extend selection to start/end of line |
+| `Shift+â†‘` / `Shift+â†“`       | Extend selection by line (multiline only) |
 | `Cmd+A`                      | Select all within current field   |
 
 Any non-shift movement collapses the selection to the cursor position.
@@ -831,10 +831,10 @@ clipboard. Selected text is rendered with an inverted/highlight background.
 
 | Key                    | Action                              |
 |------------------------|-------------------------------------|
-| `â†‘` / `k`             | Move item up                        |
-| `â†“` / `j`             | Move item down                      |
-| `Cmd+â†‘` / `g`         | Move to top                         |
-| `Cmd+â†“` / `G`         | Move to bottom                      |
+| `Ã¢â€ â€˜` / `k`             | Move item up                        |
+| `Ã¢â€ â€œ` / `j`             | Move item down                      |
+| `Cmd+Ã¢â€ â€˜` / `g`         | Move to top                         |
+| `Cmd+Ã¢â€ â€œ` / `G`         | Move to bottom                      |
 | `Enter`                | Confirm new position                |
 | `Esc`                  | Cancel, restore original            |
 
@@ -855,7 +855,7 @@ tracks).
 
 | Key                    | Action                              |
 |------------------------|-------------------------------------|
-| `â†‘` / `â†“`             | Navigate entries                    |
+| `Ã¢â€ â€˜` / `Ã¢â€ â€œ`             | Navigate entries                    |
 | `Enter`                | Select entry                        |
 | `Esc`                  | Cancel autocomplete                 |
 | typing                 | Filter entries                      |
@@ -1046,11 +1046,16 @@ when externally-modified files are detected (via mtime).
 3. **Date assignment**: add `added:` where missing (uses current date)
 4. **Done archiving**: move completed tasks past threshold to per-track
    archive
-5. **Dependency validation**: flag dangling references
-6. **File reference validation**: flag broken spec/ref paths
-7. **State suggestions**: all subtasks done â†’ suggest parent done;
-   dep not done â†’ suggest blocked
-8. **ACTIVE.md generation**: read-only convenience file for CC orientation
+5. **Duplicate ID resolution**: if two or more tasks share the same ID
+   (e.g., after a bad merge), the first occurrence by track order then
+   position keeps its ID; subsequent duplicates are reassigned new IDs
+   via the standard `max + 1` rule. Dependencies pointing to the
+   reassigned ID are updated across all tracks. Reported as a warning.
+6. **Dependency validation**: flag dangling references
+7. **File reference validation**: flag broken spec/ref paths
+8. **State suggestions**: all subtasks done Ã¢â€ â€™ suggest parent done;
+   dep not done Ã¢â€ â€™ suggest blocked
+9. **ACTIVE.md generation**: read-only convenience file for CC orientation
 
 ---
 
@@ -1080,10 +1085,11 @@ when externally-modified files are detected (via mtime).
 | Move mode | Available in track + tracks views | Consistent reordering experience |
 | UI state | Persisted to `.state.json` (gitignored) | Resume exactly where you left off |
 | Undo | Session-only, unlimited | Git for cross-session undo |
-| State transitions | Space cycles todo→active→done; b/~ toggle | Simple, predictable |
+| State transitions | Space cycles todoâ†’activeâ†’done; b/~ toggle | Simple, predictable |
 | Metadata format | Comma-separated on one line | Parser accepts both; canonical output is clean |
 | `found:` metadata | Removed; use note field instead | Simpler grammar; note is flexible enough |
 | Task deletion | No hard delete; `#wontdo`/`#duplicate` + done | Preserves audit trail via git |
 | Text selection | Shift+movement in EDIT mode | Standard editor behavior |
 | Edit conflicts | Popup with orphaned text, copy to clipboard | Never silently discard user input |
 | Nesting limit | 3 levels max | Keeps parser/TUI manageable |
+| Duplicate IDs | First occurrence keeps ID; duplicates reassigned by `fr clean` | Auto-recovery from bad merges; deps updated across all tracks |

@@ -1,29 +1,28 @@
-# Frame — Implementation Plan
+# Frame â€” Implementation Plan
 
-This document covers the implementation architecture, project structure,
-and phased task breakdown for Frame. The design specification
-(`frame-design-v3_3.md`) is the authoritative reference for all behavior,
-format, and interaction details.
+## Resolved Design Gaps
+
+Before the task breakdown, here are the resolutions for every open design
+question identified in the spec review. These decisions are binding for
+implementation.
 
 ---
 
-## Implementation Architecture
-
-### Language & Stack
+### 1. Language & Stack
 
 **Rust.** Single binary, crossterm + ratatui for TUI, clap for CLI, toml
 crate for config, regex crate for search.
 
 Key dependencies:
-- `ratatui` + `crossterm` — TUI rendering and terminal backend
-- `clap` (derive) — CLI argument parsing
-- `toml` / `toml_edit` — config read/write (toml_edit for round-tripping)
-- `serde` + `serde_json` — JSON output, state persistence
-- `regex` — search
-- `notify` — file watching (for detecting external changes)
-- `chrono` — dates
+- `ratatui` + `crossterm` â€” TUI rendering and terminal backend
+- `clap` (derive) â€” CLI argument parsing
+- `toml` / `toml_edit` â€” config read/write (toml_edit for round-tripping)
+- `serde` + `serde_json` â€” JSON output, state persistence
+- `regex` â€” search
+- `notify` â€” file watching (for detecting external changes)
+- `chrono` â€” dates
 
-### Markdown Round-Tripping Strategy
+### 2. Markdown Round-Tripping Strategy
 
 This is the hardest technical problem in the project. The approach:
 
@@ -41,8 +40,8 @@ Concretely:
    `- [` prefix at the appropriate indent level. Build a tree of `Task`
    nodes, each carrying:
    - Parsed fields (state, id, title, tags, metadata, subtasks)
-   - `source_range: Range<usize>` — line range in the original file
-   - `dirty: bool` — whether this node has been modified
+   - `source_range: Range<usize>` â€” line range in the original file
+   - `dirty: bool` â€” whether this node has been modified
 
 2. **Serialize phase**: Walk the tree. For each node:
    - If `dirty == false`: emit original source lines verbatim
@@ -67,18 +66,18 @@ state (``` open/close) so it doesn't misinterpret lines inside code blocks
 as tasks. The raw lines within a note block (including code fences) are
 preserved as-is when the note hasn't been edited.
 
-**Test strategy**: A corpus of test files with various edge cases. Parse →
-serialize → diff against original. Any diff on unmodified nodes is a bug.
+**Test strategy**: A corpus of test files with various edge cases. Parse â†’
+serialize â†’ diff against original. Any diff on unmodified nodes is a bug.
 
-### Concurrency & File Coordination
+### 3. Concurrency & File Coordination
 
-**Architecture**: The TUI and CLI share no runtime — both are just
+**Architecture**: The TUI and CLI share no runtime â€” both are just
 processes that read/write the same markdown files. Coordination is at the
 filesystem level.
 
 **Approach: File-level advisory locking + mtime-based reload.**
 
-1. **Lock file**: `frame/.lock` — acquired (via `flock` / `fcntl`) before
+1. **Lock file**: `frame/.lock` â€” acquired (via `flock` / `fcntl`) before
    any write operation. Both TUI and CLI acquire the lock, perform the
    read-modify-write cycle, then release. This serializes all writes.
 
@@ -92,7 +91,7 @@ filesystem level.
      (see undo design below)
 
 3. **No operation log needed**: The TUI doesn't need to know *what*
-   changed semantically — it just diffs the before/after task trees. This
+   changed semantically â€” it just diffs the before/after task trees. This
    is simpler and more robust than maintaining a separate change log.
 
 4. **Conflict edge case**: If the TUI has unsaved EDIT mode changes in a
@@ -101,13 +100,13 @@ filesystem level.
    - Then apply the reload, which usually merges cleanly (user edited
      task A, agent modified task B)
    - If the same task was modified externally, the user's in-progress
-     edit text is shown in a **conflict popup** — a small overlay
+     edit text is shown in a **conflict popup** â€” a small overlay
      displaying the orphaned text with the option to copy all or
      select portions to the clipboard. The user can then re-enter
      EDIT mode and paste their work back in on top of the externally
      modified version. No user input is ever silently discarded.
 
-### Undo Model
+### 4. Undo Model
 
 **Two-level undo:**
 
@@ -116,10 +115,10 @@ filesystem level.
   "Move EFF-015 from position 2 to position 5" is one step. "Add task"
   is one step.
 
-- **EDIT mode**: Standard text undo — character/word granularity, as
+- **EDIT mode**: Standard text undo â€” character/word granularity, as
   expected in a text editor. The entire edit session (from entering EDIT
   to exiting) is also a single operation-level undo step in NAVIGATE mode.
-  So: enter EDIT, type 50 characters, exit → in NAVIGATE mode, one `u`
+  So: enter EDIT, type 50 characters, exit â†’ in NAVIGATE mode, one `u`
   undoes the entire edit. Inside EDIT mode, Cmd+Z undoes character by
   character.
 
@@ -132,12 +131,206 @@ clears the redo stack.
 
 **Sync markers**: When an external file change is detected and reloaded,
 a sync marker is pushed onto the undo stack. Undo cannot cross sync
-markers — if you press `u` and the top of the stack is a sync marker,
+markers â€” if you press `u` and the top of the stack is a sync marker,
 nothing happens (or it beeps). This prevents the TUI from trying to undo
 an agent's changes. Sync markers also clear the redo stack.
 
 **Session-only**: The undo stack is not persisted. On TUI restart, the
 stack is empty. Git serves as cross-session undo.
+
+### 5. Inbox Triage
+
+Resolved in v3.2 spec. The triage flow is:
+1. `Enter` on inbox item
+2. Track selection autocomplete
+3. Position selection (t/b/a)
+4. Item promoted to task with auto-assigned ID
+
+One addition for CLI: `fr triage <inbox-index> --track <track> [--top|--bottom|--after <id>]`
+
+### 6. CLI Title Editing
+
+Add: `fr title <id> "new title"`
+
+This sets the title text, preserving ID, state, and tags.
+
+### 7. ID Numbering Scheme
+
+**Auto-assignment rules:**
+
+- **Top-level tasks**: `fr clean` (or any write operation that creates a
+  task) scans the track for the highest existing number with that track's
+  prefix, then assigns `max + 1`. E.g., if the highest is `EFF-018`, the
+  next is `EFF-019`.
+
+- **Subtask IDs**: Always `parent_number.N` where N is the sequential
+  child index (1-based). E.g., children of `EFF-014` are `EFF-014.1`,
+  `EFF-014.2`, `EFF-014.3`. Children of `EFF-014.2` are `EFF-014.2.1`,
+  `EFF-014.2.2`.
+
+- **Renumbering on move**: When a subtask is promoted to a top-level task
+  (e.g., moved out of its parent), it gets a new top-level ID. When a
+  top-level task becomes a subtask, it gets a new dotted ID. Children are
+  renumbered recursively.
+
+- **Cross-track move**: Task gets a new ID with the target track's prefix.
+  The old ID is not reused. Deps pointing to the old ID are updated
+  across all tracks.
+
+- **Numbering gaps are fine**: If EFF-005 is deleted/archived and EFF-006
+  exists, the next new task is still `max + 1`, not gap-filling.
+
+- **Duplicate ID resolution**: If two tasks share the same ID (e.g., after
+  a merge conflict), `fr clean` resolves it: the first occurrence by
+  track order (as listed in `project.toml`) then by position within the
+  track keeps the ID. Subsequent duplicates are reassigned via `max + 1`.
+  All dep references to the reassigned ID are updated across all tracks.
+  A warning is emitted listing the reassignments.
+
+### 8. State Transition Rules
+
+```
+        â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+        â”‚                                      â”‚
+        â–¼                                      â”‚
+  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”  Space   â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”  Space   â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+  â”‚   todo   â”‚ â”€â”€â”€â”€â”€â”€â”€â”€ â”‚  active  â”‚ â”€â”€â”€â”€â”€â”€â”€â”€ â”‚   done   â”‚
+  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜          â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜          â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+    â–²  â–²                  â”‚      â”‚              â”‚
+    â”‚  â”‚     b            â”‚  b   â”‚  ~           â”‚ Space
+    â”‚  â”‚  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜      â”‚              â”‚ (wraps)
+    â”‚  â”‚  â–¼                      â–¼              â”‚
+    â”‚  â”‚ â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”     â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”         â”‚
+    â”‚  â””â”€â”‚ blocked  â”‚     â”‚  parked  â”‚         â”‚
+    â”‚    â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜     â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜         â”‚
+    â”‚                                          â”‚
+    â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+```
+
+- **Space**: Cycles `todo â†’ active â†’ done â†’ todo`
+- **b**: Sets blocked from any state. If already blocked, sets todo.
+- **~**: Sets parked from any state. If already parked, sets todo.
+- **x**: Sets done from any state (direct shortcut).
+
+### 9. Metadata Canonicalization
+
+**Comma-separated on a single line.** The parser accepts both comma-separated
+and multiple lines, but the serializer always emits:
+
+```markdown
+  - dep: EFF-003, INFRA-007
+  - ref: doc/design/effects.md, doc/spec/effects.md
+```
+
+Multiple `dep:` or `ref:` lines on input are merged into one comma-separated
+line on the next write.
+
+### 10. `fr ready` Semantics
+
+`fr ready` returns tasks that are **actionable now**:
+
+- State is `todo` or `active`
+- AND (has no deps, OR all deps are in state `done`)
+- Scoped to active tracks by default
+- `--track` scopes to a specific track
+- `--cc` filters to tasks tagged `cc` on the cc-focus track
+- `--tag` adds an additional tag filter
+
+Subtasks are included in the output (nested under their parent) but a
+parent is not excluded just because some subtasks are incomplete â€” the
+parent's own deps determine its readiness. A blocked subtask doesn't
+block the parent unless the parent explicitly has a dep on that subtask's
+ID.
+
+### 11. Task Deletion
+
+No hard delete. Use conventional tags:
+
+- `#duplicate` â€” mark as duplicate, then `x` to mark done
+- `#wontdo` â€” decided not to do this, then `x` to mark done
+
+These get archived with the done tasks. The done+archived flow is the
+only removal mechanism. This preserves audit trail via git.
+
+### 12. `found:` Metadata â†’ Note Convention
+
+`found:` is removed as a first-class metadata key. Instead, use the note
+field:
+
+```markdown
+  - note:
+    Found while working on EFF-002.
+    The desugaring needs to handle three cases...
+```
+
+The `--found-from <id>` CLI flag still exists for convenience â€” it adds a
+note line like "Found while working on <id>." automatically.
+
+---
+
+## Additional Resolutions
+
+### ACTIVE.md
+
+Generated by `fr clean`. Contains all non-done, non-parked tasks across
+all active tracks, grouped by track, in priority order. Read-only
+convenience file for agent orientation. Format:
+
+```markdown
+# Active Tasks
+
+## Effect System (3 active, 1 blocked, 3 todo)
+
+- [>] EFF-014 Implement effect inference for closures #ready
+  - dep: EFF-003 âœ“
+- [ ] EFF-015 Effect handler optimization pass #ready
+  - dep: EFF-014
+...
+
+## Compiler Infrastructure (2 active, 3 todo)
+...
+```
+
+### Archive Format
+
+Flat list of done tasks, reverse-chronological, with resolved dates.
+No section headers. Just the tasks:
+
+```markdown
+- [x] `EFF-003` Implement effect handler desugaring #ready
+  - resolved: 2025-05-14
+- [x] `EFF-002` Parse effect declarations #ready
+  - resolved: 2025-05-12
+```
+
+### Nesting Limit
+
+Maximum 3 levels deep: `EFF-014` â†’ `EFF-014.2` â†’ `EFF-014.2.1`.
+The parser rejects deeper nesting with a warning. The TUI never renders
+more than 3 levels.
+
+### Platform Key Bindings
+
+The spec uses `Cmd+` for macOS. On Linux/Windows, these map to `Ctrl+`:
+
+| macOS       | Linux/Windows |
+|-------------|---------------|
+| `Cmd+C`     | `Ctrl+C`      |
+| `Cmd+V`     | `Ctrl+V`      |
+| `Cmd+X`     | `Ctrl+X`      |
+| `Cmd+Z`     | `Ctrl+Z`      |
+| `Cmd+â†‘`     | `Ctrl+â†‘` (or `Home` where applicable) |
+| `Cmd+â†“`     | `Ctrl+â†“` (or `End` where applicable)  |
+| `Cmd+â†`     | `Home`        |
+| `Cmd+â†’`     | `End`         |
+| `Cmd+Q`     | `Ctrl+Q`      |
+| `Opt+â†`     | `Ctrl+â†`      |
+| `Opt+â†’`     | `Ctrl+â†’`      |
+| `Opt+Bksp`  | `Ctrl+Bksp`   |
+
+Detection is automatic via `cfg!(target_os)` at compile time, but the
+crossterm backend reports modifier keys abstractly, so the mapping is
+mostly handled by crossterm's `KeyModifiers`.
 
 ---
 
@@ -145,114 +338,114 @@ stack is empty. Git serves as cross-session undo.
 
 ```
 frame/
-├── Cargo.toml
-├── src/
-│   ├── main.rs                 # Entry point, dispatches CLI vs TUI
-│   ├── lib.rs                  # Re-exports for testing
-│   │
-│   ├── model/                  # Core data types
-│   │   ├── mod.rs
-│   │   ├── task.rs             # Task, TaskState, Metadata, Tag
-│   │   ├── track.rs            # Track, TrackState
-│   │   ├── inbox.rs            # InboxItem
-│   │   ├── project.rs          # Project (loaded state)
-│   │   └── config.rs           # ProjectConfig (TOML mapping)
-│   │
-│   ├── parse/                  # Markdown ↔ data model
-│   │   ├── mod.rs
-│   │   ├── task_parser.rs      # Line-by-line task parser
-│   │   ├── task_serializer.rs  # Task tree → markdown
-│   │   ├── track_parser.rs     # Full track file (headers + sections)
-│   │   ├── track_serializer.rs
-│   │   ├── inbox_parser.rs     # Blank-line-separated inbox format
-│   │   ├── inbox_serializer.rs
-│   │   └── span.rs             # Source span tracking
-│   │
-│   ├── ops/                    # Business logic (shared by CLI + TUI)
-│   │   ├── mod.rs
-│   │   ├── task_ops.rs         # State changes, add, move, tag, dep, etc.
-│   │   ├── track_ops.rs        # Track management
-│   │   ├── inbox_ops.rs        # Inbox add, triage
-│   │   ├── search.rs           # Regex search across tracks
-│   │   ├── clean.rs            # fr clean logic
-│   │   ├── check.rs            # Validation
-│   │   ├── import.rs           # fr import
-│   │   └── active_gen.rs       # ACTIVE.md generation
-│   │
-│   ├── io/                     # File system interaction
-│   │   ├── mod.rs
-│   │   ├── project_io.rs       # Discover project, load all files
-│   │   ├── lock.rs             # Advisory file locking
-│   │   ├── watcher.rs          # File change notification (notify)
-│   │   └── state.rs            # .state.json read/write
-│   │
-│   ├── cli/                    # CLI interface
-│   │   ├── mod.rs
-│   │   ├── commands.rs         # Clap command definitions
-│   │   ├── output.rs           # Human-readable + JSON formatting
-│   │   └── handlers/           # One handler per command group
-│   │       ├── list.rs
-│   │       ├── show.rs
-│   │       ├── ready.rs
-│   │       ├── add.rs
-│   │       ├── state.rs
-│   │       ├── mv.rs
-│   │       ├── tag.rs
-│   │       ├── track.rs
-│   │       ├── inbox.rs
-│   │       ├── import.rs
-│   │       └── ...
-│   │
-│   └── tui/                    # Terminal UI
-│       ├── mod.rs
-│       ├── app.rs              # App state, event loop, mode management
-│       ├── event.rs            # Event handling (key → action dispatch)
-│       ├── undo.rs             # Undo stack
-│       ├── render/             # ratatui rendering
-│       │   ├── mod.rs
-│       │   ├── tab_bar.rs
-│       │   ├── track_view.rs
-│       │   ├── detail_view.rs
-│       │   ├── inbox_view.rs
-│       │   ├── recent_view.rs
-│       │   ├── tracks_view.rs
-│       │   ├── status_row.rs
-│       │   ├── help_overlay.rs
-│       │   └── autocomplete.rs
-│       ├── input/              # Mode-specific input handling
-│       │   ├── mod.rs
-│       │   ├── navigate.rs
-│       │   ├── edit.rs
-│       │   ├── move_mode.rs
-│       │   ├── search.rs
-│       │   └── triage.rs
-│       └── text_editor.rs      # Shared text editing logic
-│
-└── tests/
-    ├── parse/
-    │   ├── round_trip.rs       # Parse → serialize → diff
-    │   ├── task_parse.rs       # Unit tests for task parsing
-    │   ├── track_parse.rs
-    │   ├── inbox_parse.rs
-    │   └── edge_cases.rs       # Code blocks, deep nesting, etc.
-    ├── ops/
-    │   ├── state_transitions.rs
-    │   ├── move_ops.rs
-    │   ├── id_assignment.rs
-    │   └── clean.rs
-    ├── cli/
-    │   └── integration.rs      # Run fr commands against test projects
-    └── fixtures/
-        ├── simple_track.md
-        ├── complex_track.md
-        ├── inbox.md
-        ├── project.toml
-        └── ...
+â”œâ”€â”€ Cargo.toml
+â”œâ”€â”€ src/
+â”‚   â”œâ”€â”€ main.rs                 # Entry point, dispatches CLI vs TUI
+â”‚   â”œâ”€â”€ lib.rs                  # Re-exports for testing
+â”‚   â”‚
+â”‚   â”œâ”€â”€ model/                  # Core data types
+â”‚   â”‚   â”œâ”€â”€ mod.rs
+â”‚   â”‚   â”œâ”€â”€ task.rs             # Task, TaskState, Metadata, Tag
+â”‚   â”‚   â”œâ”€â”€ track.rs            # Track, TrackState
+â”‚   â”‚   â”œâ”€â”€ inbox.rs            # InboxItem
+â”‚   â”‚   â”œâ”€â”€ project.rs          # Project (loaded state)
+â”‚   â”‚   â””â”€â”€ config.rs           # ProjectConfig (TOML mapping)
+â”‚   â”‚
+â”‚   â”œâ”€â”€ parse/                  # Markdown â†” data model
+â”‚   â”‚   â”œâ”€â”€ mod.rs
+â”‚   â”‚   â”œâ”€â”€ task_parser.rs      # Line-by-line task parser
+â”‚   â”‚   â”œâ”€â”€ task_serializer.rs  # Task tree â†’ markdown
+â”‚   â”‚   â”œâ”€â”€ track_parser.rs     # Full track file (headers + sections)
+â”‚   â”‚   â”œâ”€â”€ track_serializer.rs
+â”‚   â”‚   â”œâ”€â”€ inbox_parser.rs     # Blank-line-separated inbox format
+â”‚   â”‚   â”œâ”€â”€ inbox_serializer.rs
+â”‚   â”‚   â””â”€â”€ span.rs             # Source span tracking
+â”‚   â”‚
+â”‚   â”œâ”€â”€ ops/                    # Business logic (shared by CLI + TUI)
+â”‚   â”‚   â”œâ”€â”€ mod.rs
+â”‚   â”‚   â”œâ”€â”€ task_ops.rs         # State changes, add, move, tag, dep, etc.
+â”‚   â”‚   â”œâ”€â”€ track_ops.rs        # Track management
+â”‚   â”‚   â”œâ”€â”€ inbox_ops.rs        # Inbox add, triage
+â”‚   â”‚   â”œâ”€â”€ search.rs           # Regex search across tracks
+â”‚   â”‚   â”œâ”€â”€ clean.rs            # fr clean logic
+â”‚   â”‚   â”œâ”€â”€ check.rs            # Validation
+â”‚   â”‚   â”œâ”€â”€ import.rs           # fr import
+â”‚   â”‚   â””â”€â”€ active_gen.rs       # ACTIVE.md generation
+â”‚   â”‚
+â”‚   â”œâ”€â”€ io/                     # File system interaction
+â”‚   â”‚   â”œâ”€â”€ mod.rs
+â”‚   â”‚   â”œâ”€â”€ project_io.rs       # Discover project, load all files
+â”‚   â”‚   â”œâ”€â”€ lock.rs             # Advisory file locking
+â”‚   â”‚   â”œâ”€â”€ watcher.rs          # File change notification (notify)
+â”‚   â”‚   â””â”€â”€ state.rs            # .state.json read/write
+â”‚   â”‚
+â”‚   â”œâ”€â”€ cli/                    # CLI interface
+â”‚   â”‚   â”œâ”€â”€ mod.rs
+â”‚   â”‚   â”œâ”€â”€ commands.rs         # Clap command definitions
+â”‚   â”‚   â”œâ”€â”€ output.rs           # Human-readable + JSON formatting
+â”‚   â”‚   â””â”€â”€ handlers/           # One handler per command group
+â”‚   â”‚       â”œâ”€â”€ list.rs
+â”‚   â”‚       â”œâ”€â”€ show.rs
+â”‚   â”‚       â”œâ”€â”€ ready.rs
+â”‚   â”‚       â”œâ”€â”€ add.rs
+â”‚   â”‚       â”œâ”€â”€ state.rs
+â”‚   â”‚       â”œâ”€â”€ mv.rs
+â”‚   â”‚       â”œâ”€â”€ tag.rs
+â”‚   â”‚       â”œâ”€â”€ track.rs
+â”‚   â”‚       â”œâ”€â”€ inbox.rs
+â”‚   â”‚       â”œâ”€â”€ import.rs
+â”‚   â”‚       â””â”€â”€ ...
+â”‚   â”‚
+â”‚   â””â”€â”€ tui/                    # Terminal UI
+â”‚       â”œâ”€â”€ mod.rs
+â”‚       â”œâ”€â”€ app.rs              # App state, event loop, mode management
+â”‚       â”œâ”€â”€ event.rs            # Event handling (key â†’ action dispatch)
+â”‚       â”œâ”€â”€ undo.rs             # Undo stack
+â”‚       â”œâ”€â”€ render/             # ratatui rendering
+â”‚       â”‚   â”œâ”€â”€ mod.rs
+â”‚       â”‚   â”œâ”€â”€ tab_bar.rs
+â”‚       â”‚   â”œâ”€â”€ track_view.rs
+â”‚       â”‚   â”œâ”€â”€ detail_view.rs
+â”‚       â”‚   â”œâ”€â”€ inbox_view.rs
+â”‚       â”‚   â”œâ”€â”€ recent_view.rs
+â”‚       â”‚   â”œâ”€â”€ tracks_view.rs
+â”‚       â”‚   â”œâ”€â”€ status_row.rs
+â”‚       â”‚   â”œâ”€â”€ help_overlay.rs
+â”‚       â”‚   â””â”€â”€ autocomplete.rs
+â”‚       â”œâ”€â”€ input/              # Mode-specific input handling
+â”‚       â”‚   â”œâ”€â”€ mod.rs
+â”‚       â”‚   â”œâ”€â”€ navigate.rs
+â”‚       â”‚   â”œâ”€â”€ edit.rs
+â”‚       â”‚   â”œâ”€â”€ move_mode.rs
+â”‚       â”‚   â”œâ”€â”€ search.rs
+â”‚       â”‚   â””â”€â”€ triage.rs
+â”‚       â””â”€â”€ text_editor.rs      # Shared text editing logic
+â”‚
+â””â”€â”€ tests/
+    â”œâ”€â”€ parse/
+    â”‚   â”œâ”€â”€ round_trip.rs       # Parse â†’ serialize â†’ diff
+    â”‚   â”œâ”€â”€ task_parse.rs       # Unit tests for task parsing
+    â”‚   â”œâ”€â”€ track_parse.rs
+    â”‚   â”œâ”€â”€ inbox_parse.rs
+    â”‚   â””â”€â”€ edge_cases.rs       # Code blocks, deep nesting, etc.
+    â”œâ”€â”€ ops/
+    â”‚   â”œâ”€â”€ state_transitions.rs
+    â”‚   â”œâ”€â”€ move_ops.rs
+    â”‚   â”œâ”€â”€ id_assignment.rs
+    â”‚   â””â”€â”€ clean.rs
+    â”œâ”€â”€ cli/
+    â”‚   â””â”€â”€ integration.rs      # Run fr commands against test projects
+    â””â”€â”€ fixtures/
+        â”œâ”€â”€ simple_track.md
+        â”œâ”€â”€ complex_track.md
+        â”œâ”€â”€ inbox.md
+        â”œâ”€â”€ project.toml
+        â””â”€â”€ ...
 ```
 
 ---
 
-## Implementation Phases — Concrete Task Breakdown
+## Implementation Phases â€” Concrete Task Breakdown
 
 Each phase builds on the previous. CC should complete all tasks in a phase
 before moving to the next. Tasks within a phase can be done in the listed
@@ -318,7 +511,7 @@ order.
 
 1.9  Write round-trip test suite (tests/parse/)
      - Corpus of test fixture files
-     - For each: parse → serialize → assert identical to input
+     - For each: parse â†’ serialize â†’ assert identical to input
      - Edge cases: code blocks in notes, deep nesting, multiple deps,
        tasks with no metadata, tasks with all metadata, empty sections
 
@@ -334,10 +527,10 @@ order.
 
 ```
 2.1  Task state transitions (ops/task_ops.rs)
-     - cycle_state(task): todo→active→done→todo
-     - set_blocked(task): any→blocked, blocked→todo
-     - set_parked(task): any→parked, parked→todo
-     - set_done(task): any→done (adds resolved date)
+     - cycle_state(task): todoâ†’activeâ†’doneâ†’todo
+     - set_blocked(task): anyâ†’blocked, blockedâ†’todo
+     - set_parked(task): anyâ†’parked, parkedâ†’todo
+     - set_done(task): anyâ†’done (adds resolved date)
      - set_state(task, state): direct set (for CLI)
      - All transitions mark task dirty and handle resolved/added dates
 
@@ -345,7 +538,7 @@ order.
      - add_task(track, title, position): append/prepend/after
      - add_subtask(parent_id, title)
      - edit_title(task_id, new_title)
-     - delete → mark done + tag #wontdo (no hard delete)
+     - delete â†’ mark done + tag #wontdo (no hard delete)
      - Auto-assign ID on creation
      - Auto-set added date
 
@@ -356,8 +549,8 @@ order.
      - add_ref, set_spec
 
 2.4  Move operations (ops/task_ops.rs)
-     - move_task(id, new_position) — within same track
-     - move_task_to_track(id, target_track, position) — cross-track,
+     - move_task(id, new_position) â€” within same track
+     - move_task_to_track(id, target_track, position) â€” cross-track,
        reassigns ID, updates deps across all tracks
      - Renumber subtask IDs on reparenting
 
@@ -370,7 +563,7 @@ order.
 2.6  Inbox operations (ops/inbox_ops.rs)
      - add_inbox_item(title, tags, body)
      - triage(index, track, position): remove from inbox, add to track
-       with auto-assigned ID and carried-over tags/body→note
+       with auto-assigned ID and carried-over tags/bodyâ†’note
 
 2.7  Search (ops/search.rs)
      - Regex search across task titles, notes, tags
@@ -380,13 +573,16 @@ order.
 2.8  fr clean (ops/clean.rs)
      - Assign IDs to tasks missing them
      - Assign added dates where missing
+     - Detect and resolve duplicate IDs (first by track order then
+       position keeps ID; duplicates reassigned max+1; deps updated)
      - Archive done tasks past threshold (250 lines) to per-track archive
      - Validate deps (flag dangling)
      - Validate file refs (flag broken paths)
-     - State suggestions (all subtasks done → suggest parent done)
+     - State suggestions (all subtasks done â†’ suggest parent done)
      - Generate ACTIVE.md
 
 2.9  fr check (ops/check.rs)
+     - Detect duplicate IDs across all tracks (report as errors)
      - Validate all deps resolve to existing task IDs
      - Validate all spec/ref paths exist on disk
      - Report format issues
@@ -458,7 +654,7 @@ order.
      - Assert file contents and stdout
 ```
 
-### Phase 4: TUI — Core Views and Navigation
+### Phase 4: TUI â€” Core Views and Navigation
 
 **Goal**: Read-only TUI that displays all views with navigation.
 
@@ -474,20 +670,20 @@ order.
      - Define color constants from spec as defaults
      - Read overrides from [ui.colors] and [ui.tag_colors] in project.toml
      - Fall back to global config, then to hardcoded defaults
-     - Not a full theme engine — just the colors listed in the spec's TOML
+     - Not a full theme engine â€” just the colors listed in the spec's TOML
 
 4.3  Tab bar rendering (tui/render/tab_bar.rs)
      - Active track tabs with names
-     - Tracks view tab (▸)
-     - Inbox tab with count (🔥N)
-     - Recent tab (✓)
+     - Tracks view tab (â–¸)
+     - Inbox tab with count (ðŸ”¥N)
+     - Recent tab (âœ“)
      - Highlight current tab
      - Separator line below
 
 4.4  Track view rendering (tui/render/track_view.rs)
-     - Render task tree with indentation and tree lines (├ └)
-     - State symbols (○ ◐ ⊘ ✓ ◇) with correct colors
-     - Collapse/expand indicators (▸ ▾)
+     - Render task tree with indentation and tree lines (â”œ â””)
+     - State symbols (â—‹ â— âŠ˜ âœ“ â—‡) with correct colors
+     - Collapse/expand indicators (â–¸ â–¾)
      - Abbreviated subtask IDs (.1, .2, .2.1)
      - Tags rendered in foreground color
      - Cursor highlight (current line in bright white)
@@ -496,11 +692,11 @@ order.
      - Scrolling for long lists
 
 4.5  Cursor navigation (tui/input/navigate.rs)
-     - ↑↓ / jk: move cursor through visible items
-     - ←/h: collapse current node (or move to parent)
-     - →/l: expand current node (or move to first child)
-     - Cmd+↑/g: jump to top
-     - Cmd+↓/G: jump to bottom
+     - â†‘â†“ / jk: move cursor through visible items
+     - â†/h: collapse current node (or move to parent)
+     - â†’/l: expand current node (or move to first child)
+     - Cmd+â†‘/g: jump to top
+     - Cmd+â†“/G: jump to bottom
      - Track expand/collapse state in app state
 
 4.6  Tab switching
@@ -514,7 +710,7 @@ order.
      - Full-screen list of all tracks
      - Grouped by state (Active, Shelved, Archived)
      - Stats per track (count of each state)
-     - cc-focus indicator (★cc)
+     - cc-focus indicator (â˜…cc)
 
 4.8  Status row rendering (tui/render/status_row.rs)
      - Empty in NAVIGATE mode
@@ -530,7 +726,7 @@ order.
      - Read .state.json on startup
      - Write on every state change (debounced, ~200ms)
      - Persist: view, active_track, cursor per track, expanded nodes,
-       scroll offset, search history
+       scroll offset, last search
 
 4.11 SEARCH mode (tui/input/search.rs)
      - / enters search mode
@@ -542,13 +738,13 @@ order.
      - Scope follows current view
 ```
 
-### Phase 5: TUI — Task Actions and MOVE Mode
+### Phase 5: TUI â€” Task Actions and MOVE Mode
 
 **Goal**: Full mutating interactions in track view.
 
 ```
 5.1  State changes
-     - Space: cycle state (todo→active→done→todo)
+     - Space: cycle state (todoâ†’activeâ†’doneâ†’todo)
      - x: mark done
      - b: toggle blocked
      - ~: toggle parked
@@ -563,9 +759,9 @@ order.
 
 5.3  MOVE mode (tui/input/move_mode.rs)
      - m: enter MOVE mode on selected task
-     - ↑↓: physically reorder in list (real-time reflow)
-     - Cmd+↑/g: move to top
-     - Cmd+↓/G: move to bottom
+     - â†‘â†“: physically reorder in list (real-time reflow)
+     - Cmd+â†‘/g: move to top
+     - Cmd+â†“/G: move to bottom
      - Enter: confirm
      - Esc: cancel (restore original position)
      - Also works in tracks view for reordering tracks
@@ -598,7 +794,7 @@ order.
      - Never silently discards user input
 ```
 
-### Phase 6: TUI — Detail View and Full Editing
+### Phase 6: TUI â€” Detail View and Full Editing
 
 **Goal**: Rich task detail view with per-region editing.
 
@@ -611,22 +807,22 @@ order.
      - Tags in foreground color
 
 6.2  Region-based navigation
-     - ↑↓: move between regions
+     - â†‘â†“: move between regions
      - Tab/Shift+Tab: jump to next/prev editable region
      - Region highlighting (subtle indicator of current region)
      - Esc: back to track view
 
 6.3  Text editor component (tui/text_editor.rs)
      - Shared component used by all EDIT mode interactions
-     - Single-line mode: ←→, Opt+←→, Cmd+←→, backspace, Opt+bksp,
+     - Single-line mode: â†â†’, Opt+â†â†’, Cmd+â†â†’, backspace, Opt+bksp,
        clipboard, Enter confirms, Esc cancels
      - Multi-line mode: same plus Enter=newline, Tab=4 spaces,
        Esc finishes (saves)
      - Text selection:
-       - Shift+←/→: extend selection by character
-       - Shift+Opt+←/→: extend selection by word
-       - Shift+Cmd+←/→: extend selection to start/end of line
-       - Shift+↑/↓: extend selection by line (multiline only)
+       - Shift+â†/â†’: extend selection by character
+       - Shift+Opt+â†/â†’: extend selection by word
+       - Shift+Cmd+â†/â†’: extend selection to start/end of line
+       - Shift+â†‘/â†“: extend selection by line (multiline only)
        - Cmd+A: select all within current field
        - Any non-shift movement collapses selection to cursor
        - Typing with active selection replaces selected text
@@ -645,14 +841,14 @@ order.
 
 6.5  Autocomplete component (tui/render/autocomplete.rs)
      - Floating dropdown below the edit cursor
-     - ↑↓ to navigate, Enter to select, Esc to dismiss
+     - â†‘â†“ to navigate, Enter to select, Esc to dismiss
      - Typing filters entries
      - Tag autocomplete: known tags from config + existing tags in project
      - Task ID autocomplete: all task IDs across tracks
      - File path autocomplete: walk project directory
 ```
 
-### Phase 7: TUI — Inbox, Recent, Polish
+### Phase 7: TUI â€” Inbox, Recent, Polish
 
 **Goal**: Complete all views and polish for daily use.
 
@@ -722,7 +918,7 @@ understand how to use `fr` effectively.
 
 - **Unit tests**: Parser, serializer, state transitions, ID assignment,
   each in isolation with small inputs.
-- **Round-trip tests**: Parse → serialize → diff for a corpus of fixture
+- **Round-trip tests**: Parse â†’ serialize â†’ diff for a corpus of fixture
   files. This is the most important test suite.
 - **Integration tests**: CLI commands against temp project directories.
   Assert file contents and command output.
@@ -747,7 +943,7 @@ fr list                    # CLI
 fr                         # TUI (no subcommand = launch TUI)
 ```
 
-**Binary name**: `fr`. No subcommand → launch TUI. Any subcommand →
+**Binary name**: `fr`. No subcommand â†’ launch TUI. Any subcommand â†’
 CLI mode. This means `fr` with no args opens the TUI, `fr list` runs
 the CLI. Simple and ergonomic.
 
