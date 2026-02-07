@@ -27,6 +27,10 @@ pub enum UndoNavTarget {
     Inbox {
         cursor: Option<usize>,
     },
+    /// Navigate to the recent view
+    Recent {
+        cursor: Option<usize>,
+    },
 }
 
 /// Derive a navigation target from an operation
@@ -156,6 +160,21 @@ pub fn nav_target_for_op(op: &Operation, is_undo: bool) -> Option<UndoNavTarget>
                 })
             }
         }
+        Operation::Reopen { track_id, task_id, .. } => {
+            if is_undo {
+                // Task was put back in Done section — navigate to Recent view
+                Some(UndoNavTarget::Recent { cursor: None })
+            } else {
+                // Task was reopened — navigate to Track view
+                Some(UndoNavTarget::Task {
+                    track_id: track_id.clone(),
+                    task_id: task_id.clone(),
+                    detail_region: None,
+                    task_removed: false,
+                    position_hint: None,
+                })
+            }
+        }
         Operation::SyncMarker => None,
     }
 }
@@ -250,6 +269,15 @@ pub enum Operation {
         /// The track and task ID it was triaged to
         track_id: String,
         task_id: String,
+    },
+    /// A task was reopened from the recent view (moved from Done to Backlog)
+    Reopen {
+        track_id: String,
+        task_id: String,
+        old_state: TaskState,
+        old_resolved: Option<String>,
+        /// Original index in the Done section
+        done_index: usize,
     },
     /// External file change sync marker — undo cannot cross this
     SyncMarker,
@@ -487,6 +515,26 @@ fn apply_inverse(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
             // Return track_id so caller knows to save
             Some(track_id.clone())
         }
+        Operation::Reopen { track_id, task_id, old_state, old_resolved, done_index } => {
+            // Undo reopen = move task from Backlog back to Done, restore state
+            let track = find_track_mut(tracks, track_id)?;
+            let mut task = {
+                let backlog = track.section_tasks_mut(SectionKind::Backlog)?;
+                let idx = backlog.iter().position(|t| t.id.as_deref() == Some(task_id))?;
+                backlog.remove(idx)
+            };
+            task.state = *old_state;
+            task.metadata.retain(|m| m.key() != "resolved");
+            if let Some(date) = old_resolved {
+                task.metadata.push(crate::model::task::Metadata::Resolved(date.clone()));
+            }
+            task.mark_dirty();
+            if let Some(done) = track.section_tasks_mut(SectionKind::Done) {
+                let idx = (*done_index).min(done.len());
+                done.insert(idx, task);
+            }
+            Some(track_id.clone())
+        }
         Operation::SyncMarker => None,
     }
 }
@@ -660,6 +708,22 @@ fn apply_forward(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
                     }
                     tasks.push(task);
                 }
+            }
+            Some(track_id.clone())
+        }
+        Operation::Reopen { track_id, task_id, .. } => {
+            // Redo reopen = move task from Done to Backlog top, set Todo
+            let track = find_track_mut(tracks, track_id)?;
+            let mut task = {
+                let done = track.section_tasks_mut(SectionKind::Done)?;
+                let idx = done.iter().position(|t| t.id.as_deref() == Some(task_id))?;
+                done.remove(idx)
+            };
+            task.state = TaskState::Todo;
+            task.metadata.retain(|m| m.key() != "resolved");
+            task.mark_dirty();
+            if let Some(backlog) = track.section_tasks_mut(SectionKind::Backlog) {
+                backlog.insert(0, task);
             }
             Some(track_id.clone())
         }

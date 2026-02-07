@@ -685,6 +685,24 @@ fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo: bool) {
             }
             let _ = app.save_inbox();
         }
+        UndoNavTarget::Recent { .. } => {
+            // Reopen undo/redo: save the affected track
+            let reopen_track_id = {
+                let op = if is_undo {
+                    app.undo_stack.peek_last_redo()
+                } else {
+                    app.undo_stack.peek_last_undo()
+                };
+                if let Some(Operation::Reopen { track_id, .. }) = op {
+                    Some(track_id.clone())
+                } else {
+                    None
+                }
+            };
+            if let Some(tid) = reopen_track_id {
+                let _ = app.save_track(&tid);
+            }
+        }
     }
 }
 
@@ -781,6 +799,16 @@ fn navigate_to_undo_target(app: &mut App, nav: &UndoNavTarget) {
             if let Some(idx) = cursor {
                 let count = app.inbox_count();
                 app.inbox_cursor = if count > 0 { (*idx).min(count - 1) } else { 0 };
+            }
+        }
+        UndoNavTarget::Recent { cursor } => {
+            if matches!(app.view, View::Detail { .. }) {
+                app.close_detail_fully();
+            }
+            app.view = View::Recent;
+            if let Some(c) = cursor {
+                let count = count_recent_tasks(app);
+                app.recent_cursor = if count > 0 { (*c).min(count - 1) } else { 0 };
             }
         }
     }
@@ -4409,16 +4437,26 @@ fn reopen_recent_task(app: &mut App) {
         None => return,
     };
 
-    // Capture old state for undo
+    // Move task from Done section to Backlog
     let track = match app.find_track_mut(&track_id) {
         Some(t) => t,
         None => return,
     };
-    let task = match task_ops::find_task_mut_in_track(track, &task_id) {
-        Some(t) => t,
-        None => return,
+
+    // Remove from Done section
+    let (done_index, mut task) = {
+        let done = match track.section_tasks_mut(SectionKind::Done) {
+            Some(d) => d,
+            None => return,
+        };
+        let idx = match done.iter().position(|t| t.id.as_deref() == Some(task_id.as_str())) {
+            Some(i) => i,
+            None => return,
+        };
+        (idx, done.remove(idx))
     };
 
+    // Capture old state for undo
     let old_state = task.state;
     let old_resolved = task
         .metadata
@@ -4431,18 +4469,21 @@ fn reopen_recent_task(app: &mut App) {
             }
         });
 
-    // Set state to Todo
+    // Set state to Todo and insert at top of Backlog
     task.state = crate::model::task::TaskState::Todo;
     task.metadata.retain(|m| m.key() != "resolved");
     task.mark_dirty();
 
-    app.undo_stack.push(Operation::StateChange {
+    if let Some(backlog) = track.section_tasks_mut(SectionKind::Backlog) {
+        backlog.insert(0, task);
+    }
+
+    app.undo_stack.push(Operation::Reopen {
         track_id: track_id.clone(),
         task_id: task_id.clone(),
         old_state,
-        new_state: crate::model::task::TaskState::Todo,
         old_resolved,
-        new_resolved: None,
+        done_index,
     });
 
     let _ = app.save_track(&track_id);
