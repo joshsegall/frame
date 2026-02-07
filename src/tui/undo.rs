@@ -2,6 +2,117 @@ use crate::model::task::{Task, TaskState};
 use crate::model::track::{SectionKind, Track};
 use crate::ops::task_ops;
 
+use super::app::DetailRegion;
+
+/// Navigation target after undo/redo — tells the UI where to navigate
+#[derive(Debug, Clone)]
+pub enum UndoNavTarget {
+    /// Navigate to a task in a track view (or detail view)
+    Task {
+        track_id: String,
+        task_id: String,
+        /// If Some, open detail view and scroll to this region
+        detail_region: Option<DetailRegion>,
+        /// True when undo removes a task (TaskAdd undo) — don't try to find the task
+        task_removed: bool,
+        /// Cursor fallback when task_removed is true
+        position_hint: Option<usize>,
+    },
+    /// Navigate to the tracks overview and flash a track row
+    TracksView {
+        track_id: String,
+    },
+}
+
+/// Derive a navigation target from an operation
+pub fn nav_target_for_op(op: &Operation, is_undo: bool) -> Option<UndoNavTarget> {
+    match op {
+        Operation::StateChange {
+            track_id, task_id, ..
+        }
+        | Operation::TitleEdit {
+            track_id, task_id, ..
+        }
+        | Operation::TaskMove {
+            track_id, task_id, ..
+        } => Some(UndoNavTarget::Task {
+            track_id: track_id.clone(),
+            task_id: task_id.clone(),
+            detail_region: None,
+            task_removed: false,
+            position_hint: None,
+        }),
+        Operation::TaskAdd {
+            track_id,
+            task_id,
+            position_index,
+        } => {
+            if is_undo {
+                Some(UndoNavTarget::Task {
+                    track_id: track_id.clone(),
+                    task_id: task_id.clone(),
+                    detail_region: None,
+                    task_removed: true,
+                    position_hint: Some(*position_index),
+                })
+            } else {
+                Some(UndoNavTarget::Task {
+                    track_id: track_id.clone(),
+                    task_id: task_id.clone(),
+                    detail_region: None,
+                    task_removed: false,
+                    position_hint: None,
+                })
+            }
+        }
+        Operation::SubtaskAdd {
+            track_id,
+            parent_id,
+            task_id,
+        } => {
+            if is_undo {
+                Some(UndoNavTarget::Task {
+                    track_id: track_id.clone(),
+                    task_id: parent_id.clone(),
+                    detail_region: None,
+                    task_removed: false,
+                    position_hint: None,
+                })
+            } else {
+                Some(UndoNavTarget::Task {
+                    track_id: track_id.clone(),
+                    task_id: task_id.clone(),
+                    detail_region: None,
+                    task_removed: false,
+                    position_hint: None,
+                })
+            }
+        }
+        Operation::FieldEdit { track_id, task_id, field, .. } => {
+            let detail_region = match field.as_str() {
+                "note" => Some(DetailRegion::Note),
+                "deps" => Some(DetailRegion::Deps),
+                "spec" => Some(DetailRegion::Spec),
+                "refs" => Some(DetailRegion::Refs),
+                _ => None,
+            };
+            Some(UndoNavTarget::Task {
+                track_id: track_id.clone(),
+                task_id: task_id.clone(),
+                detail_region,
+                task_removed: false,
+                position_hint: None,
+            })
+        }
+        Operation::TrackMove { track_id, .. } => {
+            Some(UndoNavTarget::TracksView {
+                track_id: track_id.clone(),
+            })
+        }
+        Operation::SyncMarker => None,
+    }
+}
+
 /// A single undoable operation
 #[derive(Debug, Clone)]
 pub enum Operation {
@@ -51,6 +162,12 @@ pub enum Operation {
         old_value: String,
         new_value: String,
     },
+    /// A track was reordered in the tracks list
+    TrackMove {
+        track_id: String,
+        old_index: usize,
+        new_index: usize,
+    },
     /// External file change sync marker — undo cannot cross this
     SyncMarker,
 }
@@ -87,9 +204,9 @@ impl UndoStack {
         self.redo.clear();
     }
 
-    /// Undo the last operation. Returns the track_id that was modified.
+    /// Undo the last operation. Returns navigation target for the UI.
     /// Applies the inverse operation to the track data. Does NOT save to disk.
-    pub fn undo(&mut self, tracks: &mut [(String, Track)]) -> Option<String> {
+    pub fn undo(&mut self, tracks: &mut [(String, Track)]) -> Option<UndoNavTarget> {
         let op = self.undo.pop()?;
 
         // Can't undo past a sync marker
@@ -99,14 +216,15 @@ impl UndoStack {
             return None;
         }
 
-        let track_id = apply_inverse(&op, tracks);
+        let nav = nav_target_for_op(&op, true);
+        apply_inverse(&op, tracks);
         // Push the forward operation onto redo
         self.redo.push(op);
-        track_id
+        nav
     }
 
-    /// Redo the last undone operation. Returns the track_id that was modified.
-    pub fn redo(&mut self, tracks: &mut [(String, Track)]) -> Option<String> {
+    /// Redo the last undone operation. Returns navigation target for the UI.
+    pub fn redo(&mut self, tracks: &mut [(String, Track)]) -> Option<UndoNavTarget> {
         let op = self.redo.pop()?;
 
         if matches!(op, Operation::SyncMarker) {
@@ -114,13 +232,24 @@ impl UndoStack {
             return None;
         }
 
-        let track_id = apply_forward(&op, tracks);
+        let nav = nav_target_for_op(&op, false);
+        apply_forward(&op, tracks);
         self.undo.push(op);
-        track_id
+        nav
     }
 
     pub fn is_empty(&self) -> bool {
         self.undo.is_empty()
+    }
+
+    /// Peek at the last operation on the redo stack (just pushed during undo)
+    pub fn peek_last_redo(&self) -> Option<&Operation> {
+        self.redo.last()
+    }
+
+    /// Peek at the last operation on the undo stack (just pushed during redo)
+    pub fn peek_last_undo(&self) -> Option<&Operation> {
+        self.undo.last()
     }
 }
 
@@ -212,6 +341,8 @@ fn apply_inverse(op: &Operation, tracks: &mut [(String, Track)]) -> Option<Strin
             apply_field_value(task, field, old_value);
             Some(track_id.clone())
         }
+        // TrackMove is handled by the caller (needs config access)
+        Operation::TrackMove { .. } => None,
         Operation::SyncMarker => None,
     }
 }
@@ -314,6 +445,8 @@ fn apply_forward(op: &Operation, tracks: &mut [(String, Track)]) -> Option<Strin
             apply_field_value(task, field, new_value);
             Some(track_id.clone())
         }
+        // TrackMove is handled by the caller (needs config access)
+        Operation::TrackMove { .. } => None,
         Operation::SyncMarker => None,
     }
 }
@@ -379,4 +512,210 @@ fn find_track_mut<'a>(
         .iter_mut()
         .find(|(id, _)| id == track_id)
         .map(|(_, track)| track)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper to unwrap Task variant fields
+    fn expect_task(nav: UndoNavTarget) -> (String, String, Option<DetailRegion>, bool, Option<usize>) {
+        match nav {
+            UndoNavTarget::Task { track_id, task_id, detail_region, task_removed, position_hint } =>
+                (track_id, task_id, detail_region, task_removed, position_hint),
+            other => panic!("expected Task, got {:?}", other),
+        }
+    }
+
+    fn expect_tracks_view(nav: UndoNavTarget) -> String {
+        match nav {
+            UndoNavTarget::TracksView { track_id } => track_id,
+            other => panic!("expected TracksView, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn nav_target_state_change() {
+        let op = Operation::StateChange {
+            track_id: "t1".into(),
+            task_id: "T-001".into(),
+            old_state: TaskState::Todo,
+            new_state: TaskState::Active,
+            old_resolved: None,
+            new_resolved: None,
+        };
+        let (track_id, task_id, detail_region, task_removed, _) =
+            expect_task(nav_target_for_op(&op, true).unwrap());
+        assert_eq!(track_id, "t1");
+        assert_eq!(task_id, "T-001");
+        assert!(detail_region.is_none());
+        assert!(!task_removed);
+    }
+
+    #[test]
+    fn nav_target_title_edit() {
+        let op = Operation::TitleEdit {
+            track_id: "t1".into(),
+            task_id: "T-002".into(),
+            old_title: "old".into(),
+            new_title: "new".into(),
+        };
+        let (_, task_id, _, task_removed, _) =
+            expect_task(nav_target_for_op(&op, false).unwrap());
+        assert_eq!(task_id, "T-002");
+        assert!(!task_removed);
+    }
+
+    #[test]
+    fn nav_target_task_add_undo_removes() {
+        let op = Operation::TaskAdd {
+            track_id: "t1".into(),
+            task_id: "T-003".into(),
+            position_index: 2,
+        };
+        let (_, _, _, task_removed, position_hint) =
+            expect_task(nav_target_for_op(&op, true).unwrap());
+        assert!(task_removed);
+        assert_eq!(position_hint, Some(2));
+    }
+
+    #[test]
+    fn nav_target_task_add_redo_creates() {
+        let op = Operation::TaskAdd {
+            track_id: "t1".into(),
+            task_id: "T-003".into(),
+            position_index: 2,
+        };
+        let (_, task_id, _, task_removed, _) =
+            expect_task(nav_target_for_op(&op, false).unwrap());
+        assert!(!task_removed);
+        assert_eq!(task_id, "T-003");
+    }
+
+    #[test]
+    fn nav_target_subtask_add_undo_goes_to_parent() {
+        let op = Operation::SubtaskAdd {
+            track_id: "t1".into(),
+            parent_id: "T-010".into(),
+            task_id: "T-010.1".into(),
+        };
+        let (_, task_id, _, task_removed, _) =
+            expect_task(nav_target_for_op(&op, true).unwrap());
+        assert_eq!(task_id, "T-010");
+        assert!(!task_removed);
+    }
+
+    #[test]
+    fn nav_target_subtask_add_redo_goes_to_subtask() {
+        let op = Operation::SubtaskAdd {
+            track_id: "t1".into(),
+            parent_id: "T-010".into(),
+            task_id: "T-010.1".into(),
+        };
+        let (_, task_id, _, _, _) =
+            expect_task(nav_target_for_op(&op, false).unwrap());
+        assert_eq!(task_id, "T-010.1");
+    }
+
+    #[test]
+    fn nav_target_task_move() {
+        let op = Operation::TaskMove {
+            track_id: "t1".into(),
+            task_id: "T-005".into(),
+            old_index: 0,
+            new_index: 3,
+        };
+        let (_, task_id, detail_region, _, _) =
+            expect_task(nav_target_for_op(&op, true).unwrap());
+        assert_eq!(task_id, "T-005");
+        assert!(detail_region.is_none());
+    }
+
+    #[test]
+    fn nav_target_field_edit_note_opens_detail() {
+        let op = Operation::FieldEdit {
+            track_id: "t1".into(),
+            task_id: "T-006".into(),
+            field: "note".into(),
+            old_value: "old note".into(),
+            new_value: "new note".into(),
+        };
+        let (_, _, detail_region, _, _) =
+            expect_task(nav_target_for_op(&op, true).unwrap());
+        assert_eq!(detail_region, Some(DetailRegion::Note));
+    }
+
+    #[test]
+    fn nav_target_field_edit_deps_opens_detail() {
+        let op = Operation::FieldEdit {
+            track_id: "t1".into(),
+            task_id: "T-007".into(),
+            field: "deps".into(),
+            old_value: "".into(),
+            new_value: "T-001".into(),
+        };
+        let (_, _, detail_region, _, _) =
+            expect_task(nav_target_for_op(&op, false).unwrap());
+        assert_eq!(detail_region, Some(DetailRegion::Deps));
+    }
+
+    #[test]
+    fn nav_target_field_edit_tags_stays_in_track_view() {
+        let op = Operation::FieldEdit {
+            track_id: "t1".into(),
+            task_id: "T-008".into(),
+            field: "tags".into(),
+            old_value: "#foo".into(),
+            new_value: "#bar".into(),
+        };
+        let (_, _, detail_region, _, _) =
+            expect_task(nav_target_for_op(&op, true).unwrap());
+        assert!(detail_region.is_none());
+    }
+
+    #[test]
+    fn nav_target_field_edit_spec_opens_detail() {
+        let op = Operation::FieldEdit {
+            track_id: "t1".into(),
+            task_id: "T-009".into(),
+            field: "spec".into(),
+            old_value: "".into(),
+            new_value: "spec.md".into(),
+        };
+        let (_, _, detail_region, _, _) =
+            expect_task(nav_target_for_op(&op, true).unwrap());
+        assert_eq!(detail_region, Some(DetailRegion::Spec));
+    }
+
+    #[test]
+    fn nav_target_field_edit_refs_opens_detail() {
+        let op = Operation::FieldEdit {
+            track_id: "t1".into(),
+            task_id: "T-010".into(),
+            field: "refs".into(),
+            old_value: "".into(),
+            new_value: "ref.md".into(),
+        };
+        let (_, _, detail_region, _, _) =
+            expect_task(nav_target_for_op(&op, true).unwrap());
+        assert_eq!(detail_region, Some(DetailRegion::Refs));
+    }
+
+    #[test]
+    fn nav_target_track_move() {
+        let op = Operation::TrackMove {
+            track_id: "effects".into(),
+            old_index: 0,
+            new_index: 2,
+        };
+        let track_id = expect_tracks_view(nav_target_for_op(&op, true).unwrap());
+        assert_eq!(track_id, "effects");
+    }
+
+    #[test]
+    fn nav_target_sync_marker_returns_none() {
+        let op = Operation::SyncMarker;
+        assert!(nav_target_for_op(&op, true).is_none());
+        assert!(nav_target_for_op(&op, false).is_none());
+    }
 }

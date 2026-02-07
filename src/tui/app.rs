@@ -404,6 +404,12 @@ pub struct App {
     /// Selection anchor for text selection in edit mode (None = no selection)
     /// Selection range is from min(anchor, edit_cursor) to max(anchor, edit_cursor)
     pub edit_selection_anchor: Option<usize>,
+    /// Task ID to flash-highlight after undo/redo navigation
+    pub flash_task_id: Option<String>,
+    /// Track ID to flash-highlight in tracks view after undo/redo
+    pub flash_track_id: Option<String>,
+    /// When the flash started (for auto-clearing after timeout)
+    pub flash_started: Option<Instant>,
 }
 
 impl App {
@@ -490,6 +496,9 @@ impl App {
             autocomplete_anchor: None,
             edit_history: None,
             edit_selection_anchor: None,
+            flash_task_id: None,
+            flash_track_id: None,
+            flash_started: None,
         }
     }
 
@@ -541,6 +550,49 @@ impl App {
         }
         self.edit_selection_anchor = None;
         false
+    }
+
+    /// Start flashing a task (highlight after undo/redo navigation)
+    pub fn flash_task(&mut self, task_id: &str) {
+        self.flash_task_id = Some(task_id.to_string());
+        self.flash_track_id = None;
+        self.flash_started = Some(Instant::now());
+    }
+
+    /// Start flashing a track row in tracks view
+    pub fn flash_track(&mut self, track_id: &str) {
+        self.flash_track_id = Some(track_id.to_string());
+        self.flash_task_id = None;
+        self.flash_started = Some(Instant::now());
+    }
+
+    /// Check if a specific task is currently flashing
+    pub fn is_flashing(&self, task_id: &str) -> bool {
+        if let (Some(flash_id), Some(started)) = (&self.flash_task_id, self.flash_started) {
+            flash_id == task_id && started.elapsed() < Duration::from_millis(300)
+        } else {
+            false
+        }
+    }
+
+    /// Check if a specific track is currently flashing (tracks view)
+    pub fn is_track_flashing(&self, track_id: &str) -> bool {
+        if let (Some(flash_id), Some(started)) = (&self.flash_track_id, self.flash_started) {
+            flash_id == track_id && started.elapsed() < Duration::from_millis(300)
+        } else {
+            false
+        }
+    }
+
+    /// Clear flash if the timeout has expired
+    pub fn clear_expired_flash(&mut self) {
+        if let Some(started) = self.flash_started {
+            if started.elapsed() >= Duration::from_millis(300) {
+                self.flash_task_id = None;
+                self.flash_track_id = None;
+                self.flash_started = None;
+            }
+        }
     }
 
     /// Collect all unique tags from config tag_colors + all tasks in the project
@@ -1288,6 +1340,7 @@ fn run_event_loop(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut save_counter = 0u32;
     loop {
+        app.clear_expired_flash();
         terminal.draw(|frame| render::render(frame, app))?;
 
         // Poll for file watcher events

@@ -23,6 +23,7 @@ pub struct Theme {
     pub selection_id: Color,
     pub search_match_bg: Color,
     pub search_match_fg: Color,
+    pub flash_bg: Color,
     /// Per-tag colors
     pub tag_colors: HashMap<String, Color>,
 }
@@ -55,6 +56,7 @@ impl Default for Theme {
             selection_id: Color::Rgb(0xDA, 0xB8, 0xF0),
             search_match_bg: Color::Rgb(0x40, 0xE0, 0xD0),
             search_match_fg: Color::Rgb(0x0C, 0x00, 0x1B),
+            flash_bg: Color::Rgb(0x3D, 0x2E, 0x10),
             tag_colors,
         }
     }
@@ -97,6 +99,7 @@ impl Theme {
                     "selection_id" => theme.selection_id = color,
                     "search_match_bg" => theme.search_match_bg = color,
                     "search_match_fg" => theme.search_match_fg = color,
+                    "flash_bg" => theme.flash_bg = color,
                     _ => {}
                 }
             }

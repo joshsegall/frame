@@ -84,6 +84,8 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 ancestor_last,
             } => {
                 if let Some(task) = resolve_task(track, *section, path) {
+                    let is_flash = task.id.as_deref()
+                        .is_some_and(|id| app.is_flashing(id));
                     let (line, col) = render_task_line(
                         app,
                         task,
@@ -95,6 +97,7 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
                             ancestor_last,
                         },
                         is_cursor,
+                        is_flash,
                         area.width as usize,
                         search_re.as_ref(),
                     );
@@ -159,6 +162,7 @@ fn render_task_line<'a>(
     task: &Task,
     info: &TaskLineInfo<'_>,
     is_cursor: bool,
+    is_flash: bool,
     width: usize,
     search_re: Option<&Regex>,
 ) -> (Line<'a>, Option<u16>) {
@@ -168,13 +172,27 @@ fn render_task_line<'a>(
     let dim_style = Style::default().fg(app.theme.dim).bg(bg);
     let state_color = app.theme.state_color(task.state);
 
-    // Column 0 reservation: left border accent for selected, space for non-selected
-    if is_cursor {
+    // Row background: flash uses flash_bg, cursor uses selection_bg, normal uses background
+    let row_bg = if is_flash {
+        app.theme.flash_bg
+    } else if is_cursor {
+        app.theme.selection_bg
+    } else {
+        bg
+    };
+
+    // Column 0 reservation: left border accent for selected/flash, space for non-selected
+    if is_cursor || is_flash {
+        let border_color = if is_flash {
+            app.theme.yellow
+        } else {
+            app.theme.selection_border
+        };
         spans.push(Span::styled(
             "\u{258E}",
             Style::default()
-                .fg(app.theme.selection_border)
-                .bg(app.theme.selection_bg),
+                .fg(border_color)
+                .bg(row_bg),
         ));
     } else {
         spans.push(Span::styled(" ", Style::default().bg(bg)));
@@ -450,16 +468,16 @@ fn render_task_line<'a>(
         spans.push(Span::styled(indicator, hl_style));
     }
 
-    // Highlight cursor line
-    if is_cursor {
+    // Highlight cursor line or flash line
+    if is_cursor || is_flash {
         let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
         if content_width < width {
             spans.push(Span::styled(
                 " ".repeat(width - content_width),
-                Style::default().bg(app.theme.selection_bg),
+                Style::default().bg(row_bg),
             ));
         }
-        // Re-style all spans with selection background
+        // Re-style all spans with row background
         // Skip column 0 border (already styled), search match spans (keep teal bg),
         // text selection spans (keep blue bg), and cursor spans (keep text_bright bg)
         let search_bg = app.theme.search_match_bg;
@@ -471,7 +489,7 @@ fn render_task_line<'a>(
                 && bg_color != Some(selection_blue)
                 && bg_color != Some(cursor_bg)
             {
-                span.style = span.style.bg(app.theme.selection_bg);
+                span.style = span.style.bg(row_bg);
             }
         }
     }

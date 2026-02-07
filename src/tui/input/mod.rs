@@ -7,7 +7,7 @@ use crate::ops::search::{search_inbox, search_tasks};
 use crate::ops::task_ops::{self, InsertPosition};
 
 use super::app::{App, AutocompleteKind, AutocompleteState, DetailRegion, EditHistory, EditTarget, FlatItem, Mode, MoveState, View, resolve_task_from_flat};
-use super::undo::Operation;
+use super::undo::{Operation, UndoNavTarget};
 
 /// Handle a key event in the current mode
 pub fn handle_key(app: &mut App, key: KeyEvent) {
@@ -411,14 +411,129 @@ fn handle_search(app: &mut App, key: KeyEvent) {
 // ---------------------------------------------------------------------------
 
 fn perform_undo(app: &mut App) {
-    if let Some(track_id) = app.undo_stack.undo(&mut app.project.tracks) {
-        let _ = app.save_track(&track_id);
+    if let Some(nav) = app.undo_stack.undo(&mut app.project.tracks) {
+        apply_nav_side_effects(app, &nav, true);
+        navigate_to_undo_target(app, &nav);
     }
 }
 
 fn perform_redo(app: &mut App) {
-    if let Some(track_id) = app.undo_stack.redo(&mut app.project.tracks) {
-        let _ = app.save_track(&track_id);
+    if let Some(nav) = app.undo_stack.redo(&mut app.project.tracks) {
+        apply_nav_side_effects(app, &nav, false);
+        navigate_to_undo_target(app, &nav);
+    }
+}
+
+/// Apply side effects that undo/redo can't handle internally (e.g., config changes, saves).
+fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo: bool) {
+    match nav {
+        UndoNavTarget::Task { track_id, .. } => {
+            let _ = app.save_track(track_id);
+        }
+        UndoNavTarget::TracksView { track_id } => {
+            // TrackMove: reorder in config and save
+            // Find the operation on the redo/undo stack (it was just moved there)
+            let op = if is_undo {
+                app.undo_stack.peek_last_redo()
+            } else {
+                app.undo_stack.peek_last_undo()
+            };
+            if let Some(Operation::TrackMove { old_index, new_index, .. }) = op {
+                let target_index = if is_undo { *old_index } else { *new_index };
+                let _ = crate::ops::track_ops::reorder_tracks(
+                    &mut app.project.config,
+                    track_id,
+                    target_index,
+                );
+                app.active_track_ids = app
+                    .project
+                    .config
+                    .tracks
+                    .iter()
+                    .filter(|t| t.state == "active")
+                    .map(|t| t.id.clone())
+                    .collect();
+                save_config(app);
+            }
+        }
+    }
+}
+
+/// Navigate the UI to show the item affected by an undo/redo operation.
+fn navigate_to_undo_target(app: &mut App, nav: &UndoNavTarget) {
+    match nav {
+        UndoNavTarget::Task {
+            track_id,
+            task_id,
+            detail_region,
+            task_removed,
+            position_hint,
+        } => {
+            // Find the track index in active tracks
+            let track_idx = match app.active_track_ids.iter().position(|id| id == track_id) {
+                Some(idx) => idx,
+                None => return, // Track not active (shelved) — undo still applied, just no navigation
+            };
+
+            // Close detail view if open
+            if matches!(app.view, View::Detail { .. }) {
+                app.detail_state = None;
+            }
+
+            // Switch to the target track
+            app.view = View::Track(track_idx);
+
+            if *task_removed {
+                // Task was removed — clamp cursor to position_hint
+                let flat_items = app.build_flat_items(track_id);
+                let hint = position_hint.unwrap_or(0);
+                let clamped = hint.min(flat_items.len().saturating_sub(1));
+                let state = app.get_track_state(track_id);
+                state.cursor = clamped;
+            } else {
+                // Move cursor to the affected task and flash it
+                move_cursor_to_task(app, track_id, task_id);
+                app.flash_task(task_id);
+
+                // If the operation targets a detail region, open detail view
+                if let Some(region) = detail_region {
+                    let task_exists = App::find_track_in_project(&app.project, track_id)
+                        .and_then(|track| task_ops::find_task_in_track(track, task_id))
+                        .is_some();
+                    if task_exists {
+                        app.open_detail(track_id.clone(), task_id.clone());
+                        if let Some(ref mut ds) = app.detail_state
+                            && ds.regions.contains(region)
+                        {
+                            ds.region = *region;
+                        }
+                    }
+                }
+            }
+        }
+        UndoNavTarget::TracksView { track_id } => {
+            // Close detail view if open
+            if matches!(app.view, View::Detail { .. }) {
+                app.detail_state = None;
+            }
+
+            app.view = View::Tracks;
+
+            // Move cursor to the track row
+            let active_tracks: Vec<&str> = app
+                .project
+                .config
+                .tracks
+                .iter()
+                .filter(|t| t.state == "active")
+                .map(|t| t.id.as_str())
+                .collect();
+            if let Some(idx) = active_tracks.iter().position(|id| *id == track_id) {
+                app.tracks_cursor = idx;
+            }
+
+            app.flash_track(track_id);
+        }
     }
 }
 
@@ -1439,8 +1554,22 @@ fn handle_move(app: &mut App, key: KeyEvent) {
                             .filter(|t| t.state == "active")
                             .map(|t| t.id.clone())
                             .collect();
-                        // Position cursor on the moved track
-                        let _ = (track_id, original_index);
+                        // Push undo if position changed
+                        let new_index = app
+                            .project
+                            .config
+                            .tracks
+                            .iter()
+                            .filter(|t| t.state == "active")
+                            .position(|t| t.id == track_id)
+                            .unwrap_or(0);
+                        if new_index != original_index {
+                            app.undo_stack.push(Operation::TrackMove {
+                                track_id,
+                                old_index: original_index,
+                                new_index,
+                            });
+                        }
                     }
                 }
             }

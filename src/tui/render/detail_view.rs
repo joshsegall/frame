@@ -45,6 +45,8 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
+    let is_flashing = app.is_flashing(&task_id);
+
     let detail_state = app.detail_state.as_ref();
     let current_region = detail_state.map(|ds| ds.region).unwrap_or(DetailRegion::Title);
     let editing = detail_state.is_some_and(|ds| ds.editing);
@@ -387,6 +389,42 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
         lines.push(Line::from(header_spans));
 
         render_subtask_tree(&mut lines, app, &task.subtasks, 1, bg);
+    }
+
+    // Apply flash highlight to the active region line
+    if is_flashing {
+        if let Some(line_idx) = active_region_line {
+            if let Some(line) = lines.get_mut(line_idx) {
+                let flash_bg = app.theme.flash_bg;
+                let flash_border = app.theme.yellow;
+                // Restyle all spans with flash_bg, and recolor the region indicator
+                let mut new_spans: Vec<Span<'static>> = Vec::new();
+                for (i, span) in line.spans.drain(..).enumerate() {
+                    if i == 0 && span.content.contains('\u{258E}') {
+                        // Region indicator — change to yellow border + flash_bg
+                        new_spans.push(Span::styled(
+                            span.content.into_owned(),
+                            Style::default().fg(flash_border).bg(flash_bg),
+                        ));
+                    } else {
+                        new_spans.push(Span::styled(
+                            span.content.into_owned(),
+                            span.style.bg(flash_bg),
+                        ));
+                    }
+                }
+                // Fill to width
+                let content_width: usize = new_spans.iter().map(|s| s.content.chars().count()).sum();
+                let width = area.width as usize;
+                if content_width < width {
+                    new_spans.push(Span::styled(
+                        " ".repeat(width - content_width),
+                        Style::default().bg(flash_bg),
+                    ));
+                }
+                *line = Line::from(new_spans);
+            }
+        }
     }
 
     // Handle scrolling using tracked region line index

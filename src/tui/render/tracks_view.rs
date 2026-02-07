@@ -63,6 +63,7 @@ pub fn render_tracks_view(frame: &mut Frame, app: &App, area: Rect) {
         lines.push(render_section_row(app, "Active", name_col, false));
         for tc in &active_tracks {
             let is_cursor = flat_idx == cursor;
+            let is_flash = app.is_track_flashing(&tc.id);
             lines.push(render_track_row(
                 app,
                 tc,
@@ -70,6 +71,7 @@ pub fn render_tracks_view(frame: &mut Frame, app: &App, area: Rect) {
                 num_width,
                 max_name_len,
                 is_cursor,
+                is_flash,
                 cc_focus,
                 area.width,
                 search_re.as_ref(),
@@ -84,6 +86,7 @@ pub fn render_tracks_view(frame: &mut Frame, app: &App, area: Rect) {
         lines.push(render_section_row(app, "Shelved", name_col, false));
         for tc in &shelved_tracks {
             let is_cursor = flat_idx == cursor;
+            let is_flash = app.is_track_flashing(&tc.id);
             lines.push(render_track_row(
                 app,
                 tc,
@@ -91,6 +94,7 @@ pub fn render_tracks_view(frame: &mut Frame, app: &App, area: Rect) {
                 num_width,
                 max_name_len,
                 is_cursor,
+                is_flash,
                 cc_focus,
                 area.width,
                 search_re.as_ref(),
@@ -105,6 +109,7 @@ pub fn render_tracks_view(frame: &mut Frame, app: &App, area: Rect) {
         lines.push(render_section_row(app, "Archived", name_col, true));
         for tc in &archived_tracks {
             let is_cursor = flat_idx == cursor;
+            let is_flash = app.is_track_flashing(&tc.id);
             lines.push(render_track_row(
                 app,
                 tc,
@@ -112,6 +117,7 @@ pub fn render_tracks_view(frame: &mut Frame, app: &App, area: Rect) {
                 num_width,
                 max_name_len,
                 is_cursor,
+                is_flash,
                 cc_focus,
                 area.width,
                 search_re.as_ref(),
@@ -195,11 +201,14 @@ fn render_track_row<'a>(
     num_width: usize,
     max_name_len: usize,
     is_cursor: bool,
+    is_flash: bool,
     cc_focus: Option<&str>,
     width: u16,
     search_re: Option<&regex::Regex>,
 ) -> Line<'a> {
-    let bg = if is_cursor {
+    let bg = if is_flash {
+        app.theme.flash_bg
+    } else if is_cursor {
         app.theme.selection_bg
     } else {
         app.theme.background
@@ -216,13 +225,18 @@ fn render_track_row<'a>(
 
     let mut spans: Vec<Span> = Vec::new();
 
-    // Column 0: cursor border
-    if is_cursor {
+    // Column 0: cursor/flash border
+    if is_cursor || is_flash {
+        let border_color = if is_flash {
+            app.theme.yellow
+        } else {
+            app.theme.selection_border
+        };
         spans.push(Span::styled(
             "\u{258E}",
             Style::default()
-                .fg(app.theme.selection_border)
-                .bg(app.theme.selection_bg),
+                .fg(border_color)
+                .bg(bg),
         ));
     } else {
         spans.push(Span::styled(
@@ -283,8 +297,8 @@ fn render_track_row<'a>(
         ));
     }
 
-    // Pad to full width for cursor highlight
-    if is_cursor {
+    // Pad to full width for cursor/flash highlight
+    if is_cursor || is_flash {
         let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
         let w = width as usize;
         if content_width < w {
