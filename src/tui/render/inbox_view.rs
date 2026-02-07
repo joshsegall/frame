@@ -6,6 +6,8 @@ use ratatui::widgets::Paragraph;
 
 use crate::tui::app::App;
 
+use super::push_highlighted_spans;
+
 /// Render the inbox view (read-only display for Phase 4)
 pub fn render_inbox_view(frame: &mut Frame, app: &App, area: Rect) {
     let inbox = match &app.project.inbox {
@@ -28,6 +30,8 @@ pub fn render_inbox_view(frame: &mut Frame, app: &App, area: Rect) {
     let cursor = app.inbox_cursor;
     let scroll = app.inbox_scroll;
     let visible_height = area.height as usize;
+
+    let search_re = app.active_search_re();
 
     // Build all display lines with their item indices
     let mut display_lines: Vec<(Option<usize>, Line)> = Vec::new();
@@ -58,7 +62,14 @@ pub fn render_inbox_view(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             Style::default().fg(app.theme.text_bright).bg(bg)
         };
-        spans.push(Span::styled(item.title.clone(), title_style));
+        let hl_style = title_style.bg(app.theme.purple);
+        push_highlighted_spans(
+            &mut spans,
+            &item.title,
+            title_style,
+            hl_style,
+            search_re.as_ref(),
+        );
 
         // Tags
         if !item.tags.is_empty() {

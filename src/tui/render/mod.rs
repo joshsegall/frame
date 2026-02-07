@@ -9,7 +9,9 @@ pub mod tracks_view;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::Style;
+use ratatui::text::Span;
 use ratatui::widgets::Block;
+use regex::Regex;
 
 use super::app::{App, View};
 
@@ -50,4 +52,44 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     // Status row
     status_row::render_status_row(frame, app, chunks[2]);
+}
+
+/// Push spans for text with regex match highlighting. If no regex or no matches,
+/// pushes a single span with `base_style`. Otherwise splits text at match boundaries.
+pub(super) fn push_highlighted_spans<'a>(
+    spans: &mut Vec<Span<'a>>,
+    text: &str,
+    base_style: Style,
+    highlight_style: Style,
+    search_re: Option<&Regex>,
+) {
+    let re = match search_re {
+        Some(r) => r,
+        None => {
+            spans.push(Span::styled(text.to_string(), base_style));
+            return;
+        }
+    };
+
+    let mut last_end = 0;
+    let mut has_match = false;
+    for m in re.find_iter(text) {
+        has_match = true;
+        if m.start() > last_end {
+            spans.push(Span::styled(
+                text[last_end..m.start()].to_string(),
+                base_style,
+            ));
+        }
+        spans.push(Span::styled(
+            text[m.start()..m.end()].to_string(),
+            highlight_style,
+        ));
+        last_end = m.end();
+    }
+    if !has_match {
+        spans.push(Span::styled(text.to_string(), base_style));
+    } else if last_end < text.len() {
+        spans.push(Span::styled(text[last_end..].to_string(), base_style));
+    }
 }

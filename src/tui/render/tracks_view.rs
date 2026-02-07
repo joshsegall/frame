@@ -7,6 +7,8 @@ use ratatui::widgets::Paragraph;
 use crate::ops::track_ops::{TrackStats, task_counts};
 use crate::tui::app::App;
 
+use super::push_highlighted_spans;
+
 /// Render the tracks overview: all tracks grouped by state with stats
 pub fn render_tracks_view(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
@@ -27,6 +29,7 @@ pub fn render_tracks_view(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let cc_focus = app.project.config.agent.cc_focus.as_deref();
+    let search_re = app.active_search_re();
 
     let mut flat_idx = 0usize;
 
@@ -48,6 +51,7 @@ pub fn render_tracks_view(frame: &mut Frame, app: &App, area: Rect) {
                 is_cursor,
                 cc_focus,
                 area.width,
+                search_re.as_ref(),
             ));
             flat_idx += 1;
         }
@@ -67,7 +71,13 @@ pub fn render_tracks_view(frame: &mut Frame, app: &App, area: Rect) {
             let is_cursor = flat_idx == cursor;
             let idx = flat_idx + 1;
             lines.push(render_track_line(
-                app, tc, idx, is_cursor, cc_focus, area.width,
+                app,
+                tc,
+                idx,
+                is_cursor,
+                cc_focus,
+                area.width,
+                search_re.as_ref(),
             ));
             flat_idx += 1;
         }
@@ -87,7 +97,13 @@ pub fn render_tracks_view(frame: &mut Frame, app: &App, area: Rect) {
             let is_cursor = flat_idx == cursor;
             let idx = flat_idx + 1;
             lines.push(render_track_line(
-                app, tc, idx, is_cursor, cc_focus, area.width,
+                app,
+                tc,
+                idx,
+                is_cursor,
+                cc_focus,
+                area.width,
+                search_re.as_ref(),
             ));
             flat_idx += 1;
         }
@@ -111,6 +127,7 @@ fn render_track_line<'a>(
     is_cursor: bool,
     cc_focus: Option<&str>,
     width: u16,
+    search_re: Option<&regex::Regex>,
 ) -> Line<'a> {
     let bg = if is_cursor {
         app.theme.highlight
@@ -133,9 +150,10 @@ fn render_track_line<'a>(
     // Indent
     spans.push(Span::styled("  ", Style::default().bg(bg)));
 
-    // Track name
+    // Track name (with search highlighting)
     let name_style = Style::default().fg(text_color).bg(bg);
-    spans.push(Span::styled(tc.name.clone(), name_style));
+    let hl_style = name_style.bg(app.theme.purple);
+    push_highlighted_spans(&mut spans, &tc.name, name_style, hl_style, search_re);
 
     // Stats
     let stats_str = format_stats(&stats, app, bg);

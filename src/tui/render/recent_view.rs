@@ -7,6 +7,8 @@ use ratatui::widgets::Paragraph;
 use crate::model::{Metadata, SectionKind};
 use crate::tui::app::App;
 
+use super::push_highlighted_spans;
+
 /// Render the recent completed tasks view (read-only for Phase 4)
 pub fn render_recent_view(frame: &mut Frame, app: &App, area: Rect) {
     // Collect all done tasks across active tracks, with their resolved dates
@@ -49,6 +51,7 @@ pub fn render_recent_view(frame: &mut Frame, app: &App, area: Rect) {
     let scroll = app.recent_scroll;
     let visible_height = area.height as usize;
 
+    let search_re = app.active_search_re();
     let mut lines: Vec<Line> = Vec::new();
     let mut current_date = String::new();
 
@@ -95,7 +98,14 @@ pub fn render_recent_view(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             Style::default().fg(app.theme.dim).bg(bg)
         };
-        spans.push(Span::styled(task.title.clone(), title_style));
+        let hl_style = title_style.bg(app.theme.purple);
+        push_highlighted_spans(
+            &mut spans,
+            &task.title,
+            title_style,
+            hl_style,
+            search_re.as_ref(),
+        );
 
         // Track origin
         spans.push(Span::styled(

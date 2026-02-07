@@ -3,9 +3,12 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use regex::Regex;
 
 use crate::model::{SectionKind, Task, TaskState};
 use crate::tui::app::{App, FlatItem};
+
+use super::push_highlighted_spans;
 
 /// State symbols for each task state
 fn state_symbol(state: TaskState) -> &'static str {
@@ -62,6 +65,7 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
         None => return,
     };
 
+    let search_re = app.active_search_re();
     let end = flat_items.len().min(scroll + visible_height);
     let mut lines: Vec<Line> = Vec::with_capacity(visible_height);
 
@@ -91,6 +95,7 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
                         },
                         is_cursor,
                         area.width as usize,
+                        search_re.as_ref(),
                     );
                     lines.push(line);
                 }
@@ -139,6 +144,7 @@ fn render_task_line<'a>(
     info: &TaskLineInfo<'_>,
     is_cursor: bool,
     width: usize,
+    search_re: Option<&Regex>,
 ) -> Line<'a> {
     let mut spans: Vec<Span> = Vec::new();
     let bg = app.theme.background;
@@ -218,7 +224,7 @@ fn render_task_line<'a>(
         spans.push(Span::styled(id_text, id_style));
     }
 
-    // Title
+    // Title (with search highlighting)
     let title_style = if is_cursor {
         Style::default()
             .fg(app.theme.text_bright)
@@ -229,7 +235,14 @@ fn render_task_line<'a>(
     } else {
         Style::default().fg(app.theme.text_bright).bg(bg)
     };
-    spans.push(Span::styled(task.title.clone(), title_style));
+    let highlight_style = title_style.bg(app.theme.purple);
+    push_highlighted_spans(
+        &mut spans,
+        &task.title,
+        title_style,
+        highlight_style,
+        search_re,
+    );
 
     // Tags
     if !task.tags.is_empty() {

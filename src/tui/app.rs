@@ -10,6 +10,8 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
+use regex::Regex;
+
 use crate::io::project_io::{discover_project, load_project};
 use crate::model::{Project, SectionKind, Task, Track};
 
@@ -151,7 +153,7 @@ impl App {
         }
     }
 
-    fn find_track_in_project<'a>(project: &'a Project, track_id: &str) -> Option<&'a Track> {
+    pub fn find_track_in_project<'a>(project: &'a Project, track_id: &str) -> Option<&'a Track> {
         project
             .tracks
             .iter()
@@ -176,6 +178,19 @@ impl App {
             .inbox
             .as_ref()
             .map_or(0, |inbox| inbox.items.len())
+    }
+
+    /// Get the active search regex for highlighting.
+    /// In Search mode: compiles from current input. In Navigate: compiles from last_search.
+    pub fn active_search_re(&self) -> Option<Regex> {
+        let pattern = match self.mode {
+            Mode::Search if !self.search_input.is_empty() => &self.search_input,
+            Mode::Navigate => self.last_search.as_deref()?,
+            _ => return None,
+        };
+        Regex::new(&format!("(?i){}", pattern))
+            .or_else(|_| Regex::new(&format!("(?i){}", regex::escape(pattern))))
+            .ok()
     }
 
     /// Get the currently active track ID (if in track view)

@@ -1,4 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use regex::Regex;
+
+use crate::model::SectionKind;
+use crate::ops::search::{search_inbox, search_tasks};
 
 use super::app::{App, FlatItem, Mode, View};
 
@@ -42,13 +46,14 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
         // Search: n/N for next/prev match
         (KeyModifiers::NONE, KeyCode::Char('n')) => {
             if app.last_search.is_some() {
-                // n cycles to next match — handled at view level
-                // For now just a placeholder
+                app.search_match_idx = app.search_match_idx.wrapping_add(1);
+                execute_search(app, app.search_match_idx);
             }
         }
         (KeyModifiers::SHIFT, KeyCode::Char('N')) => {
             if app.last_search.is_some() {
-                // N cycles to previous match
+                app.search_match_idx = app.search_match_idx.wrapping_sub(1);
+                execute_search(app, app.search_match_idx);
             }
         }
 
@@ -128,6 +133,7 @@ fn handle_search(app: &mut App, key: KeyEvent) {
             if !app.search_input.is_empty() {
                 app.last_search = Some(app.search_input.clone());
                 app.search_match_idx = 0;
+                execute_search(app, 0);
             }
             app.mode = Mode::Navigate;
             app.search_input.clear();
@@ -404,6 +410,245 @@ fn count_recent_tasks(app: &App) -> usize {
         .iter()
         .map(|(_, track)| track.section_tasks(crate::model::SectionKind::Done).len())
         .sum()
+}
+
+/// Execute search: find matches in the current view and jump to match at `match_idx`.
+/// Uses regex via ops::search for full-field matching. Auto-expands collapsed subtrees
+/// in track view to reveal matching tasks.
+fn execute_search(app: &mut App, match_idx: usize) {
+    let pattern = match &app.last_search {
+        Some(p) => p.clone(),
+        None => return,
+    };
+    // Build case-insensitive regex; fall back to escaped literal on invalid regex
+    let re = match Regex::new(&format!("(?i){}", pattern)) {
+        Ok(r) => r,
+        Err(_) => match Regex::new(&format!("(?i){}", regex::escape(&pattern))) {
+            Ok(r) => r,
+            Err(_) => return,
+        },
+    };
+
+    match app.view.clone() {
+        View::Track(idx) => search_in_track(app, idx, &re, match_idx),
+        View::Tracks => search_in_tracks_view(app, &re, match_idx),
+        View::Inbox => search_in_inbox(app, &re, match_idx),
+        View::Recent => search_in_recent(app, &re, match_idx),
+    }
+}
+
+/// Search within a single track view. Uses ops::search to find matching task IDs,
+/// then auto-expands ancestors and jumps the cursor.
+fn search_in_track(app: &mut App, view_idx: usize, re: &Regex, match_idx: usize) {
+    let track_id = match app.active_track_ids.get(view_idx) {
+        Some(id) => id.clone(),
+        None => return,
+    };
+
+    // Use ops::search scoped to this track to get all matching task IDs
+    let hits = search_tasks(&app.project, re, Some(&track_id));
+    if hits.is_empty() {
+        return;
+    }
+
+    // Deduplicate: multiple hits per task (title + tag + note) → unique task IDs in order
+    let mut matched_task_ids: Vec<String> = Vec::new();
+    for hit in &hits {
+        if !matched_task_ids.contains(&hit.task_id) {
+            matched_task_ids.push(hit.task_id.clone());
+        }
+    }
+
+    let idx = match_idx % matched_task_ids.len();
+    app.search_match_idx = idx;
+    let target_id = &matched_task_ids[idx];
+
+    // Auto-expand ancestors of the target task so it becomes visible
+    auto_expand_for_task(app, &track_id, target_id);
+
+    // Rebuild flat items after expansion and find the target's position
+    let flat_items = app.build_flat_items(&track_id);
+    let track = match App::find_track_in_project(&app.project, &track_id) {
+        Some(t) => t,
+        None => return,
+    };
+
+    for (fi, item) in flat_items.iter().enumerate() {
+        if let FlatItem::Task { section, path, .. } = item
+            && let Some(task) = resolve_task_from_track(track, *section, path)
+            && (task.id.as_deref() == Some(target_id)
+                || (target_id.is_empty() && task.title == hits[0].task_id))
+        {
+            let state = app.get_track_state(&track_id);
+            state.cursor = fi;
+            return;
+        }
+    }
+}
+
+/// Auto-expand all ancestor nodes of a task so it becomes visible in the flat list.
+fn auto_expand_for_task(app: &mut App, track_id: &str, target_task_id: &str) {
+    // First pass: collect expand keys immutably
+    let keys_to_expand = {
+        let track = match App::find_track_in_project(&app.project, track_id) {
+            Some(t) => t,
+            None => return,
+        };
+
+        let mut keys = Vec::new();
+        for section_kind in [SectionKind::Backlog, SectionKind::Parked, SectionKind::Done] {
+            let tasks = track.section_tasks(section_kind);
+            if let Some(path) = find_task_path(tasks, target_task_id) {
+                for depth in 0..path.len().saturating_sub(1) {
+                    let ancestor_path = &path[..=depth];
+                    let mut current = match tasks.get(ancestor_path[0]) {
+                        Some(t) => t,
+                        None => break,
+                    };
+                    for &pi in &ancestor_path[1..] {
+                        current = match current.subtasks.get(pi) {
+                            Some(t) => t,
+                            None => break,
+                        };
+                    }
+                    keys.push(crate::tui::app::task_expand_key(
+                        current,
+                        section_kind,
+                        ancestor_path,
+                    ));
+                }
+                break;
+            }
+        }
+        keys
+    };
+
+    // Second pass: insert keys mutably
+    let state = app.get_track_state(track_id);
+    for key in keys_to_expand {
+        state.expanded.insert(key);
+    }
+}
+
+/// Find the index path to a task with the given ID within a task tree.
+/// Returns e.g. [2, 0, 1] meaning tasks[2].subtasks[0].subtasks[1].
+fn find_task_path(tasks: &[crate::model::Task], target_id: &str) -> Option<Vec<usize>> {
+    for (i, task) in tasks.iter().enumerate() {
+        if task.id.as_deref() == Some(target_id) {
+            return Some(vec![i]);
+        }
+        if let Some(mut sub_path) = find_task_path(&task.subtasks, target_id) {
+            sub_path.insert(0, i);
+            return Some(sub_path);
+        }
+    }
+    None
+}
+
+fn search_in_tracks_view(app: &mut App, re: &Regex, match_idx: usize) {
+    let matches: Vec<usize> = app
+        .project
+        .config
+        .tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, tc)| re.is_match(&tc.name) || re.is_match(&tc.id))
+        .map(|(i, _)| i)
+        .collect();
+
+    if !matches.is_empty() {
+        let idx = match_idx % matches.len();
+        app.search_match_idx = idx;
+        app.tracks_cursor = matches[idx];
+    }
+}
+
+fn search_in_inbox(app: &mut App, re: &Regex, match_idx: usize) {
+    let inbox = match &app.project.inbox {
+        Some(inbox) => inbox,
+        None => return,
+    };
+
+    let hits = search_inbox(inbox, re);
+    if hits.is_empty() {
+        return;
+    }
+
+    // Deduplicate by item index
+    let mut matched_indices: Vec<usize> = Vec::new();
+    for hit in &hits {
+        if !matched_indices.contains(&hit.item_index) {
+            matched_indices.push(hit.item_index);
+        }
+    }
+
+    let idx = match_idx % matched_indices.len();
+    app.search_match_idx = idx;
+    app.inbox_cursor = matched_indices[idx];
+}
+
+fn search_in_recent(app: &mut App, re: &Regex, match_idx: usize) {
+    // Search done tasks across all tracks using ops::search
+    let all_hits = search_tasks(&app.project, re, None);
+
+    // Collect done task IDs that matched (search_tasks searches all sections)
+    let mut matched_done_ids: Vec<String> = Vec::new();
+    for hit in &all_hits {
+        // Check if this task is actually in a Done section
+        for (tid, track) in &app.project.tracks {
+            if *tid != hit.track_id {
+                continue;
+            }
+            for done_task in track.section_tasks(SectionKind::Done) {
+                if done_task.id.as_deref() == Some(hit.task_id.as_str())
+                    && !matched_done_ids.contains(&hit.task_id)
+                {
+                    matched_done_ids.push(hit.task_id.clone());
+                }
+            }
+        }
+    }
+
+    if matched_done_ids.is_empty() {
+        return;
+    }
+
+    // Build the same ordering as recent_view: collect all done tasks sorted by resolved date
+    let mut done_tasks: Vec<(String, String)> = Vec::new();
+    for (track_id, track) in &app.project.tracks {
+        for task in track.section_tasks(SectionKind::Done) {
+            let resolved = task
+                .metadata
+                .iter()
+                .find_map(|m| {
+                    if let crate::model::Metadata::Resolved(d) = m {
+                        Some(d.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
+            done_tasks.push((
+                task.id.clone().unwrap_or_default(),
+                format!("{}:{}", track_id, resolved),
+            ));
+        }
+    }
+    done_tasks.sort_by(|a, b| b.1.cmp(&a.1));
+
+    // Find flat indices of matching done tasks
+    let matches: Vec<usize> = done_tasks
+        .iter()
+        .enumerate()
+        .filter(|(_, (id, _))| matched_done_ids.contains(id))
+        .map(|(i, _)| i)
+        .collect();
+
+    if !matches.is_empty() {
+        let idx = match_idx % matches.len();
+        app.search_match_idx = idx;
+        app.recent_cursor = matches[idx];
+    }
 }
 
 /// Switch to the next/prev tab. Direction: 1 = forward, -1 = backward.
