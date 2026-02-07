@@ -145,6 +145,7 @@ fn build_track_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
     let right = vec![
         HelpEntry::Header("Edit".into()),
         HelpEntry::Binding("e".into(), "Edit title".into()),
+        HelpEntry::Binding("#".into(), "Edit tags".into()),
         HelpEntry::Binding("a".into(), "Add task (bottom)".into()),
         HelpEntry::Binding("o/-".into(), "Insert after cursor".into()),
         HelpEntry::Binding("p".into(), "Push to top".into()),

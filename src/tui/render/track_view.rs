@@ -238,14 +238,19 @@ fn render_task_line<'a>(
         spans.push(Span::styled(id_text, id_style));
     }
 
-    // Check if this task is being edited inline
+    // Check if this task is being edited inline (title or tags)
     let is_editing = is_cursor
         && app.mode == Mode::Edit
         && app.edit_target.as_ref().is_some_and(|et| match et {
-            EditTarget::NewTask { task_id, .. } | EditTarget::ExistingTitle { task_id, .. } => {
+            EditTarget::NewTask { task_id, .. }
+            | EditTarget::ExistingTitle { task_id, .. }
+            | EditTarget::ExistingTags { task_id, .. } => {
                 task.id.as_deref() == Some(task_id)
             }
         });
+    let is_editing_tags = is_cursor
+        && app.mode == Mode::Edit
+        && app.edit_target.as_ref().is_some_and(|et| matches!(et, EditTarget::ExistingTags { task_id, .. } if task.id.as_deref() == Some(task_id)));
 
     // Title (with search highlighting, or edit buffer if editing)
     let title_style = if is_cursor {
@@ -259,7 +264,7 @@ fn render_task_line<'a>(
         Style::default().fg(app.theme.text_bright).bg(bg)
     };
 
-    if is_editing {
+    if is_editing && !is_editing_tags {
         // Render edit buffer with cursor/selection highlighting
         let buf = &app.edit_buffer;
         let cursor_pos = app.edit_cursor.min(buf.len());
@@ -329,8 +334,64 @@ fn render_task_line<'a>(
         );
     }
 
-    // Tags
-    if !task.tags.is_empty() {
+    // Tags (inline edit buffer when editing tags, otherwise normal rendering)
+    if is_editing_tags {
+        spans.push(Span::styled("  ", Style::default().bg(bg)));
+        let buf = &app.edit_buffer;
+        let cursor_pos = app.edit_cursor.min(buf.len());
+        let cursor_style = Style::default()
+            .fg(app.theme.background)
+            .bg(app.theme.text_bright);
+        let tag_edit_style = title_style;
+        let selection_style = Style::default()
+            .fg(app.theme.text_bright)
+            .bg(app.theme.blue);
+
+        if let Some((sel_start, sel_end)) = app.edit_selection_range() {
+            if sel_start != sel_end {
+                if sel_start > 0 {
+                    spans.push(Span::styled(buf[..sel_start].to_string(), tag_edit_style));
+                }
+                spans.push(Span::styled(buf[sel_start..sel_end].to_string(), selection_style));
+                if sel_end < buf.len() {
+                    spans.push(Span::styled(buf[sel_end..].to_string(), tag_edit_style));
+                }
+                if cursor_pos >= buf.len() {
+                    spans.push(Span::styled(" ".to_string(), cursor_style));
+                }
+            } else {
+                let before = &buf[..cursor_pos];
+                if !before.is_empty() {
+                    spans.push(Span::styled(before.to_string(), tag_edit_style));
+                }
+                if cursor_pos < buf.len() {
+                    let cursor_char = &buf[cursor_pos..cursor_pos + 1];
+                    spans.push(Span::styled(cursor_char.to_string(), cursor_style));
+                    let after = &buf[cursor_pos + 1..];
+                    if !after.is_empty() {
+                        spans.push(Span::styled(after.to_string(), tag_edit_style));
+                    }
+                } else {
+                    spans.push(Span::styled(" ".to_string(), cursor_style));
+                }
+            }
+        } else {
+            let before = &buf[..cursor_pos];
+            if !before.is_empty() {
+                spans.push(Span::styled(before.to_string(), tag_edit_style));
+            }
+            if cursor_pos < buf.len() {
+                let cursor_char = &buf[cursor_pos..cursor_pos + 1];
+                spans.push(Span::styled(cursor_char.to_string(), cursor_style));
+                let after = &buf[cursor_pos + 1..];
+                if !after.is_empty() {
+                    spans.push(Span::styled(after.to_string(), tag_edit_style));
+                }
+            } else {
+                spans.push(Span::styled(" ".to_string(), cursor_style));
+            }
+        }
+    } else if !task.tags.is_empty() {
         spans.push(Span::styled("  ", Style::default().bg(bg)));
         for (i, tag) in task.tags.iter().enumerate() {
             let tag_color = app.theme.tag_color(tag);
@@ -378,10 +439,17 @@ fn render_task_line<'a>(
             ));
         }
         // Re-style all spans with selection background
-        // Skip column 0 border (already styled) and search match spans (keep teal bg)
+        // Skip column 0 border (already styled), search match spans (keep teal bg),
+        // text selection spans (keep blue bg), and cursor spans (keep text_bright bg)
         let search_bg = app.theme.search_match_bg;
+        let selection_blue = app.theme.blue;
+        let cursor_bg = app.theme.text_bright;
         for span in spans.iter_mut().skip(1) {
-            if span.style.bg != Some(search_bg) {
+            let bg_color = span.style.bg;
+            if bg_color != Some(search_bg)
+                && bg_color != Some(selection_blue)
+                && bg_color != Some(cursor_bg)
+            {
                 span.style = span.style.bg(app.theme.selection_bg);
             }
         }

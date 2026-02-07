@@ -243,6 +243,12 @@ pub enum EditTarget {
         track_id: String,
         original_title: String,
     },
+    /// Editing an existing task's tags (inline from track view)
+    ExistingTags {
+        task_id: String,
+        track_id: String,
+        original_tags: String,
+    },
 }
 
 /// State for MOVE mode
@@ -767,13 +773,15 @@ impl App {
 
         // Determine which task is being edited (if any)
         let editing_task_id = match &self.edit_target {
-            Some(EditTarget::NewTask { task_id, .. }) => Some(task_id.clone()),
-            Some(EditTarget::ExistingTitle { task_id, .. }) => Some(task_id.clone()),
+            Some(EditTarget::NewTask { task_id, .. })
+            | Some(EditTarget::ExistingTitle { task_id, .. })
+            | Some(EditTarget::ExistingTags { task_id, .. }) => Some(task_id.clone()),
             None => None,
         };
         let editing_track_id = match &self.edit_target {
-            Some(EditTarget::NewTask { track_id, .. }) => Some(track_id.clone()),
-            Some(EditTarget::ExistingTitle { track_id, .. }) => Some(track_id.clone()),
+            Some(EditTarget::NewTask { track_id, .. })
+            | Some(EditTarget::ExistingTitle { track_id, .. })
+            | Some(EditTarget::ExistingTags { track_id, .. }) => Some(track_id.clone()),
             None => None,
         };
 

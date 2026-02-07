@@ -247,10 +247,12 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             }
         }
 
-        // Detail view shortcut keys: #, @, d, n — jump to region + enter EDIT
+        // Tag edit: # — detail view jump to tags region, or inline tag edit in track view
         (KeyModifiers::NONE, KeyCode::Char('#')) => {
             if matches!(app.view, View::Detail { .. }) {
                 detail_jump_to_region_and_edit(app, DetailRegion::Tags);
+            } else {
+                enter_tag_edit(app);
             }
         }
         (KeyModifiers::NONE, KeyCode::Char('@')) => {
@@ -726,6 +728,45 @@ fn enter_title_edit(app: &mut App) {
     app.mode = Mode::Edit;
 }
 
+fn enter_tag_edit(app: &mut App) {
+    let (track_id, task_id, _) = match app.cursor_task_id() {
+        Some(info) => info,
+        None => return,
+    };
+
+    let track = match App::find_track_in_project(&app.project, &track_id) {
+        Some(t) => t,
+        None => return,
+    };
+
+    let task = match task_ops::find_task_in_track(track, &task_id) {
+        Some(t) => t,
+        None => return,
+    };
+
+    let original_tags = task.tags.iter().map(|t| format!("#{}", t)).collect::<Vec<_>>().join(" ");
+    app.edit_buffer = if original_tags.is_empty() { String::new() } else { format!("{} ", original_tags) };
+    app.edit_cursor = app.edit_buffer.len();
+    app.pre_edit_cursor = None;
+    app.edit_target = Some(EditTarget::ExistingTags {
+        task_id,
+        track_id,
+        original_tags,
+    });
+    app.edit_history = Some(EditHistory::new(&app.edit_buffer, app.edit_cursor, 0));
+
+    // Activate tag autocomplete
+    let candidates = app.collect_all_tags();
+    if !candidates.is_empty() {
+        let mut ac = AutocompleteState::new(AutocompleteKind::Tag, candidates);
+        let filter_text = autocomplete_filter_text(&app.edit_buffer, AutocompleteKind::Tag);
+        ac.filter(&filter_text);
+        app.autocomplete = Some(ac);
+    }
+
+    app.mode = Mode::Edit;
+}
+
 // ---------------------------------------------------------------------------
 // EDIT mode input
 // ---------------------------------------------------------------------------
@@ -767,17 +808,24 @@ fn handle_edit(app: &mut App, key: KeyEvent) {
                 autocomplete_accept(app);
                 return;
             }
-            // Dismiss autocomplete on Esc (don't cancel edit)
+            // Dismiss autocomplete on Esc (hide, don't destroy — typing will re-show)
             (_, KeyCode::Esc) => {
-                app.autocomplete = None;
+                if let Some(ac) = &mut app.autocomplete {
+                    ac.visible = false;
+                }
                 return;
             }
             // Enter: accept autocomplete selection and confirm edit
             (_, KeyCode::Enter) => {
-                // Accept autocomplete if a candidate is selected
-                let has_selection = app.autocomplete.as_ref().is_some_and(|ac| ac.selected_entry().is_some());
-                if has_selection {
-                    autocomplete_accept(app);
+                // Accept autocomplete if a candidate is selected AND the user is
+                // actually completing a partial word (not just confirming an already-typed entry)
+                if let Some(ac) = &app.autocomplete {
+                    if let Some(entry) = ac.selected_entry() {
+                        let filter = autocomplete_filter_text(&app.edit_buffer, ac.kind);
+                        if filter != entry {
+                            autocomplete_accept(app);
+                        }
+                    }
                 }
                 app.autocomplete = None;
                 // Fall through to confirm
@@ -1132,6 +1180,40 @@ fn confirm_edit(app: &mut App) {
 
                     let _ = app.save_track(&track_id);
                 }
+            }
+            drain_pending_for_track(app, &track_id);
+        }
+        EditTarget::ExistingTags {
+            task_id,
+            track_id,
+            original_tags,
+        } => {
+            let new_value = app.edit_buffer.clone();
+            let new_tags: Vec<String> = dedup_preserve_order(
+                new_value
+                    .split_whitespace()
+                    .map(|s| s.strip_prefix('#').unwrap_or(s).to_string())
+                    .filter(|s| !s.is_empty()),
+            );
+
+            let track = match app.find_track_mut(&track_id) {
+                Some(t) => t,
+                None => return,
+            };
+            if let Some(task) = task_ops::find_task_mut_in_track(track, &task_id) {
+                task.tags = new_tags;
+                task.mark_dirty();
+            }
+            let _ = app.save_track(&track_id);
+
+            if new_value != original_tags {
+                app.undo_stack.push(Operation::FieldEdit {
+                    track_id: track_id.clone(),
+                    task_id,
+                    field: "tags".to_string(),
+                    old_value: original_tags,
+                    new_value,
+                });
             }
             drain_pending_for_track(app, &track_id);
         }
