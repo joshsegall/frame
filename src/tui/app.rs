@@ -610,13 +610,26 @@ impl App {
         }
     }
 
-    /// Collect file paths from the project directory (for ref/spec autocomplete)
+    /// Collect file paths from the project directory (for ref/spec autocomplete).
+    /// Scoped to `ref_paths` dirs if configured; filters to `ref_extensions` if set;
+    /// always excludes directories.
     pub fn collect_file_paths(&self) -> Vec<String> {
         let mut paths: Vec<String> = Vec::new();
         let frame_dir = &self.project.frame_dir;
-        // Walk parent directory (project root, one level up from frame/)
         let project_root = frame_dir.parent().unwrap_or(frame_dir);
-        Self::walk_dir_for_paths(project_root, project_root, &mut paths, 3);
+        let extensions = &self.project.config.ui.ref_extensions;
+        let ref_paths = &self.project.config.ui.ref_paths;
+
+        if ref_paths.is_empty() {
+            Self::walk_dir_for_paths(project_root, project_root, &mut paths, 3, extensions);
+        } else {
+            for rp in ref_paths {
+                let dir = project_root.join(rp);
+                if dir.is_dir() {
+                    Self::walk_dir_for_paths(project_root, &dir, &mut paths, 3, extensions);
+                }
+            }
+        }
         paths.sort();
         paths
     }
@@ -626,6 +639,7 @@ impl App {
         dir: &std::path::Path,
         paths: &mut Vec<String>,
         max_depth: usize,
+        extensions: &[String],
     ) {
         if max_depth == 0 {
             return;
@@ -643,13 +657,18 @@ impl App {
                 continue;
             }
 
-            if let Ok(rel) = path.strip_prefix(base) {
-                let rel_str = rel.to_string_lossy().to_string();
-                if path.is_file() {
-                    paths.push(rel_str);
-                } else if path.is_dir() {
-                    paths.push(format!("{}/", rel_str));
-                    Self::walk_dir_for_paths(base, &path, paths, max_depth - 1);
+            if path.is_dir() {
+                Self::walk_dir_for_paths(base, &path, paths, max_depth - 1, extensions);
+            } else if path.is_file() {
+                // Filter by extension if ref_extensions is configured
+                if !extensions.is_empty() {
+                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                    if !extensions.iter().any(|e| e.eq_ignore_ascii_case(ext)) {
+                        continue;
+                    }
+                }
+                if let Ok(rel) = path.strip_prefix(base) {
+                    paths.push(rel.to_string_lossy().to_string());
                 }
             }
         }

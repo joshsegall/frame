@@ -82,6 +82,14 @@ pub struct UiConfig {
     pub colors: HashMap<String, String>,
     #[serde(default)]
     pub tag_colors: HashMap<String, String>,
+    /// File extensions to show in ref/spec autocomplete (e.g. ["md", "txt", "pdf"]).
+    /// If empty, all files are shown.
+    #[serde(default)]
+    pub ref_extensions: Vec<String>,
+    /// Directories to scope ref/spec autocomplete to (e.g. ["doc", "spec"]).
+    /// If empty, the whole project is searched.
+    #[serde(default)]
+    pub ref_paths: Vec<String>,
 }
 
 impl Default for UiConfig {
@@ -91,6 +99,8 @@ impl Default for UiConfig {
             tag_style: "foreground".to_string(),
             colors: HashMap::new(),
             tag_colors: HashMap::new(),
+            ref_extensions: Vec::new(),
+            ref_paths: Vec::new(),
         }
     }
 }
