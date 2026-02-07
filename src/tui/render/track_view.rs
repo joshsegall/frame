@@ -260,19 +260,60 @@ fn render_task_line<'a>(
     };
 
     if is_editing {
-        // Render edit buffer with cursor
+        // Render edit buffer with cursor/selection highlighting
         let buf = &app.edit_buffer;
-        let cursor_pos = app.edit_cursor;
-        let before = &buf[..cursor_pos.min(buf.len())];
-        let after = &buf[cursor_pos.min(buf.len())..];
-        spans.push(Span::styled(before.to_string(), title_style));
-        // Block cursor
-        spans.push(Span::styled(
-            "\u{258C}",
-            Style::default().fg(app.theme.highlight).bg(bg),
-        ));
-        if !after.is_empty() {
-            spans.push(Span::styled(after.to_string(), title_style));
+        let cursor_pos = app.edit_cursor.min(buf.len());
+        let cursor_style = Style::default()
+            .fg(app.theme.background)
+            .bg(app.theme.text_bright);
+        let selection_style = Style::default()
+            .fg(app.theme.text_bright)
+            .bg(app.theme.blue);
+
+        if let Some((sel_start, sel_end)) = app.edit_selection_range() {
+            if sel_start != sel_end {
+                if sel_start > 0 {
+                    spans.push(Span::styled(buf[..sel_start].to_string(), title_style));
+                }
+                spans.push(Span::styled(buf[sel_start..sel_end].to_string(), selection_style));
+                if sel_end < buf.len() {
+                    spans.push(Span::styled(buf[sel_end..].to_string(), title_style));
+                }
+                if cursor_pos >= buf.len() {
+                    spans.push(Span::styled(" ".to_string(), cursor_style));
+                }
+            } else {
+                // Empty selection, render normally with cursor
+                let before = &buf[..cursor_pos];
+                if !before.is_empty() {
+                    spans.push(Span::styled(before.to_string(), title_style));
+                }
+                if cursor_pos < buf.len() {
+                    let cursor_char = &buf[cursor_pos..cursor_pos + 1];
+                    spans.push(Span::styled(cursor_char.to_string(), cursor_style));
+                    let after = &buf[cursor_pos + 1..];
+                    if !after.is_empty() {
+                        spans.push(Span::styled(after.to_string(), title_style));
+                    }
+                } else {
+                    spans.push(Span::styled(" ".to_string(), cursor_style));
+                }
+            }
+        } else {
+            let before = &buf[..cursor_pos];
+            if !before.is_empty() {
+                spans.push(Span::styled(before.to_string(), title_style));
+            }
+            if cursor_pos < buf.len() {
+                let cursor_char = &buf[cursor_pos..cursor_pos + 1];
+                spans.push(Span::styled(cursor_char.to_string(), cursor_style));
+                let after = &buf[cursor_pos + 1..];
+                if !after.is_empty() {
+                    spans.push(Span::styled(after.to_string(), title_style));
+                }
+            } else {
+                spans.push(Span::styled(" ".to_string(), cursor_style));
+            }
         }
     } else {
         let highlight_style = Style::default()

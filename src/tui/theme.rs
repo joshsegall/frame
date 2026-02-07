@@ -40,10 +40,10 @@ impl Default for Theme {
 
         Theme {
             background: Color::Rgb(0x0C, 0x00, 0x1B),
-            text: Color::Rgb(0xA0, 0x9B, 0xFE),
+            text: Color::Rgb(0xB0, 0xAA, 0xFF),
             text_bright: Color::Rgb(0xFF, 0xFF, 0xFF),
             highlight: Color::Rgb(0xFB, 0x41, 0x96),
-            dim: Color::Rgb(0x5A, 0x55, 0x80),
+            dim: Color::Rgb(0x7D, 0x78, 0xBF),
             red: Color::Rgb(0xFF, 0x44, 0x44),
             yellow: Color::Rgb(0xFF, 0xD7, 0x00),
             green: Color::Rgb(0x44, 0xFF, 0x88),
@@ -178,7 +178,7 @@ mod tests {
             Some(&Color::Rgb(0x11, 0x22, 0x33))
         );
         // Unchanged defaults still present
-        assert_eq!(theme.text, Color::Rgb(0xA0, 0x9B, 0xFE));
+        assert_eq!(theme.text, Color::Rgb(0xB0, 0xAA, 0xFF));
     }
 
     #[test]

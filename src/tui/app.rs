@@ -35,6 +35,185 @@ pub enum View {
     Inbox,
     /// Recently completed tasks
     Recent,
+    /// Detail view for a single task
+    Detail {
+        track_id: String,
+        task_id: String,
+    },
+}
+
+/// Regions in the detail view that can be navigated
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailRegion {
+    Title,
+    Tags,
+    Added,
+    Deps,
+    Spec,
+    Refs,
+    Note,
+    Subtasks,
+}
+
+impl DetailRegion {
+    /// Whether this region is editable
+    pub fn is_editable(self) -> bool {
+        !matches!(self, DetailRegion::Added | DetailRegion::Subtasks)
+    }
+}
+
+/// Inline edit history for undo/redo within an editing session
+#[derive(Debug, Clone, Default)]
+pub struct EditHistory {
+    /// Snapshots of (buffer, cursor_pos) — for single-line edits
+    /// or (buffer, cursor_line, cursor_col) serialized as (buffer, combined) for multi-line
+    entries: Vec<(String, usize, usize)>,
+    /// Current position in history (points to the currently displayed state)
+    position: usize,
+}
+
+impl EditHistory {
+    pub fn new(initial_buffer: &str, cursor_pos: usize, cursor_line: usize) -> Self {
+        EditHistory {
+            entries: vec![(initial_buffer.to_string(), cursor_pos, cursor_line)],
+            position: 0,
+        }
+    }
+
+    /// Save a snapshot (call after each text-modifying action)
+    pub fn snapshot(&mut self, buffer: &str, cursor_pos: usize, cursor_line: usize) {
+        // Don't save duplicate consecutive states
+        if let Some(last) = self.entries.get(self.position) {
+            if last.0 == buffer {
+                return;
+            }
+        }
+        // Truncate any redo entries
+        self.entries.truncate(self.position + 1);
+        self.entries.push((buffer.to_string(), cursor_pos, cursor_line));
+        self.position = self.entries.len() - 1;
+    }
+
+    /// Undo: move back in history. Returns (buffer, cursor_pos, cursor_line) or None.
+    pub fn undo(&mut self) -> Option<(&str, usize, usize)> {
+        if self.position > 0 {
+            self.position -= 1;
+            let (buf, pos, line) = &self.entries[self.position];
+            Some((buf, *pos, *line))
+        } else {
+            None
+        }
+    }
+
+    /// Redo: move forward in history. Returns (buffer, cursor_pos, cursor_line) or None.
+    pub fn redo(&mut self) -> Option<(&str, usize, usize)> {
+        if self.position + 1 < self.entries.len() {
+            self.position += 1;
+            let (buf, pos, line) = &self.entries[self.position];
+            Some((buf, *pos, *line))
+        } else {
+            None
+        }
+    }
+}
+
+/// What kind of autocomplete is active
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutocompleteKind {
+    /// Tag names (from config tag_colors + existing tags in project)
+    Tag,
+    /// Task IDs (all task IDs across tracks)
+    TaskId,
+    /// File paths (walk project directory)
+    FilePath,
+}
+
+/// State for the autocomplete dropdown
+#[derive(Debug, Clone)]
+pub struct AutocompleteState {
+    /// What kind of autocomplete entries to show
+    pub kind: AutocompleteKind,
+    /// All candidate entries (unfiltered)
+    pub candidates: Vec<String>,
+    /// Filtered entries matching current input
+    pub filtered: Vec<String>,
+    /// Currently selected index in filtered list
+    pub selected: usize,
+    /// Whether the dropdown is visible
+    pub visible: bool,
+}
+
+impl AutocompleteState {
+    pub fn new(kind: AutocompleteKind, candidates: Vec<String>) -> Self {
+        let filtered = candidates.clone();
+        AutocompleteState {
+            kind,
+            candidates,
+            filtered,
+            selected: 0,
+            visible: true,
+        }
+    }
+
+    /// Filter candidates based on the current input fragment
+    pub fn filter(&mut self, input: &str) {
+        let query = input.to_lowercase();
+        self.filtered = self
+            .candidates
+            .iter()
+            .filter(|c| c.to_lowercase().contains(&query))
+            .cloned()
+            .collect();
+        // Clamp selected
+        if self.selected >= self.filtered.len() {
+            self.selected = 0;
+        }
+    }
+
+    /// Move selection up
+    pub fn move_up(&mut self) {
+        if !self.filtered.is_empty() {
+            if self.selected == 0 {
+                self.selected = self.filtered.len() - 1;
+            } else {
+                self.selected -= 1;
+            }
+        }
+    }
+
+    /// Move selection down
+    pub fn move_down(&mut self) {
+        if !self.filtered.is_empty() {
+            self.selected = (self.selected + 1) % self.filtered.len();
+        }
+    }
+
+    /// Get the currently selected entry
+    pub fn selected_entry(&self) -> Option<&str> {
+        self.filtered.get(self.selected).map(|s| s.as_str())
+    }
+}
+
+/// State for the detail view
+#[derive(Debug, Clone)]
+pub struct DetailState {
+    /// Which region the cursor is on
+    pub region: DetailRegion,
+    /// Scroll offset for the detail view
+    pub scroll_offset: usize,
+    /// The list of regions present for the current task (computed on render)
+    pub regions: Vec<DetailRegion>,
+    /// Track view index to return to on Esc
+    pub return_view_idx: usize,
+    /// Whether we're editing in the detail view
+    pub editing: bool,
+    /// For multi-line note editing: the buffer
+    pub edit_buffer: String,
+    /// For multi-line note editing: cursor position (line, col)
+    pub edit_cursor_line: usize,
+    pub edit_cursor_col: usize,
+    /// Original value before editing (for cancel/undo)
+    pub edit_original: String,
 }
 
 /// Current interaction mode
@@ -177,6 +356,15 @@ pub struct App {
     pub last_save_at: Option<Instant>,
     /// Last-known mtime for each track file (keyed by track_id)
     pub track_mtimes: HashMap<String, SystemTime>,
+    /// Detail view state
+    pub detail_state: Option<DetailState>,
+    /// Autocomplete state (active during EDIT mode for certain fields)
+    pub autocomplete: Option<AutocompleteState>,
+    /// Inline edit history for undo/redo within an editing session
+    pub edit_history: Option<EditHistory>,
+    /// Selection anchor for text selection in edit mode (None = no selection)
+    /// Selection range is from min(anchor, edit_cursor) to max(anchor, edit_cursor)
+    pub edit_selection_anchor: Option<usize>,
 }
 
 impl App {
@@ -258,6 +446,10 @@ impl App {
             conflict_text: None,
             last_save_at: None,
             track_mtimes,
+            detail_state: None,
+            autocomplete: None,
+            edit_history: None,
+            edit_selection_anchor: None,
         }
     }
 
@@ -286,6 +478,144 @@ impl App {
             .inbox
             .as_ref()
             .map_or(0, |inbox| inbox.items.len())
+    }
+
+    /// Get the selection range (start, end) for the single-line edit buffer, if any.
+    /// Returns (start, end) where start <= end.
+    pub fn edit_selection_range(&self) -> Option<(usize, usize)> {
+        let anchor = self.edit_selection_anchor?;
+        let cursor = self.edit_cursor;
+        Some((anchor.min(cursor), anchor.max(cursor)))
+    }
+
+    /// Delete the selected text and return the cursor to the start of selection.
+    /// Returns true if there was a selection to delete.
+    pub fn delete_selection(&mut self) -> bool {
+        if let Some((start, end)) = self.edit_selection_range() {
+            if start != end {
+                self.edit_buffer.drain(start..end);
+                self.edit_cursor = start;
+                self.edit_selection_anchor = None;
+                return true;
+            }
+        }
+        self.edit_selection_anchor = None;
+        false
+    }
+
+    /// Collect all unique tags from config tag_colors + all tasks in the project
+    pub fn collect_all_tags(&self) -> Vec<String> {
+        let mut tags: HashSet<String> = HashSet::new();
+
+        // Tags from config tag_colors keys
+        for key in self.project.config.ui.tag_colors.keys() {
+            tags.insert(key.clone());
+        }
+
+        // Tags from theme tag_colors (includes hardcoded defaults like 'cc')
+        for key in self.theme.tag_colors.keys() {
+            tags.insert(key.clone());
+        }
+
+        // Tags from agent default_tags
+        for tag in &self.project.config.agent.default_tags {
+            tags.insert(tag.clone());
+        }
+
+        // Tags from all tasks across all tracks
+        for (_, track) in &self.project.tracks {
+            Self::collect_tags_from_tasks(&track.backlog(), &mut tags);
+            Self::collect_tags_from_tasks(&track.parked(), &mut tags);
+            Self::collect_tags_from_tasks(&track.done(), &mut tags);
+        }
+
+        // Tags from inbox items
+        if let Some(inbox) = &self.project.inbox {
+            for item in &inbox.items {
+                for tag in &item.tags {
+                    tags.insert(tag.clone());
+                }
+            }
+        }
+
+        let mut sorted: Vec<String> = tags.into_iter().collect();
+        sorted.sort();
+        sorted
+    }
+
+    fn collect_tags_from_tasks(tasks: &[Task], tags: &mut HashSet<String>) {
+        for task in tasks {
+            for tag in &task.tags {
+                tags.insert(tag.clone());
+            }
+            Self::collect_tags_from_tasks(&task.subtasks, tags);
+        }
+    }
+
+    /// Collect all task IDs across all tracks
+    pub fn collect_all_task_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = Vec::new();
+        for (_, track) in &self.project.tracks {
+            Self::collect_ids_from_tasks(&track.backlog(), &mut ids);
+            Self::collect_ids_from_tasks(&track.parked(), &mut ids);
+            Self::collect_ids_from_tasks(&track.done(), &mut ids);
+        }
+        ids.sort();
+        ids
+    }
+
+    fn collect_ids_from_tasks(tasks: &[Task], ids: &mut Vec<String>) {
+        for task in tasks {
+            if let Some(ref id) = task.id {
+                ids.push(id.clone());
+            }
+            Self::collect_ids_from_tasks(&task.subtasks, ids);
+        }
+    }
+
+    /// Collect file paths from the project directory (for ref/spec autocomplete)
+    pub fn collect_file_paths(&self) -> Vec<String> {
+        let mut paths: Vec<String> = Vec::new();
+        let frame_dir = &self.project.frame_dir;
+        // Walk parent directory (project root, one level up from frame/)
+        let project_root = frame_dir.parent().unwrap_or(frame_dir);
+        Self::walk_dir_for_paths(project_root, project_root, &mut paths, 3);
+        paths.sort();
+        paths
+    }
+
+    fn walk_dir_for_paths(
+        base: &std::path::Path,
+        dir: &std::path::Path,
+        paths: &mut Vec<String>,
+        max_depth: usize,
+    ) {
+        if max_depth == 0 {
+            return;
+        }
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+            // Skip hidden dirs/files, node_modules, target, .git
+            if name.starts_with('.') || name == "node_modules" || name == "target" {
+                continue;
+            }
+
+            if let Ok(rel) = path.strip_prefix(base) {
+                let rel_str = rel.to_string_lossy().to_string();
+                if path.is_file() {
+                    paths.push(rel_str);
+                } else if path.is_dir() {
+                    paths.push(format!("{}/", rel_str));
+                    Self::walk_dir_for_paths(base, &path, paths, max_depth - 1);
+                }
+            }
+        }
     }
 
     /// Get the active search regex for highlighting.
@@ -533,6 +863,73 @@ impl App {
         edited_task_conflict
     }
 
+    /// Build the list of regions present for a task (for detail view navigation)
+    pub fn build_detail_regions(task: &Task) -> Vec<DetailRegion> {
+        use crate::model::Metadata;
+        let mut regions = vec![DetailRegion::Title];
+
+        // Tags region always present (can add tags even if none exist)
+        regions.push(DetailRegion::Tags);
+
+        // Added date
+        if task.metadata.iter().any(|m| matches!(m, Metadata::Added(_))) {
+            regions.push(DetailRegion::Added);
+        }
+
+        // Deps
+        regions.push(DetailRegion::Deps);
+
+        // Spec
+        regions.push(DetailRegion::Spec);
+
+        // Refs
+        regions.push(DetailRegion::Refs);
+
+        // Note
+        regions.push(DetailRegion::Note);
+
+        // Subtasks
+        if !task.subtasks.is_empty() {
+            regions.push(DetailRegion::Subtasks);
+        }
+
+        regions
+    }
+
+    /// Open the detail view for a task
+    pub fn open_detail(&mut self, track_id: String, task_id: String) {
+        let return_idx = match &self.view {
+            View::Track(idx) => *idx,
+            _ => 0,
+        };
+
+        // Build initial regions from the task
+        let regions = if let Some(track) = Self::find_track_in_project(&self.project, &track_id) {
+            if let Some(task) = crate::ops::task_ops::find_task_in_track(track, &task_id) {
+                Self::build_detail_regions(task)
+            } else {
+                vec![DetailRegion::Title]
+            }
+        } else {
+            vec![DetailRegion::Title]
+        };
+
+        let initial_region = regions.first().copied().unwrap_or(DetailRegion::Title);
+
+        self.detail_state = Some(DetailState {
+            region: initial_region,
+            scroll_offset: 0,
+            regions,
+            return_view_idx: return_idx,
+            editing: false,
+            edit_buffer: String::new(),
+            edit_cursor_line: 0,
+            edit_cursor_col: 0,
+            edit_original: String::new(),
+        });
+        self.view = View::Detail { track_id, task_id };
+    }
+
     /// Build the flat list of visible items for a track view
     pub fn build_flat_items(&self, track_id: &str) -> Vec<FlatItem> {
         let track = match Self::find_track_in_project(&self.project, track_id) {
@@ -706,6 +1103,10 @@ pub fn save_ui_state(app: &App) {
         View::Track(idx) => (
             "track".to_string(),
             app.active_track_ids.get(*idx).cloned().unwrap_or_default(),
+        ),
+        View::Detail { track_id, .. } => (
+            "track".to_string(),
+            track_id.clone(),
         ),
         View::Tracks => ("tracks".to_string(), String::new()),
         View::Inbox => ("inbox".to_string(), String::new()),

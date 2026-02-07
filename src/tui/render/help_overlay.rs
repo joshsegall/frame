@@ -118,6 +118,7 @@ fn render_entry(
 fn build_columns(view: &View) -> (Vec<HelpEntry>, Vec<HelpEntry>) {
     match view {
         View::Track(_) => build_track_columns(),
+        View::Detail { .. } => build_detail_columns(),
         View::Tracks => build_tracks_columns(),
         View::Inbox => build_inbox_columns(),
         View::Recent => build_recent_columns(),
@@ -162,6 +163,29 @@ fn build_track_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("Z".into(), "Redo".into()),
         HelpEntry::Binding("?".into(), "Help".into()),
         HelpEntry::Binding("QQ".into(), "Quit".into()),
+    ];
+
+    (left, right)
+}
+
+fn build_detail_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
+    let left = vec![
+        HelpEntry::Header("Navigation".into()),
+        HelpEntry::Binding("\u{2191}\u{2193}/jk".into(), "Move between regions".into()),
+        HelpEntry::Binding("Tab".into(), "Next editable region".into()),
+        HelpEntry::Binding("S-Tab".into(), "Prev editable region".into()),
+        HelpEntry::Binding("g/G".into(), "Top / bottom".into()),
+        HelpEntry::Binding("Esc".into(), "Back to track view".into()),
+    ];
+
+    let right = vec![
+        HelpEntry::Header("Edit".into()),
+        HelpEntry::Binding("e/Enter".into(), "Edit current region".into()),
+        HelpEntry::Binding("#".into(), "Edit tags".into()),
+        HelpEntry::Binding("@".into(), "Edit refs".into()),
+        HelpEntry::Binding("d".into(), "Edit deps".into()),
+        HelpEntry::Binding("n".into(), "Edit note".into()),
+        HelpEntry::Binding("Space".into(), "Cycle state".into()),
     ];
 
     (left, right)

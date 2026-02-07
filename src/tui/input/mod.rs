@@ -6,7 +6,7 @@ use crate::model::SectionKind;
 use crate::ops::search::{search_inbox, search_tasks};
 use crate::ops::task_ops::{self, InsertPosition};
 
-use super::app::{App, EditTarget, FlatItem, Mode, MoveState, View, resolve_task_from_flat};
+use super::app::{App, AutocompleteKind, AutocompleteState, DetailRegion, EditHistory, EditTarget, FlatItem, Mode, MoveState, View, resolve_task_from_flat};
 use super::undo::Operation;
 
 /// Handle a key event in the current mode
@@ -86,9 +86,14 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             app.status_message = Some("press Q again to quit".to_string());
         }
 
-        // Esc: clear search first, then normal behavior
+        // Esc: close detail view, or clear search, or normal behavior
         (_, KeyCode::Esc) => {
-            if app.last_search.is_some() {
+            if let View::Detail { .. } = &app.view {
+                // Return to track view
+                let return_idx = app.detail_state.as_ref().map(|ds| ds.return_view_idx).unwrap_or(0);
+                app.view = View::Track(return_idx);
+                app.detail_state = None;
+            } else if app.last_search.is_some() {
                 app.last_search = None;
                 app.search_match_idx = 0;
                 app.search_wrap_message = None;
@@ -113,9 +118,11 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             app.search_zero_confirmed = false;
         }
 
-        // Search: n/N for next/prev match
+        // n: note edit in detail view, or search next
         (KeyModifiers::NONE, KeyCode::Char('n')) => {
-            if app.last_search.is_some() {
+            if matches!(app.view, View::Detail { .. }) {
+                detail_jump_to_region_and_edit(app, DetailRegion::Note);
+            } else if app.last_search.is_some() {
                 search_next(app, 1);
             }
         }
@@ -133,12 +140,20 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             }
         }
 
-        // Tab/Shift+Tab: next/prev tab
+        // Tab/Shift+Tab: next/prev editable region (detail view) or next/prev tab
         (KeyModifiers::NONE, KeyCode::Tab) => {
-            switch_tab(app, 1);
+            if matches!(app.view, View::Detail { .. }) {
+                detail_jump_editable(app, 1);
+            } else {
+                switch_tab(app, 1);
+            }
         }
         (KeyModifiers::SHIFT, KeyCode::BackTab) => {
-            switch_tab(app, -1);
+            if matches!(app.view, View::Detail { .. }) {
+                detail_jump_editable(app, -1);
+            } else {
+                switch_tab(app, -1);
+            }
         }
 
         // View switching
@@ -182,6 +197,11 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             jump_to_bottom(app);
         }
 
+        // Enter: open detail view (track view) or edit region (detail view)
+        (KeyModifiers::NONE, KeyCode::Enter) => {
+            handle_enter(app);
+        }
+
         // Expand/collapse (track view only)
         (KeyModifiers::NONE, KeyCode::Right | KeyCode::Char('l')) => {
             expand_or_enter(app);
@@ -218,9 +238,30 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             add_subtask_action(app);
         }
 
-        // Inline title edit
+        // Inline title edit (track view) or enter edit mode (detail view)
         (KeyModifiers::NONE, KeyCode::Char('e')) => {
-            enter_title_edit(app);
+            if matches!(app.view, View::Detail { .. }) {
+                detail_enter_edit(app);
+            } else {
+                enter_title_edit(app);
+            }
+        }
+
+        // Detail view shortcut keys: #, @, d, n — jump to region + enter EDIT
+        (KeyModifiers::NONE, KeyCode::Char('#')) => {
+            if matches!(app.view, View::Detail { .. }) {
+                detail_jump_to_region_and_edit(app, DetailRegion::Tags);
+            }
+        }
+        (KeyModifiers::NONE, KeyCode::Char('@')) => {
+            if matches!(app.view, View::Detail { .. }) {
+                detail_jump_to_region_and_edit(app, DetailRegion::Refs);
+            }
+        }
+        (KeyModifiers::NONE, KeyCode::Char('d')) => {
+            if matches!(app.view, View::Detail { .. }) {
+                detail_jump_to_region_and_edit(app, DetailRegion::Deps);
+            }
         }
 
         // Toggle cc tag on task
@@ -588,6 +629,7 @@ fn add_task_action(app: &mut App, pos: AddPosition) {
         parent_id: None,
     });
     app.pre_edit_cursor = saved_cursor;
+    app.edit_history = Some(EditHistory::new("", 0, 0));
     app.mode = Mode::Edit;
 
     // Move cursor to the new task
@@ -643,6 +685,7 @@ fn add_subtask_action(app: &mut App) {
         track_id: track_id.clone(),
         parent_id: Some(parent_id),
     });
+    app.edit_history = Some(EditHistory::new("", 0, 0));
     app.mode = Mode::Edit;
 
     // Move cursor to the new subtask
@@ -679,6 +722,7 @@ fn enter_title_edit(app: &mut App) {
         track_id,
         original_title,
     });
+    app.edit_history = Some(EditHistory::new(&app.edit_buffer, app.edit_cursor, 0));
     app.mode = Mode::Edit;
 }
 
@@ -687,57 +731,210 @@ fn enter_title_edit(app: &mut App) {
 // ---------------------------------------------------------------------------
 
 fn handle_edit(app: &mut App, key: KeyEvent) {
+    // Check if we're in multi-line note editing in detail view
+    let is_detail_multiline = app.detail_state.as_ref().is_some_and(|ds| {
+        ds.editing && ds.region == DetailRegion::Note
+    }) && app.edit_target.is_none();
+
+    if is_detail_multiline {
+        handle_detail_multiline_edit(app, key);
+        return;
+    }
+
+    // Check if we're editing a detail region (single-line)
+    let is_detail_edit = matches!(app.view, View::Detail { .. }) && app.detail_state.as_ref().is_some_and(|ds| ds.editing);
+
+    // Handle autocomplete navigation when dropdown is visible
+    let ac_visible = app.autocomplete.as_ref().is_some_and(|ac| ac.visible && !ac.filtered.is_empty());
+
+    if ac_visible {
+        match (key.modifiers, key.code) {
+            // Navigate autocomplete entries
+            (KeyModifiers::NONE, KeyCode::Up) => {
+                if let Some(ac) = &mut app.autocomplete {
+                    ac.move_up();
+                }
+                return;
+            }
+            (KeyModifiers::NONE, KeyCode::Down) => {
+                if let Some(ac) = &mut app.autocomplete {
+                    ac.move_down();
+                }
+                return;
+            }
+            // Select entry
+            (KeyModifiers::NONE, KeyCode::Tab) => {
+                autocomplete_accept(app);
+                return;
+            }
+            // Dismiss autocomplete on Esc (don't cancel edit)
+            (_, KeyCode::Esc) => {
+                app.autocomplete = None;
+                return;
+            }
+            // Enter: accept autocomplete selection and confirm edit
+            (_, KeyCode::Enter) => {
+                // Accept autocomplete if a candidate is selected
+                let has_selection = app.autocomplete.as_ref().is_some_and(|ac| ac.selected_entry().is_some());
+                if has_selection {
+                    autocomplete_accept(app);
+                }
+                app.autocomplete = None;
+                // Fall through to confirm
+                if is_detail_edit {
+                    confirm_detail_edit(app);
+                } else {
+                    confirm_edit(app);
+                }
+                return;
+            }
+            _ => {
+                // For other keys, dismiss autocomplete and fall through to normal handling
+                // (characters will re-trigger filtering below)
+            }
+        }
+    }
+
+    // Handle selection anchor for arrow keys as a pre-pass
+    let has_shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    let is_arrow = matches!(key.code, KeyCode::Left | KeyCode::Right);
+    if is_arrow {
+        if has_shift {
+            // Start or extend selection
+            if app.edit_selection_anchor.is_none() {
+                app.edit_selection_anchor = Some(app.edit_cursor);
+            }
+        } else {
+            // Clear selection on non-shift movement
+            app.edit_selection_anchor = None;
+        }
+    }
+
     match (key.modifiers, key.code) {
         // Confirm edit
         (_, KeyCode::Enter) => {
-            confirm_edit(app);
+            app.autocomplete = None;
+            app.edit_history = None;
+            app.edit_selection_anchor = None;
+            if is_detail_edit {
+                confirm_detail_edit(app);
+            } else {
+                confirm_edit(app);
+            }
         }
         // Cancel edit
         (_, KeyCode::Esc) => {
-            cancel_edit(app);
+            app.autocomplete = None;
+            app.edit_history = None;
+            app.edit_selection_anchor = None;
+            if is_detail_edit {
+                cancel_detail_edit(app);
+            } else {
+                cancel_edit(app);
+            }
         }
-        // Cursor movement
-        (KeyModifiers::NONE, KeyCode::Left) => {
+        // Select all (Ctrl+A)
+        (m, KeyCode::Char('a')) if m.contains(KeyModifiers::CONTROL) => {
+            app.edit_selection_anchor = Some(0);
+            app.edit_cursor = app.edit_buffer.len();
+        }
+        // Inline undo (Ctrl+Z)
+        (m, KeyCode::Char('z')) if m.contains(KeyModifiers::CONTROL) => {
+            app.edit_selection_anchor = None;
+            if let Some(eh) = &mut app.edit_history {
+                if let Some((buf, pos, _)) = eh.undo() {
+                    app.edit_buffer = buf.to_string();
+                    app.edit_cursor = pos;
+                }
+            }
+            update_autocomplete_filter(app);
+        }
+        // Inline redo (Ctrl+Y or Ctrl+Shift+Z)
+        (m, KeyCode::Char('y')) if m.contains(KeyModifiers::CONTROL) => {
+            app.edit_selection_anchor = None;
+            if let Some(eh) = &mut app.edit_history {
+                if let Some((buf, pos, _)) = eh.redo() {
+                    app.edit_buffer = buf.to_string();
+                    app.edit_cursor = pos;
+                }
+            }
+            update_autocomplete_filter(app);
+        }
+        (m, KeyCode::Char('Z')) if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) => {
+            app.edit_selection_anchor = None;
+            if let Some(eh) = &mut app.edit_history {
+                if let Some((buf, pos, _)) = eh.redo() {
+                    app.edit_buffer = buf.to_string();
+                    app.edit_cursor = pos;
+                }
+            }
+            update_autocomplete_filter(app);
+        }
+        // Cursor movement: single character left/right (with or without Shift)
+        (_, KeyCode::Left) if !key.modifiers.contains(KeyModifiers::ALT)
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::SUPER) =>
+        {
             if app.edit_cursor > 0 {
                 app.edit_cursor -= 1;
             }
         }
-        (KeyModifiers::NONE, KeyCode::Right) => {
+        (_, KeyCode::Right) if !key.modifiers.contains(KeyModifiers::ALT)
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::SUPER) =>
+        {
             if app.edit_cursor < app.edit_buffer.len() {
                 app.edit_cursor += 1;
             }
         }
-        // Jump to start/end of line
+        // Jump to start/end of line (Cmd/Super, with or without Shift)
         (m, KeyCode::Left) if m.contains(KeyModifiers::SUPER) => {
             app.edit_cursor = 0;
         }
         (m, KeyCode::Right) if m.contains(KeyModifiers::SUPER) => {
             app.edit_cursor = app.edit_buffer.len();
         }
-        // Word movement
-        (m, KeyCode::Left) if m.contains(KeyModifiers::ALT) => {
+        // Word movement (Alt or Ctrl, with or without Shift)
+        (m, KeyCode::Left) if m.contains(KeyModifiers::ALT) || m.contains(KeyModifiers::CONTROL) => {
             app.edit_cursor = word_boundary_left(&app.edit_buffer, app.edit_cursor);
         }
-        (m, KeyCode::Right) if m.contains(KeyModifiers::ALT) => {
+        (m, KeyCode::Right) if m.contains(KeyModifiers::ALT) || m.contains(KeyModifiers::CONTROL) => {
             app.edit_cursor = word_boundary_right(&app.edit_buffer, app.edit_cursor);
         }
-        // Backspace
+        // Backspace: delete selection or single char
         (KeyModifiers::NONE, KeyCode::Backspace) => {
-            if app.edit_cursor > 0 {
-                app.edit_buffer.remove(app.edit_cursor - 1);
-                app.edit_cursor -= 1;
+            if !app.delete_selection() {
+                if app.edit_cursor > 0 {
+                    app.edit_buffer.remove(app.edit_cursor - 1);
+                    app.edit_cursor -= 1;
+                }
             }
+            if let Some(eh) = &mut app.edit_history {
+                eh.snapshot(&app.edit_buffer, app.edit_cursor, 0);
+            }
+            update_autocomplete_filter(app);
         }
-        // Word backspace
-        (m, KeyCode::Backspace) if m.contains(KeyModifiers::ALT) => {
-            let new_pos = word_boundary_left(&app.edit_buffer, app.edit_cursor);
-            app.edit_buffer.drain(new_pos..app.edit_cursor);
-            app.edit_cursor = new_pos;
+        // Word backspace (Alt or Ctrl)
+        (m, KeyCode::Backspace) if m.contains(KeyModifiers::ALT) || m.contains(KeyModifiers::CONTROL) => {
+            if !app.delete_selection() {
+                let new_pos = word_boundary_left(&app.edit_buffer, app.edit_cursor);
+                app.edit_buffer.drain(new_pos..app.edit_cursor);
+                app.edit_cursor = new_pos;
+            }
+            if let Some(eh) = &mut app.edit_history {
+                eh.snapshot(&app.edit_buffer, app.edit_cursor, 0);
+            }
+            update_autocomplete_filter(app);
         }
-        // Type character
+        // Type character: replace selection if any
         (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+            app.delete_selection();
             app.edit_buffer.insert(app.edit_cursor, c);
             app.edit_cursor += 1;
+            if let Some(eh) = &mut app.edit_history {
+                eh.snapshot(&app.edit_buffer, app.edit_cursor, 0);
+            }
+            update_autocomplete_filter(app);
         }
         _ => {}
     }
@@ -945,6 +1142,7 @@ fn cancel_edit(app: &mut App) {
     let target = app.edit_target.take();
     let saved_cursor = app.pre_edit_cursor.take();
     app.mode = Mode::Navigate;
+    app.autocomplete = None;
 
     // If we were creating a new task, remove the placeholder
     if let Some(EditTarget::NewTask {
@@ -1017,6 +1215,12 @@ fn remove_task_from_section(
 }
 
 /// Find the byte offset of the previous word boundary
+/// Deduplicate items while preserving first-occurrence order.
+fn dedup_preserve_order(iter: impl Iterator<Item = String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    iter.filter(|s| seen.insert(s.clone())).collect()
+}
+
 fn word_boundary_left(s: &str, pos: usize) -> usize {
     if pos == 0 {
         return 0;
@@ -1480,6 +1684,9 @@ fn move_cursor(app: &mut App, delta: i32) {
 
             state.cursor = new_cursor;
         }
+        View::Detail { .. } => {
+            detail_move_region(app, delta);
+        }
         View::Tracks => {
             let total = count_tracks(app);
             if total == 0 {
@@ -1540,6 +1747,12 @@ fn jump_to_top(app: &mut App) {
             state.cursor = 0;
             state.scroll_offset = 0;
         }
+        View::Detail { .. } => {
+            if let Some(ds) = &mut app.detail_state {
+                ds.region = ds.regions.first().copied().unwrap_or(DetailRegion::Title);
+                ds.scroll_offset = 0;
+            }
+        }
         View::Tracks => {
             app.tracks_cursor = 0;
         }
@@ -1571,6 +1784,11 @@ fn jump_to_bottom(app: &mut App) {
             target = skip_separator(&flat_items, target, -1);
             let state = app.get_track_state(&track_id);
             state.cursor = target;
+        }
+        View::Detail { .. } => {
+            if let Some(ds) = &mut app.detail_state {
+                ds.region = ds.regions.last().copied().unwrap_or(DetailRegion::Title);
+            }
         }
         View::Tracks => {
             let total = count_tracks(app);
@@ -1715,6 +1933,620 @@ fn count_recent_tasks(app: &App) -> usize {
         .sum()
 }
 
+// ---------------------------------------------------------------------------
+// Detail view functions
+// ---------------------------------------------------------------------------
+
+/// Handle Enter key: open detail view from track view, or enter edit in detail view
+fn handle_enter(app: &mut App) {
+    match &app.view {
+        View::Track(_) => {
+            // Open detail view for the task under cursor
+            if let Some((track_id, task_id, _)) = app.cursor_task_id() {
+                app.open_detail(track_id, task_id);
+            }
+        }
+        View::Detail { .. } => {
+            detail_enter_edit(app);
+        }
+        _ => {}
+    }
+}
+
+/// Move between regions in the detail view (up/down)
+fn detail_move_region(app: &mut App, delta: i32) {
+    let ds = match &mut app.detail_state {
+        Some(ds) => ds,
+        None => return,
+    };
+
+    if ds.regions.is_empty() {
+        return;
+    }
+
+    let current_idx = ds.regions.iter().position(|r| *r == ds.region).unwrap_or(0);
+    let new_idx = (current_idx as i32 + delta).clamp(0, ds.regions.len() as i32 - 1) as usize;
+    ds.region = ds.regions[new_idx];
+}
+
+/// Jump to next/prev region in the detail view (Tab/Shift+Tab)
+fn detail_jump_editable(app: &mut App, direction: i32) {
+    let ds = match &mut app.detail_state {
+        Some(ds) => ds,
+        None => return,
+    };
+
+    if ds.regions.is_empty() {
+        return;
+    }
+
+    let current_idx = ds.regions.iter().position(|r| *r == ds.region).unwrap_or(0);
+    let len = ds.regions.len();
+
+    if direction > 0 {
+        let new_idx = (current_idx + 1) % len;
+        ds.region = ds.regions[new_idx];
+    } else {
+        let new_idx = if current_idx == 0 { len - 1 } else { current_idx - 1 };
+        ds.region = ds.regions[new_idx];
+    }
+}
+
+/// Enter EDIT mode on the current region in the detail view
+fn detail_enter_edit(app: &mut App) {
+    let (track_id, task_id) = match &app.view {
+        View::Detail { track_id, task_id } => (track_id.clone(), task_id.clone()),
+        _ => return,
+    };
+
+    let region = match &app.detail_state {
+        Some(ds) => ds.region,
+        None => return,
+    };
+
+    // Don't allow editing non-editable regions
+    if !region.is_editable() {
+        return;
+    }
+
+    // Get current value for the region
+    let track = match App::find_track_in_project(&app.project, &track_id) {
+        Some(t) => t,
+        None => return,
+    };
+    let task = match task_ops::find_task_in_track(track, &task_id) {
+        Some(t) => t,
+        None => return,
+    };
+
+    let (initial_value, is_multiline) = match region {
+        DetailRegion::Title => (task.title.clone(), false),
+        DetailRegion::Tags => {
+            let tag_str = task.tags.iter().map(|t| format!("#{}", t)).collect::<Vec<_>>().join(" ");
+            (tag_str, false)
+        }
+        DetailRegion::Deps => {
+            let deps: Vec<String> = task.metadata.iter().flat_map(|m| {
+                if let Metadata::Dep(d) = m { d.clone() } else { Vec::new() }
+            }).collect();
+            (deps.join(", "), false)
+        }
+        DetailRegion::Spec => {
+            let spec = task.metadata.iter().find_map(|m| {
+                if let Metadata::Spec(s) = m { Some(s.clone()) } else { None }
+            }).unwrap_or_default();
+            (spec, false)
+        }
+        DetailRegion::Refs => {
+            let refs: Vec<String> = task.metadata.iter().flat_map(|m| {
+                if let Metadata::Ref(r) = m { r.clone() } else { Vec::new() }
+            }).collect();
+            (refs.join(" "), false)
+        }
+        DetailRegion::Note => {
+            let note = task.metadata.iter().find_map(|m| {
+                if let Metadata::Note(n) = m { Some(n.clone()) } else { None }
+            }).unwrap_or_default();
+            (note, true)
+        }
+        _ => return,
+    };
+
+    if is_multiline {
+        // Multi-line editing (note): use detail_state's edit fields
+        if let Some(ds) = &mut app.detail_state {
+            ds.editing = true;
+            ds.edit_buffer = initial_value.clone();
+            ds.edit_cursor_line = 0;
+            ds.edit_cursor_col = 0;
+            ds.edit_original = initial_value.clone();
+        }
+        app.edit_history = Some(EditHistory::new(&initial_value, 0, 0));
+        app.mode = Mode::Edit;
+    } else {
+        // Single-line editing: use the existing edit_buffer/edit_cursor on App
+        app.edit_buffer = initial_value.clone();
+        app.edit_cursor = app.edit_buffer.len();
+        app.edit_target = Some(EditTarget::ExistingTitle {
+            task_id: task_id.clone(),
+            track_id: track_id.clone(),
+            original_title: initial_value,
+        });
+        if let Some(ds) = &mut app.detail_state {
+            ds.editing = true;
+            ds.edit_original = app.edit_buffer.clone();
+        }
+
+        // Activate autocomplete for appropriate regions
+        activate_autocomplete_for_region(app, region);
+
+        app.edit_history = Some(EditHistory::new(&app.edit_buffer, app.edit_cursor, 0));
+        app.mode = Mode::Edit;
+    }
+}
+
+/// Jump to a specific region and enter EDIT mode (for #, @, d, n shortcuts)
+fn detail_jump_to_region_and_edit(app: &mut App, target_region: DetailRegion) {
+    if let Some(ds) = &mut app.detail_state {
+        ds.region = target_region;
+    }
+    detail_enter_edit(app);
+}
+
+/// Handle multi-line editing (note field) in detail view
+fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
+    match (key.modifiers, key.code) {
+        // Esc: finish editing (save)
+        (_, KeyCode::Esc) => {
+            app.edit_history = None;
+            confirm_detail_multiline(app);
+        }
+        // Inline undo (Ctrl+Z)
+        (m, KeyCode::Char('z')) if m.contains(KeyModifiers::CONTROL) => {
+            if let Some(eh) = &mut app.edit_history {
+                if let Some((buf, col, line)) = eh.undo() {
+                    let buf = buf.to_string();
+                    if let Some(ds) = &mut app.detail_state {
+                        ds.edit_buffer = buf;
+                        ds.edit_cursor_col = col;
+                        ds.edit_cursor_line = line;
+                    }
+                }
+            }
+        }
+        // Inline redo (Ctrl+Y or Ctrl+Shift+Z)
+        (m, KeyCode::Char('y')) if m.contains(KeyModifiers::CONTROL) => {
+            if let Some(eh) = &mut app.edit_history {
+                if let Some((buf, col, line)) = eh.redo() {
+                    let buf = buf.to_string();
+                    if let Some(ds) = &mut app.detail_state {
+                        ds.edit_buffer = buf;
+                        ds.edit_cursor_col = col;
+                        ds.edit_cursor_line = line;
+                    }
+                }
+            }
+        }
+        (m, KeyCode::Char('Z')) if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) => {
+            if let Some(eh) = &mut app.edit_history {
+                if let Some((buf, col, line)) = eh.redo() {
+                    let buf = buf.to_string();
+                    if let Some(ds) = &mut app.detail_state {
+                        ds.edit_buffer = buf;
+                        ds.edit_cursor_col = col;
+                        ds.edit_cursor_line = line;
+                    }
+                }
+            }
+        }
+        // Enter: newline
+        (KeyModifiers::NONE, KeyCode::Enter) => {
+            if let Some(ds) = &mut app.detail_state {
+                let mut edit_lines: Vec<String> = ds.edit_buffer.split('\n').map(String::from).collect();
+                let line = ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1));
+                let col = ds.edit_cursor_col.min(edit_lines[line].len());
+
+                // Split current line at cursor
+                let rest = edit_lines[line][col..].to_string();
+                edit_lines[line] = edit_lines[line][..col].to_string();
+                edit_lines.insert(line + 1, rest);
+
+                ds.edit_buffer = edit_lines.join("\n");
+                ds.edit_cursor_line = line + 1;
+                ds.edit_cursor_col = 0;
+            }
+            snapshot_multiline(app);
+        }
+        // Tab: insert 4 spaces
+        (KeyModifiers::NONE, KeyCode::Tab) => {
+            if let Some(ds) = &mut app.detail_state {
+                let mut edit_lines: Vec<String> = ds.edit_buffer.split('\n').map(String::from).collect();
+                let line = ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1));
+                let col = ds.edit_cursor_col.min(edit_lines[line].len());
+                edit_lines[line].insert_str(col, "    ");
+                ds.edit_buffer = edit_lines.join("\n");
+                ds.edit_cursor_col = col + 4;
+            }
+            snapshot_multiline(app);
+        }
+        // Cursor movement
+        (KeyModifiers::NONE, KeyCode::Left) => {
+            if let Some(ds) = &mut app.detail_state {
+                if ds.edit_cursor_col > 0 {
+                    ds.edit_cursor_col -= 1;
+                } else if ds.edit_cursor_line > 0 {
+                    ds.edit_cursor_line -= 1;
+                    let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
+                    ds.edit_cursor_col = edit_lines.get(ds.edit_cursor_line).map_or(0, |l| l.len());
+                }
+            }
+        }
+        (KeyModifiers::NONE, KeyCode::Right) => {
+            if let Some(ds) = &mut app.detail_state {
+                let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
+                let line_len = edit_lines.get(ds.edit_cursor_line).map_or(0, |l| l.len());
+                if ds.edit_cursor_col < line_len {
+                    ds.edit_cursor_col += 1;
+                } else if ds.edit_cursor_line + 1 < edit_lines.len() {
+                    ds.edit_cursor_line += 1;
+                    ds.edit_cursor_col = 0;
+                }
+            }
+        }
+        (KeyModifiers::NONE, KeyCode::Up) => {
+            if let Some(ds) = &mut app.detail_state {
+                if ds.edit_cursor_line > 0 {
+                    ds.edit_cursor_line -= 1;
+                    let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
+                    let line_len = edit_lines.get(ds.edit_cursor_line).map_or(0, |l| l.len());
+                    ds.edit_cursor_col = ds.edit_cursor_col.min(line_len);
+                }
+            }
+        }
+        (KeyModifiers::NONE, KeyCode::Down) => {
+            if let Some(ds) = &mut app.detail_state {
+                let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
+                if ds.edit_cursor_line + 1 < edit_lines.len() {
+                    ds.edit_cursor_line += 1;
+                    let line_len = edit_lines.get(ds.edit_cursor_line).map_or(0, |l| l.len());
+                    ds.edit_cursor_col = ds.edit_cursor_col.min(line_len);
+                }
+            }
+        }
+        // Home / Cmd+Left: start of line
+        (m, KeyCode::Left) if m.contains(KeyModifiers::SUPER) => {
+            if let Some(ds) = &mut app.detail_state {
+                ds.edit_cursor_col = 0;
+            }
+        }
+        // End / Cmd+Right: end of line
+        (m, KeyCode::Right) if m.contains(KeyModifiers::SUPER) => {
+            if let Some(ds) = &mut app.detail_state {
+                let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
+                let line_len = edit_lines.get(ds.edit_cursor_line).map_or(0, |l| l.len());
+                ds.edit_cursor_col = line_len;
+            }
+        }
+        // Word movement (Alt or Ctrl)
+        (m, KeyCode::Left) if m.contains(KeyModifiers::ALT) || m.contains(KeyModifiers::CONTROL) => {
+            if let Some(ds) = &mut app.detail_state {
+                let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
+                let line = &edit_lines[ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1))];
+                ds.edit_cursor_col = word_boundary_left(line, ds.edit_cursor_col);
+            }
+        }
+        (m, KeyCode::Right) if m.contains(KeyModifiers::ALT) || m.contains(KeyModifiers::CONTROL) => {
+            if let Some(ds) = &mut app.detail_state {
+                let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
+                let line = &edit_lines[ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1))];
+                ds.edit_cursor_col = word_boundary_right(line, ds.edit_cursor_col);
+            }
+        }
+        // Word backspace (Alt or Ctrl)
+        (m, KeyCode::Backspace) if m.contains(KeyModifiers::ALT) || m.contains(KeyModifiers::CONTROL) => {
+            if let Some(ds) = &mut app.detail_state {
+                let mut edit_lines: Vec<String> = ds.edit_buffer.split('\n').map(String::from).collect();
+                let line_idx = ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1));
+                let col = ds.edit_cursor_col.min(edit_lines[line_idx].len());
+                let new_pos = word_boundary_left(&edit_lines[line_idx], col);
+                edit_lines[line_idx].drain(new_pos..col);
+                ds.edit_cursor_col = new_pos;
+                ds.edit_buffer = edit_lines.join("\n");
+            }
+            snapshot_multiline(app);
+        }
+        // Backspace
+        (KeyModifiers::NONE, KeyCode::Backspace) => {
+            if let Some(ds) = &mut app.detail_state {
+                let mut edit_lines: Vec<String> = ds.edit_buffer.split('\n').map(String::from).collect();
+                let line = ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1));
+                let col = ds.edit_cursor_col.min(edit_lines[line].len());
+
+                if col > 0 {
+                    edit_lines[line].remove(col - 1);
+                    ds.edit_cursor_col = col - 1;
+                } else if line > 0 {
+                    // Merge with previous line
+                    let current_line = edit_lines.remove(line);
+                    let prev_len = edit_lines[line - 1].len();
+                    edit_lines[line - 1].push_str(&current_line);
+                    ds.edit_cursor_line = line - 1;
+                    ds.edit_cursor_col = prev_len;
+                }
+                ds.edit_buffer = edit_lines.join("\n");
+            }
+            snapshot_multiline(app);
+        }
+        // Type character
+        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+            if let Some(ds) = &mut app.detail_state {
+                let mut edit_lines: Vec<String> = ds.edit_buffer.split('\n').map(String::from).collect();
+                let line = ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1));
+                let col = ds.edit_cursor_col.min(edit_lines[line].len());
+                edit_lines[line].insert(col, c);
+                ds.edit_buffer = edit_lines.join("\n");
+                ds.edit_cursor_col = col + 1;
+            }
+            snapshot_multiline(app);
+        }
+        _ => {}
+    }
+}
+
+/// Snapshot the current multiline edit state for inline undo/redo
+fn snapshot_multiline(app: &mut App) {
+    if let Some(ds) = &app.detail_state {
+        if let Some(eh) = &mut app.edit_history {
+            eh.snapshot(&ds.edit_buffer, ds.edit_cursor_col, ds.edit_cursor_line);
+        }
+    }
+}
+
+/// Confirm a detail view multi-line edit (note)
+fn confirm_detail_multiline(app: &mut App) {
+    let (track_id, task_id) = match &app.view {
+        View::Detail { track_id, task_id } => (track_id.clone(), task_id.clone()),
+        _ => {
+            app.mode = Mode::Navigate;
+            return;
+        }
+    };
+
+    let new_value = app.detail_state.as_ref().map(|ds| ds.edit_buffer.clone()).unwrap_or_default();
+    let original = app.detail_state.as_ref().map(|ds| ds.edit_original.clone()).unwrap_or_default();
+
+    // Apply the note change
+    let track = match app.find_track_mut(&track_id) {
+        Some(t) => t,
+        None => {
+            app.mode = Mode::Navigate;
+            return;
+        }
+    };
+    let _ = task_ops::set_note(track, &task_id, new_value.clone());
+    let _ = app.save_track(&track_id);
+
+    if new_value != original {
+        app.undo_stack.push(Operation::FieldEdit {
+            track_id,
+            task_id,
+            field: "note".to_string(),
+            old_value: original,
+            new_value,
+        });
+    }
+
+    // Exit edit mode
+    app.mode = Mode::Navigate;
+    app.autocomplete = None;
+    if let Some(ds) = &mut app.detail_state {
+        ds.editing = false;
+    }
+}
+
+/// Confirm a detail view single-line edit (title, tags, deps, spec, refs)
+fn confirm_detail_edit(app: &mut App) {
+    let (track_id, task_id) = match &app.view {
+        View::Detail { track_id, task_id } => (track_id.clone(), task_id.clone()),
+        _ => {
+            app.mode = Mode::Navigate;
+            return;
+        }
+    };
+
+    let region = match &app.detail_state {
+        Some(ds) => ds.region,
+        None => {
+            app.mode = Mode::Navigate;
+            return;
+        }
+    };
+
+    let new_value = app.edit_buffer.clone();
+    let original = app.detail_state.as_ref().map(|ds| ds.edit_original.clone()).unwrap_or_default();
+
+    // Apply the change based on region
+    match region {
+        DetailRegion::Title => {
+            if !new_value.trim().is_empty() && new_value != original {
+                let track = match app.find_track_mut(&track_id) {
+                    Some(t) => t,
+                    None => {
+                        app.mode = Mode::Navigate;
+                        return;
+                    }
+                };
+                let _ = task_ops::edit_title(track, &task_id, new_value.clone());
+
+                app.undo_stack.push(Operation::TitleEdit {
+                    track_id: track_id.clone(),
+                    task_id: task_id.clone(),
+                    old_title: original,
+                    new_title: new_value,
+                });
+
+                let _ = app.save_track(&track_id);
+            }
+        }
+        DetailRegion::Tags => {
+            // Parse tags from input: "#tag1 #tag2" or "tag1 tag2" (deduplicated)
+            let new_tags: Vec<String> = dedup_preserve_order(
+                new_value
+                    .split_whitespace()
+                    .map(|s| s.strip_prefix('#').unwrap_or(s).to_string())
+                    .filter(|s| !s.is_empty()),
+            );
+
+            let track = match app.find_track_mut(&track_id) {
+                Some(t) => t,
+                None => {
+                    app.mode = Mode::Navigate;
+                    return;
+                }
+            };
+            if let Some(task) = task_ops::find_task_mut_in_track(track, &task_id) {
+                task.tags = new_tags;
+                task.mark_dirty();
+            }
+            let _ = app.save_track(&track_id);
+
+            if new_value != original {
+                app.undo_stack.push(Operation::FieldEdit {
+                    track_id: track_id.clone(),
+                    task_id: task_id.clone(),
+                    field: "tags".to_string(),
+                    old_value: original,
+                    new_value,
+                });
+            }
+        }
+        DetailRegion::Deps => {
+            // Parse deps: "EFF-003, MOD-007" or "EFF-003 MOD-007" (deduplicated)
+            let new_deps: Vec<String> = dedup_preserve_order(
+                new_value
+                    .split(|c: char| c == ',' || c.is_whitespace())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
+            );
+
+            let track = match app.find_track_mut(&track_id) {
+                Some(t) => t,
+                None => {
+                    app.mode = Mode::Navigate;
+                    return;
+                }
+            };
+            if let Some(task) = task_ops::find_task_mut_in_track(track, &task_id) {
+                // Remove existing deps and add new ones
+                task.metadata.retain(|m| !matches!(m, Metadata::Dep(_)));
+                if !new_deps.is_empty() {
+                    task.metadata.push(Metadata::Dep(new_deps));
+                }
+                task.mark_dirty();
+            }
+            let _ = app.save_track(&track_id);
+
+            if new_value != original {
+                app.undo_stack.push(Operation::FieldEdit {
+                    track_id: track_id.clone(),
+                    task_id: task_id.clone(),
+                    field: "deps".to_string(),
+                    old_value: original,
+                    new_value,
+                });
+            }
+        }
+        DetailRegion::Spec => {
+            let track = match app.find_track_mut(&track_id) {
+                Some(t) => t,
+                None => {
+                    app.mode = Mode::Navigate;
+                    return;
+                }
+            };
+            if !new_value.trim().is_empty() {
+                let _ = task_ops::set_spec(track, &task_id, new_value.trim().to_string());
+            } else {
+                // Remove spec
+                if let Some(task) = task_ops::find_task_mut_in_track(track, &task_id) {
+                    task.metadata.retain(|m| !matches!(m, Metadata::Spec(_)));
+                    task.mark_dirty();
+                }
+            }
+            let _ = app.save_track(&track_id);
+
+            if new_value != original {
+                app.undo_stack.push(Operation::FieldEdit {
+                    track_id: track_id.clone(),
+                    task_id: task_id.clone(),
+                    field: "spec".to_string(),
+                    old_value: original,
+                    new_value,
+                });
+            }
+        }
+        DetailRegion::Refs => {
+            // Parse refs: space or comma separated paths (deduplicated)
+            let new_refs: Vec<String> = dedup_preserve_order(
+                new_value
+                    .split(|c: char| c == ',' || c.is_whitespace())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
+            );
+
+            let track = match app.find_track_mut(&track_id) {
+                Some(t) => t,
+                None => {
+                    app.mode = Mode::Navigate;
+                    return;
+                }
+            };
+            if let Some(task) = task_ops::find_task_mut_in_track(track, &task_id) {
+                task.metadata.retain(|m| !matches!(m, Metadata::Ref(_)));
+                if !new_refs.is_empty() {
+                    task.metadata.push(Metadata::Ref(new_refs));
+                }
+                task.mark_dirty();
+            }
+            let _ = app.save_track(&track_id);
+
+            if new_value != original {
+                app.undo_stack.push(Operation::FieldEdit {
+                    track_id: track_id.clone(),
+                    task_id: task_id.clone(),
+                    field: "refs".to_string(),
+                    old_value: original,
+                    new_value,
+                });
+            }
+        }
+        _ => {}
+    }
+
+    // Exit edit mode
+    app.mode = Mode::Navigate;
+    app.edit_target = None;
+    app.edit_buffer.clear();
+    app.edit_cursor = 0;
+    app.autocomplete = None;
+    if let Some(ds) = &mut app.detail_state {
+        ds.editing = false;
+    }
+}
+
+/// Cancel a detail view edit
+fn cancel_detail_edit(app: &mut App) {
+    app.mode = Mode::Navigate;
+    app.edit_target = None;
+    app.edit_buffer.clear();
+    app.edit_cursor = 0;
+    app.autocomplete = None;
+    if let Some(ds) = &mut app.detail_state {
+        ds.editing = false;
+        ds.edit_buffer.clear();
+    }
+}
+
 /// Advance search by `direction` (+1 = next, -1 = prev) with proper wrapping.
 fn search_next(app: &mut App, direction: i32) {
     app.search_wrap_message = None;
@@ -1744,6 +2576,7 @@ fn execute_search_dir(app: &mut App, direction: i32) {
 
     match app.view.clone() {
         View::Track(idx) => search_in_track(app, idx, &re, direction),
+        View::Detail { .. } => {} // Search not supported in detail view
         View::Tracks => search_in_tracks_view(app, &re, direction),
         View::Inbox => search_in_inbox(app, &re, direction),
         View::Recent => search_in_recent(app, &re, direction),
@@ -2060,6 +2893,7 @@ fn search_in_recent(app: &mut App, re: &Regex, direction: i32) {
 /// Count unique matches for a regex pattern in the current view.
 fn count_matches_for_pattern(app: &App, re: &Regex) -> usize {
     match &app.view {
+        View::Detail { .. } => 0,
         View::Track(idx) => {
             let track_id = match app.active_track_ids.get(*idx) {
                 Some(id) => id.as_str(),
@@ -2134,10 +2968,16 @@ fn switch_tab(app: &mut App, direction: i32) {
 
     let current_idx = match &app.view {
         View::Track(i) => *i,
+        View::Detail { track_id, .. } => {
+            // When in detail view, tab switching goes back to track view
+            app.active_track_ids.iter().position(|id| id == track_id).unwrap_or(0)
+        }
         View::Tracks => total_tracks,
         View::Inbox => total_tracks + 1,
         View::Recent => total_tracks + 2,
     };
+    // Close detail view if open
+    app.detail_state = None;
 
     let new_idx = (current_idx as i32 + direction).rem_euclid(total_views as i32) as usize;
 
@@ -2150,4 +2990,175 @@ fn switch_tab(app: &mut App, direction: i32) {
             _ => View::Recent,
         }
     };
+}
+
+/// Activate autocomplete for the given detail region
+fn activate_autocomplete_for_region(app: &mut App, region: DetailRegion) {
+    let (kind, candidates) = match region {
+        DetailRegion::Tags => (AutocompleteKind::Tag, app.collect_all_tags()),
+        DetailRegion::Deps => (AutocompleteKind::TaskId, app.collect_all_task_ids()),
+        DetailRegion::Spec | DetailRegion::Refs => (AutocompleteKind::FilePath, app.collect_file_paths()),
+        _ => {
+            app.autocomplete = None;
+            return;
+        }
+    };
+
+    if candidates.is_empty() {
+        app.autocomplete = None;
+        return;
+    }
+
+    let mut ac = AutocompleteState::new(kind, candidates);
+    // Filter with current edit buffer content
+    let filter_text = autocomplete_filter_text(&app.edit_buffer, kind);
+    ac.filter(&filter_text);
+    app.autocomplete = Some(ac);
+}
+
+/// Get the relevant filter text from the edit buffer for autocomplete.
+/// For tags: the current word being typed (after last space).
+/// For deps: the current word being typed (after last comma or space).
+/// For file paths: the whole buffer (single path).
+fn autocomplete_filter_text(buffer: &str, kind: AutocompleteKind) -> String {
+    match kind {
+        AutocompleteKind::Tag => {
+            // Get last word (which may start with #)
+            let word = buffer.rsplit_once(' ').map(|(_, w)| w).unwrap_or(buffer);
+            word.strip_prefix('#').unwrap_or(word).to_string()
+        }
+        AutocompleteKind::TaskId => {
+            // Get last entry (after comma or space)
+            let word = buffer
+                .rsplit(|c: char| c == ',' || c.is_whitespace())
+                .next()
+                .unwrap_or(buffer)
+                .trim();
+            word.to_string()
+        }
+        AutocompleteKind::FilePath => {
+            // Get current entry (after last space for multi-value refs)
+            let word = buffer
+                .rsplit(' ')
+                .next()
+                .unwrap_or(buffer)
+                .trim();
+            word.to_string()
+        }
+    }
+}
+
+/// Update autocomplete filter when text changes
+fn update_autocomplete_filter(app: &mut App) {
+    if let Some(ac) = &mut app.autocomplete {
+        let kind = ac.kind;
+        let filter_text = autocomplete_filter_text(&app.edit_buffer, kind);
+        ac.filter(&filter_text);
+        // Hide if no matches
+        ac.visible = !ac.filtered.is_empty();
+    }
+}
+
+/// Accept the currently selected autocomplete entry
+fn autocomplete_accept(app: &mut App) {
+    let (selected, kind) = match &app.autocomplete {
+        Some(ac) => match ac.selected_entry() {
+            Some(s) => (s.to_string(), ac.kind),
+            None => {
+                app.autocomplete = None;
+                return;
+            }
+        },
+        None => return,
+    };
+
+    match kind {
+        AutocompleteKind::Tag => {
+            // Replace the current word with the selected tag (skip duplicates)
+            let existing: Vec<String> = app.edit_buffer
+                .split_whitespace()
+                .map(|s| s.strip_prefix('#').unwrap_or(s).to_string())
+                .collect();
+            let buf = &app.edit_buffer;
+            let last_space = buf.rfind(' ');
+            if existing.iter().any(|e| *e == selected) {
+                // Already present — clear the current word being typed
+                if let Some(pos) = last_space {
+                    app.edit_buffer.truncate(pos + 1);
+                }
+            } else {
+                let insert_value = format!("#{}", selected);
+                if let Some(pos) = last_space {
+                    app.edit_buffer.truncate(pos + 1);
+                    app.edit_buffer.push_str(&insert_value);
+                } else {
+                    app.edit_buffer = insert_value;
+                }
+                app.edit_buffer.push(' ');
+            }
+            app.edit_cursor = app.edit_buffer.len();
+        }
+        AutocompleteKind::TaskId => {
+            // Replace the current entry with the selected ID (skip duplicates)
+            let existing: Vec<&str> = app.edit_buffer
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let buf = &app.edit_buffer;
+            let last_sep = buf.rfind(|c: char| c == ',' || c.is_whitespace());
+            if existing.iter().any(|e| *e == selected) {
+                // Already present — clear the current word being typed
+                if let Some(pos) = last_sep {
+                    app.edit_buffer.truncate(pos + 1);
+                    if !app.edit_buffer.ends_with(' ') {
+                        app.edit_buffer.push(' ');
+                    }
+                }
+            } else {
+                if let Some(pos) = last_sep {
+                    app.edit_buffer.truncate(pos + 1);
+                    if !app.edit_buffer.ends_with(' ') {
+                        app.edit_buffer.push(' ');
+                    }
+                    app.edit_buffer.push_str(&selected);
+                } else {
+                    app.edit_buffer = selected;
+                }
+            }
+            app.edit_cursor = app.edit_buffer.len();
+        }
+        AutocompleteKind::FilePath => {
+            // Support space-separated entries (for refs); normalized to commas on confirm
+            // Check for duplicate: skip if this path is already in the buffer
+            let existing: Vec<&str> = app.edit_buffer
+                .split_whitespace()
+                .collect();
+            if existing.iter().any(|e| *e == selected) {
+                // Already present — just move cursor to end and dismiss current filter word
+                let buf = &app.edit_buffer;
+                let last_space = buf.rfind(' ');
+                if let Some(pos) = last_space {
+                    app.edit_buffer.truncate(pos + 1);
+                } else {
+                    app.edit_buffer.push(' ');
+                }
+                app.edit_cursor = app.edit_buffer.len();
+            } else {
+                let buf = &app.edit_buffer;
+                let last_space = buf.rfind(' ');
+                if let Some(pos) = last_space {
+                    app.edit_buffer.truncate(pos + 1);
+                    app.edit_buffer.push_str(&selected);
+                } else {
+                    app.edit_buffer = selected;
+                }
+                app.edit_buffer.push(' ');
+                app.edit_cursor = app.edit_buffer.len();
+            }
+        }
+    }
+
+    // Re-filter after acceptance (so user can keep adding more)
+    update_autocomplete_filter(app);
 }

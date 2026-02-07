@@ -43,6 +43,14 @@ pub enum Operation {
         old_index: usize,
         new_index: usize,
     },
+    /// A detail field was edited (tags, deps, spec, refs, note)
+    FieldEdit {
+        track_id: String,
+        task_id: String,
+        field: String,
+        old_value: String,
+        new_value: String,
+    },
     /// External file change sync marker — undo cannot cross this
     SyncMarker,
 }
@@ -192,6 +200,18 @@ fn apply_inverse(op: &Operation, tracks: &mut [(String, Track)]) -> Option<Strin
             tasks.insert(idx, task);
             Some(track_id.clone())
         }
+        Operation::FieldEdit {
+            track_id,
+            task_id,
+            field,
+            old_value,
+            ..
+        } => {
+            let track = find_track_mut(tracks, track_id)?;
+            let task = task_ops::find_task_mut_in_track(track, task_id)?;
+            apply_field_value(task, field, old_value);
+            Some(track_id.clone())
+        }
         Operation::SyncMarker => None,
     }
 }
@@ -282,7 +302,72 @@ fn apply_forward(op: &Operation, tracks: &mut [(String, Track)]) -> Option<Strin
             tasks.insert(idx, task);
             Some(track_id.clone())
         }
+        Operation::FieldEdit {
+            track_id,
+            task_id,
+            field,
+            new_value,
+            ..
+        } => {
+            let track = find_track_mut(tracks, track_id)?;
+            let task = task_ops::find_task_mut_in_track(track, task_id)?;
+            apply_field_value(task, field, new_value);
+            Some(track_id.clone())
+        }
         Operation::SyncMarker => None,
+    }
+}
+
+/// Apply a value to the appropriate task field based on field name
+fn apply_field_value(task: &mut Task, field: &str, value: &str) {
+    match field {
+        "tags" => {
+            task.tags = value
+                .split_whitespace()
+                .map(|s| s.strip_prefix('#').unwrap_or(s).to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            task.mark_dirty();
+        }
+        "deps" => {
+            task.metadata.retain(|m| !matches!(m, crate::model::task::Metadata::Dep(_)));
+            let deps: Vec<String> = value
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !deps.is_empty() {
+                task.metadata.push(crate::model::task::Metadata::Dep(deps));
+            }
+            task.mark_dirty();
+        }
+        "spec" => {
+            task.metadata.retain(|m| !matches!(m, crate::model::task::Metadata::Spec(_)));
+            if !value.trim().is_empty() {
+                task.metadata.push(crate::model::task::Metadata::Spec(value.trim().to_string()));
+            }
+            task.mark_dirty();
+        }
+        "refs" => {
+            task.metadata.retain(|m| !matches!(m, crate::model::task::Metadata::Ref(_)));
+            let refs: Vec<String> = value
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !refs.is_empty() {
+                task.metadata.push(crate::model::task::Metadata::Ref(refs));
+            }
+            task.mark_dirty();
+        }
+        "note" => {
+            task.metadata.retain(|m| !matches!(m, crate::model::task::Metadata::Note(_)));
+            if !value.is_empty() {
+                task.metadata.push(crate::model::task::Metadata::Note(value.to_string()));
+            }
+            task.mark_dirty();
+        }
+        _ => {}
     }
 }
 

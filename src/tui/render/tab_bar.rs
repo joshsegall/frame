@@ -32,7 +32,9 @@ fn render_tabs(frame: &mut Frame, app: &App, area: Rect) {
     let cc_focus = app.project.config.agent.cc_focus.as_deref();
     for (i, track_id) in app.active_track_ids.iter().enumerate() {
         let name = app.track_name(track_id);
-        let is_current = app.view == View::Track(i);
+        let track_id_str = track_id.as_str();
+        let is_current = app.view == View::Track(i)
+            || matches!(&app.view, View::Detail { track_id: tid, .. } if tid == track_id_str);
         let is_cc = cc_focus == Some(track_id.as_str());
         let style = tab_style(app, is_current);
         if is_cc {

@@ -1,4 +1,6 @@
+pub mod autocomplete;
 pub mod conflict_popup;
+pub mod detail_view;
 pub mod help_overlay;
 pub mod inbox_view;
 pub mod recent_view;
@@ -41,6 +43,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let view = app.view.clone();
     match &view {
         View::Track(_) => track_view::render_track_view(frame, app, chunks[1]),
+        View::Detail { .. } => detail_view::render_detail_view(frame, app, chunks[1]),
         View::Tracks => tracks_view::render_tracks_view(frame, app, chunks[1]),
         View::Inbox => inbox_view::render_inbox_view(frame, app, chunks[1]),
         View::Recent => recent_view::render_recent_view(frame, app, chunks[1]),
@@ -54,6 +57,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // Conflict popup (rendered on top of everything)
     if app.conflict_text.is_some() {
         conflict_popup::render_conflict_popup(frame, app, frame.area());
+    }
+
+    // Autocomplete dropdown (rendered on top of content)
+    if app.autocomplete.is_some() {
+        autocomplete::render_autocomplete(frame, app, chunks[1]);
     }
 
     // Status row
