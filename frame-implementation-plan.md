@@ -530,7 +530,7 @@ order.
      - Read .state.json on startup
      - Write on every state change (debounced, ~200ms)
      - Persist: view, active_track, cursor per track, expanded nodes,
-       scroll offset, last search
+       scroll offset, search history
 
 4.11 SEARCH mode (tui/input/search.rs)
      - / enters search mode
