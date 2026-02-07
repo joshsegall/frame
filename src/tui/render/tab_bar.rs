@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
 
 use crate::tui::app::{App, View};
 
@@ -39,10 +39,7 @@ fn render_tabs(frame: &mut Frame, app: &App, area: Rect) {
 
     // Tracks view tab (▸)
     let is_tracks = app.view == View::Tracks;
-    spans.push(Span::styled(
-        " \u{25B8} ",
-        tab_style(app, is_tracks),
-    ));
+    spans.push(Span::styled(" \u{25B8} ", tab_style(app, is_tracks)));
     spans.push(sep.clone());
 
     // Inbox tab with count (🔥N)
@@ -58,10 +55,7 @@ fn render_tabs(frame: &mut Frame, app: &App, area: Rect) {
 
     // Recent tab (✓)
     let is_recent = app.view == View::Recent;
-    spans.push(Span::styled(
-        " \u{2713} ",
-        tab_style(app, is_recent),
-    ));
+    spans.push(Span::styled(" \u{2713} ", tab_style(app, is_recent)));
     spans.push(sep.clone());
 
     let line = Line::from(spans);
@@ -84,8 +78,6 @@ fn tab_style(app: &App, is_current: bool) -> Style {
             .bg(app.theme.highlight)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default()
-            .fg(app.theme.text)
-            .bg(app.theme.background)
+        Style::default().fg(app.theme.text).bg(app.theme.background)
     }
 }

@@ -1,14 +1,20 @@
+pub mod help_overlay;
+pub mod inbox_view;
+pub mod recent_view;
+pub mod status_row;
 pub mod tab_bar;
+pub mod track_view;
+pub mod tracks_view;
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::Style;
-use ratatui::widgets::{Block, Paragraph};
-use ratatui::Frame;
+use ratatui::widgets::Block;
 
 use super::app::{App, View};
 
 /// Main render function — dispatches to sub-renderers
-pub fn render(frame: &mut Frame, app: &App) {
+pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
     // Background fill
@@ -20,7 +26,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(2), // tab bar + separator
-            Constraint::Min(1),   // content area
+            Constraint::Min(1),    // content area
             Constraint::Length(1), // status row
         ])
         .split(area);
@@ -28,31 +34,20 @@ pub fn render(frame: &mut Frame, app: &App) {
     // Render tab bar
     tab_bar::render_tab_bar(frame, app, chunks[0]);
 
-    // Render content area (placeholder for now)
-    render_content_placeholder(frame, app, chunks[1]);
+    // Render content area (clone view to avoid borrow conflict)
+    let view = app.view.clone();
+    match &view {
+        View::Track(_) => track_view::render_track_view(frame, app, chunks[1]),
+        View::Tracks => tracks_view::render_tracks_view(frame, app, chunks[1]),
+        View::Inbox => inbox_view::render_inbox_view(frame, app, chunks[1]),
+        View::Recent => recent_view::render_recent_view(frame, app, chunks[1]),
+    }
 
-    // Status row is empty in NAVIGATE mode
-}
+    // Help overlay (rendered on top of everything)
+    if app.show_help {
+        help_overlay::render_help_overlay(frame, app, frame.area());
+    }
 
-fn render_content_placeholder(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let text = match &app.view {
-        View::Track(idx) => {
-            if let Some(track_id) = app.active_track_ids.get(*idx) {
-                let name = app.track_name(track_id);
-                format!("Track: {} ({})", name, track_id)
-            } else {
-                "No track selected".to_string()
-            }
-        }
-        View::Tracks => "Tracks view".to_string(),
-        View::Inbox => {
-            let count = app.inbox_count();
-            format!("Inbox ({} items)", count)
-        }
-        View::Recent => "Recent view".to_string(),
-    };
-
-    let paragraph = Paragraph::new(text)
-        .style(Style::default().fg(app.theme.text).bg(app.theme.background));
-    frame.render_widget(paragraph, area);
+    // Status row
+    status_row::render_status_row(frame, app, chunks[2]);
 }

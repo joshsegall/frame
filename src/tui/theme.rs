@@ -153,10 +153,8 @@ mod tests {
     #[test]
     fn test_from_config_overrides() {
         let mut ui = UiConfig::default();
-        ui.colors
-            .insert("background".into(), "#000000".into());
-        ui.tag_colors
-            .insert("custom".into(), "#112233".into());
+        ui.colors.insert("background".into(), "#000000".into());
+        ui.tag_colors.insert("custom".into(), "#112233".into());
 
         let theme = Theme::from_config(&ui);
         assert_eq!(theme.background, Color::Rgb(0, 0, 0));
