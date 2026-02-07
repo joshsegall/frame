@@ -1,7 +1,7 @@
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "fr", about = "Frame — markdown task tracker", version)]
+#[command(name = "fr", about = concat!("[>] frame v", env!("CARGO_PKG_VERSION"), " - your backlog is plain text"), version)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,

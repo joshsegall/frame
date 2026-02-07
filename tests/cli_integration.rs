@@ -831,7 +831,7 @@ fn test_state_invalid() {
 #[test]
 fn test_help() {
     let out = run_fr_ok(Path::new("."), &["--help"]);
-    assert!(out.contains("Frame"));
+    assert!(out.contains("frame"));
     assert!(out.contains("list"));
     assert!(out.contains("add"));
 }
