@@ -517,13 +517,21 @@ fn navigate_to_undo_target(app: &mut App, nav: &UndoNavTarget) {
                 None => return, // Track not active (shelved) — undo still applied, just no navigation
             };
 
-            // Close detail view if open
-            if matches!(app.view, View::Detail { .. }) {
+            // Check if we're already in detail view for the same task
+            let stay_in_detail = matches!(
+                &app.view,
+                View::Detail { track_id: dt, task_id: di } if dt == track_id && di == task_id
+            );
+
+            // Close detail view only if navigating to a different task
+            if matches!(app.view, View::Detail { .. }) && !stay_in_detail {
                 app.close_detail_fully();
             }
 
-            // Switch to the target track
-            app.view = View::Track(track_idx);
+            // Switch to the target track (unless staying in detail view)
+            if !stay_in_detail {
+                app.view = View::Track(track_idx);
+            }
 
             if *task_removed {
                 // Task was removed — clamp cursor to position_hint
@@ -537,18 +545,20 @@ fn navigate_to_undo_target(app: &mut App, nav: &UndoNavTarget) {
                 move_cursor_to_task(app, track_id, task_id);
                 app.flash_task(task_id);
 
-                // If the operation targets a detail region, open detail view
+                // If the operation targets a detail region, navigate to it
                 if let Some(region) = detail_region {
-                    let task_exists = App::find_track_in_project(&app.project, track_id)
-                        .and_then(|track| task_ops::find_task_in_track(track, task_id))
-                        .is_some();
-                    if task_exists {
-                        app.open_detail(track_id.clone(), task_id.clone());
-                        if let Some(ref mut ds) = app.detail_state
-                            && ds.regions.contains(region)
-                        {
-                            ds.region = *region;
+                    if !stay_in_detail {
+                        let task_exists = App::find_track_in_project(&app.project, track_id)
+                            .and_then(|track| task_ops::find_task_in_track(track, task_id))
+                            .is_some();
+                        if task_exists {
+                            app.open_detail(track_id.clone(), task_id.clone());
                         }
+                    }
+                    if let Some(ref mut ds) = app.detail_state
+                        && ds.regions.contains(region)
+                    {
+                        ds.region = *region;
                     }
                 }
             }
