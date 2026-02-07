@@ -18,6 +18,11 @@ pub struct Theme {
     pub cyan: Color,
     pub purple: Color,
     pub blue: Color,
+    pub selection_bg: Color,
+    pub selection_border: Color,
+    pub selection_id: Color,
+    pub search_match_bg: Color,
+    pub search_match_fg: Color,
     /// Per-tag colors
     pub tag_colors: HashMap<String, Color>,
 }
@@ -45,6 +50,11 @@ impl Default for Theme {
             cyan: Color::Rgb(0x44, 0xDD, 0xFF),
             purple: Color::Rgb(0xCC, 0x66, 0xFF),
             blue: Color::Rgb(0x44, 0x88, 0xFF),
+            selection_bg: Color::Rgb(0x3D, 0x14, 0x38),
+            selection_border: Color::Rgb(0xFB, 0x41, 0x96),
+            selection_id: Color::Rgb(0xDA, 0xB8, 0xF0),
+            search_match_bg: Color::Rgb(0x40, 0xE0, 0xD0),
+            search_match_fg: Color::Rgb(0x0C, 0x00, 0x1B),
             tag_colors,
         }
     }
@@ -82,6 +92,11 @@ impl Theme {
                     "cyan" => theme.cyan = color,
                     "purple" => theme.purple = color,
                     "blue" => theme.blue = color,
+                    "selection_bg" => theme.selection_bg = color,
+                    "selection_border" => theme.selection_border = color,
+                    "selection_id" => theme.selection_id = color,
+                    "search_match_bg" => theme.search_match_bg = color,
+                    "search_match_fg" => theme.search_match_fg = color,
                     _ => {}
                 }
             }

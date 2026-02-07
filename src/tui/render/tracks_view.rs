@@ -130,7 +130,7 @@ fn render_track_line<'a>(
     search_re: Option<&regex::Regex>,
 ) -> Line<'a> {
     let bg = if is_cursor {
-        app.theme.highlight
+        app.theme.selection_bg
     } else {
         app.theme.background
     };
@@ -147,12 +147,30 @@ fn render_track_line<'a>(
 
     let mut spans: Vec<Span> = Vec::new();
 
+    // Column 0 reservation
+    if is_cursor {
+        spans.push(Span::styled(
+            "\u{258E}",
+            Style::default()
+                .fg(app.theme.selection_border)
+                .bg(app.theme.selection_bg),
+        ));
+    } else {
+        spans.push(Span::styled(
+            " ",
+            Style::default().bg(app.theme.background),
+        ));
+    }
+
     // Indent
-    spans.push(Span::styled("  ", Style::default().bg(bg)));
+    spans.push(Span::styled(" ", Style::default().bg(bg)));
 
     // Track name (with search highlighting)
     let name_style = Style::default().fg(text_color).bg(bg);
-    let hl_style = name_style.bg(app.theme.purple);
+    let hl_style = Style::default()
+        .fg(app.theme.search_match_fg)
+        .bg(app.theme.search_match_bg)
+        .add_modifier(Modifier::BOLD);
     push_highlighted_spans(&mut spans, &tc.name, name_style, hl_style, search_re);
 
     // Stats

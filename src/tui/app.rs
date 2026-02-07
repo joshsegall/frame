@@ -98,6 +98,18 @@ pub struct App {
     pub last_search: Option<String>,
     /// Current search match index (for n/N cycling)
     pub search_match_idx: usize,
+    /// Search history (most recent first, max 200)
+    pub search_history: Vec<String>,
+    /// Current position in search history (None = new/draft, Some(0) = most recent, etc.)
+    pub search_history_index: Option<usize>,
+    /// Draft search text (preserved while browsing history)
+    pub search_draft: String,
+    /// Wrap-around message shown after n/N wraps (cleared on next n/N or Esc)
+    pub search_wrap_message: Option<String>,
+    /// Number of matches for the current search pattern in the current view
+    pub search_match_count: Option<usize>,
+    /// True when user hit Enter with 0 matches (for red background highlight)
+    pub search_zero_confirmed: bool,
 }
 
 impl App {
@@ -150,6 +162,12 @@ impl App {
             search_input: String::new(),
             last_search: None,
             search_match_idx: 0,
+            search_history: Vec::new(),
+            search_history_index: None,
+            search_draft: String::new(),
+            search_wrap_message: None,
+            search_match_count: None,
+            search_zero_confirmed: false,
         }
     }
 
@@ -359,6 +377,9 @@ pub fn restore_ui_state(app: &mut App) {
 
     // Restore last search
     app.last_search = ui_state.last_search;
+
+    // Restore search history
+    app.search_history = ui_state.search_history;
 }
 
 /// Save UI state to .state.json
@@ -392,6 +413,7 @@ pub fn save_ui_state(app: &App) {
         active_track,
         tracks,
         last_search: app.last_search.clone(),
+        search_history: app.search_history.clone(),
     };
 
     let _ = write_ui_state(&app.project.frame_dir, &ui_state);

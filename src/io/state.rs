@@ -18,6 +18,9 @@ pub struct UiState {
     /// Last search pattern
     #[serde(default)]
     pub last_search: Option<String>,
+    /// Search history (most recent first, max 200)
+    #[serde(default)]
+    pub search_history: Vec<String>,
 }
 
 /// Per-track UI state

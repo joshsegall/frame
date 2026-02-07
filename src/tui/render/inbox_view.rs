@@ -39,7 +39,7 @@ pub fn render_inbox_view(frame: &mut Frame, app: &App, area: Rect) {
     for (i, item) in inbox.items.iter().enumerate() {
         let is_cursor = i == cursor;
         let bg = if is_cursor {
-            app.theme.highlight
+            app.theme.selection_bg
         } else {
             app.theme.background
         };
@@ -51,8 +51,24 @@ pub fn render_inbox_view(frame: &mut Frame, app: &App, area: Rect) {
 
         // Number + title + tags
         let mut spans: Vec<Span> = Vec::new();
+
+        // Column 0 reservation
+        if is_cursor {
+            spans.push(Span::styled(
+                "\u{258E}",
+                Style::default()
+                    .fg(app.theme.selection_border)
+                    .bg(app.theme.selection_bg),
+            ));
+        } else {
+            spans.push(Span::styled(
+                " ",
+                Style::default().bg(app.theme.background),
+            ));
+        }
+
         let num_style = Style::default().fg(app.theme.dim).bg(bg);
-        spans.push(Span::styled(format!(" {:>2}  ", i + 1), num_style));
+        spans.push(Span::styled(format!("{:>2}  ", i + 1), num_style));
 
         let title_style = if is_cursor {
             Style::default()
@@ -62,7 +78,10 @@ pub fn render_inbox_view(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             Style::default().fg(app.theme.text_bright).bg(bg)
         };
-        let hl_style = title_style.bg(app.theme.purple);
+        let hl_style = Style::default()
+            .fg(app.theme.search_match_fg)
+            .bg(app.theme.search_match_bg)
+            .add_modifier(Modifier::BOLD);
         push_highlighted_spans(
             &mut spans,
             &item.title,

@@ -73,16 +73,31 @@ pub fn render_recent_view(frame: &mut Frame, app: &App, area: Rect) {
 
         let is_cursor = flat_idx == cursor;
         let bg = if is_cursor {
-            app.theme.highlight
+            app.theme.selection_bg
         } else {
             app.theme.background
         };
 
         let mut spans: Vec<Span> = Vec::new();
 
+        // Column 0 reservation
+        if is_cursor {
+            spans.push(Span::styled(
+                "\u{258E}",
+                Style::default()
+                    .fg(app.theme.selection_border)
+                    .bg(app.theme.selection_bg),
+            ));
+        } else {
+            spans.push(Span::styled(
+                " ",
+                Style::default().bg(app.theme.background),
+            ));
+        }
+
         // Check mark + ID + Title
         spans.push(Span::styled(
-            " \u{2713} ",
+            "\u{2713} ",
             Style::default().fg(app.theme.dim).bg(bg),
         ));
 
@@ -98,7 +113,10 @@ pub fn render_recent_view(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             Style::default().fg(app.theme.dim).bg(bg)
         };
-        let hl_style = title_style.bg(app.theme.purple);
+        let hl_style = Style::default()
+            .fg(app.theme.search_match_fg)
+            .bg(app.theme.search_match_bg)
+            .add_modifier(Modifier::BOLD);
         push_highlighted_spans(
             &mut spans,
             &task.title,

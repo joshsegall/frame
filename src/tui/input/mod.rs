@@ -37,6 +37,9 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             if app.last_search.is_some() {
                 app.last_search = None;
                 app.search_match_idx = 0;
+                app.search_wrap_message = None;
+                app.search_match_count = None;
+                app.search_zero_confirmed = false;
             }
         }
 
@@ -49,6 +52,11 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
         (KeyModifiers::NONE, KeyCode::Char('/')) => {
             app.mode = Mode::Search;
             app.search_input.clear();
+            app.search_draft.clear();
+            app.search_history_index = None;
+            app.search_wrap_message = None;
+            app.search_match_count = None;
+            app.search_zero_confirmed = false;
         }
 
         // Search: n/N for next/prev match
@@ -132,27 +140,95 @@ fn handle_search(app: &mut App, key: KeyEvent) {
         (_, KeyCode::Esc) => {
             app.mode = Mode::Navigate;
             app.search_input.clear();
+            app.search_history_index = None;
+            // Recompute match count for last_search (mode is now Navigate)
+            if let Some(re) = app.active_search_re() {
+                app.search_match_count = Some(count_matches_for_pattern(app, &re));
+            } else {
+                app.search_match_count = None;
+            }
         }
 
         // Execute search
         (_, KeyCode::Enter) => {
             if !app.search_input.is_empty() {
+                let query = app.search_input.clone();
+                // Add to history (dedup: remove previous occurrence, then push to front)
+                app.search_history.retain(|s| s != &query);
+                app.search_history.insert(0, query);
+                app.search_history.truncate(200);
+
                 app.last_search = Some(app.search_input.clone());
                 app.search_match_idx = 0;
                 execute_search_dir(app, 0, 0);
+                app.search_zero_confirmed = app.search_match_count == Some(0);
             }
             app.mode = Mode::Navigate;
             app.search_input.clear();
+            app.search_history_index = None;
+            app.search_wrap_message = None;
+        }
+
+        // History navigation: Up = older
+        (_, KeyCode::Up) => {
+            if !app.search_history.is_empty() {
+                match app.search_history_index {
+                    None => {
+                        app.search_draft = app.search_input.clone();
+                        app.search_history_index = Some(0);
+                        app.search_input = app.search_history[0].clone();
+                    }
+                    Some(idx) => {
+                        let next = idx + 1;
+                        if next < app.search_history.len() {
+                            app.search_history_index = Some(next);
+                            app.search_input = app.search_history[next].clone();
+                        }
+                    }
+                }
+                update_match_count(app);
+            }
+        }
+
+        // History navigation: Down = newer
+        (_, KeyCode::Down) => {
+            let changed = match app.search_history_index {
+                None => false,
+                Some(0) => {
+                    app.search_history_index = None;
+                    app.search_input = app.search_draft.clone();
+                    true
+                }
+                Some(idx) => {
+                    let prev = idx - 1;
+                    app.search_history_index = Some(prev);
+                    app.search_input = app.search_history[prev].clone();
+                    true
+                }
+            };
+            if changed {
+                update_match_count(app);
+            }
         }
 
         // Backspace
         (_, KeyCode::Backspace) => {
             app.search_input.pop();
+            if app.search_history_index.is_some() {
+                app.search_history_index = None;
+                app.search_draft.clear();
+            }
+            update_match_count(app);
         }
 
         // Type character
         (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
             app.search_input.push(c);
+            if app.search_history_index.is_some() {
+                app.search_history_index = None;
+                app.search_draft.clear();
+            }
+            update_match_count(app);
         }
 
         _ => {}
@@ -420,9 +496,18 @@ fn count_recent_tasks(app: &App) -> usize {
 
 /// Advance search by `direction` (+1 = next, -1 = prev) with proper wrapping.
 fn search_next(app: &mut App, direction: i32) {
-    let current = app.search_match_idx;
-    // We pass the direction to execute_search which handles cycling internally
-    execute_search_dir(app, current, direction);
+    app.search_wrap_message = None;
+    let old_idx = app.search_match_idx;
+    execute_search_dir(app, old_idx, direction);
+    let new_idx = app.search_match_idx;
+    let count = app.search_match_count.unwrap_or(0);
+    if count > 1 {
+        if direction == 1 && old_idx == count - 1 && new_idx == 0 {
+            app.search_wrap_message = Some("Search wrapped to top".to_string());
+        } else if direction == -1 && old_idx == 0 && new_idx == count - 1 {
+            app.search_wrap_message = Some("Search wrapped to bottom".to_string());
+        }
+    }
 }
 
 /// Execute search: find matches in the current view and jump to the match.
@@ -442,6 +527,8 @@ fn execute_search_dir(app: &mut App, from_idx: usize, direction: i32) {
             Err(_) => return,
         },
     };
+
+    app.search_match_count = Some(count_matches_for_pattern(app, &re));
 
     match app.view.clone() {
         View::Track(idx) => search_in_track(app, idx, &re, from_idx, direction),
@@ -676,6 +763,75 @@ fn search_in_recent(app: &mut App, re: &Regex, from_idx: usize, direction: i32) 
         let idx = cycle_index(from_idx, direction, matches.len());
         app.search_match_idx = idx;
         app.recent_cursor = matches[idx];
+    }
+}
+
+/// Count unique matches for a regex pattern in the current view.
+fn count_matches_for_pattern(app: &App, re: &Regex) -> usize {
+    match &app.view {
+        View::Track(idx) => {
+            let track_id = match app.active_track_ids.get(*idx) {
+                Some(id) => id.as_str(),
+                None => return 0,
+            };
+            let hits = search_tasks(&app.project, re, Some(track_id));
+            let mut seen: Vec<&str> = Vec::new();
+            for hit in &hits {
+                if !seen.contains(&hit.task_id.as_str()) {
+                    seen.push(&hit.task_id);
+                }
+            }
+            seen.len()
+        }
+        View::Tracks => app
+            .project
+            .config
+            .tracks
+            .iter()
+            .filter(|tc| re.is_match(&tc.name) || re.is_match(&tc.id))
+            .count(),
+        View::Inbox => {
+            let inbox = match &app.project.inbox {
+                Some(inbox) => inbox,
+                None => return 0,
+            };
+            let hits = search_inbox(inbox, re);
+            let mut seen: Vec<usize> = Vec::new();
+            for hit in &hits {
+                if !seen.contains(&hit.item_index) {
+                    seen.push(hit.item_index);
+                }
+            }
+            seen.len()
+        }
+        View::Recent => {
+            let all_hits = search_tasks(&app.project, re, None);
+            let mut matched_done_ids: Vec<String> = Vec::new();
+            for hit in &all_hits {
+                for (tid, track) in &app.project.tracks {
+                    if *tid != hit.track_id {
+                        continue;
+                    }
+                    for done_task in track.section_tasks(SectionKind::Done) {
+                        if done_task.id.as_deref() == Some(hit.task_id.as_str())
+                            && !matched_done_ids.contains(&hit.task_id)
+                        {
+                            matched_done_ids.push(hit.task_id.clone());
+                        }
+                    }
+                }
+            }
+            matched_done_ids.len()
+        }
+    }
+}
+
+/// Update search_match_count based on current search input (for real-time display in Search mode).
+fn update_match_count(app: &mut App) {
+    if let Some(re) = app.active_search_re() {
+        app.search_match_count = Some(count_matches_for_pattern(app, &re));
+    } else {
+        app.search_match_count = None;
     }
 }
 

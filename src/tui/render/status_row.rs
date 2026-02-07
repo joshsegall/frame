@@ -1,6 +1,6 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -13,53 +13,118 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
 
     let line = match app.mode {
         Mode::Navigate => {
-            // Empty in navigate mode (clean, like vim normal mode)
-            // But if we have an active search, show it dimmed
             if let Some(ref pattern) = app.last_search {
                 let mut spans = vec![Span::styled(
                     format!("/{}", pattern),
-                    Style::default().fg(app.theme.dim).bg(bg),
+                    Style::default().fg(app.theme.text_bright).bg(bg),
                 )];
-                let hint = "n/N next/prev";
-                let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-                let hint_width = hint.chars().count();
-                if content_width + hint_width < width {
-                    let padding = width - content_width - hint_width;
-                    spans.push(Span::styled(" ".repeat(padding), Style::default().bg(bg)));
-                    spans.push(Span::styled(
-                        hint,
-                        Style::default().fg(app.theme.dim).bg(bg),
-                    ));
-                }
+                let hint = "n/N next/prev  Esc clear";
+                build_right_side(app, &mut spans, hint, width, bg, true);
                 Line::from(spans)
             } else {
                 Line::from(Span::styled(" ".repeat(width), Style::default().bg(bg)))
             }
         }
         Mode::Search => {
-            // Search prompt: /pattern▌
             let mut spans = vec![
                 Span::styled(
                     format!("/{}", app.search_input),
                     Style::default().fg(app.theme.text_bright).bg(bg),
                 ),
-                Span::styled("\u{258C}", Style::default().fg(app.theme.highlight).bg(bg)), // ▌ cursor
+                Span::styled("\u{258C}", Style::default().fg(app.theme.highlight).bg(bg)),
             ];
             let hint = "Enter search  Esc cancel";
-            let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-            let hint_width = hint.chars().count();
-            if content_width + hint_width < width {
-                let padding = width - content_width - hint_width;
-                spans.push(Span::styled(" ".repeat(padding), Style::default().bg(bg)));
-                spans.push(Span::styled(
-                    hint,
-                    Style::default().fg(app.theme.dim).bg(bg),
-                ));
-            }
+            build_right_side(app, &mut spans, hint, width, bg, false);
             Line::from(spans)
         }
     };
 
     let paragraph = Paragraph::new(line).style(Style::default().bg(bg));
     frame.render_widget(paragraph, area);
+}
+
+/// Build the right side of the status bar: optional message + spacer + key hints.
+/// In Navigate mode, wrap messages take priority over match count.
+/// In Search mode, only match count is shown (no wrap messages).
+fn build_right_side<'a>(
+    app: &App,
+    spans: &mut Vec<Span<'a>>,
+    hint: &'a str,
+    width: usize,
+    bg: Color,
+    is_navigate: bool,
+) {
+    let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let hint_width = hint.chars().count();
+
+    // Determine message text and style
+    let message: Option<(String, Style)> = if is_navigate {
+        if let Some(ref wrap_msg) = app.search_wrap_message {
+            Some((
+                wrap_msg.clone(),
+                Style::default().fg(Color::LightMagenta).bg(bg),
+            ))
+        } else {
+            match_count_message(app, bg)
+        }
+    } else {
+        match_count_message(app, bg)
+    };
+
+    let spacer = 8;
+
+    if let Some((ref msg_text, msg_style)) = message {
+        let padded_msg = format!(" {} ", msg_text);
+        let msg_width = padded_msg.chars().count();
+        let right_width = msg_width + spacer + hint_width;
+        if content_width + right_width < width {
+            let padding = width - content_width - right_width;
+            spans.push(Span::styled(
+                " ".repeat(padding),
+                Style::default().bg(bg),
+            ));
+            spans.push(Span::styled(padded_msg, msg_style));
+            spans.push(Span::styled(
+                " ".repeat(spacer),
+                Style::default().bg(bg),
+            ));
+            spans.push(Span::styled(
+                hint,
+                Style::default().fg(app.theme.text_bright).bg(bg),
+            ));
+            return;
+        }
+    }
+
+    // Fallback: no message, just hints
+    if content_width + hint_width < width {
+        let padding = width - content_width - hint_width;
+        spans.push(Span::styled(
+            " ".repeat(padding),
+            Style::default().bg(bg),
+        ));
+        spans.push(Span::styled(
+            hint,
+            Style::default().fg(app.theme.text_bright).bg(bg),
+        ));
+    }
+}
+
+/// Build the match count message with appropriate styling.
+fn match_count_message(app: &App, bg: Color) -> Option<(String, Style)> {
+    let count = app.search_match_count?;
+    let text = if count == 1 {
+        "1 match".to_string()
+    } else {
+        format!("{} matches", count)
+    };
+    let style = if count == 0 && app.search_zero_confirmed {
+        Style::default()
+            .fg(app.theme.text_bright)
+            .bg(Color::Rgb(0x8D, 0x0B, 0x0B))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(app.theme.text_bright).bg(bg)
+    };
+    Some((text, style))
 }

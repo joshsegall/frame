@@ -151,6 +151,18 @@ fn render_task_line<'a>(
     let dim_style = Style::default().fg(app.theme.dim).bg(bg);
     let state_color = app.theme.state_color(task.state);
 
+    // Column 0 reservation: left border accent for selected, space for non-selected
+    if is_cursor {
+        spans.push(Span::styled(
+            "\u{258E}",
+            Style::default()
+                .fg(app.theme.selection_border)
+                .bg(app.theme.selection_bg),
+        ));
+    } else {
+        spans.push(Span::styled(" ", Style::default().bg(bg)));
+    }
+
     // Build prefix based on depth
     if info.depth == 0 {
         // Top-level: [expand][state] ID Title  tags
@@ -218,6 +230,8 @@ fn render_task_line<'a>(
     if !id_text.is_empty() {
         let id_style = if task.state == TaskState::Done {
             Style::default().fg(app.theme.dim).bg(bg)
+        } else if is_cursor {
+            Style::default().fg(app.theme.selection_id).bg(bg)
         } else {
             Style::default().fg(app.theme.text).bg(bg)
         };
@@ -235,7 +249,10 @@ fn render_task_line<'a>(
     } else {
         Style::default().fg(app.theme.text_bright).bg(bg)
     };
-    let highlight_style = title_style.bg(app.theme.purple);
+    let highlight_style = Style::default()
+        .fg(app.theme.search_match_fg)
+        .bg(app.theme.search_match_bg)
+        .add_modifier(Modifier::BOLD);
     push_highlighted_spans(
         &mut spans,
         &task.title,
@@ -276,8 +293,9 @@ fn render_task_line<'a>(
         }
 
         let hl_style = Style::default()
-            .fg(app.theme.text_bright)
-            .bg(app.theme.purple);
+            .fg(app.theme.search_match_fg)
+            .bg(app.theme.search_match_bg)
+            .add_modifier(Modifier::BOLD);
         spans.push(Span::styled("  ", Style::default().bg(bg)));
         spans.push(Span::styled(indicator, hl_style));
     }
@@ -288,12 +306,16 @@ fn render_task_line<'a>(
         if content_width < width {
             spans.push(Span::styled(
                 " ".repeat(width - content_width),
-                Style::default().bg(app.theme.highlight),
+                Style::default().bg(app.theme.selection_bg),
             ));
         }
-        // Re-style all spans with highlight background
-        for span in &mut spans {
-            span.style = span.style.bg(app.theme.highlight);
+        // Re-style all spans with selection background
+        // Skip column 0 border (already styled) and search match spans (keep teal bg)
+        let search_bg = app.theme.search_match_bg;
+        for span in spans.iter_mut().skip(1) {
+            if span.style.bg != Some(search_bg) {
+                span.style = span.style.bg(app.theme.selection_bg);
+            }
         }
     }
 
@@ -313,24 +335,42 @@ fn abbreviated_id(task: &Task) -> Option<String> {
 /// Render the parked section separator
 fn render_parked_separator<'a>(app: &'a App, width: usize, is_cursor: bool) -> Line<'a> {
     let bg = if is_cursor {
-        app.theme.highlight
+        app.theme.selection_bg
     } else {
         app.theme.background
     };
     let style = Style::default().fg(app.theme.dim).bg(bg);
+
+    let mut spans: Vec<Span> = Vec::new();
+
+    // Column 0 reservation
+    if is_cursor {
+        spans.push(Span::styled(
+            "\u{258E}",
+            Style::default()
+                .fg(app.theme.selection_border)
+                .bg(app.theme.selection_bg),
+        ));
+    } else {
+        spans.push(Span::styled(
+            " ",
+            Style::default().bg(app.theme.background),
+        ));
+    }
 
     let label = " Parked ";
     let dashes_before = 2;
     let dashes_after = width.saturating_sub(label.len() + dashes_before + 2);
 
     let line_text = format!(
-        " {}{}{}",
+        "{}{}{}",
         "\u{2500}".repeat(dashes_before),
         label,
         "\u{2500}".repeat(dashes_after.max(2))
     );
 
-    Line::from(Span::styled(line_text, style))
+    spans.push(Span::styled(line_text, style));
+    Line::from(spans)
 }
 
 /// Build a hidden match indicator for non-visible field matches on a task.

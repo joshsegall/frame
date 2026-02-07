@@ -75,7 +75,7 @@ fn tab_style(app: &App, is_current: bool) -> Style {
     if is_current {
         Style::default()
             .fg(app.theme.text_bright)
-            .bg(app.theme.highlight)
+            .bg(app.theme.selection_bg)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(app.theme.text).bg(app.theme.background)
