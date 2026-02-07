@@ -141,19 +141,25 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             move_cursor(app, 1);
         }
 
-        // Jump to top: g or Cmd+Up
+        // Jump to top: g, Cmd+Up, or Home
         (KeyModifiers::NONE, KeyCode::Char('g')) => {
             jump_to_top(app);
         }
         (m, KeyCode::Up) if m.contains(KeyModifiers::SUPER) => {
             jump_to_top(app);
         }
+        (_, KeyCode::Home) => {
+            jump_to_top(app);
+        }
 
-        // Jump to bottom: G or Cmd+Down
+        // Jump to bottom: G, Cmd+Down, or End
         (KeyModifiers::SHIFT, KeyCode::Char('G')) => {
             jump_to_bottom(app);
         }
         (m, KeyCode::Down) if m.contains(KeyModifiers::SUPER) => {
+            jump_to_bottom(app);
+        }
+        (_, KeyCode::End) => {
             jump_to_bottom(app);
         }
 
@@ -183,7 +189,7 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
         (KeyModifiers::NONE, KeyCode::Char('a')) => {
             add_task_action(app, AddPosition::Bottom);
         }
-        (KeyModifiers::NONE, KeyCode::Char('o')) => {
+        (KeyModifiers::NONE, KeyCode::Char('o') | KeyCode::Char('-')) => {
             add_task_action(app, AddPosition::AfterCursor);
         }
         (KeyModifiers::NONE, KeyCode::Char('p')) => {
@@ -196,6 +202,16 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
         // Inline title edit
         (KeyModifiers::NONE, KeyCode::Char('e')) => {
             enter_title_edit(app);
+        }
+
+        // Toggle cc tag on task
+        (KeyModifiers::NONE, KeyCode::Char('c')) => {
+            toggle_cc_tag(app);
+        }
+
+        // Set cc-focus to current track
+        (KeyModifiers::SHIFT, KeyCode::Char('C')) => {
+            set_cc_focus_current(app);
         }
 
         // Move mode
@@ -420,6 +436,85 @@ fn task_state_action(app: &mut App, action: StateAction) {
 }
 
 // ---------------------------------------------------------------------------
+// CC tag / CC focus
+// ---------------------------------------------------------------------------
+
+/// Toggle the `cc` tag on the task under the cursor (track view only).
+fn toggle_cc_tag(app: &mut App) {
+    let (track_id, task_id, _) = match app.cursor_task_id() {
+        Some(info) => info,
+        None => return,
+    };
+
+    // Check if task already has cc tag (immutable borrow)
+    let has_cc = App::find_track_in_project(&app.project, &track_id)
+        .and_then(|t| task_ops::find_task_in_track(t, &task_id))
+        .map(|t| t.tags.iter().any(|tag| tag == "cc"))
+        .unwrap_or(false);
+
+    let track = match app.find_track_mut(&track_id) {
+        Some(t) => t,
+        None => return,
+    };
+
+    if has_cc {
+        let _ = task_ops::remove_tag(track, &task_id, "cc");
+    } else {
+        let _ = task_ops::add_tag(track, &task_id, "cc");
+    }
+    let _ = app.save_track(&track_id);
+}
+
+/// Set the current track as cc-focus (track view or tracks view).
+fn set_cc_focus_current(app: &mut App) {
+    let track_id = match &app.view {
+        View::Track(idx) => match app.active_track_ids.get(*idx) {
+            Some(id) => id.clone(),
+            None => return,
+        },
+        View::Tracks => {
+            let active_tracks: Vec<&str> = app
+                .project
+                .config
+                .tracks
+                .iter()
+                .filter(|t| t.state == "active")
+                .map(|t| t.id.as_str())
+                .collect();
+            match active_tracks.get(app.tracks_cursor) {
+                Some(id) => id.to_string(),
+                None => return,
+            }
+        }
+        _ => return,
+    };
+
+    // Toggle: if already cc-focus, clear it; otherwise set it
+    if app.project.config.agent.cc_focus.as_deref() == Some(&track_id) {
+        app.project.config.agent.cc_focus = None;
+    } else {
+        app.project.config.agent.cc_focus = Some(track_id.clone());
+    }
+
+    save_config(app);
+    app.status_message = match &app.project.config.agent.cc_focus {
+        Some(id) => Some(format!("cc-focus \u{2192} {}", id)),
+        None => Some("cc-focus cleared".to_string()),
+    };
+}
+
+/// Save the project config to project.toml.
+fn save_config(app: &mut App) {
+    let config_text = match toml::to_string_pretty(&app.project.config) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let config_path = app.project.frame_dir.join("project.toml");
+    let _ = std::fs::write(&config_path, config_text);
+    app.last_save_at = Some(std::time::Instant::now());
+}
+
+// ---------------------------------------------------------------------------
 // Add task
 // ---------------------------------------------------------------------------
 
@@ -439,6 +534,9 @@ fn add_task_action(app: &mut App, pos: AddPosition) {
         Some(p) => p.to_string(),
         None => return,
     };
+
+    // Save cursor position for restore on cancel
+    let saved_cursor = app.track_states.get(&track_id).map(|s| s.cursor);
 
     let insert_pos = match pos {
         AddPosition::Top => InsertPosition::Top,
@@ -470,6 +568,7 @@ fn add_task_action(app: &mut App, pos: AddPosition) {
         track_id: track_id.clone(),
         parent_id: None,
     });
+    app.pre_edit_cursor = saved_cursor;
     app.mode = Mode::Edit;
 
     // Move cursor to the new task
@@ -482,6 +581,9 @@ fn add_subtask_action(app: &mut App) {
         Some(info) => info,
         None => return,
     };
+
+    // Save cursor position for restore on cancel
+    app.pre_edit_cursor = app.track_states.get(&track_id).map(|s| s.cursor);
 
     let track = match app.find_track_mut(&track_id) {
         Some(t) => t,
@@ -552,6 +654,7 @@ fn enter_title_edit(app: &mut App) {
     let original_title = task.title.clone();
     app.edit_buffer = original_title.clone();
     app.edit_cursor = app.edit_buffer.len();
+    app.pre_edit_cursor = None;
     app.edit_target = Some(EditTarget::ExistingTitle {
         task_id,
         track_id,
@@ -632,6 +735,7 @@ fn confirm_edit(app: &mut App) {
 
     let title = app.edit_buffer.clone();
     app.mode = Mode::Navigate;
+    app.pre_edit_cursor = None;
 
     match target {
         EditTarget::NewTask {
@@ -714,6 +818,7 @@ fn confirm_edit(app: &mut App) {
 
 fn cancel_edit(app: &mut App) {
     let target = app.edit_target.take();
+    let saved_cursor = app.pre_edit_cursor.take();
     app.mode = Mode::Navigate;
 
     // If we were creating a new task, remove it entirely
@@ -737,6 +842,12 @@ fn cancel_edit(app: &mut App) {
             remove_task_from_section(track, &task_id, SectionKind::Backlog);
         }
         let _ = app.save_track(&track_id);
+
+        // Restore cursor to pre-edit position
+        if let Some(cursor) = saved_cursor {
+            let state = app.get_track_state(&track_id);
+            state.cursor = cursor;
+        }
     }
     // For existing title edit, cancel means revert (title unchanged since we didn't write)
 }
@@ -1002,6 +1113,13 @@ fn handle_move(app: &mut App, key: KeyEvent) {
                 move_task_to_boundary(app, true);
             }
         }
+        (_, KeyCode::Home) => {
+            if is_track_move {
+                move_track_to_boundary(app, true);
+            } else {
+                move_task_to_boundary(app, true);
+            }
+        }
         // Move to bottom
         (KeyModifiers::SHIFT, KeyCode::Char('G')) => {
             if is_track_move {
@@ -1011,6 +1129,13 @@ fn handle_move(app: &mut App, key: KeyEvent) {
             }
         }
         (m, KeyCode::Down) if m.contains(KeyModifiers::SUPER) => {
+            if is_track_move {
+                move_track_to_boundary(app, false);
+            } else {
+                move_task_to_boundary(app, false);
+            }
+        }
+        (_, KeyCode::End) => {
             if is_track_move {
                 move_track_to_boundary(app, false);
             } else {
@@ -1145,13 +1270,7 @@ fn move_track_to_boundary(app: &mut App, to_top: bool) {
 
 /// Save the current track order to project.toml.
 fn save_track_order(app: &mut App) {
-    let config_text = match toml::to_string_pretty(&app.project.config) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    let config_path = app.project.frame_dir.join("project.toml");
-    let _ = std::fs::write(&config_path, config_text);
-    app.last_save_at = Some(std::time::Instant::now());
+    save_config(app);
 }
 
 // ---------------------------------------------------------------------------

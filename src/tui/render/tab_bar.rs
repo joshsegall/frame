@@ -29,11 +29,28 @@ fn render_tabs(frame: &mut Frame, app: &App, area: Rect) {
     );
 
     // Active track tabs
+    let cc_focus = app.project.config.agent.cc_focus.as_deref();
     for (i, track_id) in app.active_track_ids.iter().enumerate() {
         let name = app.track_name(track_id);
         let is_current = app.view == View::Track(i);
+        let is_cc = cc_focus == Some(track_id.as_str());
         let style = tab_style(app, is_current);
-        spans.push(Span::styled(format!(" {} ", name), style));
+        if is_cc {
+            spans.push(Span::styled(format!(" {} ", name), style));
+            spans.push(Span::styled(
+                "\u{2605}",
+                Style::default()
+                    .fg(app.theme.purple)
+                    .bg(if is_current { app.theme.selection_bg } else { app.theme.background }),
+            ));
+            spans.push(Span::styled(
+                " ",
+                Style::default()
+                    .bg(if is_current { app.theme.selection_bg } else { app.theme.background }),
+            ));
+        } else {
+            spans.push(Span::styled(format!(" {} ", name), style));
+        }
         spans.push(sep.clone());
     }
 

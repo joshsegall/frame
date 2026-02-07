@@ -126,7 +126,7 @@ pub fn render_inbox_view(frame: &mut Frame, app: &App, area: Rect) {
                     Span::styled("      ", Style::default().bg(app.theme.background)),
                     Span::styled(
                         body_line.to_string(),
-                        Style::default().fg(app.theme.dim).bg(app.theme.background),
+                        Style::default().fg(app.theme.text).bg(app.theme.background),
                     ),
                 ];
                 display_lines.push((Some(i), Line::from(body_spans)));

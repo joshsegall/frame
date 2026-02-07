@@ -162,6 +162,8 @@ pub struct App {
     pub edit_cursor: usize,
     /// Edit mode: what is being edited
     pub edit_target: Option<EditTarget>,
+    /// Saved cursor position to restore on edit cancel (for new task inserts)
+    pub pre_edit_cursor: Option<usize>,
     /// Move mode state
     pub move_state: Option<MoveState>,
     /// Undo/redo stack (session-only, not persisted)
@@ -235,6 +237,7 @@ impl App {
             edit_buffer: String::new(),
             edit_cursor: 0,
             edit_target: None,
+            pre_edit_cursor: None,
             move_state: None,
             undo_stack: UndoStack::new(),
             pending_reload: false,

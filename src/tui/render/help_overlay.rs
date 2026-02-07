@@ -6,12 +6,17 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::tui::app::{App, View};
 
+/// A single entry in a help column
+enum HelpEntry {
+    Header(String),
+    Binding(String, String),
+    Blank,
+}
+
 /// Render the help overlay (toggled with ?)
 pub fn render_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
-    // Center the overlay, leaving some margin
-    let overlay_area = centered_rect(60, 80, area);
+    let overlay_area = centered_rect(72, 80, area);
 
-    // Clear the area behind the overlay
     frame.render_widget(Clear, overlay_area);
 
     let bg = app.theme.background;
@@ -29,126 +34,43 @@ pub fn render_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
         .fg(bright)
         .bg(bg)
         .add_modifier(Modifier::BOLD);
+    let blank_style = Style::default().bg(bg);
 
     let mut lines: Vec<Line> = Vec::new();
 
     lines.push(Line::from(Span::styled(" Key Bindings", header_style)));
     lines.push(Line::from(""));
 
-    // Context-sensitive help
-    match &app.view {
-        View::Track(_) => {
-            lines.push(Line::from(Span::styled(" Navigation", header_style)));
-            add_binding(
-                &mut lines,
-                " \u{2191}\u{2193}/jk",
-                "Move cursor up/down",
-                key_style,
-                desc_style,
-            );
-            add_binding(
-                &mut lines,
-                " \u{2190}/h",
-                "Collapse / go to parent",
-                key_style,
-                desc_style,
-            );
-            add_binding(
-                &mut lines,
-                " \u{2192}/l",
-                "Expand / go to first child",
-                key_style,
-                desc_style,
-            );
-            add_binding(
-                &mut lines,
-                " g/G",
-                "Jump to top/bottom",
-                key_style,
-                desc_style,
-            );
-            add_binding(&mut lines, " Esc", "Back / close", key_style, desc_style);
-            lines.push(Line::from(""));
+    // Build left and right column entries based on view
+    let (left, right) = build_columns(&app.view);
 
-            lines.push(Line::from(Span::styled(" Task Actions", header_style)));
-            add_binding(&mut lines, " Space", "Cycle state", key_style, desc_style);
-            add_binding(&mut lines, " x", "Mark done", key_style, desc_style);
-            add_binding(&mut lines, " b", "Toggle blocked", key_style, desc_style);
-            add_binding(&mut lines, " ~", "Toggle parked", key_style, desc_style);
-            add_binding(&mut lines, " e", "Edit title", key_style, desc_style);
-            add_binding(&mut lines, " a", "Add task (bottom)", key_style, desc_style);
-            add_binding(&mut lines, " o", "Insert after cursor", key_style, desc_style);
-            add_binding(&mut lines, " p", "Push to top", key_style, desc_style);
-            add_binding(&mut lines, " A", "Add subtask", key_style, desc_style);
-            add_binding(&mut lines, " m", "Move mode", key_style, desc_style);
-            lines.push(Line::from(""));
+    // Merge columns into lines
+    let max_rows = left.len().max(right.len());
+    let key_w = 12usize;
+    let desc_w = 22usize;
+    let col_w = key_w + desc_w; // total width per column
+    let gap = 3usize;
 
-            lines.push(Line::from(Span::styled(" Views", header_style)));
-            add_binding(
-                &mut lines,
-                " 1-9",
-                "Switch to track N",
-                key_style,
-                desc_style,
-            );
-            add_binding(&mut lines, " Tab", "Next track", key_style, desc_style);
-            add_binding(&mut lines, " i", "Inbox view", key_style, desc_style);
-            add_binding(&mut lines, " r", "Recent view", key_style, desc_style);
-            add_binding(&mut lines, " 0/`", "Tracks view", key_style, desc_style);
-            add_binding(&mut lines, " /", "Search", key_style, desc_style);
-            add_binding(&mut lines, " z/u", "Undo", key_style, desc_style);
-            add_binding(&mut lines, " Z", "Redo", key_style, desc_style);
-            lines.push(Line::from(""));
+    for row in 0..max_rows {
+        let mut spans: Vec<Span> = Vec::new();
+
+        // Left column
+        if row < left.len() {
+            render_entry(&left[row], &mut spans, key_w, col_w, key_style, desc_style, header_style, blank_style);
+        } else {
+            spans.push(Span::styled(" ".repeat(col_w), blank_style));
         }
-        View::Tracks => {
-            lines.push(Line::from(Span::styled(" Tracks View", header_style)));
-            add_binding(
-                &mut lines,
-                " \u{2191}\u{2193}/jk",
-                "Move cursor",
-                key_style,
-                desc_style,
-            );
-            add_binding(
-                &mut lines,
-                " 1-9",
-                "Switch to track N",
-                key_style,
-                desc_style,
-            );
-            add_binding(&mut lines, " Tab", "Next view", key_style, desc_style);
-            lines.push(Line::from(""));
+
+        // Gap
+        spans.push(Span::styled(" ".repeat(gap), blank_style));
+
+        // Right column
+        if row < right.len() {
+            render_entry(&right[row], &mut spans, key_w, col_w, key_style, desc_style, header_style, blank_style);
         }
-        View::Inbox => {
-            lines.push(Line::from(Span::styled(" Inbox", header_style)));
-            add_binding(
-                &mut lines,
-                " \u{2191}\u{2193}/jk",
-                "Move cursor",
-                key_style,
-                desc_style,
-            );
-            add_binding(&mut lines, " /", "Search inbox", key_style, desc_style);
-            lines.push(Line::from(""));
-        }
-        View::Recent => {
-            lines.push(Line::from(Span::styled(" Recent", header_style)));
-            add_binding(
-                &mut lines,
-                " \u{2191}\u{2193}/jk",
-                "Move cursor",
-                key_style,
-                desc_style,
-            );
-            lines.push(Line::from(""));
-        }
+
+        lines.push(Line::from(spans));
     }
-
-    // Global keys
-    lines.push(Line::from(Span::styled(" Global", header_style)));
-    add_binding(&mut lines, " ?", "Toggle this help", key_style, desc_style);
-    add_binding(&mut lines, " QQ", "Quit", key_style, desc_style);
-    add_binding(&mut lines, " Ctrl+Q", "Quit (immediate)", key_style, desc_style);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -162,19 +84,140 @@ pub fn render_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, overlay_area);
 }
 
-fn add_binding<'a>(
-    lines: &mut Vec<Line<'a>>,
-    key: &'a str,
-    desc: &'a str,
+fn render_entry(
+    entry: &HelpEntry,
+    spans: &mut Vec<Span<'_>>,
+    key_w: usize,
+    col_w: usize,
     key_style: Style,
     desc_style: Style,
+    header_style: Style,
+    blank_style: Style,
 ) {
-    let key_width = 16;
-    let padded_key = format!("{:<width$}", key, width = key_width);
-    lines.push(Line::from(vec![
-        Span::styled(padded_key, key_style),
-        Span::styled(desc, desc_style),
-    ]));
+    match entry {
+        HelpEntry::Header(text) => {
+            let padded = format!(" {:<width$}", text, width = col_w - 1);
+            spans.push(Span::styled(padded, header_style));
+        }
+        HelpEntry::Binding(key, desc) => {
+            let padded_key = format!(" {:<width$}", key, width = key_w - 1);
+            let padded_desc = format!("{:<width$}", desc, width = col_w - key_w);
+            spans.push(Span::styled(padded_key, key_style));
+            spans.push(Span::styled(padded_desc, desc_style));
+        }
+        HelpEntry::Blank => {
+            spans.push(Span::styled(" ".repeat(col_w), blank_style));
+        }
+    }
+}
+
+fn build_columns(view: &View) -> (Vec<HelpEntry>, Vec<HelpEntry>) {
+    match view {
+        View::Track(_) => build_track_columns(),
+        View::Tracks => build_tracks_columns(),
+        View::Inbox => build_inbox_columns(),
+        View::Recent => build_recent_columns(),
+    }
+}
+
+fn build_track_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
+    let left = vec![
+        HelpEntry::Header("Navigation".into()),
+        HelpEntry::Binding("\u{2191}\u{2193}/jk".into(), "Move up/down".into()),
+        HelpEntry::Binding("\u{2190}/h".into(), "Collapse / parent".into()),
+        HelpEntry::Binding("\u{2192}/l".into(), "Expand / child".into()),
+        HelpEntry::Binding("g/G".into(), "Top / bottom".into()),
+        HelpEntry::Binding("Esc".into(), "Back / close".into()),
+        HelpEntry::Blank,
+        HelpEntry::Header("Task State".into()),
+        HelpEntry::Binding("Space".into(), "Cycle state".into()),
+        HelpEntry::Binding("x".into(), "Mark done".into()),
+        HelpEntry::Binding("b".into(), "Toggle blocked".into()),
+        HelpEntry::Binding("~".into(), "Toggle parked".into()),
+        HelpEntry::Binding("c".into(), "Toggle cc tag".into()),
+    ];
+
+    let right = vec![
+        HelpEntry::Header("Edit".into()),
+        HelpEntry::Binding("e".into(), "Edit title".into()),
+        HelpEntry::Binding("a".into(), "Add task (bottom)".into()),
+        HelpEntry::Binding("o/-".into(), "Insert after cursor".into()),
+        HelpEntry::Binding("p".into(), "Push to top".into()),
+        HelpEntry::Binding("A".into(), "Add subtask".into()),
+        HelpEntry::Binding("m".into(), "Move mode".into()),
+        HelpEntry::Blank,
+        HelpEntry::Header("Views & Other".into()),
+        HelpEntry::Binding("1-9".into(), "Track N".into()),
+        HelpEntry::Binding("Tab".into(), "Next track".into()),
+        HelpEntry::Binding("0/`".into(), "Tracks overview".into()),
+        HelpEntry::Binding("i".into(), "Inbox".into()),
+        HelpEntry::Binding("r".into(), "Recent".into()),
+        HelpEntry::Binding("/".into(), "Search".into()),
+        HelpEntry::Binding("C".into(), "Set cc-focus".into()),
+        HelpEntry::Binding("z/u".into(), "Undo".into()),
+        HelpEntry::Binding("Z".into(), "Redo".into()),
+        HelpEntry::Binding("?".into(), "Help".into()),
+        HelpEntry::Binding("QQ".into(), "Quit".into()),
+    ];
+
+    (left, right)
+}
+
+fn build_tracks_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
+    let left = vec![
+        HelpEntry::Header("Navigation".into()),
+        HelpEntry::Binding("\u{2191}\u{2193}/jk".into(), "Move cursor".into()),
+        HelpEntry::Binding("g/G".into(), "Top / bottom".into()),
+        HelpEntry::Binding("1-9".into(), "Switch to track N".into()),
+        HelpEntry::Binding("m".into(), "Reorder track".into()),
+        HelpEntry::Binding("C".into(), "Set cc-focus".into()),
+    ];
+
+    let right = vec![
+        HelpEntry::Header("Views & Other".into()),
+        HelpEntry::Binding("Tab".into(), "Next view".into()),
+        HelpEntry::Binding("/".into(), "Search".into()),
+        HelpEntry::Binding("?".into(), "Help".into()),
+        HelpEntry::Binding("QQ".into(), "Quit".into()),
+    ];
+
+    (left, right)
+}
+
+fn build_inbox_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
+    let left = vec![
+        HelpEntry::Header("Navigation".into()),
+        HelpEntry::Binding("\u{2191}\u{2193}/jk".into(), "Move cursor".into()),
+        HelpEntry::Binding("g/G".into(), "Top / bottom".into()),
+        HelpEntry::Binding("/".into(), "Search inbox".into()),
+    ];
+
+    let right = vec![
+        HelpEntry::Header("Views & Other".into()),
+        HelpEntry::Binding("Tab".into(), "Next view".into()),
+        HelpEntry::Binding("?".into(), "Help".into()),
+        HelpEntry::Binding("QQ".into(), "Quit".into()),
+    ];
+
+    (left, right)
+}
+
+fn build_recent_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
+    let left = vec![
+        HelpEntry::Header("Navigation".into()),
+        HelpEntry::Binding("\u{2191}\u{2193}/jk".into(), "Move cursor".into()),
+        HelpEntry::Binding("g/G".into(), "Top / bottom".into()),
+        HelpEntry::Binding("/".into(), "Search".into()),
+    ];
+
+    let right = vec![
+        HelpEntry::Header("Views & Other".into()),
+        HelpEntry::Binding("Tab".into(), "Next view".into()),
+        HelpEntry::Binding("?".into(), "Help".into()),
+        HelpEntry::Binding("QQ".into(), "Quit".into()),
+    ];
+
+    (left, right)
 }
 
 /// Create a centered rectangle of the given percentage of the parent
