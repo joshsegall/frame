@@ -245,6 +245,10 @@ pub struct DetailState {
     pub edit_cursor_col: usize,
     /// Original value before editing (for cancel/undo)
     pub edit_original: String,
+    /// Cursor index in flattened subtask list (when region is Subtasks)
+    pub subtask_cursor: usize,
+    /// Flattened subtask IDs (rebuilt on each render)
+    pub flat_subtask_ids: Vec<String>,
 }
 
 /// Current interaction mode
@@ -395,6 +399,8 @@ pub struct App {
     pub track_mtimes: HashMap<String, SystemTime>,
     /// Detail view state
     pub detail_state: Option<DetailState>,
+    /// Stack of (track_id, task_id) for parent breadcrumbs when drilling into subtasks
+    pub detail_stack: Vec<(String, String)>,
     /// Autocomplete state (active during EDIT mode for certain fields)
     pub autocomplete: Option<AutocompleteState>,
     /// Screen position (x, y) where the edit text area starts, used to anchor autocomplete dropdown
@@ -492,6 +498,7 @@ impl App {
             last_save_at: None,
             track_mtimes,
             detail_state: None,
+            detail_stack: Vec::new(),
             autocomplete: None,
             autocomplete_anchor: None,
             edit_history: None,
@@ -1009,11 +1016,32 @@ impl App {
         regions
     }
 
+    /// Close detail view fully: clear state and stack
+    pub fn close_detail_fully(&mut self) {
+        self.detail_state = None;
+        self.detail_stack.clear();
+    }
+
     /// Open the detail view for a task
     pub fn open_detail(&mut self, track_id: String, task_id: String) {
-        let return_idx = match &self.view {
-            View::Track(idx) => *idx,
-            _ => 0,
+        // If already in detail view, push current onto stack for back-navigation
+        let return_idx = if let View::Detail {
+            track_id: ref cur_track,
+            task_id: ref cur_task,
+        } = self.view
+        {
+            self.detail_stack
+                .push((cur_track.clone(), cur_task.clone()));
+            // Preserve the return_view_idx from current detail state
+            self.detail_state
+                .as_ref()
+                .map(|ds| ds.return_view_idx)
+                .unwrap_or(0)
+        } else {
+            match &self.view {
+                View::Track(idx) => *idx,
+                _ => 0,
+            }
         };
 
         // Build initial regions from the task
@@ -1039,6 +1067,8 @@ impl App {
             edit_cursor_line: 0,
             edit_cursor_col: 0,
             edit_original: String::new(),
+            subtask_cursor: 0,
+            flat_subtask_ids: Vec::new(),
         });
         self.view = View::Detail { track_id, task_id };
     }
@@ -1086,6 +1116,22 @@ pub fn resolve_task_from_flat<'a>(
         current = current.subtasks.get(idx)?;
     }
     Some(current)
+}
+
+/// Recursively flatten subtask IDs in depth-first order
+pub fn flatten_subtask_ids(task: &Task) -> Vec<String> {
+    let mut ids = Vec::new();
+    flatten_subtask_ids_inner(&task.subtasks, &mut ids);
+    ids
+}
+
+fn flatten_subtask_ids_inner(tasks: &[Task], ids: &mut Vec<String>) {
+    for task in tasks {
+        if let Some(ref id) = task.id {
+            ids.push(id.clone());
+        }
+        flatten_subtask_ids_inner(&task.subtasks, ids);
+    }
 }
 
 /// Generate a unique key for a task's expand/collapse state

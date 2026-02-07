@@ -86,13 +86,51 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             app.status_message = Some("press Q again to quit".to_string());
         }
 
-        // Esc: close detail view, or clear search, or normal behavior
+        // Esc: pop detail stack, close detail view, or clear search
         (_, KeyCode::Esc) => {
             if let View::Detail { .. } = &app.view {
-                // Return to track view
-                let return_idx = app.detail_state.as_ref().map(|ds| ds.return_view_idx).unwrap_or(0);
-                app.view = View::Track(return_idx);
-                app.detail_state = None;
+                if let Some((parent_track, parent_task)) = app.detail_stack.pop() {
+                    // Return to parent detail view, focusing on Subtasks region
+                    let return_idx = app.detail_state.as_ref().map(|ds| ds.return_view_idx).unwrap_or(0);
+                    app.detail_state = None;
+                    app.view = View::Detail {
+                        track_id: parent_track.clone(),
+                        task_id: parent_task.clone(),
+                    };
+                    // Rebuild regions and focus on Subtasks
+                    let regions = if let Some(track) = App::find_track_in_project(&app.project, &parent_track) {
+                        if let Some(task) = crate::ops::task_ops::find_task_in_track(track, &parent_task) {
+                            App::build_detail_regions(task)
+                        } else {
+                            vec![DetailRegion::Title]
+                        }
+                    } else {
+                        vec![DetailRegion::Title]
+                    };
+                    let region = if regions.contains(&DetailRegion::Subtasks) {
+                        DetailRegion::Subtasks
+                    } else {
+                        regions.first().copied().unwrap_or(DetailRegion::Title)
+                    };
+                    app.detail_state = Some(super::app::DetailState {
+                        region,
+                        scroll_offset: 0,
+                        regions,
+                        return_view_idx: return_idx,
+                        editing: false,
+                        edit_buffer: String::new(),
+                        edit_cursor_line: 0,
+                        edit_cursor_col: 0,
+                        edit_original: String::new(),
+                        subtask_cursor: 0,
+                        flat_subtask_ids: Vec::new(),
+                    });
+                } else {
+                    // Stack empty — return to track view
+                    let return_idx = app.detail_state.as_ref().map(|ds| ds.return_view_idx).unwrap_or(0);
+                    app.view = View::Track(return_idx);
+                    app.close_detail_fully();
+                }
             } else if app.last_search.is_some() {
                 app.last_search = None;
                 app.search_match_idx = 0;
@@ -136,6 +174,7 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
         (KeyModifiers::NONE, KeyCode::Char(c @ '1'..='9')) => {
             let idx = (c as usize) - ('1' as usize);
             if idx < app.active_track_ids.len() {
+                app.close_detail_fully();
                 app.view = View::Track(idx);
             }
         }
@@ -158,12 +197,15 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
 
         // View switching
         (KeyModifiers::NONE, KeyCode::Char('i')) => {
+            app.close_detail_fully();
             app.view = View::Inbox;
         }
         (KeyModifiers::NONE, KeyCode::Char('r')) => {
+            app.close_detail_fully();
             app.view = View::Recent;
         }
         (KeyModifiers::NONE, KeyCode::Char('0') | KeyCode::Char('`')) => {
+            app.close_detail_fully();
             app.view = View::Tracks;
         }
 
@@ -477,7 +519,7 @@ fn navigate_to_undo_target(app: &mut App, nav: &UndoNavTarget) {
 
             // Close detail view if open
             if matches!(app.view, View::Detail { .. }) {
-                app.detail_state = None;
+                app.close_detail_fully();
             }
 
             // Switch to the target track
@@ -514,7 +556,7 @@ fn navigate_to_undo_target(app: &mut App, nav: &UndoNavTarget) {
         UndoNavTarget::TracksView { track_id } => {
             // Close detail view if open
             if matches!(app.view, View::Detail { .. }) {
-                app.detail_state = None;
+                app.close_detail_fully();
             }
 
             app.view = View::Tracks;
@@ -1999,6 +2041,9 @@ fn jump_to_bottom(app: &mut App) {
         View::Detail { .. } => {
             if let Some(ds) = &mut app.detail_state {
                 ds.region = ds.regions.last().copied().unwrap_or(DetailRegion::Title);
+                if ds.region == DetailRegion::Subtasks {
+                    ds.subtask_cursor = 0;
+                }
             }
         }
         View::Tracks => {
@@ -2148,7 +2193,7 @@ fn count_recent_tasks(app: &App) -> usize {
 // Detail view functions
 // ---------------------------------------------------------------------------
 
-/// Handle Enter key: open detail view from track view, or enter edit in detail view
+/// Handle Enter key: open detail view from track view, or enter edit / open subtask in detail view
 fn handle_enter(app: &mut App) {
     match &app.view {
         View::Track(_) => {
@@ -2157,8 +2202,22 @@ fn handle_enter(app: &mut App) {
                 app.open_detail(track_id, task_id);
             }
         }
-        View::Detail { .. } => {
-            detail_enter_edit(app);
+        View::Detail { track_id, .. } => {
+            let track_id = track_id.clone();
+            let on_subtask = app.detail_state.as_ref().is_some_and(|ds| {
+                ds.region == DetailRegion::Subtasks && !ds.flat_subtask_ids.is_empty()
+            });
+            if on_subtask {
+                let subtask_id = app
+                    .detail_state
+                    .as_ref()
+                    .and_then(|ds| ds.flat_subtask_ids.get(ds.subtask_cursor).cloned());
+                if let Some(sub_id) = subtask_id {
+                    app.open_detail(track_id, sub_id);
+                }
+            } else {
+                detail_enter_edit(app);
+            }
         }
         _ => {}
     }
@@ -2176,8 +2235,37 @@ fn detail_move_region(app: &mut App, delta: i32) {
     }
 
     let current_idx = ds.regions.iter().position(|r| *r == ds.region).unwrap_or(0);
+
+    // Special handling when on Subtasks region with subtasks
+    if ds.region == DetailRegion::Subtasks && !ds.flat_subtask_ids.is_empty() {
+        if delta > 0 {
+            // Moving down within subtasks
+            if ds.subtask_cursor + 1 < ds.flat_subtask_ids.len() {
+                ds.subtask_cursor += 1;
+                return;
+            }
+            // At last subtask, stay put
+            return;
+        } else {
+            // Moving up within subtasks
+            if ds.subtask_cursor > 0 {
+                ds.subtask_cursor -= 1;
+                return;
+            }
+            // At first subtask, move to previous region
+            let new_idx = current_idx.saturating_sub(1);
+            ds.region = ds.regions[new_idx];
+            return;
+        }
+    }
+
     let new_idx = (current_idx as i32 + delta).clamp(0, ds.regions.len() as i32 - 1) as usize;
     ds.region = ds.regions[new_idx];
+
+    // When entering Subtasks from another region via Down, reset subtask_cursor
+    if ds.region == DetailRegion::Subtasks && delta > 0 {
+        ds.subtask_cursor = 0;
+    }
 }
 
 /// Jump to next/prev region in the detail view (Tab/Shift+Tab)
@@ -2200,6 +2288,11 @@ fn detail_jump_editable(app: &mut App, direction: i32) {
     } else {
         let new_idx = if current_idx == 0 { len - 1 } else { current_idx - 1 };
         ds.region = ds.regions[new_idx];
+    }
+
+    // Reset subtask_cursor when landing on Subtasks
+    if ds.region == DetailRegion::Subtasks {
+        ds.subtask_cursor = 0;
     }
 }
 
@@ -3188,7 +3281,7 @@ fn switch_tab(app: &mut App, direction: i32) {
         View::Recent => total_tracks + 2,
     };
     // Close detail view if open
-    app.detail_state = None;
+    app.close_detail_fully();
 
     let new_idx = (current_idx as i32 + direction).rem_euclid(total_views as i32) as usize;
 

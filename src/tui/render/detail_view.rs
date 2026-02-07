@@ -6,7 +6,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::model::{Metadata, Task, TaskState};
 use crate::ops::task_ops;
-use crate::tui::app::{App, DetailRegion, Mode, View};
+use crate::tui::app::{App, DetailRegion, Mode, View, flatten_subtask_ids};
 
 /// Render the detail view for a single task
 pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -37,11 +37,20 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Rebuild regions from current task state
     let regions = App::build_detail_regions(task);
+    // Rebuild flat_subtask_ids
+    let flat_subtask_ids = flatten_subtask_ids(task);
     if let Some(ref mut ds) = app.detail_state {
         ds.regions = regions.clone();
         // Clamp region to valid range
         if !regions.contains(&ds.region) {
             ds.region = regions.first().copied().unwrap_or(DetailRegion::Title);
+        }
+        ds.flat_subtask_ids = flat_subtask_ids;
+        // Clamp subtask_cursor
+        if !ds.flat_subtask_ids.is_empty() {
+            ds.subtask_cursor = ds.subtask_cursor.min(ds.flat_subtask_ids.len() - 1);
+        } else {
+            ds.subtask_cursor = 0;
         }
     }
 
@@ -50,6 +59,13 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
     let detail_state = app.detail_state.as_ref();
     let current_region = detail_state.map(|ds| ds.region).unwrap_or(DetailRegion::Title);
     let editing = detail_state.is_some_and(|ds| ds.editing);
+    let selected_subtask_id = detail_state.and_then(|ds| {
+        if ds.region == DetailRegion::Subtasks {
+            ds.flat_subtask_ids.get(ds.subtask_cursor).cloned()
+        } else {
+            None
+        }
+    });
 
     let bg = app.theme.background;
     let text_style = Style::default().fg(app.theme.text).bg(bg);
@@ -66,6 +82,25 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Blank line at top for breathing room
     lines.push(Line::from(""));
+
+    // Breadcrumb trail when drilled into subtask details
+    if !app.detail_stack.is_empty() {
+        let mut crumb_spans: Vec<Span> = Vec::new();
+        crumb_spans.push(Span::styled("   ", Style::default().bg(bg)));
+        for (i, (_stack_track, stack_task)) in app.detail_stack.iter().enumerate() {
+            if i > 0 {
+                crumb_spans.push(Span::styled(" > ", dim_style));
+            }
+            crumb_spans.push(Span::styled(stack_task.clone(), dim_style));
+        }
+        crumb_spans.push(Span::styled(" > ", dim_style));
+        crumb_spans.push(Span::styled(
+            task_id.clone(),
+            Style::default().fg(app.theme.text).bg(bg),
+        ));
+        lines.push(Line::from(crumb_spans));
+        lines.push(Line::from(""));
+    }
 
     // --- Title region ---
     {
@@ -376,7 +411,8 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
     if !task.subtasks.is_empty() {
         lines.push(Line::from(""));
         let is_active = current_region == DetailRegion::Subtasks;
-        if is_active {
+        if is_active && selected_subtask_id.is_none() {
+            // Only set header as active if no subtask is selected
             active_region_line = Some(lines.len());
         }
 
@@ -388,7 +424,20 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
         ));
         lines.push(Line::from(header_spans));
 
-        render_subtask_tree(&mut lines, app, &task.subtasks, 1, bg);
+        let subtask_selected_line = render_subtask_tree(
+            &mut lines,
+            app,
+            &task.subtasks,
+            1,
+            bg,
+            selected_subtask_id.as_deref(),
+        );
+        // When a subtask is selected, use its line for scroll tracking
+        if is_active {
+            if let Some(sl) = subtask_selected_line {
+                active_region_line = Some(sl);
+            }
+        }
     }
 
     // Apply flash highlight to the active region line
@@ -509,80 +558,106 @@ fn render_edit_inline(spans: &mut Vec<Span<'static>>, app: &App, style: Style) {
     }
 }
 
-/// Render subtask tree for the detail view
+/// Render subtask tree for the detail view.
+/// Returns the line index of the selected subtask (if any).
 fn render_subtask_tree(
     lines: &mut Vec<Line<'static>>,
     app: &App,
     tasks: &[Task],
     depth: usize,
     bg: ratatui::style::Color,
-) {
-    let dim_style = Style::default().fg(app.theme.dim).bg(bg);
+    selected_subtask_id: Option<&str>,
+) -> Option<usize> {
+    let selection_bg = app.theme.selection_bg;
+    let mut selected_line: Option<usize> = None;
 
     for (i, task) in tasks.iter().enumerate() {
         let is_last = i == tasks.len() - 1;
         let state_color = app.theme.state_color(task.state);
+
+        let is_selected = selected_subtask_id.is_some()
+            && task.id.as_deref() == selected_subtask_id;
+
+        let row_bg = if is_selected { selection_bg } else { bg };
+        let row_dim_style = Style::default().fg(app.theme.dim).bg(row_bg);
+
         let mut spans: Vec<Span> = Vec::new();
 
         // Indent
-        spans.push(Span::styled(" ", Style::default().bg(bg)));
+        spans.push(Span::styled(" ", Style::default().bg(row_bg)));
         for _ in 0..depth {
-            spans.push(Span::styled("  ", dim_style));
+            spans.push(Span::styled("  ", row_dim_style));
         }
 
         // Tree char
         let tree_char = if is_last { "\u{2514}" } else { "\u{251C}" };
-        spans.push(Span::styled(tree_char, dim_style));
-        spans.push(Span::styled(" ", dim_style));
+        spans.push(Span::styled(tree_char, row_dim_style));
+        spans.push(Span::styled(" ", row_dim_style));
 
         // State symbol
         spans.push(Span::styled(
             state_symbol(task.state),
-            Style::default().fg(state_color).bg(bg),
+            Style::default().fg(state_color).bg(row_bg),
         ));
-        spans.push(Span::styled(" ", Style::default().bg(bg)));
+        spans.push(Span::styled(" ", Style::default().bg(row_bg)));
 
         // Abbreviated ID
         if let Some(ref id) = task.id {
             let abbrev = abbreviated_id(id);
             spans.push(Span::styled(
                 format!("{} ", abbrev),
-                Style::default().fg(app.theme.text).bg(bg),
+                Style::default().fg(app.theme.text).bg(row_bg),
             ));
         }
 
         // Title
         let title_style = if task.state == TaskState::Done {
-            Style::default().fg(app.theme.dim).bg(bg)
+            Style::default().fg(app.theme.dim).bg(row_bg)
         } else {
-            Style::default().fg(app.theme.text_bright).bg(bg)
+            Style::default().fg(app.theme.text_bright).bg(row_bg)
         };
         spans.push(Span::styled(task.title.clone(), title_style));
 
         // Tags
         if !task.tags.is_empty() {
-            spans.push(Span::styled("  ", Style::default().bg(bg)));
+            spans.push(Span::styled("  ", Style::default().bg(row_bg)));
             for (j, tag) in task.tags.iter().enumerate() {
                 let tag_color = app.theme.tag_color(tag);
                 let tag_style = if task.state == TaskState::Done {
-                    Style::default().fg(app.theme.dim).bg(bg)
+                    Style::default().fg(app.theme.dim).bg(row_bg)
                 } else {
-                    Style::default().fg(tag_color).bg(bg)
+                    Style::default().fg(tag_color).bg(row_bg)
                 };
                 if j > 0 {
-                    spans.push(Span::styled(" ", Style::default().bg(bg)));
+                    spans.push(Span::styled(" ", Style::default().bg(row_bg)));
                 }
                 spans.push(Span::styled(format!("#{}", tag), tag_style));
             }
+        }
+
+        if is_selected {
+            selected_line = Some(lines.len());
         }
 
         lines.push(Line::from(spans));
 
         // Recurse into sub-subtasks
         if !task.subtasks.is_empty() {
-            render_subtask_tree(lines, app, &task.subtasks, depth + 1, bg);
+            let child_result = render_subtask_tree(
+                lines,
+                app,
+                &task.subtasks,
+                depth + 1,
+                bg,
+                selected_subtask_id,
+            );
+            if selected_line.is_none() {
+                selected_line = child_result;
+            }
         }
     }
+
+    selected_line
 }
 
 /// Region indicator: a small accent mark on the left for the active region

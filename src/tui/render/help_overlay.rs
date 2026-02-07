@@ -176,12 +176,12 @@ fn build_detail_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("Tab".into(), "Next editable region".into()),
         HelpEntry::Binding("S-Tab".into(), "Prev editable region".into()),
         HelpEntry::Binding("g/G".into(), "Top / bottom".into()),
-        HelpEntry::Binding("Esc".into(), "Back to track view".into()),
+        HelpEntry::Binding("Esc".into(), "Back".into()),
     ];
 
     let right = vec![
         HelpEntry::Header("Edit".into()),
-        HelpEntry::Binding("e/Enter".into(), "Edit current region".into()),
+        HelpEntry::Binding("e/Enter".into(), "Edit region / open sub".into()),
         HelpEntry::Binding("#".into(), "Edit tags".into()),
         HelpEntry::Binding("@".into(), "Edit refs".into()),
         HelpEntry::Binding("d".into(), "Edit deps".into()),
