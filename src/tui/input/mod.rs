@@ -1,13 +1,146 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use regex::Regex;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 use crate::model::task::Metadata;
 use crate::model::SectionKind;
 use crate::ops::search::{search_inbox, search_tasks};
 use crate::ops::task_ops::{self, InsertPosition};
 
-use super::app::{App, AutocompleteKind, AutocompleteState, DetailRegion, EditHistory, EditTarget, FlatItem, Mode, MoveState, View, resolve_task_from_flat};
+use super::app::{App, AutocompleteKind, AutocompleteState, DetailRegion, DetailState, EditHistory, EditTarget, FlatItem, Mode, MoveState, View, resolve_task_from_flat};
 use super::undo::{Operation, UndoNavTarget};
+
+// ---------------------------------------------------------------------------
+// Clipboard helpers (macOS pbcopy/pbpaste, Linux xclip)
+// ---------------------------------------------------------------------------
+
+fn clipboard_set(text: &str) {
+    #[cfg(target_os = "macos")]
+    let result = Command::new("pbcopy")
+        .stdin(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            if let Some(stdin) = child.stdin.as_mut() {
+                stdin.write_all(text.as_bytes())?;
+            }
+            child.wait()
+        });
+    #[cfg(target_os = "linux")]
+    let result = Command::new("xclip")
+        .args(["-selection", "clipboard"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            if let Some(stdin) = child.stdin.as_mut() {
+                stdin.write_all(text.as_bytes())?;
+            }
+            child.wait()
+        });
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let result: Result<(), std::io::Error> = Ok(());
+    let _ = result;
+}
+
+fn clipboard_get() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    let output = Command::new("pbpaste").output().ok();
+    #[cfg(target_os = "linux")]
+    let output = Command::new("xclip")
+        .args(["-selection", "clipboard", "-o"])
+        .output()
+        .ok();
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let output: Option<std::process::Output> = None;
+    output.and_then(|o| {
+        if o.status.success() {
+            String::from_utf8(o.stdout).ok()
+        } else {
+            None
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Multi-line selection helpers
+// ---------------------------------------------------------------------------
+
+/// Convert (line, col) to absolute byte offset in a multi-line buffer.
+fn multiline_pos_to_offset(text: &str, line: usize, col: usize) -> usize {
+    let mut offset = 0;
+    for (i, l) in text.split('\n').enumerate() {
+        if i == line {
+            return offset + col.min(l.len());
+        }
+        offset += l.len() + 1;
+    }
+    text.len()
+}
+
+/// Convert absolute byte offset to (line, col) in a multi-line buffer.
+fn offset_to_multiline_pos(text: &str, offset: usize) -> (usize, usize) {
+    let mut remaining = offset;
+    for (i, line) in text.split('\n').enumerate() {
+        if remaining <= line.len() {
+            return (i, remaining);
+        }
+        remaining -= line.len() + 1;
+    }
+    let line_count = text.split('\n').count();
+    let last_len = text.split('\n').last().map_or(0, |l| l.len());
+    (line_count.saturating_sub(1), last_len)
+}
+
+/// Get multi-line selection range as (start_offset, end_offset) in absolute terms.
+pub fn multiline_selection_range(ds: &DetailState) -> Option<(usize, usize)> {
+    let (anchor_line, anchor_col) = ds.multiline_selection_anchor?;
+    let anchor_off = multiline_pos_to_offset(&ds.edit_buffer, anchor_line, anchor_col);
+    let cursor_off = multiline_pos_to_offset(&ds.edit_buffer, ds.edit_cursor_line, ds.edit_cursor_col);
+    let start = anchor_off.min(cursor_off);
+    let end = anchor_off.max(cursor_off);
+    if start == end {
+        return None;
+    }
+    Some((start, end))
+}
+
+/// Get the selected text in a multi-line buffer.
+fn get_multiline_selection_text(ds: &DetailState) -> Option<String> {
+    let (start, end) = multiline_selection_range(ds)?;
+    Some(ds.edit_buffer[start..end].to_string())
+}
+
+/// Delete the selected text in a multi-line buffer, updating cursor position.
+/// Returns the deleted text if there was a selection.
+fn delete_multiline_selection(ds: &mut DetailState) -> Option<String> {
+    let (start, end) = multiline_selection_range(ds)?;
+    let deleted = ds.edit_buffer[start..end].to_string();
+    ds.edit_buffer.drain(start..end);
+    let (line, col) = offset_to_multiline_pos(&ds.edit_buffer, start);
+    ds.edit_cursor_line = line;
+    ds.edit_cursor_col = col;
+    ds.multiline_selection_anchor = None;
+    Some(deleted)
+}
+
+/// Get the selected column range (start_col, end_col) for a specific line in a multi-line selection.
+/// Returns None if the line has no selection.
+pub fn selection_cols_for_line(buffer: &str, sel_start: usize, sel_end: usize, target_line: usize) -> Option<(usize, usize)> {
+    let mut offset = 0;
+    for (i, line) in buffer.split('\n').enumerate() {
+        if i == target_line {
+            let line_end = offset + line.len();
+            let vis_start = sel_start.max(offset);
+            let vis_end = sel_end.min(line_end);
+            if vis_start >= vis_end {
+                return None;
+            }
+            return Some((vis_start - offset, vis_end - offset));
+        }
+        offset += line.len() + 1;
+    }
+    None
+}
 
 /// Handle a key event in the current mode
 pub fn handle_key(app: &mut App, key: KeyEvent) {
@@ -124,6 +257,7 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
                         edit_original: String::new(),
                         subtask_cursor: 0,
                         flat_subtask_ids: Vec::new(),
+                        multiline_selection_anchor: None,
                     });
                 } else {
                     // Stack empty — return to track view
@@ -1052,6 +1186,35 @@ fn handle_edit(app: &mut App, key: KeyEvent) {
         (m, KeyCode::Char('a')) if m.contains(KeyModifiers::CONTROL) => {
             app.edit_selection_anchor = Some(0);
             app.edit_cursor = app.edit_buffer.len();
+        }
+        // Copy (Ctrl+C)
+        (m, KeyCode::Char('c')) if m.contains(KeyModifiers::CONTROL) => {
+            if let Some(text) = app.get_selection_text() {
+                clipboard_set(&text);
+            }
+        }
+        // Cut (Ctrl+X)
+        (m, KeyCode::Char('x')) if m.contains(KeyModifiers::CONTROL) => {
+            if let Some(text) = app.get_selection_text() {
+                clipboard_set(&text);
+                app.delete_selection();
+                if let Some(eh) = &mut app.edit_history {
+                    eh.snapshot(&app.edit_buffer, app.edit_cursor, 0);
+                }
+                update_autocomplete_filter(app);
+            }
+        }
+        // Paste (Ctrl+V)
+        (m, KeyCode::Char('v')) if m.contains(KeyModifiers::CONTROL) => {
+            if let Some(text) = clipboard_get() {
+                app.delete_selection();
+                app.edit_buffer.insert_str(app.edit_cursor, &text);
+                app.edit_cursor += text.len();
+                if let Some(eh) = &mut app.edit_history {
+                    eh.snapshot(&app.edit_buffer, app.edit_cursor, 0);
+                }
+                update_autocomplete_filter(app);
+            }
         }
         // Inline undo (Ctrl+Z)
         (m, KeyCode::Char('z')) if m.contains(KeyModifiers::CONTROL) => {
@@ -2409,14 +2572,77 @@ fn detail_jump_to_region_and_edit(app: &mut App, target_region: DetailRegion) {
 
 /// Handle multi-line editing (note field) in detail view
 fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
+    // Selection pre-pass: manage multiline_selection_anchor for movement keys
+    let has_shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    let is_movement = matches!(key.code, KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down);
+    if is_movement {
+        if let Some(ds) = &mut app.detail_state {
+            if has_shift {
+                if ds.multiline_selection_anchor.is_none() {
+                    ds.multiline_selection_anchor = Some((ds.edit_cursor_line, ds.edit_cursor_col));
+                }
+            } else {
+                ds.multiline_selection_anchor = None;
+            }
+        }
+    }
+
     match (key.modifiers, key.code) {
         // Esc: finish editing (save)
         (_, KeyCode::Esc) => {
+            if let Some(ds) = &mut app.detail_state {
+                ds.multiline_selection_anchor = None;
+            }
             app.edit_history = None;
             confirm_detail_multiline(app);
         }
+        // Select all (Ctrl+A)
+        (m, KeyCode::Char('a')) if m.contains(KeyModifiers::CONTROL) => {
+            if let Some(ds) = &mut app.detail_state {
+                ds.multiline_selection_anchor = Some((0, 0));
+                let line_count = ds.edit_buffer.split('\n').count();
+                let last_len = ds.edit_buffer.split('\n').last().map_or(0, |l| l.len());
+                ds.edit_cursor_line = line_count.saturating_sub(1);
+                ds.edit_cursor_col = last_len;
+            }
+        }
+        // Copy (Ctrl+C)
+        (m, KeyCode::Char('c')) if m.contains(KeyModifiers::CONTROL) => {
+            if let Some(ds) = &app.detail_state {
+                if let Some(text) = get_multiline_selection_text(ds) {
+                    clipboard_set(&text);
+                }
+            }
+        }
+        // Cut (Ctrl+X)
+        (m, KeyCode::Char('x')) if m.contains(KeyModifiers::CONTROL) => {
+            if let Some(ds) = &mut app.detail_state {
+                if let Some(text) = delete_multiline_selection(ds) {
+                    clipboard_set(&text);
+                }
+            }
+            snapshot_multiline(app);
+        }
+        // Paste (Ctrl+V)
+        (m, KeyCode::Char('v')) if m.contains(KeyModifiers::CONTROL) => {
+            if let Some(paste_text) = clipboard_get() {
+                if let Some(ds) = &mut app.detail_state {
+                    delete_multiline_selection(ds);
+                    let offset = multiline_pos_to_offset(&ds.edit_buffer, ds.edit_cursor_line, ds.edit_cursor_col);
+                    ds.edit_buffer.insert_str(offset, &paste_text);
+                    let new_offset = offset + paste_text.len();
+                    let (new_line, new_col) = offset_to_multiline_pos(&ds.edit_buffer, new_offset);
+                    ds.edit_cursor_line = new_line;
+                    ds.edit_cursor_col = new_col;
+                }
+                snapshot_multiline(app);
+            }
+        }
         // Inline undo (Ctrl+Z)
         (m, KeyCode::Char('z')) if m.contains(KeyModifiers::CONTROL) => {
+            if let Some(ds) = &mut app.detail_state {
+                ds.multiline_selection_anchor = None;
+            }
             if let Some(eh) = &mut app.edit_history {
                 if let Some((buf, col, line)) = eh.undo() {
                     let buf = buf.to_string();
@@ -2430,6 +2656,9 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
         }
         // Inline redo (Ctrl+Y or Ctrl+Shift+Z)
         (m, KeyCode::Char('y')) if m.contains(KeyModifiers::CONTROL) => {
+            if let Some(ds) = &mut app.detail_state {
+                ds.multiline_selection_anchor = None;
+            }
             if let Some(eh) = &mut app.edit_history {
                 if let Some((buf, col, line)) = eh.redo() {
                     let buf = buf.to_string();
@@ -2442,6 +2671,9 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
             }
         }
         (m, KeyCode::Char('Z')) if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) => {
+            if let Some(ds) = &mut app.detail_state {
+                ds.multiline_selection_anchor = None;
+            }
             if let Some(eh) = &mut app.edit_history {
                 if let Some((buf, col, line)) = eh.redo() {
                     let buf = buf.to_string();
@@ -2453,9 +2685,10 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                 }
             }
         }
-        // Enter: newline
+        // Enter: newline (delete selection first)
         (KeyModifiers::NONE, KeyCode::Enter) => {
             if let Some(ds) = &mut app.detail_state {
+                delete_multiline_selection(ds);
                 let mut edit_lines: Vec<String> = ds.edit_buffer.split('\n').map(String::from).collect();
                 let line = ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1));
                 let col = ds.edit_cursor_col.min(edit_lines[line].len());
@@ -2471,9 +2704,10 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
             }
             snapshot_multiline(app);
         }
-        // Tab: insert 4 spaces
+        // Tab: insert 4 spaces (delete selection first)
         (KeyModifiers::NONE, KeyCode::Tab) => {
             if let Some(ds) = &mut app.detail_state {
+                delete_multiline_selection(ds);
                 let mut edit_lines: Vec<String> = ds.edit_buffer.split('\n').map(String::from).collect();
                 let line = ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1));
                 let col = ds.edit_cursor_col.min(edit_lines[line].len());
@@ -2483,8 +2717,11 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
             }
             snapshot_multiline(app);
         }
-        // Cursor movement
-        (KeyModifiers::NONE, KeyCode::Left) => {
+        // Cursor movement: Left (plain or Shift for selection)
+        (_, KeyCode::Left) if !key.modifiers.contains(KeyModifiers::ALT)
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::SUPER) =>
+        {
             if let Some(ds) = &mut app.detail_state {
                 if ds.edit_cursor_col > 0 {
                     ds.edit_cursor_col -= 1;
@@ -2495,7 +2732,11 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                 }
             }
         }
-        (KeyModifiers::NONE, KeyCode::Right) => {
+        // Cursor movement: Right (plain or Shift for selection)
+        (_, KeyCode::Right) if !key.modifiers.contains(KeyModifiers::ALT)
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::SUPER) =>
+        {
             if let Some(ds) = &mut app.detail_state {
                 let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
                 let line_len = edit_lines.get(ds.edit_cursor_line).map_or(0, |l| l.len());
@@ -2507,7 +2748,11 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                 }
             }
         }
-        (KeyModifiers::NONE, KeyCode::Up) => {
+        // Cursor movement: Up (plain or Shift for selection)
+        (_, KeyCode::Up) if !key.modifiers.contains(KeyModifiers::ALT)
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::SUPER) =>
+        {
             if let Some(ds) = &mut app.detail_state {
                 if ds.edit_cursor_line > 0 {
                     ds.edit_cursor_line -= 1;
@@ -2517,7 +2762,11 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                 }
             }
         }
-        (KeyModifiers::NONE, KeyCode::Down) => {
+        // Cursor movement: Down (plain or Shift for selection)
+        (_, KeyCode::Down) if !key.modifiers.contains(KeyModifiers::ALT)
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::SUPER) =>
+        {
             if let Some(ds) = &mut app.detail_state {
                 let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
                 if ds.edit_cursor_line + 1 < edit_lines.len() {
@@ -2527,13 +2776,13 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                 }
             }
         }
-        // Home / Cmd+Left: start of line
+        // Home / Cmd+Left: start of line (with or without Shift)
         (m, KeyCode::Left) if m.contains(KeyModifiers::SUPER) => {
             if let Some(ds) = &mut app.detail_state {
                 ds.edit_cursor_col = 0;
             }
         }
-        // End / Cmd+Right: end of line
+        // End / Cmd+Right: end of line (with or without Shift)
         (m, KeyCode::Right) if m.contains(KeyModifiers::SUPER) => {
             if let Some(ds) = &mut app.detail_state {
                 let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
@@ -2541,7 +2790,7 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                 ds.edit_cursor_col = line_len;
             }
         }
-        // Word movement (Alt or Ctrl)
+        // Word movement (Alt or Ctrl, with or without Shift)
         (m, KeyCode::Left) if m.contains(KeyModifiers::ALT) || m.contains(KeyModifiers::CONTROL) => {
             if let Some(ds) = &mut app.detail_state {
                 let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
@@ -2556,44 +2805,49 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                 ds.edit_cursor_col = word_boundary_right(line, ds.edit_cursor_col);
             }
         }
-        // Word backspace (Alt or Ctrl)
+        // Word backspace (Alt or Ctrl): delete selection or word
         (m, KeyCode::Backspace) if m.contains(KeyModifiers::ALT) || m.contains(KeyModifiers::CONTROL) => {
             if let Some(ds) = &mut app.detail_state {
-                let mut edit_lines: Vec<String> = ds.edit_buffer.split('\n').map(String::from).collect();
-                let line_idx = ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1));
-                let col = ds.edit_cursor_col.min(edit_lines[line_idx].len());
-                let new_pos = word_boundary_left(&edit_lines[line_idx], col);
-                edit_lines[line_idx].drain(new_pos..col);
-                ds.edit_cursor_col = new_pos;
-                ds.edit_buffer = edit_lines.join("\n");
+                if delete_multiline_selection(ds).is_none() {
+                    let mut edit_lines: Vec<String> = ds.edit_buffer.split('\n').map(String::from).collect();
+                    let line_idx = ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1));
+                    let col = ds.edit_cursor_col.min(edit_lines[line_idx].len());
+                    let new_pos = word_boundary_left(&edit_lines[line_idx], col);
+                    edit_lines[line_idx].drain(new_pos..col);
+                    ds.edit_cursor_col = new_pos;
+                    ds.edit_buffer = edit_lines.join("\n");
+                }
             }
             snapshot_multiline(app);
         }
-        // Backspace
+        // Backspace: delete selection or single char
         (KeyModifiers::NONE, KeyCode::Backspace) => {
             if let Some(ds) = &mut app.detail_state {
-                let mut edit_lines: Vec<String> = ds.edit_buffer.split('\n').map(String::from).collect();
-                let line = ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1));
-                let col = ds.edit_cursor_col.min(edit_lines[line].len());
+                if delete_multiline_selection(ds).is_none() {
+                    let mut edit_lines: Vec<String> = ds.edit_buffer.split('\n').map(String::from).collect();
+                    let line = ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1));
+                    let col = ds.edit_cursor_col.min(edit_lines[line].len());
 
-                if col > 0 {
-                    edit_lines[line].remove(col - 1);
-                    ds.edit_cursor_col = col - 1;
-                } else if line > 0 {
-                    // Merge with previous line
-                    let current_line = edit_lines.remove(line);
-                    let prev_len = edit_lines[line - 1].len();
-                    edit_lines[line - 1].push_str(&current_line);
-                    ds.edit_cursor_line = line - 1;
-                    ds.edit_cursor_col = prev_len;
+                    if col > 0 {
+                        edit_lines[line].remove(col - 1);
+                        ds.edit_cursor_col = col - 1;
+                    } else if line > 0 {
+                        // Merge with previous line
+                        let current_line = edit_lines.remove(line);
+                        let prev_len = edit_lines[line - 1].len();
+                        edit_lines[line - 1].push_str(&current_line);
+                        ds.edit_cursor_line = line - 1;
+                        ds.edit_cursor_col = prev_len;
+                    }
+                    ds.edit_buffer = edit_lines.join("\n");
                 }
-                ds.edit_buffer = edit_lines.join("\n");
             }
             snapshot_multiline(app);
         }
-        // Type character
+        // Type character: delete selection first, then insert
         (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
             if let Some(ds) = &mut app.detail_state {
+                delete_multiline_selection(ds);
                 let mut edit_lines: Vec<String> = ds.edit_buffer.split('\n').map(String::from).collect();
                 let line = ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1));
                 let col = ds.edit_cursor_col.min(edit_lines[line].len());

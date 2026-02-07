@@ -249,6 +249,8 @@ pub struct DetailState {
     pub subtask_cursor: usize,
     /// Flattened subtask IDs (rebuilt on each render)
     pub flat_subtask_ids: Vec<String>,
+    /// Selection anchor for multi-line editing (line, col). None = no selection.
+    pub multiline_selection_anchor: Option<(usize, usize)>,
 }
 
 /// Current interaction mode
@@ -557,6 +559,15 @@ impl App {
         }
         self.edit_selection_anchor = None;
         false
+    }
+
+    /// Get the selected text in single-line edit mode (if any).
+    pub fn get_selection_text(&self) -> Option<String> {
+        let (start, end) = self.edit_selection_range()?;
+        if start == end {
+            return None;
+        }
+        Some(self.edit_buffer[start..end].to_string())
     }
 
     /// Start flashing a task (highlight after undo/redo navigation)
@@ -1069,6 +1080,7 @@ impl App {
             edit_original: String::new(),
             subtask_cursor: 0,
             flat_subtask_ids: Vec::new(),
+            multiline_selection_anchor: None,
         });
         self.view = View::Detail { track_id, task_id };
     }

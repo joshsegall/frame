@@ -7,6 +7,7 @@ use ratatui::widgets::Paragraph;
 use crate::model::{Metadata, Task, TaskState};
 use crate::ops::task_ops;
 use crate::tui::app::{App, DetailRegion, Mode, View, flatten_subtask_ids};
+use crate::tui::input::{multiline_selection_range, selection_cols_for_line};
 
 /// Render the detail view for a single task
 pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -342,17 +343,42 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             // Render the multi-line edit buffer
             let note_indent = "   "; // align with field labels
             if let Some(ref ds) = app.detail_state {
+                let cursor_style = Style::default()
+                    .fg(app.theme.background)
+                    .bg(app.theme.text_bright);
+                let selection_style = Style::default()
+                    .fg(app.theme.text_bright)
+                    .bg(app.theme.blue);
+
+                // Compute selection range (absolute offsets) if any
+                let sel_range = multiline_selection_range(ds);
+
                 let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
                 for (line_idx, edit_line) in edit_lines.iter().enumerate() {
                     let mut spans: Vec<Span> = Vec::new();
                     spans.push(Span::styled(note_indent.to_string(), Style::default().bg(bg)));
-                    if line_idx == ds.edit_cursor_line {
-                        // Render with cursor highlighting current character
+
+                    let has_cursor = line_idx == ds.edit_cursor_line;
+                    let line_sel = sel_range.and_then(|(s, e)| {
+                        selection_cols_for_line(&ds.edit_buffer, s, e, line_idx)
+                    });
+
+                    if let Some((sc, ec)) = line_sel {
+                        // Render with selection highlight
+                        if sc > 0 {
+                            spans.push(Span::styled(edit_line[..sc].to_string(), bright_style));
+                        }
+                        spans.push(Span::styled(edit_line[sc..ec].to_string(), selection_style));
+                        if ec < edit_line.len() {
+                            spans.push(Span::styled(edit_line[ec..].to_string(), bright_style));
+                        }
+                        if has_cursor && ds.edit_cursor_col >= edit_line.len() {
+                            spans.push(Span::styled(" ".to_string(), cursor_style));
+                        }
+                    } else if has_cursor {
+                        // No selection on this line, render with cursor
                         let col = ds.edit_cursor_col.min(edit_line.len());
                         let before = &edit_line[..col];
-                        let cursor_style = Style::default()
-                            .fg(app.theme.background)
-                            .bg(app.theme.text_bright);
                         if !before.is_empty() {
                             spans.push(Span::styled(before.to_string(), bright_style));
                         }
@@ -367,6 +393,7 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                             spans.push(Span::styled(" ".to_string(), cursor_style));
                         }
                     } else {
+                        // No selection, no cursor
                         spans.push(Span::styled(edit_line.to_string(), bright_style));
                     }
                     lines.push(Line::from(spans));
