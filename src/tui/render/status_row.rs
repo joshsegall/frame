@@ -4,7 +4,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::tui::app::{App, Mode};
+use crate::tui::app::{App, Mode, TriageSource};
 
 /// Render the status row (bottom of screen)
 pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
@@ -88,8 +88,13 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 "Select position:"
             };
+            let is_cross_track = matches!(
+                &app.triage_state,
+                Some(ts) if matches!(ts.source, TriageSource::CrossTrackMove { .. })
+            );
+            let label_text = if is_cross_track { "-- MOVE TO TRACK --" } else { "-- TRIAGE --" };
             let mode_label = Span::styled(
-                "-- TRIAGE --",
+                label_text,
                 Style::default()
                     .fg(app.theme.highlight)
                     .bg(bg)

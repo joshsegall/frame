@@ -124,6 +124,11 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
     // Set autocomplete anchor now that immutable borrows are released
     if let Some(anchor) = edit_anchor {
         app.autocomplete_anchor = Some(anchor);
+    } else if app.mode == Mode::Triage {
+        // Cross-track move: anchor autocomplete to the cursor row
+        let screen_y = area.y + cursor.saturating_sub(scroll) as u16;
+        let screen_x = area.x + 4;
+        app.autocomplete_anchor = Some((screen_x, screen_y));
     }
 }
 

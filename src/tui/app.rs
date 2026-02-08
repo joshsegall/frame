@@ -264,11 +264,23 @@ pub enum TriageStep {
     },
 }
 
+/// Source of a triage/move operation
+#[derive(Debug, Clone)]
+pub enum TriageSource {
+    /// Triaging an inbox item
+    Inbox { index: usize },
+    /// Cross-track move of an existing task
+    CrossTrackMove {
+        source_track_id: String,
+        task_id: String,
+    },
+}
+
 /// State for the triage flow
 #[derive(Debug, Clone)]
 pub struct TriageState {
-    /// Which inbox item index is being triaged
-    pub inbox_index: usize,
+    /// Source of this triage operation
+    pub source: TriageSource,
     /// Current step
     pub step: TriageStep,
     /// Screen position for the position-selection popup (set when transitioning from track selection)

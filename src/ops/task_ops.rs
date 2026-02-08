@@ -405,7 +405,7 @@ fn remove_metadata(task: &mut Task, key: &str) {
 }
 
 /// Find the next available ID number for a given prefix in a track.
-fn next_id_number(track: &Track, prefix: &str) -> usize {
+pub fn next_id_number(track: &Track, prefix: &str) -> usize {
     let mut max = 0usize;
     let prefix_dash = format!("{}-", prefix);
     find_max_id_in_track(track, &prefix_dash, &mut max);
@@ -521,7 +521,7 @@ fn for_each_task(tasks: &[Task], f: &mut dyn FnMut(&Task)) {
 }
 
 /// Recursively renumber subtask IDs based on the new parent ID.
-fn renumber_subtasks(task: &mut Task, parent_id: &str) {
+pub fn renumber_subtasks(task: &mut Task, parent_id: &str) {
     for (i, sub) in task.subtasks.iter_mut().enumerate() {
         let new_sub_id = format!("{}.{}", parent_id, i + 1);
         sub.id = Some(new_sub_id.clone());
@@ -531,7 +531,7 @@ fn renumber_subtasks(task: &mut Task, parent_id: &str) {
 }
 
 /// Update all dep references across tracks from old_id to new_id.
-fn update_dep_references(tracks: &mut [(String, Track)], old_id: &str, new_id: &str) {
+pub fn update_dep_references(tracks: &mut [(String, Track)], old_id: &str, new_id: &str) {
     for (_, track) in tracks.iter_mut() {
         for node in &mut track.nodes {
             if let TrackNode::Section { tasks, .. } = node {

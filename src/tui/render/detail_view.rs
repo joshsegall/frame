@@ -533,6 +533,11 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
         let screen_y = area.y + line_idx.saturating_sub(scroll) as u16;
         let screen_x = area.x + prefix_w + word_offset;
         app.autocomplete_anchor = Some((screen_x, screen_y));
+    } else if app.mode == Mode::Triage {
+        // Cross-track move from detail view: anchor autocomplete to title region
+        let screen_y = area.y + active_region_line.unwrap_or(0).saturating_sub(scroll) as u16;
+        let screen_x = area.x + 4;
+        app.autocomplete_anchor = Some((screen_x, screen_y));
     }
 }
 

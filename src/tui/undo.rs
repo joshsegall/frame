@@ -221,6 +221,27 @@ pub fn nav_target_for_op(op: &Operation, is_undo: bool) -> Option<UndoNavTarget>
                 track_id: focus.clone().unwrap_or_default(),
             })
         }
+        Operation::CrossTrackMove {
+            source_track_id, target_track_id, task_id_old, task_id_new, ..
+        } => {
+            if is_undo {
+                Some(UndoNavTarget::Task {
+                    track_id: source_track_id.clone(),
+                    task_id: task_id_old.clone(),
+                    detail_region: None,
+                    task_removed: false,
+                    position_hint: None,
+                })
+            } else {
+                Some(UndoNavTarget::Task {
+                    track_id: target_track_id.clone(),
+                    task_id: task_id_new.clone(),
+                    detail_region: None,
+                    task_removed: false,
+                    position_hint: None,
+                })
+            }
+        }
         Operation::SyncMarker => None,
     }
 }
@@ -365,6 +386,21 @@ pub enum Operation {
     TrackCcFocus {
         old_focus: Option<String>,
         new_focus: Option<String>,
+    },
+    /// A task was moved to a different track
+    CrossTrackMove {
+        source_track_id: String,
+        target_track_id: String,
+        task_id_old: String,
+        task_id_new: String,
+        /// Index in source backlog (top-level) or parent.subtasks
+        source_index: usize,
+        /// Index in target backlog
+        target_index: usize,
+        /// Some if moving a subtask (promotion to top-level)
+        source_parent_id: Option<String>,
+        /// Original depth of the task before move
+        old_depth: usize,
     },
     /// External file change sync marker — undo cannot cross this
     SyncMarker,
@@ -668,6 +704,42 @@ fn apply_inverse(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
             }
             Some(track_id.clone())
         }
+        Operation::CrossTrackMove {
+            source_track_id, target_track_id, task_id_old, task_id_new,
+            source_index, source_parent_id, old_depth, ..
+        } => {
+            // Undo: remove task from target, rename back to old ID, insert into source
+            let target_track = find_track_mut(tracks, target_track_id)?;
+            let target_tasks = target_track.section_tasks_mut(SectionKind::Backlog)?;
+            let idx = target_tasks.iter().position(|t| t.id.as_deref() == Some(task_id_new))?;
+            let mut task = target_tasks.remove(idx);
+
+            // Rename ID back
+            task.id = Some(task_id_old.clone());
+            task.mark_dirty();
+            task_ops::renumber_subtasks(&mut task, task_id_old);
+
+            if let Some(parent_id) = source_parent_id {
+                // Was a subtask — restore depth and insert back as subtask
+                task.depth = *old_depth;
+                let source_track = find_track_mut(tracks, source_track_id)?;
+                let parent = task_ops::find_task_mut_in_track(source_track, parent_id)?;
+                let idx = (*source_index).min(parent.subtasks.len());
+                parent.subtasks.insert(idx, task);
+                parent.mark_dirty();
+            } else {
+                // Was top-level — restore depth and insert back into source backlog
+                task.depth = *old_depth;
+                let source_track = find_track_mut(tracks, source_track_id)?;
+                let source_tasks = source_track.section_tasks_mut(SectionKind::Backlog)?;
+                let idx = (*source_index).min(source_tasks.len());
+                source_tasks.insert(idx, task);
+            }
+
+            // Update dep references back
+            task_ops::update_dep_references(tracks, task_id_new, task_id_old);
+            None // Both tracks saved by caller
+        }
         Operation::SyncMarker => None,
     }
 }
@@ -899,6 +971,41 @@ fn apply_forward(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
                 task.mark_dirty();
             }
             Some(track_id.clone())
+        }
+        Operation::CrossTrackMove {
+            source_track_id, target_track_id, task_id_old, task_id_new,
+            target_index, source_parent_id, ..
+        } => {
+            // Redo: remove from source, rename to new ID, insert into target
+            let task = if let Some(parent_id) = source_parent_id {
+                // Was a subtask — remove from parent
+                let source_track = find_track_mut(tracks, source_track_id)?;
+                let parent = task_ops::find_task_mut_in_track(source_track, parent_id)?;
+                let idx = parent.subtasks.iter().position(|t| t.id.as_deref() == Some(task_id_old))?;
+                let task = parent.subtasks.remove(idx);
+                parent.mark_dirty();
+                task
+            } else {
+                let source_track = find_track_mut(tracks, source_track_id)?;
+                let source_tasks = source_track.section_tasks_mut(SectionKind::Backlog)?;
+                let idx = source_tasks.iter().position(|t| t.id.as_deref() == Some(task_id_old))?;
+                source_tasks.remove(idx)
+            };
+
+            let mut task = task;
+            task.id = Some(task_id_new.clone());
+            task.depth = 0;
+            task.mark_dirty();
+            task_ops::renumber_subtasks(&mut task, task_id_new);
+
+            let target_track = find_track_mut(tracks, target_track_id)?;
+            let target_tasks = target_track.section_tasks_mut(SectionKind::Backlog)?;
+            let idx = (*target_index).min(target_tasks.len());
+            target_tasks.insert(idx, task);
+
+            // Update dep references
+            task_ops::update_dep_references(tracks, task_id_old, task_id_new);
+            None // Both tracks saved by caller
         }
         Operation::SyncMarker => None,
     }

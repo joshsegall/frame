@@ -8,7 +8,7 @@ use crate::model::SectionKind;
 use crate::ops::search::{search_inbox, search_tasks};
 use crate::ops::task_ops::{self, InsertPosition};
 
-use super::app::{App, AutocompleteKind, AutocompleteState, DetailRegion, DetailState, EditHistory, EditTarget, FlatItem, Mode, MoveState, PendingMove, PendingMoveKind, View, resolve_task_from_flat};
+use super::app::{App, AutocompleteKind, AutocompleteState, DetailRegion, DetailState, EditHistory, EditTarget, FlatItem, Mode, MoveState, PendingMove, PendingMoveKind, TriageSource, View, resolve_task_from_flat};
 use super::undo::{Operation, UndoNavTarget};
 
 // ---------------------------------------------------------------------------
@@ -519,6 +519,11 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             }
         }
 
+        // Cross-track move (track view or detail view)
+        (KeyModifiers::SHIFT, KeyCode::Char('M')) => {
+            begin_cross_track_move(app);
+        }
+
         // Redo: Z, Ctrl+Y, or Ctrl+Shift+Z (must be checked BEFORE Ctrl+Z/z undo)
         (m, KeyCode::Char('y')) if m.contains(KeyModifiers::CONTROL) => {
             perform_redo(app);
@@ -690,6 +695,23 @@ fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo: bool) {
     match nav {
         UndoNavTarget::Task { track_id, .. } => {
             let _ = app.save_track(track_id);
+            // For cross-track moves, also save the other track
+            let other_track = {
+                let op = if is_undo {
+                    app.undo_stack.peek_last_redo()
+                } else {
+                    app.undo_stack.peek_last_undo()
+                };
+                if let Some(Operation::CrossTrackMove { source_track_id, target_track_id, .. }) = op {
+                    let other = if track_id == source_track_id { target_track_id } else { source_track_id };
+                    Some(other.clone())
+                } else {
+                    None
+                }
+            };
+            if let Some(other) = other_track {
+                let _ = app.save_track(&other);
+            }
         }
         UndoNavTarget::TracksView { track_id } => {
             // Find the operation on the redo/undo stack (it was just moved there)
@@ -4794,7 +4816,7 @@ fn inbox_begin_triage(app: &mut App) {
     }
 
     app.triage_state = Some(super::app::TriageState {
-        inbox_index: app.inbox_cursor,
+        source: TriageSource::Inbox { index: app.inbox_cursor },
         step: super::app::TriageStep::SelectTrack,
         popup_anchor: None,
         position_cursor: 1, // default to Bottom
@@ -4920,8 +4942,8 @@ fn handle_triage_select_position(app: &mut App, key: KeyEvent, track_id: &str) {
         (_, KeyCode::Enter) => {
             let cursor = app.triage_state.as_ref().map(|ts| ts.position_cursor).unwrap_or(1);
             match cursor {
-                0 => execute_triage(app, track_id, InsertPosition::Top),
-                1 => execute_triage(app, track_id, InsertPosition::Bottom),
+                0 => dispatch_triage_or_move(app, track_id, InsertPosition::Top),
+                1 => dispatch_triage_or_move(app, track_id, InsertPosition::Bottom),
                 _ => {
                     // Cancel
                     app.mode = Mode::Navigate;
@@ -4934,19 +4956,34 @@ fn handle_triage_select_position(app: &mut App, key: KeyEvent, track_id: &str) {
 
         // Direct shortcuts still work
         (KeyModifiers::NONE, KeyCode::Char('t')) => {
-            execute_triage(app, track_id, InsertPosition::Top);
+            dispatch_triage_or_move(app, track_id, InsertPosition::Top);
         }
         (KeyModifiers::NONE, KeyCode::Char('b')) => {
-            execute_triage(app, track_id, InsertPosition::Bottom);
+            dispatch_triage_or_move(app, track_id, InsertPosition::Bottom);
         }
 
         _ => {}
     }
 }
 
+/// Dispatch to execute_triage or execute_cross_track_move based on the triage source
+fn dispatch_triage_or_move(app: &mut App, track_id: &str, position: InsertPosition) {
+    let source = match &app.triage_state {
+        Some(ts) => ts.source.clone(),
+        None => return,
+    };
+    match source {
+        TriageSource::Inbox { .. } => execute_triage(app, track_id, position),
+        TriageSource::CrossTrackMove { .. } => execute_cross_track_move(app, track_id, position),
+    }
+}
+
 fn execute_triage(app: &mut App, track_id: &str, position: InsertPosition) {
     let inbox_index = match &app.triage_state {
-        Some(ts) => ts.inbox_index,
+        Some(ts) => match &ts.source {
+            TriageSource::Inbox { index } => *index,
+            _ => return,
+        },
         None => return,
     };
 
@@ -5003,6 +5040,242 @@ fn execute_triage(app: &mut App, track_id: &str, position: InsertPosition) {
 
     let track_name = app.track_name(track_id).to_string();
     app.status_message = Some(format!("Triaged to {}", track_name));
+}
+
+// ---------------------------------------------------------------------------
+// Cross-track move (M key)
+// ---------------------------------------------------------------------------
+
+/// Begin cross-track move: enter triage-style track selection for moving a task
+fn begin_cross_track_move(app: &mut App) {
+    // Determine source task
+    let (source_track_id, task_id, section) = match &app.view {
+        View::Track(_) => {
+            match app.cursor_task_id() {
+                Some(info) => info,
+                None => return,
+            }
+        }
+        View::Detail { track_id, task_id } => {
+            // Find task to determine its section
+            let section = if let Some(track) = App::find_track_in_project(&app.project, track_id) {
+                if task_ops::is_top_level_in_section(track, task_id, SectionKind::Backlog) {
+                    SectionKind::Backlog
+                } else if task_ops::find_task_in_track(track, task_id).is_some() {
+                    // Subtask in backlog — will be promoted
+                    SectionKind::Backlog
+                } else {
+                    return;
+                }
+            } else {
+                return;
+            };
+            (track_id.clone(), task_id.clone(), section)
+        }
+        _ => return,
+    };
+
+    // Only allow moving tasks from Backlog
+    if section != SectionKind::Backlog {
+        app.status_message = Some("Can only move backlog tasks".to_string());
+        return;
+    }
+
+    // Build candidate tracks: all non-archived tracks except current
+    let candidates: Vec<String> = app
+        .project
+        .config
+        .tracks
+        .iter()
+        .filter(|t| t.state != "archived" && t.id != source_track_id)
+        .map(|t| format!("{} ({})", t.name, t.id.to_uppercase()))
+        .collect();
+
+    if candidates.is_empty() {
+        app.status_message = Some("No other tracks to move to".to_string());
+        return;
+    }
+
+    app.edit_buffer.clear();
+    app.edit_cursor = 0;
+    app.autocomplete = Some(AutocompleteState::new(AutocompleteKind::Tag, candidates));
+    if let Some(ac) = &mut app.autocomplete {
+        ac.filter(""); // Show all
+    }
+
+    app.triage_state = Some(super::app::TriageState {
+        source: TriageSource::CrossTrackMove {
+            source_track_id,
+            task_id,
+        },
+        step: super::app::TriageStep::SelectTrack,
+        popup_anchor: None,
+        position_cursor: 1, // default to Bottom
+    });
+    app.mode = Mode::Triage;
+}
+
+/// Execute the cross-track move after track and position are selected
+fn execute_cross_track_move(app: &mut App, target_track_id: &str, position: InsertPosition) {
+    let (source_track_id, task_id) = match &app.triage_state {
+        Some(ts) => match &ts.source {
+            TriageSource::CrossTrackMove { source_track_id, task_id } => {
+                (source_track_id.clone(), task_id.clone())
+            }
+            _ => return,
+        },
+        None => return,
+    };
+
+    let target_prefix = app.track_prefix(target_track_id).unwrap_or("").to_string();
+
+    // Determine if task is a subtask (has a parent)
+    let is_subtask = task_id.contains('.');
+    let source_parent_id = if is_subtask {
+        // Extract parent ID: everything before the last dot
+        task_id.rsplit_once('.').map(|(parent, _)| parent.to_string())
+    } else {
+        None
+    };
+
+    // Find old depth
+    let old_depth = {
+        let track = match App::find_track_in_project(&app.project, &source_track_id) {
+            Some(t) => t,
+            None => return,
+        };
+        task_ops::find_task_in_track(track, &task_id)
+            .map(|t| t.depth)
+            .unwrap_or(0)
+    };
+
+    // Remove task from source
+    let (mut task, source_index) = if let Some(ref parent_id) = source_parent_id {
+        // Subtask: remove from parent's subtask list
+        let source_track = match app.find_track_mut(&source_track_id) {
+            Some(t) => t,
+            None => return,
+        };
+        let parent = match task_ops::find_task_mut_in_track(source_track, parent_id) {
+            Some(p) => p,
+            None => return,
+        };
+        let idx = match parent.subtasks.iter().position(|t| t.id.as_deref() == Some(&task_id)) {
+            Some(i) => i,
+            None => return,
+        };
+        let task = parent.subtasks.remove(idx);
+        parent.mark_dirty();
+        (task, idx)
+    } else {
+        // Top-level: remove from source backlog
+        let source_track = match app.find_track_mut(&source_track_id) {
+            Some(t) => t,
+            None => return,
+        };
+        let source_tasks = match source_track.section_tasks_mut(SectionKind::Backlog) {
+            Some(t) => t,
+            None => return,
+        };
+        let idx = match source_tasks.iter().position(|t| t.id.as_deref() == Some(&task_id)) {
+            Some(i) => i,
+            None => return,
+        };
+        let task = source_tasks.remove(idx);
+        (task, idx)
+    };
+
+    // Compute new ID
+    let target_track = match App::find_track_in_project(&app.project, target_track_id) {
+        Some(t) => t,
+        None => return,
+    };
+    let new_num = task_ops::next_id_number(target_track, &target_prefix);
+    let new_id = format!("{}-{:03}", target_prefix, new_num);
+    let old_id = task_id.clone();
+
+    // Set new ID and depth
+    task.id = Some(new_id.clone());
+    task.depth = 0;
+    task.mark_dirty();
+    task_ops::renumber_subtasks(&mut task, &new_id);
+
+    // Insert into target backlog
+    let target_track = match app.find_track_mut(target_track_id) {
+        Some(t) => t,
+        None => return,
+    };
+    let target_tasks = match target_track.section_tasks_mut(SectionKind::Backlog) {
+        Some(t) => t,
+        None => return,
+    };
+    let target_index = match &position {
+        InsertPosition::Top => {
+            target_tasks.insert(0, task);
+            0
+        }
+        InsertPosition::Bottom => {
+            let idx = target_tasks.len();
+            target_tasks.push(task);
+            idx
+        }
+        InsertPosition::After(after_id) => {
+            let after_idx = target_tasks
+                .iter()
+                .position(|t| t.id.as_deref() == Some(after_id.as_str()))
+                .unwrap_or(target_tasks.len().saturating_sub(1));
+            target_tasks.insert(after_idx + 1, task);
+            after_idx + 1
+        }
+    };
+
+    // Update dep references across all tracks
+    task_ops::update_dep_references(&mut app.project.tracks, &old_id, &new_id);
+
+    // Push undo operation
+    app.undo_stack.push(Operation::CrossTrackMove {
+        source_track_id: source_track_id.clone(),
+        target_track_id: target_track_id.to_string(),
+        task_id_old: old_id.clone(),
+        task_id_new: new_id.clone(),
+        source_index,
+        target_index,
+        source_parent_id,
+        old_depth,
+    });
+
+    // Save both tracks
+    let _ = app.save_track(&source_track_id);
+    let _ = app.save_track(target_track_id);
+
+    // Cursor management
+    let was_detail = matches!(app.view, View::Detail { .. });
+    if was_detail {
+        // Close detail view, return to track view
+        app.close_detail_fully();
+        if let Some(idx) = app.active_track_ids.iter().position(|id| id == &source_track_id) {
+            app.view = View::Track(idx);
+        }
+    } else {
+        // Advance cursor in track view (or clamp to last)
+        if let Some(track_id) = app.current_track_id().map(|s| s.to_string()) {
+            let flat_items = app.build_flat_items(&track_id);
+            let state = app.get_track_state(&track_id);
+            if state.cursor >= flat_items.len() && !flat_items.is_empty() {
+                state.cursor = flat_items.len() - 1;
+            }
+        }
+    }
+
+    // Status message
+    let target_name = app.track_name(target_track_id).to_string();
+    app.status_message = Some(format!("Moved to {} ({} → {})", target_name, old_id, new_id));
+
+    // Clean up triage state
+    app.mode = Mode::Navigate;
+    app.triage_state = None;
+    app.autocomplete = None;
+    app.edit_buffer.clear();
 }
 
 // ---------------------------------------------------------------------------

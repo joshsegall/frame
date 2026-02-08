@@ -171,6 +171,7 @@ fn build_track_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("p".into(), "Push to top".into()),
         HelpEntry::Binding("A".into(), "Add subtask".into()),
         HelpEntry::Binding("m".into(), "Move mode".into()),
+        HelpEntry::Binding("M".into(), "Move to track".into()),
         HelpEntry::Blank,
         HelpEntry::Header("Views & Other".into()),
         HelpEntry::Binding("1-9".into(), "Track N".into()),
@@ -207,6 +208,7 @@ fn build_detail_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("d".into(), "Edit deps".into()),
         HelpEntry::Binding("n".into(), "Edit note".into()),
         HelpEntry::Binding("Space".into(), "Cycle state".into()),
+        HelpEntry::Binding("M".into(), "Move to track".into()),
     ];
 
     (left, right)
