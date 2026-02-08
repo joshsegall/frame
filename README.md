@@ -91,6 +91,8 @@ The short version: `↑↓`/`jk` to move, `←→`/`hl` to collapse/expand,
 ## CLI
 
 Designed for coding agents. Every read command supports `--json`.
+See [`skills/managing-frame-tasks/SKILL.md`](skills/managing-frame-tasks/SKILL.md)
+for the full agent reference.
 
 ```bash
 # What should I work on?
