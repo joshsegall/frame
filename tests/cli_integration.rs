@@ -122,6 +122,8 @@ fn run_fr(dir: &Path, args: &[&str]) -> (String, String, bool) {
     let output = Command::new(fr_bin())
         .args(args)
         .current_dir(dir)
+        // Isolate tests from the real global registry (~/.config/frame/projects.toml)
+        .env("XDG_CONFIG_HOME", dir.join(".xdg-config"))
         .output()
         .expect("failed to run fr");
 
