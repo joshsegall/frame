@@ -13,7 +13,7 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
 
     let line = match &app.mode {
         Mode::Navigate if app.status_message.is_some() => {
-            render_centered_message(app.status_message.as_deref().unwrap(), width, bg)
+            render_centered_message(app.status_message.as_deref().unwrap(), width, bg, app.status_is_error, app.theme.text_bright)
         }
         Mode::Navigate if app.filter_pending => {
             let mut spans = vec![
@@ -51,7 +51,14 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
         }
         Mode::Edit => {
             let is_filter_tag = matches!(app.edit_target, Some(crate::tui::app::EditTarget::FilterTag));
-            let label = if is_filter_tag { "filter tag:" } else { "-- EDIT --" };
+            let is_jump_to = matches!(app.edit_target, Some(crate::tui::app::EditTarget::JumpTo));
+            let label = if is_filter_tag {
+                "filter tag:"
+            } else if is_jump_to {
+                "jump:"
+            } else {
+                "-- EDIT --"
+            };
             let mode_label = Span::styled(
                 label,
                 Style::default()
@@ -59,9 +66,15 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
                     .bg(bg)
                     .add_modifier(Modifier::BOLD),
             );
-            let hint = if is_filter_tag { "Enter select  Esc cancel" } else { "Enter confirm  Esc cancel" };
+            let hint = if is_filter_tag {
+                "Enter select  Esc cancel"
+            } else if is_jump_to {
+                "Enter jump  Esc cancel"
+            } else {
+                "Enter confirm  Esc cancel"
+            };
             let mut spans = vec![Span::styled(" ", Style::default().bg(bg)), mode_label];
-            if is_filter_tag {
+            if is_filter_tag || is_jump_to {
                 spans.push(Span::styled(" ", Style::default().bg(bg)));
                 spans.push(Span::styled(
                     app.edit_buffer.clone(),
@@ -164,7 +177,7 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
             Line::from(spans)
         }
         Mode::Select if app.status_message.is_some() => {
-            render_centered_message(app.status_message.as_deref().unwrap(), width, bg)
+            render_centered_message(app.status_message.as_deref().unwrap(), width, bg, app.status_is_error, app.theme.text_bright)
         }
         Mode::Select => {
             let count = app.selection.len();
@@ -360,19 +373,25 @@ fn build_mode_hint<'a>(
 }
 
 /// Render a centered status message spanning the full width.
-fn render_centered_message<'a>(msg: &str, width: usize, bg: Color) -> Line<'a> {
-    let msg_len = msg.chars().count();
+fn render_centered_message<'a>(msg: &str, width: usize, bg: Color, is_error: bool, text_bright: Color) -> Line<'a> {
+    let msg_text = if is_error { format!(" {} ", msg) } else { msg.to_string() };
+    let msg_len = msg_text.chars().count();
     let left_pad = width.saturating_sub(msg_len) / 2;
     let right_pad = width.saturating_sub(msg_len + left_pad);
+    let msg_style = if is_error {
+        Style::default()
+            .fg(text_bright)
+            .bg(Color::Rgb(0x8D, 0x0B, 0x0B))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(Color::LightMagenta)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD)
+    };
     Line::from(vec![
         Span::styled(" ".repeat(left_pad), Style::default().bg(bg)),
-        Span::styled(
-            msg.to_string(),
-            Style::default()
-                .fg(Color::LightMagenta)
-                .bg(bg)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(msg_text, msg_style),
         Span::styled(" ".repeat(right_pad), Style::default().bg(bg)),
     ])
 }

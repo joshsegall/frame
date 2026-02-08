@@ -204,6 +204,7 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
 
     // Clear any transient status message on keypress
     app.status_message = None;
+    app.status_is_error = false;
 
     // QQ quit: second Q confirms, any other key cancels
     if app.quit_pending {
@@ -583,6 +584,11 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             }
         }
 
+        // Jump to task by ID: J (available from any view)
+        (KeyModifiers::SHIFT, KeyCode::Char('J')) => {
+            begin_jump_to(app);
+        }
+
         _ => {}
     }
 }
@@ -730,6 +736,25 @@ fn begin_filter_tag_select(app: &mut App) {
     app.autocomplete = Some(ac);
 }
 
+/// Begin jump-to-task prompt: enter Edit mode with task ID autocomplete
+fn begin_jump_to(app: &mut App) {
+    let candidates = app.collect_active_track_task_ids();
+    if candidates.is_empty() {
+        app.status_message = Some("no tasks to jump to".to_string());
+        return;
+    }
+    app.mode = Mode::Edit;
+    app.edit_buffer = String::new();
+    app.edit_cursor = 0;
+    app.edit_selection_anchor = None;
+    app.edit_target = Some(EditTarget::JumpTo);
+    app.edit_history = Some(EditHistory::new("", 0, 0));
+
+    let mut ac = AutocompleteState::new(AutocompleteKind::JumpTaskId, candidates);
+    ac.filter("");
+    app.autocomplete = Some(ac);
+}
+
 // ---------------------------------------------------------------------------
 // SELECT mode (bulk operations)
 // ---------------------------------------------------------------------------
@@ -855,6 +880,7 @@ fn handle_select(app: &mut App, key: KeyEvent) {
 
     // Clear any transient status message on keypress
     app.status_message = None;
+    app.status_is_error = false;
 
     // QQ quit: second Q confirms, any other key cancels
     if app.quit_pending {
@@ -1056,6 +1082,11 @@ fn handle_select(app: &mut App, key: KeyEvent) {
         // Bulk move to track
         (KeyModifiers::SHIFT, KeyCode::Char('M')) => {
             begin_bulk_cross_track_move(app);
+        }
+
+        // Jump to task by ID (preserves selection)
+        (KeyModifiers::SHIFT, KeyCode::Char('J')) => {
+            begin_jump_to(app);
         }
 
         // Help overlay
@@ -2522,7 +2553,7 @@ fn handle_edit(app: &mut App, key: KeyEvent) {
             // Dismiss autocomplete on Esc (hide, don't destroy — typing will re-show)
             // For FilterTag: Esc cancels the entire filter tag selection
             (_, KeyCode::Esc) => {
-                if matches!(app.edit_target, Some(EditTarget::FilterTag)) {
+                if matches!(app.edit_target, Some(EditTarget::FilterTag) | Some(EditTarget::JumpTo)) {
                     app.autocomplete = None;
                     app.edit_history = None;
                     app.edit_selection_anchor = None;
@@ -3140,6 +3171,16 @@ fn confirm_edit(app: &mut App) {
         EditTarget::BulkDeps => {
             confirm_bulk_dep_edit(app);
         }
+        EditTarget::JumpTo => {
+            // Extract the task ID (from buffer or autocomplete selection)
+            let task_id = app.edit_buffer.trim().to_string();
+            // If the buffer looks like "ID  title" (from autocomplete), extract just the ID
+            let task_id = task_id.split_whitespace().next().unwrap_or("").to_string();
+            if !task_id.is_empty() && !app.jump_to_task(&task_id) {
+                app.status_message = Some(format!("task {} not found", task_id));
+                app.status_is_error = true;
+            }
+        }
     }
 }
 
@@ -3238,6 +3279,8 @@ fn cancel_edit(app: &mut App) {
         Some(EditTarget::BulkTags) | Some(EditTarget::BulkDeps) => {
             // Selection persists, mode already set to Select above
         }
+        // JumpTo: cancel just returns to previous mode (no cleanup needed)
+        Some(EditTarget::JumpTo) => {}
         // For existing title/tags edit, cancel means revert (unchanged since we didn't write)
         _ => {}
     }
@@ -5718,6 +5761,10 @@ fn autocomplete_filter_text(buffer: &str, kind: AutocompleteKind) -> String {
                 .trim();
             word.to_string()
         }
+        AutocompleteKind::JumpTaskId => {
+            // Whole buffer is the filter query
+            buffer.trim().to_string()
+        }
     }
 }
 
@@ -5799,6 +5846,12 @@ fn autocomplete_accept(app: &mut App) {
                     app.edit_buffer = selected;
                 }
             }
+            app.edit_cursor = app.edit_buffer.len();
+        }
+        AutocompleteKind::JumpTaskId => {
+            // Extract just the task ID from "ID  title" format
+            let id = selected.split_whitespace().next().unwrap_or(&selected).to_string();
+            app.edit_buffer = id;
             app.edit_cursor = app.edit_buffer.len();
         }
         AutocompleteKind::FilePath => {

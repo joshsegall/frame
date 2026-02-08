@@ -68,6 +68,16 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         conflict_popup::render_conflict_popup(frame, app, frame.area());
     }
 
+    // For JumpTo: anchor autocomplete to the status row (edit buffer lives there)
+    if app.mode == super::app::Mode::Edit
+        && matches!(app.edit_target, Some(super::app::EditTarget::JumpTo))
+    {
+        // " jump: " = 7 chars, then edit_buffer text, then cursor
+        let x = chunks[2].x + 7 + app.edit_buffer.chars().count() as u16;
+        let y = chunks[2].y;
+        app.autocomplete_anchor = Some((x, y));
+    }
+
     // Autocomplete dropdown (rendered on top of content)
     if app.autocomplete.is_some() {
         autocomplete::render_autocomplete(frame, app, chunks[1]);

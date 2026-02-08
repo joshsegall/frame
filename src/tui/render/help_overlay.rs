@@ -197,6 +197,7 @@ fn build_track_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("i".into(), "Inbox".into()),
         HelpEntry::Binding("r".into(), "Recent".into()),
         HelpEntry::Binding("/".into(), "Search".into()),
+        HelpEntry::Binding("J".into(), "Jump to task".into()),
         HelpEntry::Binding("C".into(), "Set cc-focus".into()),
         HelpEntry::Binding("z/u".into(), "Undo".into()),
         HelpEntry::Binding("Z".into(), "Redo".into()),
@@ -226,6 +227,7 @@ fn build_detail_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("n".into(), "Edit note".into()),
         HelpEntry::Binding("Space".into(), "Cycle state".into()),
         HelpEntry::Binding("M".into(), "Move to track".into()),
+        HelpEntry::Binding("J".into(), "Jump to task".into()),
     ];
 
     (left, right)
@@ -252,6 +254,7 @@ fn build_tracks_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Header("Views & Other".into()),
         HelpEntry::Binding("Tab".into(), "Next view".into()),
         HelpEntry::Binding("/".into(), "Search".into()),
+        HelpEntry::Binding("J".into(), "Jump to task".into()),
         HelpEntry::Binding("z/u".into(), "Undo".into()),
         HelpEntry::Binding("Z".into(), "Redo".into()),
         HelpEntry::Binding("?".into(), "Help".into()),
@@ -283,6 +286,7 @@ fn build_inbox_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Blank,
         HelpEntry::Header("Views & Other".into()),
         HelpEntry::Binding("Tab".into(), "Next view".into()),
+        HelpEntry::Binding("J".into(), "Jump to task".into()),
         HelpEntry::Binding("z/u".into(), "Undo".into()),
         HelpEntry::Binding("Z".into(), "Redo".into()),
         HelpEntry::Binding("?".into(), "Help".into()),
@@ -309,6 +313,7 @@ fn build_recent_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
     let right = vec![
         HelpEntry::Header("Views & Other".into()),
         HelpEntry::Binding("Tab".into(), "Next view".into()),
+        HelpEntry::Binding("J".into(), "Jump to task".into()),
         HelpEntry::Binding("z/u".into(), "Undo".into()),
         HelpEntry::Binding("Z".into(), "Redo".into()),
         HelpEntry::Binding("?".into(), "Help".into()),

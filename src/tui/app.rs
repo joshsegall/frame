@@ -129,6 +129,8 @@ pub enum AutocompleteKind {
     TaskId,
     /// File paths (walk project directory)
     FilePath,
+    /// Task IDs for jump-to-task (entries are "ID  title", whole buffer is filter)
+    JumpTaskId,
 }
 
 /// State for the autocomplete dropdown
@@ -182,6 +184,10 @@ impl AutocompleteState {
             AutocompleteKind::FilePath => {
                 // Last entry starts after the last space
                 buffer.rfind(' ').map(|i| i + 1).unwrap_or(0)
+            }
+            AutocompleteKind::JumpTaskId => {
+                // Whole buffer is the filter text
+                0
             }
         }
     }
@@ -441,6 +447,8 @@ pub enum EditTarget {
     BulkTags,
     /// Bulk dep edit in SELECT mode (+ID -ID syntax)
     BulkDeps,
+    /// Jump-to-task prompt (J key)
+    JumpTo,
 }
 
 /// State for MOVE mode
@@ -553,6 +561,8 @@ pub struct App {
     pub quit_pending: bool,
     /// Transient centered status message (cleared on next keypress)
     pub status_message: Option<String>,
+    /// If true, status_message renders with error style (bright text on red bg)
+    pub status_is_error: bool,
     /// Edit mode: text buffer for inline editing
     pub edit_buffer: String,
     /// Edit mode: cursor position within the buffer
@@ -682,6 +692,7 @@ impl App {
             search_zero_confirmed: false,
             quit_pending: false,
             status_message: None,
+            status_is_error: false,
             edit_buffer: String::new(),
             edit_cursor: 0,
             edit_target: None,
@@ -998,6 +1009,30 @@ impl App {
         }
     }
 
+    /// Collect all task IDs across active tracks only (for jump-to-task).
+    /// Each entry is "ID  title" for display in autocomplete.
+    pub fn collect_active_track_task_ids(&self) -> Vec<String> {
+        let mut entries: Vec<String> = Vec::new();
+        for track_id in &self.active_track_ids {
+            if let Some(track) = Self::find_track_in_project(&self.project, track_id) {
+                Self::collect_id_title_from_tasks(&track.backlog(), &mut entries);
+                Self::collect_id_title_from_tasks(&track.parked(), &mut entries);
+                Self::collect_id_title_from_tasks(&track.done(), &mut entries);
+            }
+        }
+        entries.sort();
+        entries
+    }
+
+    fn collect_id_title_from_tasks(tasks: &[Task], entries: &mut Vec<String>) {
+        for task in tasks {
+            if let Some(ref id) = task.id {
+                entries.push(format!("{}  {}", id, task.title));
+            }
+            Self::collect_id_title_from_tasks(&task.subtasks, entries);
+        }
+    }
+
     /// Collect file paths from the project directory (for ref/spec autocomplete).
     /// Scoped to `ref_paths` dirs if configured; filters to `ref_extensions` if set;
     /// always excludes directories.
@@ -1096,6 +1131,85 @@ impl App {
                 .insert(track_id.to_string(), TrackViewState::default());
         }
         self.track_states.get_mut(track_id).unwrap()
+    }
+
+    /// Find which active track contains a given task ID.
+    /// Returns the track_id if found.
+    pub fn find_task_track_id(&self, task_id: &str) -> Option<String> {
+        for track_id in &self.active_track_ids {
+            if let Some(track) = Self::find_track_in_project(&self.project, track_id) {
+                if crate::ops::task_ops::find_task_in_track(track, task_id).is_some() {
+                    return Some(track_id.clone());
+                }
+            }
+        }
+        None
+    }
+
+    /// Jump to a task by ID: switch track if needed, expand parent chain, move cursor.
+    /// Returns true if the jump succeeded.
+    pub fn jump_to_task(&mut self, task_id: &str) -> bool {
+        let target_track_id = match self.find_task_track_id(task_id) {
+            Some(id) => id,
+            None => return false,
+        };
+
+        // Switch to the target track's tab
+        let track_idx = match self.active_track_ids.iter().position(|id| id == &target_track_id) {
+            Some(idx) => idx,
+            None => return false,
+        };
+        self.close_detail_fully();
+        self.view = View::Track(track_idx);
+
+        // Expand parent chain: for "EFF-014.2.1", expand "EFF-014" and "EFF-014.2"
+        self.expand_parent_chain(&target_track_id, task_id);
+
+        // Build flat items and find the target task
+        let flat_items = self.build_flat_items(&target_track_id);
+        let track = match Self::find_track_in_project(&self.project, &target_track_id) {
+            Some(t) => t,
+            None => return false,
+        };
+        for (i, item) in flat_items.iter().enumerate() {
+            if let FlatItem::Task { section, path, .. } = item {
+                if let Some(task) = resolve_task_from_flat(track, *section, path) {
+                    if task.id.as_deref() == Some(task_id) {
+                        let state = self.get_track_state(&target_track_id);
+                        state.cursor = i;
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Expand the parent chain for a task ID so it becomes visible in the flat list.
+    /// For "EFF-014.2.1", expands "EFF-014" and "EFF-014.2".
+    fn expand_parent_chain(&mut self, track_id: &str, task_id: &str) {
+        // Walk up the ID hierarchy: "A.B.C" → expand "A" then "A.B"
+        let parts: Vec<&str> = task_id.split('.').collect();
+        if parts.len() <= 1 {
+            return; // top-level task, nothing to expand
+        }
+
+        // Collect ancestor IDs that exist in the track
+        let mut ancestors_to_expand = Vec::new();
+        if let Some(track) = Self::find_track_in_project(&self.project, track_id) {
+            for i in 1..parts.len() {
+                let ancestor_id = parts[..i].join(".");
+                if crate::ops::task_ops::find_task_in_track(track, &ancestor_id).is_some() {
+                    ancestors_to_expand.push(ancestor_id);
+                }
+            }
+        }
+
+        // Now expand them (separate borrow)
+        let state = self.get_track_state(track_id);
+        for ancestor_id in ancestors_to_expand {
+            state.expanded.insert(ancestor_id);
+        }
     }
 
     /// Get the ID prefix for a track (e.g., "EFF" for "effects")
