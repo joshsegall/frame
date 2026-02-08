@@ -248,11 +248,14 @@ fn build_recent_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
     let left = vec![
         HelpEntry::Header("Navigation".into()),
         HelpEntry::Binding("\u{25B2}\u{25BC}/jk".into(), "Move cursor".into()),
+        HelpEntry::Binding("\u{25B6}/l".into(), "Expand subtasks".into()),
+        HelpEntry::Binding("\u{25C0}/h".into(), "Collapse subtasks".into()),
+        HelpEntry::Binding("Enter".into(), "Toggle expand".into()),
         HelpEntry::Binding("g/G".into(), "Top / bottom".into()),
         HelpEntry::Binding("/".into(), "Search".into()),
         HelpEntry::Blank,
         HelpEntry::Header("Actions".into()),
-        HelpEntry::Binding("Space/Enter".into(), "Reopen as todo".into()),
+        HelpEntry::Binding("Space".into(), "Reopen as todo".into()),
     ];
 
     let right = vec![

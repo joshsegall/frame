@@ -352,6 +352,47 @@ pub fn move_task_to_track(
 }
 
 // ---------------------------------------------------------------------------
+// Section moves
+// ---------------------------------------------------------------------------
+
+/// Move a top-level task (with its entire subtree) from one section to another.
+/// Returns the original index in the source section, or None if the task is not
+/// found as a top-level task in the source section (subtasks are not moved independently).
+pub fn move_task_between_sections(
+    track: &mut Track,
+    task_id: &str,
+    from: SectionKind,
+    to: SectionKind,
+) -> Option<usize> {
+    // Remove from source section
+    let task = {
+        let source = track.section_tasks_mut(from)?;
+        let idx = source
+            .iter()
+            .position(|t| t.id.as_deref() == Some(task_id))?;
+        let task = source.remove(idx);
+        // Store idx for caller before we drop the borrow
+        (idx, task)
+    };
+    let (source_index, task) = task;
+
+    // Insert at top of destination section
+    if let Some(dest) = track.section_tasks_mut(to) {
+        dest.insert(0, task);
+    }
+
+    Some(source_index)
+}
+
+/// Check if a task ID is a top-level task in the given section.
+pub fn is_top_level_in_section(track: &Track, task_id: &str, section: SectionKind) -> bool {
+    track
+        .section_tasks(section)
+        .iter()
+        .any(|t| t.id.as_deref() == Some(task_id))
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -828,5 +869,68 @@ mod tests {
         move_task(&mut track, "T-001", InsertPosition::Bottom).unwrap();
         let backlog = track.backlog();
         assert_eq!(backlog.last().unwrap().id.as_deref(), Some("T-001"));
+    }
+
+    // --- Section moves ---
+
+    #[test]
+    fn test_move_task_between_sections_backlog_to_done() {
+        let mut track = sample_track();
+        let backlog_count = track.backlog().len();
+        let done_count = track.done().len();
+
+        let idx = move_task_between_sections(
+            &mut track,
+            "T-001",
+            SectionKind::Backlog,
+            SectionKind::Done,
+        );
+        assert_eq!(idx, Some(0)); // was first in backlog
+        assert_eq!(track.backlog().len(), backlog_count - 1);
+        assert_eq!(track.done().len(), done_count + 1);
+        // Should be at top of Done section
+        assert_eq!(track.done()[0].id.as_deref(), Some("T-001"));
+    }
+
+    #[test]
+    fn test_move_task_between_sections_with_subtasks() {
+        let mut track = sample_track();
+        // T-003 has 2 subtasks
+        let sub_count = track.backlog()[2].subtasks.len();
+        assert_eq!(sub_count, 2);
+
+        let idx = move_task_between_sections(
+            &mut track,
+            "T-003",
+            SectionKind::Backlog,
+            SectionKind::Done,
+        );
+        assert_eq!(idx, Some(2)); // was third in backlog
+        // Subtasks should travel with parent
+        let done_task = &track.done()[0];
+        assert_eq!(done_task.id.as_deref(), Some("T-003"));
+        assert_eq!(done_task.subtasks.len(), 2);
+    }
+
+    #[test]
+    fn test_move_task_between_sections_subtask_returns_none() {
+        let mut track = sample_track();
+        // T-003.1 is a subtask — should not be movable independently
+        let result = move_task_between_sections(
+            &mut track,
+            "T-003.1",
+            SectionKind::Backlog,
+            SectionKind::Done,
+        );
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_is_top_level_in_section() {
+        let track = sample_track();
+        assert!(is_top_level_in_section(&track, "T-001", SectionKind::Backlog));
+        assert!(!is_top_level_in_section(&track, "T-003.1", SectionKind::Backlog));
+        assert!(!is_top_level_in_section(&track, "T-001", SectionKind::Done));
+        assert!(is_top_level_in_section(&track, "T-000", SectionKind::Done));
     }
 }

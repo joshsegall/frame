@@ -4,43 +4,17 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::model::{Metadata, SectionKind};
-use crate::tui::app::App;
+use crate::model::task::{Task, TaskState};
+use crate::tui::app::{App, PendingMoveKind};
+use crate::tui::input::build_recent_entries;
 
 use super::push_highlighted_spans;
 
-/// Render the recent completed tasks view
+/// Render the recent completed tasks view with tree structure
 pub fn render_recent_view(frame: &mut Frame, app: &mut App, area: Rect) {
-    // Collect all done tasks across active tracks, with their resolved dates
-    let mut done_tasks: Vec<RecentTask> = Vec::new();
+    let entries = build_recent_entries(app);
 
-    for (track_id, track) in &app.project.tracks {
-        let track_name = app.track_name(track_id);
-        for task in track.section_tasks(SectionKind::Done) {
-            let resolved = task
-                .metadata
-                .iter()
-                .find_map(|m| {
-                    if let Metadata::Resolved(d) = m {
-                        Some(d.clone())
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_default();
-            done_tasks.push(RecentTask {
-                id: task.id.clone().unwrap_or_default(),
-                title: task.title.clone(),
-                resolved,
-                track_name: track_name.to_string(),
-            });
-        }
-    }
-
-    // Sort by resolved date, most recent first
-    done_tasks.sort_by(|a, b| b.resolved.cmp(&a.resolved));
-
-    if done_tasks.is_empty() {
+    if entries.is_empty() {
         let empty = Paragraph::new(" No completed tasks")
             .style(Style::default().fg(app.theme.dim).bg(app.theme.background));
         frame.render_widget(empty, area);
@@ -48,7 +22,7 @@ pub fn render_recent_view(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     // Clamp cursor
-    let task_count = done_tasks.len();
+    let task_count = entries.len();
     let cursor = app.recent_cursor.min(task_count.saturating_sub(1));
     app.recent_cursor = cursor;
     let visible_height = area.height as usize;
@@ -58,10 +32,10 @@ pub fn render_recent_view(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut current_date = String::new();
     let mut cursor_line: Option<usize> = None;
 
-    for (flat_idx, task) in done_tasks.iter().enumerate() {
+    for (flat_idx, entry) in entries.iter().enumerate() {
         // Date header (group by date)
-        if task.resolved != current_date && !task.resolved.is_empty() {
-            current_date.clone_from(&task.resolved);
+        if entry.resolved != current_date && !entry.resolved.is_empty() {
+            current_date.clone_from(&entry.resolved);
             if !lines.is_empty() {
                 lines.push(Line::from(""));
             }
@@ -84,6 +58,19 @@ pub fn render_recent_view(frame: &mut Frame, app: &mut App, area: Rect) {
             app.theme.background
         };
 
+        // Check if this task has a pending ToBacklog move (show as reopened)
+        let has_pending_reopen = app
+            .pending_moves
+            .iter()
+            .any(|pm| {
+                pm.kind == PendingMoveKind::ToBacklog
+                    && pm.track_id == entry.track_id
+                    && pm.task_id == entry.id
+            });
+
+        let has_subtasks = !entry.task.subtasks.is_empty();
+        let is_expanded = has_subtasks && app.recent_expanded.contains(&entry.id);
+
         let mut spans: Vec<Span> = Vec::new();
 
         // Column 0 reservation
@@ -101,15 +88,36 @@ pub fn render_recent_view(frame: &mut Frame, app: &mut App, area: Rect) {
             ));
         }
 
-        // Check mark + ID + Title
-        spans.push(Span::styled(
-            "\u{2713} ",
-            Style::default().fg(app.theme.text).bg(bg),
-        ));
-
-        if !task.id.is_empty() {
+        // Expand/collapse indicator or check mark
+        if has_subtasks {
+            let indicator = if is_expanded { "\u{25BE} " } else { "\u{25B8} " };
             spans.push(Span::styled(
-                format!("{} ", task.id),
+                indicator,
+                Style::default().fg(app.theme.dim).bg(bg),
+            ));
+        } else {
+            spans.push(Span::styled(
+                "  ",
+                Style::default().bg(bg),
+            ));
+        }
+
+        // State bracket for the task
+        if has_pending_reopen {
+            spans.push(Span::styled(
+                "[ ] ",
+                Style::default().fg(app.theme.state_color(TaskState::Todo)).bg(bg),
+            ));
+        } else {
+            spans.push(Span::styled(
+                "[x] ",
+                Style::default().fg(app.theme.state_color(TaskState::Done)).bg(bg),
+            ));
+        }
+
+        if !entry.id.is_empty() {
+            spans.push(Span::styled(
+                format!("{} ", entry.id),
                 Style::default().fg(app.theme.text).bg(bg),
             ));
         }
@@ -125,9 +133,9 @@ pub fn render_recent_view(frame: &mut Frame, app: &mut App, area: Rect) {
             .add_modifier(Modifier::BOLD);
         // Truncate title at available width
         let prefix_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-        let track_suffix_width = task.track_name.len() + 2; // "  trackname"
+        let track_suffix_width = entry.track_name.len() + 2;
         let available = (area.width as usize).saturating_sub(prefix_width + track_suffix_width + 1);
-        let display_title = super::truncate_with_ellipsis(&task.title, available);
+        let display_title = super::truncate_with_ellipsis(&entry.title, available);
         push_highlighted_spans(
             &mut spans,
             &display_title,
@@ -138,7 +146,7 @@ pub fn render_recent_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
         // Track origin
         spans.push(Span::styled(
-            format!("  {}", task.track_name),
+            format!("  {}", entry.track_name),
             Style::default().fg(app.theme.text).bg(bg),
         ));
 
@@ -155,6 +163,11 @@ pub fn render_recent_view(frame: &mut Frame, app: &mut App, area: Rect) {
         }
 
         lines.push(Line::from(spans));
+
+        // Render children if expanded
+        if is_expanded {
+            render_subtask_tree(&entry.task.subtasks, &mut lines, app, area, bg, search_re.as_ref(), &[], is_cursor);
+        }
     }
 
     // Auto-adjust scroll to keep cursor visible
@@ -179,9 +192,99 @@ pub fn render_recent_view(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-struct RecentTask {
-    id: String,
-    title: String,
-    resolved: String,
-    track_name: String,
+/// Render subtask tree lines recursively
+fn render_subtask_tree<'a>(
+    tasks: &[Task],
+    lines: &mut Vec<Line<'a>>,
+    app: &App,
+    area: Rect,
+    _parent_bg: ratatui::style::Color,
+    search_re: Option<&regex::Regex>,
+    ancestor_last: &[bool],
+    _parent_is_cursor: bool,
+) {
+    let bg = app.theme.background;
+    let count = tasks.len();
+
+    for (i, task) in tasks.iter().enumerate() {
+        let is_last = i == count - 1;
+        let mut spans: Vec<Span> = Vec::new();
+
+        // Leading space
+        spans.push(Span::styled(" ", Style::default().bg(bg)));
+        // Extra indentation for expand/collapse column
+        spans.push(Span::styled("  ", Style::default().bg(bg)));
+
+        // Tree lines from ancestors
+        for &ancestor_is_last in ancestor_last {
+            let connector = if ancestor_is_last { "   " } else { "\u{2502}  " };
+            spans.push(Span::styled(
+                connector,
+                Style::default().fg(app.theme.dim).bg(bg),
+            ));
+        }
+
+        // Current branch connector
+        let branch = if is_last { "\u{2514}\u{2500} " } else { "\u{251C}\u{2500} " };
+        spans.push(Span::styled(
+            branch,
+            Style::default().fg(app.theme.dim).bg(bg),
+        ));
+
+        // State bracket showing actual state
+        let state_str = match task.state {
+            TaskState::Todo => "[ ] ",
+            TaskState::Active => "[>] ",
+            TaskState::Blocked => "[-] ",
+            TaskState::Done => "[x] ",
+            TaskState::Parked => "[~] ",
+        };
+        spans.push(Span::styled(
+            state_str,
+            Style::default().fg(app.theme.state_color(task.state)).bg(bg),
+        ));
+
+        // ID
+        if let Some(ref id) = task.id {
+            spans.push(Span::styled(
+                format!("{} ", id),
+                Style::default().fg(app.theme.dim).bg(bg),
+            ));
+        }
+
+        // Title
+        let title_style = Style::default().fg(app.theme.dim).bg(bg);
+        let hl_style = Style::default()
+            .fg(app.theme.search_match_fg)
+            .bg(app.theme.search_match_bg)
+            .add_modifier(Modifier::BOLD);
+        let prefix_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let available = (area.width as usize).saturating_sub(prefix_width + 1);
+        let display_title = super::truncate_with_ellipsis(&task.title, available);
+        push_highlighted_spans(
+            &mut spans,
+            &display_title,
+            title_style,
+            hl_style,
+            search_re,
+        );
+
+        lines.push(Line::from(spans));
+
+        // Recurse into children (always shown when parent is expanded)
+        if !task.subtasks.is_empty() {
+            let mut new_ancestor_last = ancestor_last.to_vec();
+            new_ancestor_last.push(is_last);
+            render_subtask_tree(
+                &task.subtasks,
+                lines,
+                app,
+                area,
+                bg,
+                search_re,
+                &new_ancestor_last,
+                false,
+            );
+        }
+    }
 }

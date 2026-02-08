@@ -8,7 +8,7 @@ use crate::model::SectionKind;
 use crate::ops::search::{search_inbox, search_tasks};
 use crate::ops::task_ops::{self, InsertPosition};
 
-use super::app::{App, AutocompleteKind, AutocompleteState, DetailRegion, DetailState, EditHistory, EditTarget, FlatItem, Mode, MoveState, View, resolve_task_from_flat};
+use super::app::{App, AutocompleteKind, AutocompleteState, DetailRegion, DetailState, EditHistory, EditTarget, FlatItem, Mode, MoveState, PendingMove, PendingMoveKind, View, resolve_task_from_flat};
 use super::undo::{Operation, UndoNavTarget};
 
 // ---------------------------------------------------------------------------
@@ -375,23 +375,31 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             jump_to_bottom(app);
         }
 
-        // Enter: open detail view (track view), triage (inbox), reopen (recent), or edit region (detail view)
+        // Enter: open detail view (track view), triage (inbox), expand/collapse (recent), or edit region (detail view)
         (KeyModifiers::NONE, KeyCode::Enter) => {
             if matches!(app.view, View::Inbox) {
                 inbox_begin_triage(app);
             } else if matches!(app.view, View::Recent) {
-                reopen_recent_task(app);
+                toggle_recent_expand(app);
             } else {
                 handle_enter(app);
             }
         }
 
-        // Expand/collapse (track view only)
+        // Expand/collapse (track view) or recent view
         (KeyModifiers::NONE, KeyCode::Right | KeyCode::Char('l')) => {
-            expand_or_enter(app);
+            if matches!(app.view, View::Recent) {
+                expand_recent(app);
+            } else {
+                expand_or_enter(app);
+            }
         }
         (KeyModifiers::NONE, KeyCode::Left | KeyCode::Char('h')) => {
-            collapse_or_parent(app);
+            if matches!(app.view, View::Recent) {
+                collapse_recent(app);
+            } else {
+                collapse_or_parent(app);
+            }
         }
 
         // Task state changes (track view) or reopen (recent view)
@@ -619,6 +627,27 @@ fn handle_search(app: &mut App, key: KeyEvent) {
 // ---------------------------------------------------------------------------
 
 fn perform_undo(app: &mut App) {
+    // If the top of the undo stack is a StateChange to Done and there's a matching
+    // pending move, cancel the pending move so undo reverts both in one press.
+    if let Some(op) = app.undo_stack.peek_last_undo() {
+        match op {
+            Operation::StateChange { track_id, task_id, new_state, .. } => {
+                if *new_state == crate::model::task::TaskState::Done {
+                    let tid = track_id.clone();
+                    let taskid = task_id.clone();
+                    app.cancel_pending_move(&tid, &taskid);
+                }
+            }
+            Operation::Reopen { track_id, task_id, .. } => {
+                // Cancel any pending ToBacklog move so the undo doesn't conflict
+                let tid = track_id.clone();
+                let taskid = task_id.clone();
+                app.cancel_pending_move(&tid, &taskid);
+            }
+            _ => {}
+        }
+    }
+
     let inbox = app.project.inbox.as_mut();
     if let Some(nav) = app.undo_stack.undo(&mut app.project.tracks, inbox) {
         apply_nav_side_effects(app, &nav, true);
@@ -686,20 +715,20 @@ fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo: bool) {
             let _ = app.save_inbox();
         }
         UndoNavTarget::Recent { .. } => {
-            // Reopen undo/redo: save the affected track
-            let reopen_track_id = {
+            // Reopen or SectionMove undo/redo: save the affected track
+            let affected_track_id = {
                 let op = if is_undo {
                     app.undo_stack.peek_last_redo()
                 } else {
                     app.undo_stack.peek_last_undo()
                 };
-                if let Some(Operation::Reopen { track_id, .. }) = op {
-                    Some(track_id.clone())
-                } else {
-                    None
+                match op {
+                    Some(Operation::Reopen { track_id, .. }) => Some(track_id.clone()),
+                    Some(Operation::SectionMove { track_id, .. }) => Some(track_id.clone()),
+                    _ => None,
                 }
             };
-            if let Some(tid) = reopen_track_id {
+            if let Some(tid) = affected_track_id {
                 let _ = app.save_track(&tid);
             }
         }
@@ -878,6 +907,11 @@ fn task_state_action(app: &mut App, action: StateAction) {
 
     // Only push undo if state actually changed
     if old_state != new_state {
+        // If transitioning away from Done, cancel any pending ToDone move
+        if old_state == crate::model::task::TaskState::Done {
+            app.cancel_pending_move(&track_id, &task_id);
+        }
+
         app.undo_stack.push(Operation::StateChange {
             track_id: track_id.clone(),
             task_id: task_id.clone(),
@@ -886,6 +920,23 @@ fn task_state_action(app: &mut App, action: StateAction) {
             old_resolved,
             new_resolved,
         });
+
+        // If task is now Done and is a top-level Backlog task, schedule pending move
+        if new_state == crate::model::task::TaskState::Done {
+            let is_top_level_backlog = task_ops::is_top_level_in_section(
+                App::find_track_in_project(&app.project, &track_id).unwrap(),
+                &task_id,
+                SectionKind::Backlog,
+            );
+            if is_top_level_backlog {
+                app.pending_moves.push(PendingMove {
+                    kind: PendingMoveKind::ToDone,
+                    track_id: track_id.clone(),
+                    task_id: task_id.clone(),
+                    deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+                });
+            }
+        }
     }
 
     let _ = app.save_track(&track_id);
@@ -2625,6 +2676,88 @@ fn count_recent_tasks(app: &App) -> usize {
         .iter()
         .map(|(_, track)| track.section_tasks(crate::model::SectionKind::Done).len())
         .sum()
+}
+
+/// An entry in the recent view (top-level done task with subtask tree)
+pub struct RecentEntry {
+    pub track_id: String,
+    pub id: String,
+    pub title: String,
+    pub resolved: String,
+    pub track_name: String,
+    pub task: crate::model::task::Task,
+    /// Whether this entry is from an archive file (not reopenable)
+    pub is_archived: bool,
+}
+
+/// Build the sorted list of recent (done) entries from all tracks' Done sections + archive files.
+pub fn build_recent_entries(app: &App) -> Vec<RecentEntry> {
+    let mut entries: Vec<RecentEntry> = Vec::new();
+
+    for (track_id, track) in &app.project.tracks {
+        let track_name = app.track_name(track_id).to_string();
+        for task in track.section_tasks(SectionKind::Done) {
+            let resolved = task
+                .metadata
+                .iter()
+                .find_map(|m| {
+                    if let crate::model::task::Metadata::Resolved(d) = m {
+                        Some(d.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
+            entries.push(RecentEntry {
+                track_id: track_id.clone(),
+                id: task.id.clone().unwrap_or_default(),
+                title: task.title.clone(),
+                resolved,
+                track_name: track_name.clone(),
+                task: task.clone(),
+                is_archived: false,
+            });
+        }
+    }
+
+    // Load archived tasks from frame/archive/{track_id}.md files
+    let archive_dir = app.project.frame_dir.join("archive");
+    if archive_dir.is_dir() {
+        for tc in &app.project.config.tracks {
+            let archive_path = archive_dir.join(format!("{}.md", tc.id));
+            if let Ok(text) = std::fs::read_to_string(&archive_path) {
+                let lines: Vec<String> = text.lines().map(String::from).collect();
+                let (tasks, _) = crate::parse::parse_tasks(&lines, 0, 0, 0);
+                let track_name = app.track_name(&tc.id).to_string();
+                for task in tasks {
+                    let resolved = task
+                        .metadata
+                        .iter()
+                        .find_map(|m| {
+                            if let crate::model::task::Metadata::Resolved(d) = m {
+                                Some(d.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or_default();
+                    entries.push(RecentEntry {
+                        track_id: tc.id.clone(),
+                        id: task.id.clone().unwrap_or_default(),
+                        title: task.title.clone(),
+                        resolved,
+                        track_name: track_name.clone(),
+                        task,
+                        is_archived: true,
+                    });
+                }
+            }
+        }
+    }
+
+    // Sort by resolved date, most recent first
+    entries.sort_by(|a, b| b.resolved.cmp(&a.resolved));
+    entries
 }
 
 // ---------------------------------------------------------------------------
@@ -4409,53 +4542,72 @@ fn confirm_inbox_delete(app: &mut App, index: usize) {
 /// Reopen a done task from the recent view (set state back to todo).
 fn reopen_recent_task(app: &mut App) {
     // Rebuild the sorted done-task list to find the task at current cursor
-    let mut done_tasks: Vec<(String, String, String)> = Vec::new(); // (track_id, task_id, resolved)
-
-    for (track_id, track) in &app.project.tracks {
-        for task in track.section_tasks(SectionKind::Done) {
-            let resolved = task
-                .metadata
-                .iter()
-                .find_map(|m| {
-                    if let crate::model::task::Metadata::Resolved(d) = m {
-                        Some(d.clone())
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_default();
-            if let Some(ref id) = task.id {
-                done_tasks.push((track_id.clone(), id.clone(), resolved));
-            }
-        }
-    }
-
-    // Sort by resolved date, most recent first (matching render order)
-    done_tasks.sort_by(|a, b| b.2.cmp(&a.2));
+    let entries = build_recent_entries(app);
 
     let cursor = app.recent_cursor;
-    let (track_id, task_id) = match done_tasks.get(cursor) {
-        Some((tid, taskid, _)) => (tid.clone(), taskid.clone()),
+    let (track_id, task_id) = match entries.get(cursor) {
+        Some(entry) => (entry.track_id.clone(), entry.id.clone()),
         None => return,
     };
 
-    // Move task from Done section to Backlog
+    if task_id.is_empty() {
+        return;
+    }
+
+    // Archived tasks cannot be reopened
+    if entries.get(cursor).is_some_and(|e| e.is_archived) {
+        app.status_message = Some("Archived tasks cannot be reopened".to_string());
+        return;
+    }
+
+    // Check if this task already has a pending ToBacklog move (re-press = cancel reopen)
+    if let Some(_pm) = app.cancel_pending_move(&track_id, &task_id) {
+        // Re-close: restore state to Done, restore resolved date
+        let track = match app.find_track_mut(&track_id) {
+            Some(t) => t,
+            None => return,
+        };
+        let task = match task_ops::find_task_mut_in_track(track, &task_id) {
+            Some(t) => t,
+            None => return,
+        };
+
+        task.state = crate::model::task::TaskState::Done;
+        // Resolved date was never removed (kept during grace period), just restore state
+        task.mark_dirty();
+
+        // Pop the Reopen from undo stack (move to redo)
+        // We do this by performing an undo, but we need to be careful—
+        // instead, just pop the top entry if it's our Reopen
+        let inbox = app.project.inbox.as_mut();
+        let _ = app.undo_stack.undo(&mut app.project.tracks, inbox);
+
+        let _ = app.save_track(&track_id);
+        app.status_message = Some("Re-closed".to_string());
+        return;
+    }
+
+    // Normal reopen: change state in-place in Done section (don't move yet)
     let track = match app.find_track_mut(&track_id) {
         Some(t) => t,
         None => return,
     };
 
-    // Remove from Done section
-    let (done_index, mut task) = {
-        let done = match track.section_tasks_mut(SectionKind::Done) {
-            Some(d) => d,
-            None => return,
+    // Find the done_index for undo before mutating
+    let done_index = {
+        let done = match track.section_tasks(SectionKind::Done) {
+            d if d.is_empty() => return,
+            d => d,
         };
-        let idx = match done.iter().position(|t| t.id.as_deref() == Some(task_id.as_str())) {
+        match done.iter().position(|t| t.id.as_deref() == Some(task_id.as_str())) {
             Some(i) => i,
             None => return,
-        };
-        (idx, done.remove(idx))
+        }
+    };
+
+    let task = match task_ops::find_task_mut_in_track(track, &task_id) {
+        Some(t) => t,
+        None => return,
     };
 
     // Capture old state for undo
@@ -4471,14 +4623,12 @@ fn reopen_recent_task(app: &mut App) {
             }
         });
 
-    // Set state to Todo and insert at top of Backlog
+    // Set state to Todo in-place in Done section.
+    // Keep resolved date so the task maintains its sort position in Recent view
+    // during the grace period. The resolved date is removed when the actual move
+    // to Backlog happens (in execute_pending_move).
     task.state = crate::model::task::TaskState::Todo;
-    task.metadata.retain(|m| m.key() != "resolved");
     task.mark_dirty();
-
-    if let Some(backlog) = track.section_tasks_mut(SectionKind::Backlog) {
-        backlog.insert(0, task);
-    }
 
     app.undo_stack.push(Operation::Reopen {
         track_id: track_id.clone(),
@@ -4488,16 +4638,51 @@ fn reopen_recent_task(app: &mut App) {
         done_index,
     });
 
+    // Schedule pending move to Backlog (grace period)
+    app.pending_moves.push(PendingMove {
+        kind: PendingMoveKind::ToBacklog,
+        track_id: track_id.clone(),
+        task_id: task_id.clone(),
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+    });
+
     let _ = app.save_track(&track_id);
 
-    // Clamp recent cursor
-    let count = count_recent_tasks(app);
-    if count == 0 {
-        app.recent_cursor = 0;
-    } else {
-        app.recent_cursor = app.recent_cursor.min(count - 1);
-    }
-
     let track_name = app.track_name(&track_id).to_string();
-    app.status_message = Some(format!("Reopened in {}", track_name));
+    app.status_message = Some(format!("Reopening in {}...", track_name));
+}
+
+/// Toggle expand/collapse of a task's subtree in the Recent view
+fn toggle_recent_expand(app: &mut App) {
+    let entries = build_recent_entries(app);
+    let cursor = app.recent_cursor;
+    if let Some(entry) = entries.get(cursor) {
+        if !entry.task.subtasks.is_empty() {
+            if app.recent_expanded.contains(&entry.id) {
+                app.recent_expanded.remove(&entry.id);
+            } else {
+                app.recent_expanded.insert(entry.id.clone());
+            }
+        }
+    }
+}
+
+/// Expand a task's subtree in the Recent view
+fn expand_recent(app: &mut App) {
+    let entries = build_recent_entries(app);
+    let cursor = app.recent_cursor;
+    if let Some(entry) = entries.get(cursor) {
+        if !entry.task.subtasks.is_empty() {
+            app.recent_expanded.insert(entry.id.clone());
+        }
+    }
+}
+
+/// Collapse a task's subtree in the Recent view
+fn collapse_recent(app: &mut App) {
+    let entries = build_recent_entries(app);
+    let cursor = app.recent_cursor;
+    if let Some(entry) = entries.get(cursor) {
+        app.recent_expanded.remove(&entry.id);
+    }
 }

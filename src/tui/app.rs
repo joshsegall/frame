@@ -25,7 +25,7 @@ use crate::parse::{parse_inbox, parse_track};
 use super::input;
 use super::render;
 use super::theme::Theme;
-use super::undo::UndoStack;
+use super::undo::{Operation, UndoStack};
 
 /// Which view is currently displayed
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,6 +288,24 @@ pub enum ConfirmAction {
     DeleteInboxItem { index: usize },
 }
 
+/// The kind of pending section move (grace period)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingMoveKind {
+    /// Task marked done in Backlog → will move to Done section
+    ToDone,
+    /// Task reopened from Done → will move to Backlog
+    ToBacklog,
+}
+
+/// A pending section move with a grace period
+#[derive(Debug, Clone)]
+pub struct PendingMove {
+    pub kind: PendingMoveKind,
+    pub track_id: String,
+    pub task_id: String,
+    pub deadline: Instant,
+}
+
 /// Current interaction mode
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
@@ -480,6 +498,10 @@ pub struct App {
     pub flash_track_id: Option<String>,
     /// When the flash started (for auto-clearing after timeout)
     pub flash_started: Option<Instant>,
+    /// Pending section moves (grace period before moving tasks between sections)
+    pub pending_moves: Vec<PendingMove>,
+    /// Expanded task IDs in the Recent view (for tree structure)
+    pub recent_expanded: HashSet<String>,
 }
 
 impl App {
@@ -572,6 +594,8 @@ impl App {
             flash_task_id: None,
             flash_track_id: None,
             flash_started: None,
+            pending_moves: Vec::new(),
+            recent_expanded: HashSet::new(),
         }
     }
 
@@ -675,6 +699,101 @@ impl App {
                 self.flash_started = None;
             }
         }
+    }
+
+    /// Check if a task has a pending move
+    pub fn has_pending_move(&self, track_id: &str, task_id: &str) -> bool {
+        self.pending_moves
+            .iter()
+            .any(|pm| pm.track_id == track_id && pm.task_id == task_id)
+    }
+
+    /// Cancel a pending move for a task. Returns the cancelled move if found.
+    pub fn cancel_pending_move(&mut self, track_id: &str, task_id: &str) -> Option<PendingMove> {
+        let idx = self
+            .pending_moves
+            .iter()
+            .position(|pm| pm.track_id == track_id && pm.task_id == task_id)?;
+        Some(self.pending_moves.remove(idx))
+    }
+
+    /// Execute a single pending move. Returns the track_id that was modified.
+    fn execute_pending_move(&mut self, pm: &PendingMove) -> Option<String> {
+        use crate::ops::task_ops::move_task_between_sections;
+        let track = self.find_track_mut(&pm.track_id)?;
+        match pm.kind {
+            PendingMoveKind::ToDone => {
+                let source_index = move_task_between_sections(
+                    track,
+                    &pm.task_id,
+                    SectionKind::Backlog,
+                    SectionKind::Done,
+                )?;
+                // Push SectionMove undo entry
+                self.undo_stack.push(Operation::SectionMove {
+                    track_id: pm.track_id.clone(),
+                    task_id: pm.task_id.clone(),
+                    from_section: SectionKind::Backlog,
+                    to_section: SectionKind::Done,
+                    from_index: source_index,
+                });
+                Some(pm.track_id.clone())
+            }
+            PendingMoveKind::ToBacklog => {
+                // For reopen flush: move from Done to Backlog top
+                // No extra undo entry — the existing Reopen operation handles full reversal
+                move_task_between_sections(
+                    track,
+                    &pm.task_id,
+                    SectionKind::Done,
+                    SectionKind::Backlog,
+                )?;
+                // Now remove the resolved date (kept during grace period for sort stability)
+                let track = self.find_track_mut(&pm.track_id)?;
+                let task =
+                    crate::ops::task_ops::find_task_mut_in_track(track, &pm.task_id)?;
+                task.metadata.retain(|m| m.key() != "resolved");
+                task.mark_dirty();
+                Some(pm.track_id.clone())
+            }
+        }
+    }
+
+    /// Flush all pending moves whose deadline has expired. Returns modified track IDs.
+    pub fn flush_expired_pending_moves(&mut self) -> Vec<String> {
+        let now = Instant::now();
+        let expired: Vec<PendingMove> = self
+            .pending_moves
+            .iter()
+            .filter(|pm| now >= pm.deadline)
+            .cloned()
+            .collect();
+        self.pending_moves
+            .retain(|pm| now < pm.deadline);
+
+        let mut modified = Vec::new();
+        for pm in &expired {
+            if let Some(tid) = self.execute_pending_move(pm) {
+                if !modified.contains(&tid) {
+                    modified.push(tid);
+                }
+            }
+        }
+        modified
+    }
+
+    /// Flush all pending moves immediately (used on view change, quit). Returns modified track IDs.
+    pub fn flush_all_pending_moves(&mut self) -> Vec<String> {
+        let all: Vec<PendingMove> = std::mem::take(&mut self.pending_moves);
+        let mut modified = Vec::new();
+        for pm in &all {
+            if let Some(tid) = self.execute_pending_move(pm) {
+                if !modified.contains(&tid) {
+                    modified.push(tid);
+                }
+            }
+        }
+        modified
     }
 
     /// Collect all unique tags from config tag_colors + all tasks in the project
@@ -1483,6 +1602,15 @@ fn run_event_loop(
     let mut save_counter = 0u32;
     loop {
         app.clear_expired_flash();
+
+        // Flush expired pending moves (only in Navigate mode, like pending_reload)
+        if app.mode == Mode::Navigate && !app.pending_moves.is_empty() {
+            let modified = app.flush_expired_pending_moves();
+            for tid in &modified {
+                let _ = app.save_track(tid);
+            }
+        }
+
         terminal.draw(|frame| render::render(frame, app))?;
 
         // Poll for file watcher events
@@ -1521,7 +1649,16 @@ fn run_event_loop(
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
+            let old_view = app.view.clone();
             input::handle_key(app, key);
+
+            // Flush all pending moves on view change
+            if app.view != old_view && !app.pending_moves.is_empty() {
+                let modified = app.flush_all_pending_moves();
+                for tid in &modified {
+                    let _ = app.save_track(tid);
+                }
+            }
 
             // Process pending reload when returning to Navigate mode
             if !app.pending_reload_paths.is_empty() && app.mode == Mode::Navigate {
@@ -1538,6 +1675,11 @@ fn run_event_loop(
         }
 
         if app.should_quit {
+            // Flush all pending moves before exit
+            let modified = app.flush_all_pending_moves();
+            for tid in &modified {
+                let _ = app.save_track(tid);
+            }
             break;
         }
     }

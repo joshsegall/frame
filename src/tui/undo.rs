@@ -160,6 +160,33 @@ pub fn nav_target_for_op(op: &Operation, is_undo: bool) -> Option<UndoNavTarget>
                 })
             }
         }
+        Operation::SectionMove {
+            track_id, task_id, from_section: _, to_section, from_index,
+        } => {
+            if is_undo {
+                // Task moved back to original section — navigate to task in track view
+                Some(UndoNavTarget::Task {
+                    track_id: track_id.clone(),
+                    task_id: task_id.clone(),
+                    detail_region: None,
+                    task_removed: false,
+                    position_hint: Some(*from_index),
+                })
+            } else {
+                // Task moved to target section (e.g., Done) — navigate to Recent view
+                if *to_section == SectionKind::Done {
+                    Some(UndoNavTarget::Recent { cursor: None })
+                } else {
+                    Some(UndoNavTarget::Task {
+                        track_id: track_id.clone(),
+                        task_id: task_id.clone(),
+                        detail_region: None,
+                        task_removed: false,
+                        position_hint: None,
+                    })
+                }
+            }
+        }
         Operation::Reopen { track_id, task_id, .. } => {
             if is_undo {
                 // Task was put back in Done section — navigate to Recent view
@@ -269,6 +296,14 @@ pub enum Operation {
         /// The track and task ID it was triaged to
         track_id: String,
         task_id: String,
+    },
+    /// A task was moved between sections (e.g., Backlog → Done after grace period)
+    SectionMove {
+        track_id: String,
+        task_id: String,
+        from_section: SectionKind,
+        to_section: SectionKind,
+        from_index: usize,
     },
     /// A task was reopened from the recent view (moved from Done to Backlog)
     Reopen {
@@ -515,23 +550,62 @@ fn apply_inverse(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
             // Return track_id so caller knows to save
             Some(track_id.clone())
         }
-        Operation::Reopen { track_id, task_id, old_state, old_resolved, done_index } => {
-            // Undo reopen = move task from Backlog back to Done, restore state
+        Operation::SectionMove {
+            track_id, task_id, from_section, to_section, from_index,
+        } => {
+            // Undo section move = move task back from to_section to from_section at from_index
             let track = find_track_mut(tracks, track_id)?;
-            let mut task = {
-                let backlog = track.section_tasks_mut(SectionKind::Backlog)?;
-                let idx = backlog.iter().position(|t| t.id.as_deref() == Some(task_id))?;
-                backlog.remove(idx)
+            let task = {
+                let dest = track.section_tasks_mut(*to_section)?;
+                let idx = dest.iter().position(|t| t.id.as_deref() == Some(task_id))?;
+                dest.remove(idx)
             };
-            task.state = *old_state;
-            task.metadata.retain(|m| m.key() != "resolved");
-            if let Some(date) = old_resolved {
-                task.metadata.push(crate::model::task::Metadata::Resolved(date.clone()));
+            if let Some(source) = track.section_tasks_mut(*from_section) {
+                let idx = (*from_index).min(source.len());
+                source.insert(idx, task);
             }
-            task.mark_dirty();
-            if let Some(done) = track.section_tasks_mut(SectionKind::Done) {
-                let idx = (*done_index).min(done.len());
-                done.insert(idx, task);
+            Some(track_id.clone())
+        }
+        Operation::Reopen { track_id, task_id, old_state, old_resolved, done_index } => {
+            // Undo reopen = restore state to Done. Task may be in Backlog (after flush)
+            // or still in Done section (during grace period).
+            let track = find_track_mut(tracks, track_id)?;
+
+            // Try to find and remove from Backlog (post-flush case)
+            let from_backlog = {
+                if let Some(backlog) = track.section_tasks_mut(SectionKind::Backlog) {
+                    if let Some(idx) = backlog.iter().position(|t| t.id.as_deref() == Some(task_id)) {
+                        Some(backlog.remove(idx))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+
+            if let Some(mut task) = from_backlog {
+                // Task was in Backlog — move back to Done at original index
+                task.state = *old_state;
+                task.metadata.retain(|m| m.key() != "resolved");
+                if let Some(date) = old_resolved {
+                    task.metadata.push(crate::model::task::Metadata::Resolved(date.clone()));
+                }
+                task.mark_dirty();
+                if let Some(done) = track.section_tasks_mut(SectionKind::Done) {
+                    let idx = (*done_index).min(done.len());
+                    done.insert(idx, task);
+                }
+            } else {
+                // Task is still in Done section (grace period, pending move was cancelled)
+                // Just restore the state and resolved date
+                let task = task_ops::find_task_mut_in_track(track, task_id)?;
+                task.state = *old_state;
+                task.metadata.retain(|m| m.key() != "resolved");
+                if let Some(date) = old_resolved {
+                    task.metadata.push(crate::model::task::Metadata::Resolved(date.clone()));
+                }
+                task.mark_dirty();
             }
             Some(track_id.clone())
         }
@@ -711,19 +785,52 @@ fn apply_forward(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
             }
             Some(track_id.clone())
         }
-        Operation::Reopen { track_id, task_id, .. } => {
-            // Redo reopen = move task from Done to Backlog top, set Todo
+        Operation::SectionMove {
+            track_id, task_id, from_section, to_section, ..
+        } => {
+            // Redo section move = move task from from_section to to_section
             let track = find_track_mut(tracks, track_id)?;
-            let mut task = {
-                let done = track.section_tasks_mut(SectionKind::Done)?;
-                let idx = done.iter().position(|t| t.id.as_deref() == Some(task_id))?;
-                done.remove(idx)
+            let task = {
+                let source = track.section_tasks_mut(*from_section)?;
+                let idx = source.iter().position(|t| t.id.as_deref() == Some(task_id))?;
+                source.remove(idx)
             };
-            task.state = TaskState::Todo;
-            task.metadata.retain(|m| m.key() != "resolved");
-            task.mark_dirty();
-            if let Some(backlog) = track.section_tasks_mut(SectionKind::Backlog) {
-                backlog.insert(0, task);
+            if let Some(dest) = track.section_tasks_mut(*to_section) {
+                dest.insert(0, task);
+            }
+            Some(track_id.clone())
+        }
+        Operation::Reopen { track_id, task_id, .. } => {
+            // Redo reopen = set task to Todo (it's in Done section), then move to Backlog
+            let track = find_track_mut(tracks, track_id)?;
+
+            // Try to find in Done section first (normal case)
+            let from_done = {
+                if let Some(done) = track.section_tasks_mut(SectionKind::Done) {
+                    if let Some(idx) = done.iter().position(|t| t.id.as_deref() == Some(task_id)) {
+                        Some(done.remove(idx))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+
+            if let Some(mut task) = from_done {
+                task.state = TaskState::Todo;
+                task.metadata.retain(|m| m.key() != "resolved");
+                task.mark_dirty();
+                if let Some(backlog) = track.section_tasks_mut(SectionKind::Backlog) {
+                    backlog.insert(0, task);
+                }
+            } else {
+                // Task might already be in Backlog (if pending move had been flushed after undo)
+                // Just update its state
+                let task = task_ops::find_task_mut_in_track(track, task_id)?;
+                task.state = TaskState::Todo;
+                task.metadata.retain(|m| m.key() != "resolved");
+                task.mark_dirty();
             }
             Some(track_id.clone())
         }

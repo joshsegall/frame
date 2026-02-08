@@ -953,6 +953,8 @@ fn cmd_inbox_add(args: InboxCmd) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cmd_state(args: StateArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::model::track::SectionKind;
+
     let mut project = load_project_cwd()?;
     let _lock = FileLock::acquire_default(&project.frame_dir)?;
 
@@ -970,6 +972,20 @@ fn cmd_state(args: StateArgs) -> Result<(), Box<dyn std::error::Error>> {
         .ok_or_else(|| format!("task not found: {}", args.id))?;
 
     task_ops::set_state(task, new_state);
+
+    // If setting to Done and task is a top-level Backlog task, move to Done section immediately
+    if new_state == TaskState::Done {
+        let track = find_track_mut(&mut project, &track_id)
+            .ok_or_else(|| format!("track not found: {}", track_id))?;
+        if task_ops::is_top_level_in_section(track, &args.id, SectionKind::Backlog) {
+            task_ops::move_task_between_sections(
+                track,
+                &args.id,
+                SectionKind::Backlog,
+                SectionKind::Done,
+            );
+        }
+    }
 
     save_track(&project, &track_id)?;
     println!("{} → {}", args.id, args.state);

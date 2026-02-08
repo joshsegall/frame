@@ -1032,7 +1032,8 @@ fr import /tmp/effects-tasks.md --track effects --top
 ```
 
 IDs auto-assigned. `added:` dates auto-set. Supports the workflow
-where CC or Claude produces a task breakdown as markdown, then imports.
+where CC (Computer Collaborator or Code Companion) produces a task 
+breakdown as markdown, then imports.
 
 ---
 
