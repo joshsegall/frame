@@ -330,9 +330,8 @@ fn render_task_line<'a>(
             "\u{251C}"
         }; // └ / ├
         spans.push(Span::styled(tree_char, dim_style));
-        spans.push(Span::styled(" ", dim_style));
 
-        // Expand indicator for subtasks with children
+        // Replace the space after tree char with expand indicator when applicable
         if info.has_children {
             let expand_char = if info.is_expanded {
                 "\u{25BC}"
@@ -340,6 +339,8 @@ fn render_task_line<'a>(
                 "\u{25B6}"
             };
             spans.push(Span::styled(expand_char, dim_style));
+        } else {
+            spans.push(Span::styled(" ", dim_style));
         }
     }
 
