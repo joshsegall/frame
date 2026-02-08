@@ -79,8 +79,9 @@ reference — the generated file is self-documenting.
 
 `fr` with no arguments launches the TUI.
 
-Vim-style modal interface. Four modes: **NAVIGATE**, **EDIT**,
-**MOVE**, **SEARCH**. Press `?` for the full key binding reference.
+Vim-style modal interface. Four primary modes: **NAVIGATE**, **EDIT**,
+**MOVE**, **SEARCH**, plus **SELECT** for bulk operations.
+Press `?` for the full key binding reference.
 
 The short version: `↑↓`/`jk` to move, `←→`/`hl` to collapse/expand,
 `1`–`9` for track tabs, `Space` to cycle state, `e` to edit,
