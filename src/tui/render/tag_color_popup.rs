@@ -95,14 +95,7 @@ pub fn render_tag_color_popup(frame: &mut Frame, app: &App, area: Rect) {
                 render_palette_swatches(&mut spans, tcp, row_bg, dim);
             } else {
                 // Color label or (none)
-                render_color_label(
-                    &mut spans,
-                    hex_opt.as_deref(),
-                    app,
-                    tag_name,
-                    row_bg,
-                    dim,
-                );
+                render_color_label(&mut spans, hex_opt.as_deref(), app, tag_name, row_bg, dim);
             }
 
             pad_to_width(&mut spans, inner_w, row_pad);

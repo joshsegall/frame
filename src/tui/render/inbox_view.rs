@@ -179,8 +179,7 @@ pub fn render_inbox_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
         // Body text (dimmed, indented)
         if let Some(body) = &item.body {
-            let body_style =
-                Style::default().fg(app.theme.text).bg(app.theme.background);
+            let body_style = Style::default().fg(app.theme.text).bg(app.theme.background);
             let body_hl_style = Style::default()
                 .fg(app.theme.search_match_fg)
                 .bg(app.theme.search_match_bg)

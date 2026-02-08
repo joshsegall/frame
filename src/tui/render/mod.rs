@@ -5,6 +5,7 @@ pub mod dep_popup;
 pub mod detail_view;
 pub mod help_overlay;
 pub mod inbox_view;
+pub mod prefix_confirm;
 pub mod recent_view;
 pub mod status_row;
 pub mod tab_bar;
@@ -69,6 +70,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // Tag color editor popup overlay
     if app.tag_color_popup.is_some() {
         tag_color_popup::render_tag_color_popup(frame, app, chunks[1]);
+    }
+
+    // Prefix rename confirmation popup
+    if app.prefix_rename.as_ref().is_some_and(|pr| pr.confirming) {
+        prefix_confirm::render_prefix_confirm(frame, app, chunks[1]);
     }
 
     // Help overlay (rendered on top of everything)

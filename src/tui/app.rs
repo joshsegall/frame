@@ -484,6 +484,27 @@ pub struct TagColorPopupState {
     pub picker_cursor: usize,
 }
 
+/// State for the prefix rename flow (edit → confirm → execute)
+#[derive(Debug, Clone)]
+pub struct PrefixRenameState {
+    /// Track being renamed
+    pub track_id: String,
+    /// Track display name (for the confirmation popup)
+    pub track_name: String,
+    /// Current (old) prefix
+    pub old_prefix: String,
+    /// New prefix being entered
+    pub new_prefix: String,
+    /// Whether we're in the confirmation step (true) or still editing (false)
+    pub confirming: bool,
+    /// Blast radius counts (populated when entering confirmation)
+    pub task_id_count: usize,
+    pub dep_ref_count: usize,
+    pub affected_track_count: usize,
+    /// Validation error message (empty when valid)
+    pub validation_error: String,
+}
+
 /// Current interaction mode
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
@@ -552,6 +573,11 @@ pub enum EditTarget {
     BulkDeps,
     /// Jump-to-task prompt (J key)
     JumpTo,
+    /// Editing a track's prefix (P key in Tracks view)
+    ExistingPrefix {
+        track_id: String,
+        original_prefix: String,
+    },
 }
 
 /// State for MOVE mode
@@ -731,6 +757,8 @@ pub struct App {
     pub dep_popup: Option<DepPopupState>,
     /// Tag color editor popup state
     pub tag_color_popup: Option<TagColorPopupState>,
+    /// Prefix rename state (active during prefix rename flow)
+    pub prefix_rename: Option<PrefixRenameState>,
     /// Debug mode: show raw KeyEvent info in status row
     pub key_debug: bool,
     /// Last raw KeyEvent description (for debug display)
@@ -843,6 +871,7 @@ impl App {
             command_palette: None,
             dep_popup: None,
             tag_color_popup: None,
+            prefix_rename: None,
             key_debug: false,
             last_key_event: None,
             kitty_enabled: false,

@@ -296,7 +296,11 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
 
     // In key debug mode, show the raw KeyEvent instead of the normal status row
     let line = if app.key_debug {
-        let kitty_tag = if app.kitty_enabled { "kitty:on" } else { "kitty:off" };
+        let kitty_tag = if app.kitty_enabled {
+            "kitty:on"
+        } else {
+            "kitty:off"
+        };
         if let Some(ref event_str) = app.last_key_event {
             let mut spans = vec![
                 Span::styled(
@@ -318,7 +322,10 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
             if content_width + right_width + 2 < width {
                 let padding = width - content_width - right_width;
                 spans.push(Span::styled(" ".repeat(padding), Style::default().bg(bg)));
-                spans.push(Span::styled(right, Style::default().fg(app.theme.dim).bg(bg)));
+                spans.push(Span::styled(
+                    right,
+                    Style::default().fg(app.theme.dim).bg(bg),
+                ));
             }
             Line::from(spans)
         } else {

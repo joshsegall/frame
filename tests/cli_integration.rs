@@ -998,19 +998,22 @@ fn test_init_with_tracks() {
 
     let out = run_fr_ok(
         tmp.path(),
-        &["init", "--name", "Test Project", "--track", "api", "API Layer"],
+        &[
+            "init",
+            "--name",
+            "Test Project",
+            "--track",
+            "api",
+            "API Layer",
+        ],
     );
     assert!(out.contains("Initialized"));
     assert!(out.contains("Test Project"));
 
     // project.toml exists and is valid TOML
-    let toml_content =
-        fs::read_to_string(tmp.path().join("frame/project.toml")).unwrap();
+    let toml_content = fs::read_to_string(tmp.path().join("frame/project.toml")).unwrap();
     let parsed: toml::Value = toml::from_str(&toml_content).unwrap();
-    assert_eq!(
-        parsed["project"]["name"].as_str().unwrap(),
-        "Test Project"
-    );
+    assert_eq!(parsed["project"]["name"].as_str().unwrap(), "Test Project");
 
     // Contains expected sections from the template
     assert!(toml_content.contains("[clean]"));

@@ -81,6 +81,10 @@ pub fn render_tracks_view(frame: &mut Frame, app: &mut App, area: Rect) {
         (&app.mode, &app.edit_target),
         (Mode::Edit, Some(EditTarget::NewTrackName))
     );
+    let editing_prefix_track_id = match (&app.mode, &app.edit_target) {
+        (Mode::Edit, Some(EditTarget::ExistingPrefix { track_id, .. })) => Some(track_id.clone()),
+        _ => None,
+    };
 
     // Active section
     if !active_tracks.is_empty() || is_new_track_edit {
@@ -113,6 +117,10 @@ pub fn render_tracks_view(frame: &mut Frame, app: &mut App, area: Rect) {
                     area.width,
                     search_re.as_ref(),
                 ));
+            }
+            // Prefix edit row below the track
+            if editing_prefix_track_id.as_deref() == Some(&tc.id) && is_cursor {
+                lines.push(render_prefix_edit_row(app, num_width, area.width));
             }
             flat_idx += 1;
         }
@@ -160,6 +168,9 @@ pub fn render_tracks_view(frame: &mut Frame, app: &mut App, area: Rect) {
                     area.width,
                     search_re.as_ref(),
                 ));
+            }
+            if editing_prefix_track_id.as_deref() == Some(&tc.id) && is_cursor {
+                lines.push(render_prefix_edit_row(app, num_width, area.width));
             }
             flat_idx += 1;
         }
@@ -578,6 +589,97 @@ fn render_new_track_edit_row<'a>(
     } else {
         spans.push(Span::styled(buffer.to_string(), text_style));
         spans.push(Span::styled("\u{258C}", cursor_style));
+    }
+
+    // Pad to full width
+    let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let w = width as usize;
+    if content_width < w {
+        spans.push(Span::styled(
+            " ".repeat(w - content_width),
+            Style::default().bg(bg),
+        ));
+    }
+
+    Line::from(spans)
+}
+
+/// Render the inline prefix edit row below a track (shown when P is pressed)
+fn render_prefix_edit_row<'a>(app: &'a App, num_width: usize, width: u16) -> Line<'a> {
+    let bg = app.theme.selection_bg;
+    let mut spans: Vec<Span> = Vec::new();
+
+    // Indent to align with name column: border(1) + num + "  " + "Prefix: "
+    let indent = 1 + num_width + 2;
+    spans.push(Span::styled(" ".repeat(indent), Style::default().bg(bg)));
+    spans.push(Span::styled(
+        "Prefix: ",
+        Style::default().fg(app.theme.dim).bg(bg),
+    ));
+
+    // Edit buffer with cursor and selection
+    let cursor_pos = app.edit_cursor;
+    let buffer = &app.edit_buffer;
+    let text_style = Style::default()
+        .fg(app.theme.text_bright)
+        .bg(bg)
+        .add_modifier(Modifier::BOLD);
+    let cursor_style = Style::default()
+        .fg(app.theme.background)
+        .bg(app.theme.highlight)
+        .add_modifier(Modifier::BOLD);
+
+    let sel_range = app.edit_selection_range();
+
+    if let Some((sel_start, sel_end)) = sel_range {
+        // Render with selection highlight
+        let selection_style = Style::default()
+            .fg(app.theme.text_bright)
+            .bg(app.theme.highlight);
+        let before_sel = &buffer[..sel_start];
+        let selected = &buffer[sel_start..sel_end];
+        let after_sel = &buffer[sel_end..];
+
+        if !before_sel.is_empty() {
+            spans.push(Span::styled(before_sel.to_string(), text_style));
+        }
+        spans.push(Span::styled(selected.to_string(), selection_style));
+        if !after_sel.is_empty() {
+            spans.push(Span::styled(after_sel.to_string(), text_style));
+        }
+        // Cursor at end
+        if cursor_pos >= buffer.len() {
+            spans.push(Span::styled(
+                "\u{258C}",
+                Style::default().fg(app.theme.highlight).bg(bg),
+            ));
+        }
+    } else if cursor_pos < buffer.len() {
+        let (before, rest) = buffer.split_at(cursor_pos);
+        let mut chars = rest.chars();
+        let cursor_char = chars.next().unwrap_or(' ');
+        let after: String = chars.collect();
+
+        spans.push(Span::styled(before.to_string(), text_style));
+        spans.push(Span::styled(cursor_char.to_string(), cursor_style));
+        spans.push(Span::styled(after, text_style));
+    } else {
+        spans.push(Span::styled(buffer.to_string(), text_style));
+        spans.push(Span::styled(
+            "\u{258C}",
+            Style::default().fg(app.theme.highlight).bg(bg),
+        ));
+    }
+
+    // Validation error (dim red text after the editor)
+    if let Some(ref pr) = app.prefix_rename
+        && !pr.validation_error.is_empty()
+    {
+        spans.push(Span::styled("  ", Style::default().bg(bg)));
+        spans.push(Span::styled(
+            pr.validation_error.clone(),
+            Style::default().fg(app.theme.red).bg(bg),
+        ));
     }
 
     // Pad to full width

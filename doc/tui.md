@@ -162,6 +162,7 @@ With selection active (Select mode):
 | `e` | Edit track name |
 | `s` | Toggle shelve/activate |
 | `X` | Archive or delete track (with confirmation) |
+| `P` | Rename track prefix |
 | `C` | Set cc-focus |
 | `m` | Reorder track (enter move mode) |
 
@@ -369,6 +370,14 @@ Shows upstream (blocked by) and downstream (blocking) dependencies in an expanda
 The popup has two sections: **Blocked by** (tasks this task depends on) and **Blocking** (tasks that depend on this task). When a section has 1-2 entries, they are auto-expanded one level. With 3+ entries, they start collapsed. Empty sections show "(nothing)".
 
 Circular dependencies marked with `↻`. Missing deps shown as `[?]`.
+
+### Prefix Rename (`P` in Tracks View)
+
+3-step flow for renaming a track's ID prefix (e.g., `EFF` to `FX`):
+
+1. **Edit**: Inline editor opens pre-filled with the current prefix, text selected. Type the new prefix (auto-uppercased). Live validation shows errors for empty, non-alphanumeric, or duplicate prefixes. `Enter` to proceed, `Esc` to cancel.
+2. **Confirm**: Popup shows old/new prefix, blast radius (task ID count, dep references across tracks), and a warning that the operation cannot be undone. `Enter` to confirm, `Esc` to go back to editing.
+3. **Execute**: Renames all task IDs and subtask IDs in the track, updates dep references across all other tracks, renames IDs in the archive file, and updates `project.toml`. Inserts an undo sync marker (no undo — use git to revert).
 
 ### Conflict Popup
 

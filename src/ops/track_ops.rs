@@ -531,8 +531,39 @@ pub fn rename_track_prefix(
     Ok(result)
 }
 
+/// Rename task IDs in an archive file on disk. Reads the archive, renames matching
+/// IDs, writes it back. Returns the number of IDs renamed, or 0 if the file doesn't exist.
+pub fn rename_archive_prefix(
+    frame_dir: &Path,
+    track_id: &str,
+    old_prefix: &str,
+    new_prefix: &str,
+) -> Result<usize, TrackError> {
+    let archive_path = frame_dir.join("archive").join(format!("{}.md", track_id));
+    if !archive_path.exists() {
+        return Ok(0);
+    }
+    let content = fs::read_to_string(&archive_path).map_err(ProjectError::IoError)?;
+    let mut archive_track = crate::parse::parse_track(&content);
+    let mut count = 0;
+    for node in &mut archive_track.nodes {
+        if let TrackNode::Section { tasks, .. } = node {
+            count += rename_task_ids(tasks, old_prefix, new_prefix);
+        }
+    }
+    if count > 0 {
+        let serialized = crate::parse::serialize_track(&archive_track);
+        fs::write(&archive_path, serialized).map_err(ProjectError::IoError)?;
+    }
+    Ok(count)
+}
+
 /// Rename task IDs in a list of tasks (recursive). Returns count of tasks renamed.
-fn rename_task_ids(tasks: &mut [crate::model::Task], old_prefix: &str, new_prefix: &str) -> usize {
+pub fn rename_task_ids(
+    tasks: &mut [crate::model::Task],
+    old_prefix: &str,
+    new_prefix: &str,
+) -> usize {
     let mut count = 0;
     for task in tasks.iter_mut() {
         if let Some(ref mut id) = task.id {
@@ -597,6 +628,117 @@ pub fn generate_track_id(name: &str) -> String {
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("-")
+}
+
+/// Impact summary for a prefix rename (read-only, does not modify data)
+#[derive(Debug, Default)]
+pub struct PrefixRenameImpact {
+    /// Number of task/subtask IDs carrying the old prefix in the target track
+    pub task_id_count: usize,
+    /// Number of dep references to old-prefix IDs across other tracks
+    pub dep_ref_count: usize,
+    /// Number of other tracks containing affected dep references
+    pub affected_track_count: usize,
+}
+
+/// Compute the blast radius of renaming a track's prefix without modifying any data.
+/// Scans the target track for task IDs with `old_prefix`, and all other tracks for
+/// dep references pointing to old-prefix IDs. Also counts archived tasks if an
+/// archive file exists.
+pub fn prefix_rename_impact(
+    project_tracks: &[(String, Track)],
+    track_id: &str,
+    old_prefix: &str,
+    archive_dir: Option<&Path>,
+) -> PrefixRenameImpact {
+    let mut impact = PrefixRenameImpact::default();
+
+    // Count task IDs in target track
+    if let Some((_, track)) = project_tracks.iter().find(|(id, _)| id == track_id) {
+        for node in &track.nodes {
+            if let TrackNode::Section { tasks, .. } = node {
+                impact.task_id_count += count_prefix_ids(tasks, old_prefix);
+            }
+        }
+    }
+
+    // Count archived tasks if archive file exists
+    if let Some(archive_dir) = archive_dir {
+        let archive_path = archive_dir.join(format!("{}.md", track_id));
+        if archive_path.exists() {
+            if let Ok(content) = fs::read_to_string(&archive_path) {
+                let archive_track = crate::parse::parse_track(&content);
+                for node in &archive_track.nodes {
+                    if let TrackNode::Section { tasks, .. } = node {
+                        impact.task_id_count += count_prefix_ids(tasks, old_prefix);
+                    }
+                }
+            }
+        }
+    }
+
+    // Count dep references across other tracks
+    let mut affected_tracks = std::collections::HashSet::new();
+    for (tid, track) in project_tracks {
+        if tid == track_id {
+            continue;
+        }
+        let count = count_dep_references(track, old_prefix);
+        if count > 0 {
+            impact.dep_ref_count += count;
+            affected_tracks.insert(tid.clone());
+        }
+    }
+    impact.affected_track_count = affected_tracks.len();
+
+    impact
+}
+
+/// Count task IDs matching a prefix in a task list (recursive)
+fn count_prefix_ids(tasks: &[crate::model::Task], prefix: &str) -> usize {
+    let mut count = 0;
+    for task in tasks {
+        if let Some(ref id) = task.id {
+            if let Some(rest) = id.strip_prefix(prefix) {
+                if rest.starts_with('-') {
+                    count += 1;
+                }
+            }
+        }
+        count += count_prefix_ids(&task.subtasks, prefix);
+    }
+    count
+}
+
+/// Count dep references matching a prefix in a track (recursive)
+fn count_dep_references(track: &Track, prefix: &str) -> usize {
+    let mut count = 0;
+    for node in &track.nodes {
+        if let TrackNode::Section { tasks, .. } = node {
+            count += count_deps_in_tasks(tasks, prefix);
+        }
+    }
+    count
+}
+
+/// Count dep references matching a prefix in a task list (recursive)
+fn count_deps_in_tasks(tasks: &[crate::model::Task], prefix: &str) -> usize {
+    let mut count = 0;
+    for task in tasks {
+        for m in &task.metadata {
+            if let crate::model::task::Metadata::Dep(deps) = m {
+                for dep in deps {
+                    if let Some(rest) = dep.strip_prefix(prefix) {
+                        if rest.starts_with('-') {
+                            count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        count += count_deps_in_tasks(&task.subtasks, prefix);
+    }
+    count
 }
 
 /// Count the total number of tasks in a track (across all sections, including subtasks)
@@ -1036,5 +1178,138 @@ file = "tracks/old.md"
             "# Test\n\n## Backlog\n\n- [ ] `T-001` A\n- [ ] `T-002` B\n\n## Done\n\n- [x] `T-003` C\n",
         );
         assert_eq!(total_task_count(&track), 3);
+    }
+
+    #[test]
+    fn test_prefix_rename_impact_basic() {
+        let track_content = "\
+# Effects
+
+## Backlog
+
+- [>] `EFF-001` First task
+  - [ ] `EFF-001.1` Subtask
+- [ ] `EFF-002` Second task
+
+## Done
+";
+        let other_content = "\
+# Other
+
+## Backlog
+
+- [ ] `OTH-001` Other task
+  - dep: EFF-001, EFF-002
+
+## Done
+";
+        let tracks = vec![
+            (
+                "effects".to_string(),
+                crate::parse::parse_track(track_content),
+            ),
+            (
+                "other".to_string(),
+                crate::parse::parse_track(other_content),
+            ),
+        ];
+
+        let impact = prefix_rename_impact(&tracks, "effects", "EFF", None);
+        assert_eq!(impact.task_id_count, 3); // EFF-001, EFF-001.1, EFF-002
+        assert_eq!(impact.dep_ref_count, 2); // EFF-001 and EFF-002 in other
+        assert_eq!(impact.affected_track_count, 1); // other track
+    }
+
+    #[test]
+    fn test_prefix_rename_impact_no_tasks() {
+        let empty_content = "# Empty\n\n## Backlog\n\n## Done\n";
+        let tracks = vec![(
+            "empty".to_string(),
+            crate::parse::parse_track(empty_content),
+        )];
+
+        let impact = prefix_rename_impact(&tracks, "empty", "EMP", None);
+        assert_eq!(impact.task_id_count, 0);
+        assert_eq!(impact.dep_ref_count, 0);
+        assert_eq!(impact.affected_track_count, 0);
+    }
+
+    #[test]
+    fn test_prefix_rename_impact_cross_track_deps() {
+        let track_a = "\
+# A
+
+## Backlog
+
+- [ ] `AAA-001` Task A
+
+## Done
+";
+        let track_b = "\
+# B
+
+## Backlog
+
+- [ ] `BBB-001` Task B
+  - dep: AAA-001
+
+## Done
+";
+        let track_c = "\
+# C
+
+## Backlog
+
+- [ ] `CCC-001` Task C
+  - dep: AAA-001
+
+## Done
+";
+        let tracks = vec![
+            ("a".to_string(), crate::parse::parse_track(track_a)),
+            ("b".to_string(), crate::parse::parse_track(track_b)),
+            ("c".to_string(), crate::parse::parse_track(track_c)),
+        ];
+
+        let impact = prefix_rename_impact(&tracks, "a", "AAA", None);
+        assert_eq!(impact.task_id_count, 1);
+        assert_eq!(impact.dep_ref_count, 2);
+        assert_eq!(impact.affected_track_count, 2);
+    }
+
+    #[test]
+    fn test_prefix_rename_impact_with_archive() {
+        let track_content = "\
+# Effects
+
+## Backlog
+
+- [ ] `EFF-010` Task
+
+## Done
+";
+        let tracks = vec![(
+            "effects".to_string(),
+            crate::parse::parse_track(track_content),
+        )];
+
+        let tmp = TempDir::new().unwrap();
+        let archive_dir = tmp.path().join("archive");
+        fs::create_dir_all(&archive_dir).unwrap();
+        let archive_content = "\
+# Effects
+
+## Done
+
+- [x] `EFF-001` Archived task 1
+- [x] `EFF-002` Archived task 2
+  - [x] `EFF-002.1` Archived subtask
+";
+        fs::write(archive_dir.join("effects.md"), archive_content).unwrap();
+
+        let impact = prefix_rename_impact(&tracks, "effects", "EFF", Some(&archive_dir));
+        assert_eq!(impact.task_id_count, 4); // 1 in track + 3 in archive
+        assert_eq!(impact.dep_ref_count, 0);
+        assert_eq!(impact.affected_track_count, 0);
     }
 }

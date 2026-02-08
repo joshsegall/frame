@@ -669,6 +669,13 @@ fn static_actions() -> Vec<PaletteAction> {
             contexts: &[ViewContext::TracksView],
             category: ActionCategory::Move,
         },
+        PaletteAction {
+            id: "rename_prefix",
+            label: "Rename prefix".into(),
+            shortcut: Some("P"),
+            contexts: &[ViewContext::TracksView],
+            category: ActionCategory::Manage,
+        },
     ]
 }
 

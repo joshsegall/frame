@@ -230,6 +230,39 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    // Prefix rename confirmation popup
+    if let Some(ref pr) = app.prefix_rename
+        && pr.confirming
+    {
+        match key.code {
+            KeyCode::Enter => {
+                execute_prefix_rename(app);
+            }
+            KeyCode::Esc => {
+                // Go back to the prefix editor (not all the way back to Tracks view)
+                if let Some(ref mut pr) = app.prefix_rename {
+                    let old_prefix = pr.old_prefix.clone();
+                    let track_id = pr.track_id.clone();
+                    let new_prefix = pr.new_prefix.clone();
+                    pr.confirming = false;
+
+                    // Re-enter edit mode with the new_prefix in the buffer
+                    app.edit_buffer = new_prefix.clone();
+                    app.edit_cursor = new_prefix.len();
+                    app.edit_target = Some(EditTarget::ExistingPrefix {
+                        track_id,
+                        original_prefix: old_prefix,
+                    });
+                    app.edit_history = Some(EditHistory::new(&new_prefix, new_prefix.len(), 0));
+                    app.edit_selection_anchor = None;
+                    app.mode = Mode::Edit;
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+
     // Filter prefix key: 'f' was pressed, now handle second key
     if app.filter_pending {
         app.filter_pending = false;
@@ -564,6 +597,13 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
         (KeyModifiers::SHIFT, KeyCode::Char('X')) => {
             if matches!(app.view, View::Tracks) {
                 tracks_archive_or_delete(app);
+            }
+        }
+
+        // Rename prefix (tracks view only)
+        (KeyModifiers::SHIFT, KeyCode::Char('P')) => {
+            if matches!(app.view, View::Tracks) {
+                tracks_rename_prefix(app);
             }
         }
 
@@ -3440,11 +3480,15 @@ fn handle_edit(app: &mut App, key: KeyEvent) {
             app.edit_cursor = app.edit_buffer.len();
         }
         // Ctrl+Left/Right: jump to start/end of line (Ctrl+arrow in terminals)
-        (m, KeyCode::Left) if m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) => {
+        (m, KeyCode::Left)
+            if m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) =>
+        {
             app.edit_selection_anchor = None;
             app.edit_cursor = 0;
         }
-        (m, KeyCode::Right) if m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) => {
+        (m, KeyCode::Right)
+            if m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) =>
+        {
             app.edit_selection_anchor = None;
             app.edit_cursor = app.edit_buffer.len();
         }
@@ -3483,6 +3527,7 @@ fn handle_edit(app: &mut App, key: KeyEvent) {
             if let Some(eh) = &mut app.edit_history {
                 eh.snapshot(&app.edit_buffer, app.edit_cursor, 0);
             }
+            update_prefix_validation(app);
             update_autocomplete_filter(app);
         }
         // Word backspace (Alt or Ctrl)
@@ -3497,15 +3542,30 @@ fn handle_edit(app: &mut App, key: KeyEvent) {
             if let Some(eh) = &mut app.edit_history {
                 eh.snapshot(&app.edit_buffer, app.edit_cursor, 0);
             }
+            update_prefix_validation(app);
             update_autocomplete_filter(app);
         }
         // Type character: replace selection if any
         (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
             app.delete_selection();
+            // Auto-uppercase for prefix editing
+            let c = if matches!(app.edit_target, Some(EditTarget::ExistingPrefix { .. })) {
+                c.to_ascii_uppercase()
+            } else {
+                c
+            };
             app.edit_buffer.insert(app.edit_cursor, c);
             app.edit_cursor += 1;
             if let Some(eh) = &mut app.edit_history {
                 eh.snapshot(&app.edit_buffer, app.edit_cursor, 0);
+            }
+            // Update prefix validation on each keystroke
+            if let Some(EditTarget::ExistingPrefix { ref track_id, .. }) = app.edit_target {
+                let tid = track_id.clone();
+                if let Some(ref mut pr) = app.prefix_rename {
+                    pr.validation_error =
+                        validate_prefix(&app.edit_buffer, &tid, &app.project.config);
+                }
             }
             update_autocomplete_filter(app);
         }
@@ -3984,6 +4044,55 @@ fn confirm_edit(app: &mut App) {
                 app.status_is_error = true;
             }
         }
+        EditTarget::ExistingPrefix {
+            track_id,
+            original_prefix,
+        } => {
+            let new_prefix = app.edit_buffer.clone();
+
+            // Same as current → no-op
+            if new_prefix == original_prefix {
+                app.prefix_rename = None;
+                return;
+            }
+
+            // Validate
+            let error = validate_prefix(&new_prefix, &track_id, &app.project.config);
+            if !error.is_empty() {
+                // Don't confirm — put the target back and stay in Edit mode
+                app.edit_target = Some(EditTarget::ExistingPrefix {
+                    track_id,
+                    original_prefix,
+                });
+                app.mode = Mode::Edit;
+                return;
+            }
+
+            // Compute blast radius and transition to confirmation
+            let archive_dir = app.project.frame_dir.join("archive");
+            let archive_opt = if archive_dir.exists() {
+                Some(archive_dir.as_path())
+            } else {
+                None
+            };
+            let impact = crate::ops::track_ops::prefix_rename_impact(
+                &app.project.tracks,
+                &track_id,
+                &original_prefix,
+                archive_opt,
+            );
+
+            if let Some(ref mut pr) = app.prefix_rename {
+                pr.new_prefix = new_prefix;
+                pr.confirming = true;
+                pr.task_id_count = impact.task_id_count;
+                pr.dep_ref_count = impact.dep_ref_count;
+                pr.affected_track_count = impact.affected_track_count;
+            }
+
+            // Stay in Navigate mode — the confirmation popup renders as an overlay
+            // and intercepts Enter/Esc in handle_navigate
+        }
     }
 }
 
@@ -4096,6 +4205,10 @@ fn cancel_edit(app: &mut App) {
         }
         // JumpTo: cancel just returns to previous mode (no cleanup needed)
         Some(EditTarget::JumpTo) => {}
+        // Prefix edit: cancel clears the prefix rename state
+        Some(EditTarget::ExistingPrefix { .. }) => {
+            app.prefix_rename = None;
+        }
         // For existing title/tags edit, cancel means revert (unchanged since we didn't write)
         _ => {}
     }
@@ -5362,6 +5475,171 @@ fn rebuild_active_track_ids(app: &mut App) {
     }
 }
 
+/// Enter EDIT mode to rename the track prefix under the cursor
+fn tracks_rename_prefix(app: &mut App) {
+    let track_id = match tracks_cursor_track_id(app) {
+        Some(id) => id,
+        None => return,
+    };
+
+    let current_prefix = match app.project.config.ids.prefixes.get(&track_id) {
+        Some(p) => p.clone(),
+        None => return,
+    };
+
+    let track_name = app.track_name(&track_id).to_string();
+    let cursor_pos = current_prefix.len();
+
+    app.edit_buffer = current_prefix.clone();
+    app.edit_cursor = cursor_pos;
+    app.edit_target = Some(EditTarget::ExistingPrefix {
+        track_id: track_id.clone(),
+        original_prefix: current_prefix.clone(),
+    });
+    app.edit_history = Some(EditHistory::new(&current_prefix, cursor_pos, 0));
+    app.edit_selection_anchor = Some(0); // Select all text initially
+    app.prefix_rename = Some(super::app::PrefixRenameState {
+        track_id,
+        track_name,
+        old_prefix: current_prefix,
+        new_prefix: String::new(),
+        confirming: false,
+        task_id_count: 0,
+        dep_ref_count: 0,
+        affected_track_count: 0,
+        validation_error: String::new(),
+    });
+    app.mode = Mode::Edit;
+}
+
+/// Validate a prefix string and return an error message (empty = valid)
+fn validate_prefix(
+    input: &str,
+    track_id: &str,
+    config: &crate::model::config::ProjectConfig,
+) -> String {
+    if input.is_empty() {
+        return "prefix cannot be empty".to_string();
+    }
+    if !input.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return "letters and numbers only".to_string();
+    }
+    // Check for duplicate prefix (case-insensitive)
+    for (tid, prefix) in &config.ids.prefixes {
+        if tid != track_id && prefix.eq_ignore_ascii_case(input) {
+            let name = config
+                .tracks
+                .iter()
+                .find(|t| t.id == *tid)
+                .map(|t| t.name.as_str())
+                .unwrap_or(tid);
+            return format!("prefix already used by {}", name);
+        }
+    }
+    String::new()
+}
+
+/// Execute the prefix rename: call ops layer, save all tracks + config, push sync marker
+fn execute_prefix_rename(app: &mut App) {
+    let pr = match app.prefix_rename.take() {
+        Some(pr) => pr,
+        None => return,
+    };
+
+    let old_prefix = pr.old_prefix.clone();
+    let new_prefix = pr.new_prefix.clone();
+    let track_id = pr.track_id.clone();
+
+    // Rename IDs in archive file (shared ops function)
+    let _ = crate::ops::track_ops::rename_archive_prefix(
+        &app.project.frame_dir,
+        &track_id,
+        &old_prefix,
+        &new_prefix,
+    );
+
+    // Call the rename operation on in-memory tracks
+    let result = crate::ops::track_ops::rename_track_prefix(
+        &mut app.project.config,
+        &mut app.project.tracks,
+        &track_id,
+        &old_prefix,
+        &new_prefix,
+    );
+
+    match result {
+        Ok(rename_result) => {
+            // Save config
+            save_config(app);
+
+            // Save the target track
+            let _ = app.save_track(&track_id);
+
+            // Save all other affected tracks (those with updated dep references)
+            let affected_tracks: Vec<String> = app
+                .project
+                .tracks
+                .iter()
+                .filter(|(tid, track)| tid != &track_id && has_dirty_tasks(track))
+                .map(|(tid, _)| tid.clone())
+                .collect();
+            for tid in &affected_tracks {
+                let _ = app.save_track(tid);
+            }
+
+            // Push sync marker (no undo for prefix rename)
+            app.undo_stack.push_sync_marker();
+
+            app.status_message = Some(format!(
+                "renamed {} \u{2192} {}: {} tasks, {} deps across {} tracks",
+                old_prefix,
+                new_prefix,
+                rename_result.tasks_renamed,
+                rename_result.deps_updated,
+                rename_result.tracks_affected,
+            ));
+        }
+        Err(e) => {
+            app.status_message = Some(format!("prefix rename failed: {}", e));
+            app.status_is_error = true;
+        }
+    }
+}
+
+/// Check if any task in a track has the dirty flag set
+fn has_dirty_tasks(track: &crate::model::Track) -> bool {
+    for node in &track.nodes {
+        if let crate::model::track::TrackNode::Section { tasks, .. } = node
+            && check_dirty_recursive(tasks)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn check_dirty_recursive(tasks: &[crate::model::Task]) -> bool {
+    for task in tasks {
+        if task.dirty {
+            return true;
+        }
+        if check_dirty_recursive(&task.subtasks) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Update prefix validation error based on current edit buffer (no-op if not editing a prefix)
+fn update_prefix_validation(app: &mut App) {
+    if let Some(EditTarget::ExistingPrefix { ref track_id, .. }) = app.edit_target {
+        let tid = track_id.clone();
+        if let Some(ref mut pr) = app.prefix_rename {
+            pr.validation_error = validate_prefix(&app.edit_buffer, &tid, &app.project.config);
+        }
+    }
+}
+
 /// Update the "# Title" header in a track's literal nodes
 fn update_track_header(app: &mut App, track_id: &str, new_name: &str) {
     if let Some(track) = app.find_track_mut(track_id) {
@@ -5839,13 +6117,17 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
             }
         }
         // Ctrl+Left/Right: jump to start/end of line (Ctrl+arrow in terminals)
-        (m, KeyCode::Left) if m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) => {
+        (m, KeyCode::Left)
+            if m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) =>
+        {
             if let Some(ds) = &mut app.detail_state {
                 ds.multiline_selection_anchor = None;
                 ds.edit_cursor_col = 0;
             }
         }
-        (m, KeyCode::Right) if m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) => {
+        (m, KeyCode::Right)
+            if m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) =>
+        {
             if let Some(ds) = &mut app.detail_state {
                 ds.multiline_selection_anchor = None;
                 let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
@@ -8392,6 +8674,9 @@ fn dispatch_palette_action(app: &mut App, action_id: &str, track_index: Option<u
         }
         "reorder_track" => {
             enter_move_mode(app);
+        }
+        "rename_prefix" => {
+            tracks_rename_prefix(app);
         }
 
         _ => {}

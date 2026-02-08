@@ -1458,8 +1458,33 @@ fn cmd_track_rename(args: TrackRenameArgs) -> Result<(), Box<dyn std::error::Err
             new_prefix,
         )?;
 
+        // Check for archived tasks
+        let archive_dir = project.frame_dir.join("archive");
+        let archive_id_count = {
+            let archive_path = archive_dir.join(format!("{}.md", effective_id));
+            if archive_path.exists() {
+                if let Ok(content) = std::fs::read_to_string(&archive_path) {
+                    let archive_track = crate::parse::parse_track(&content);
+                    track_ops::prefix_rename_impact(
+                        &[(effective_id.clone(), archive_track)],
+                        &effective_id,
+                        &old_prefix,
+                        None,
+                    )
+                    .task_id_count
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        };
+
         println!("Renaming prefix {} → {}:", old_prefix, new_prefix);
         println!("  {} tasks in {}", result.tasks_renamed, effective_id);
+        if archive_id_count > 0 {
+            println!("  {} archived task IDs", archive_id_count);
+        }
         if result.deps_updated > 0 {
             println!(
                 "  {} dep references across {} other tracks",
@@ -1481,6 +1506,17 @@ fn cmd_track_rename(args: TrackRenameArgs) -> Result<(), Box<dyn std::error::Err
                 println!("cancelled");
                 return Ok(());
             }
+        }
+
+        // Rename IDs in archive file
+        let archive_count = track_ops::rename_archive_prefix(
+            &project.frame_dir,
+            &effective_id,
+            &old_prefix,
+            new_prefix,
+        )?;
+        if archive_count > 0 {
+            println!("  {} archived task IDs renamed", archive_count);
         }
 
         // Save all affected tracks
