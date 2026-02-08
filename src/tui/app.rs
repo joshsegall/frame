@@ -2335,19 +2335,23 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
 
-    // Always enable Kitty keyboard protocol — the detection via
-    // supports_keyboard_enhancement() is unreliable (many terminals that support it,
-    // like Warp, fail the probe). Terminals that don't support the protocol simply
-    // ignore the escape sequence, so this is safe to send unconditionally.
-    let kitty_enabled = execute!(
-        stdout,
-        PushKeyboardEnhancementFlags(
-            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+    // Kitty keyboard protocol: enabled by default (detection via
+    // supports_keyboard_enhancement() is unreliable). Can be overridden
+    // in project.toml with [ui] kitty_keyboard = true/false.
+    let kitty_setting = app.project.config.ui.kitty_keyboard.unwrap_or(true);
+    let kitty_enabled = if kitty_setting {
+        execute!(
+            stdout,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+            )
         )
-    )
-    .is_ok();
+        .is_ok()
+    } else {
+        false
+    };
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;

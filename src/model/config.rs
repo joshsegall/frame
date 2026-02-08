@@ -90,6 +90,10 @@ pub struct UiConfig {
     /// If empty, the whole project is searched.
     #[serde(default)]
     pub ref_paths: Vec<String>,
+    /// Kitty keyboard protocol: true = force on, false = force off, absent = on (default).
+    /// Disable if your terminal has issues with enhanced key reporting.
+    #[serde(default)]
+    pub kitty_keyboard: Option<bool>,
 }
 
 impl Default for UiConfig {
@@ -101,6 +105,7 @@ impl Default for UiConfig {
             tag_colors: HashMap::new(),
             ref_extensions: Vec::new(),
             ref_paths: Vec::new(),
+            kitty_keyboard: None,
         }
     }
 }
