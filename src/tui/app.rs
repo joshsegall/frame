@@ -274,6 +274,10 @@ pub enum TriageSource {
         source_track_id: String,
         task_id: String,
     },
+    /// Bulk cross-track move of selected tasks
+    BulkCrossTrackMove {
+        source_track_id: String,
+    },
 }
 
 /// State for the triage flow
@@ -383,6 +387,8 @@ pub enum Mode {
     Triage,
     /// Confirmation prompt (e.g., delete inbox item)
     Confirm,
+    /// Multi-select mode for bulk operations (track view only)
+    Select,
 }
 
 /// What kind of edit operation is in progress
@@ -431,6 +437,10 @@ pub enum EditTarget {
     },
     /// Selecting a tag for filter (using autocomplete)
     FilterTag,
+    /// Bulk tag edit in SELECT mode (+tag -tag syntax)
+    BulkTags,
+    /// Bulk dep edit in SELECT mode (+ID -ID syntax)
+    BulkDeps,
 }
 
 /// State for MOVE mode
@@ -450,6 +460,14 @@ pub enum MoveState {
     /// Moving an inbox item
     InboxItem {
         original_index: usize,
+    },
+    /// Bulk move of selected tasks within a track
+    BulkTask {
+        track_id: String,
+        /// The removed tasks with their original backlog indices, in original order
+        removed_tasks: Vec<(usize, Task)>,
+        /// Current insertion point index in the (reduced) backlog
+        insert_pos: usize,
     },
 }
 
@@ -484,6 +502,8 @@ pub enum FlatItem {
     },
     /// The "── Parked ──" separator
     ParkedSeparator,
+    /// Stand-in row during bulk move showing "━━━ N tasks ━━━"
+    BulkMoveStandin { count: usize },
 }
 
 /// Main application state
@@ -572,6 +592,8 @@ pub struct App {
     pub confirm_state: Option<ConfirmState>,
     /// Task ID to flash-highlight after undo/redo navigation
     pub flash_task_id: Option<String>,
+    /// Multiple task IDs to flash (for bulk undo)
+    pub flash_task_ids: HashSet<String>,
     /// Track ID to flash-highlight in tracks view after undo/redo
     pub flash_track_id: Option<String>,
     /// When the flash started (for auto-clearing after timeout)
@@ -584,6 +606,10 @@ pub struct App {
     pub filter_state: FilterState,
     /// True when 'f' prefix key has been pressed, waiting for second key
     pub filter_pending: bool,
+    /// Selected task IDs in SELECT mode (empty = not in select mode)
+    pub selection: HashSet<String>,
+    /// Anchor flat-item index for V range select preview (None = not in range select mode)
+    pub range_anchor: Option<usize>,
 }
 
 impl App {
@@ -675,12 +701,15 @@ impl App {
             triage_state: None,
             confirm_state: None,
             flash_task_id: None,
+            flash_task_ids: HashSet::new(),
             flash_track_id: None,
             flash_started: None,
             pending_moves: Vec::new(),
             recent_expanded: HashSet::new(),
             filter_state: FilterState::default(),
             filter_pending: false,
+            selection: HashSet::new(),
+            range_anchor: None,
         }
     }
 
@@ -746,6 +775,15 @@ impl App {
     /// Start flashing a task (highlight after undo/redo navigation)
     pub fn flash_task(&mut self, task_id: &str) {
         self.flash_task_id = Some(task_id.to_string());
+        self.flash_task_ids.clear();
+        self.flash_track_id = None;
+        self.flash_started = Some(Instant::now());
+    }
+
+    /// Start flashing multiple tasks (for bulk undo)
+    pub fn flash_tasks(&mut self, task_ids: HashSet<String>) {
+        self.flash_task_id = None;
+        self.flash_task_ids = task_ids;
         self.flash_track_id = None;
         self.flash_started = Some(Instant::now());
     }
@@ -754,16 +792,24 @@ impl App {
     pub fn flash_track(&mut self, track_id: &str) {
         self.flash_track_id = Some(track_id.to_string());
         self.flash_task_id = None;
+        self.flash_task_ids.clear();
         self.flash_started = Some(Instant::now());
     }
 
     /// Check if a specific task is currently flashing
     pub fn is_flashing(&self, task_id: &str) -> bool {
-        if let (Some(flash_id), Some(started)) = (&self.flash_task_id, self.flash_started) {
-            flash_id == task_id && started.elapsed() < Duration::from_millis(300)
-        } else {
-            false
+        if let Some(started) = self.flash_started {
+            if started.elapsed() >= Duration::from_millis(300) {
+                return false;
+            }
+            if self.flash_task_id.as_deref() == Some(task_id) {
+                return true;
+            }
+            if self.flash_task_ids.contains(task_id) {
+                return true;
+            }
         }
+        false
     }
 
     /// Check if a specific track is currently flashing (tracks view)
@@ -780,6 +826,7 @@ impl App {
         if let Some(started) = self.flash_started {
             if started.elapsed() >= Duration::from_millis(300) {
                 self.flash_task_id = None;
+                self.flash_task_ids.clear();
                 self.flash_track_id = None;
                 self.flash_started = None;
             }

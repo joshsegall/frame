@@ -4,7 +4,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::tui::app::{App, Mode, TriageSource};
+use crate::tui::app::{App, EditTarget, Mode, MoveState, TriageSource};
 
 /// Render the status row (bottom of screen)
 pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
@@ -88,8 +88,13 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
             Line::from(spans)
         }
         Mode::Move => {
+            let label_text = if let Some(MoveState::BulkTask { ref removed_tasks, .. }) = app.move_state {
+                format!("-- MOVE ({}) --", removed_tasks.len())
+            } else {
+                "-- MOVE --".to_string()
+            };
             let mode_label = Span::styled(
-                "-- MOVE --",
+                label_text,
                 Style::default()
                     .fg(app.theme.highlight)
                     .bg(bg)
@@ -112,7 +117,7 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
             };
             let is_cross_track = matches!(
                 &app.triage_state,
-                Some(ts) if matches!(ts.source, TriageSource::CrossTrackMove { .. })
+                Some(ts) if matches!(ts.source, TriageSource::CrossTrackMove { .. } | TriageSource::BulkCrossTrackMove { .. })
             );
             let label_text = if is_cross_track { "-- MOVE TO TRACK --" } else { "-- TRIAGE --" };
             let mode_label = Span::styled(
@@ -154,6 +159,63 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
                 spans.push(Span::styled(
                     " ".repeat(width - content_width),
                     Style::default().bg(bg),
+                ));
+            }
+            Line::from(spans)
+        }
+        Mode::Select => {
+            let count = app.selection.len();
+            let is_range = app.range_anchor.is_some();
+            let label_text = if is_range { "-- RANGE --" } else { "-- SELECT --" };
+            let mode_label = Span::styled(
+                label_text,
+                Style::default()
+                    .fg(app.theme.highlight)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
+            );
+            let count_text = format!("{} selected", count);
+            let is_bulk_edit = matches!(&app.edit_target,
+                Some(EditTarget::BulkTags { .. }) | Some(EditTarget::BulkDeps { .. }));
+            let hint = if is_bulk_edit {
+                "Enter confirm  Esc cancel"
+            } else if is_range {
+                "V end range  Esc cancel"
+            } else {
+                "x/b/o/~ t d m Esc"
+            };
+            let mut spans = vec![Span::styled(" ", Style::default().bg(bg)), mode_label];
+            let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+            let count_width = count_text.chars().count();
+            let hint_width = hint.chars().count();
+            let right_width = count_width + 4 + hint_width;
+            if content_width + right_width < width {
+                let padding = width - content_width - right_width;
+                spans.push(Span::styled(
+                    " ".repeat(padding),
+                    Style::default().bg(bg),
+                ));
+                spans.push(Span::styled(
+                    count_text,
+                    Style::default().fg(app.theme.text_bright).bg(bg),
+                ));
+                spans.push(Span::styled(
+                    " ".repeat(4),
+                    Style::default().bg(bg),
+                ));
+                spans.push(Span::styled(
+                    hint,
+                    Style::default().fg(app.theme.text_bright).bg(bg),
+                ));
+            } else if content_width + hint_width < width {
+                let padding = width - content_width - hint_width;
+                spans.push(Span::styled(
+                    " ".repeat(padding),
+                    Style::default().bg(bg),
+                ));
+                spans.push(Span::styled(
+                    hint,
+                    Style::default().fg(app.theme.text_bright).bg(bg),
                 ));
             }
             Line::from(spans)

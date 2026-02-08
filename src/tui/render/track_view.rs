@@ -6,7 +6,7 @@ use ratatui::widgets::Paragraph;
 use regex::Regex;
 
 use crate::model::{Metadata, SectionKind, Task, TaskState};
-use crate::tui::app::{App, EditTarget, FlatItem, Mode};
+use crate::tui::app::{App, EditTarget, FlatItem, Mode, MoveState};
 
 use super::push_highlighted_spans;
 
@@ -34,7 +34,17 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
     };
 
     // Build flat items and adjust scroll (mutable access to app.track_states)
-    let flat_items = app.build_flat_items(&track_id);
+    let mut flat_items = app.build_flat_items(&track_id);
+
+    // Insert bulk move stand-in at the insertion position
+    if let Some(MoveState::BulkTask { track_id: ref ms_tid, insert_pos, ref removed_tasks, .. }) = app.move_state {
+        if ms_tid == &track_id {
+            let count = removed_tasks.len();
+            let idx = insert_pos.min(flat_items.len());
+            flat_items.insert(idx, FlatItem::BulkMoveStandin { count });
+        }
+    }
+
     let visible_height = area.height as usize;
     {
         let state = app.get_track_state(&track_id);
@@ -86,6 +96,11 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut lines: Vec<Line> = Vec::with_capacity(visible_height);
     let mut edit_anchor: Option<(u16, u16)> = None;
 
+    // Compute range preview bounds for V-select
+    let range_preview: Option<(usize, usize)> = app.range_anchor.map(|anchor| {
+        if cursor <= anchor { (cursor, anchor) } else { (anchor, cursor) }
+    });
+
     for (item, row) in flat_items[scroll..end].iter().zip(scroll..end) {
         let is_cursor = row == cursor;
 
@@ -105,6 +120,10 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
                     let effective_cursor = is_cursor && !is_context;
                     let is_flash = !is_context && task.id.as_deref()
                         .is_some_and(|id| app.is_flashing(id));
+                    let in_range = !is_context && range_preview
+                        .is_some_and(|(start, end)| row >= start && row <= end);
+                    let is_selected = !is_context && (in_range || task.id.as_deref()
+                        .is_some_and(|id| app.selection.contains(id)));
                     let (line, col) = render_task_line(
                         app,
                         task,
@@ -117,6 +136,7 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
                         },
                         effective_cursor,
                         is_flash,
+                        is_selected,
                         *is_context,
                         area.width as usize,
                         search_re.as_ref(),
@@ -130,10 +150,33 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
                         edit_anchor = Some((screen_x, screen_y));
                     }
                     lines.push(line);
+
+                    // Insert bulk inline editor below cursor row
+                    if is_cursor && lines.len() < visible_height {
+                        if let Some(ref et) = app.edit_target {
+                            let label = match et {
+                                EditTarget::BulkTags => Some("tags:"),
+                                EditTarget::BulkDeps => Some("deps:"),
+                                _ => None,
+                            };
+                            if let Some(label) = label {
+                                let (editor_line, ec) = render_bulk_editor_line(
+                                    app, label, area.width as usize,
+                                );
+                                let screen_y = area.y + lines.len() as u16;
+                                let screen_x = area.x + ec;
+                                edit_anchor = Some((screen_x, screen_y));
+                                lines.push(editor_line);
+                            }
+                        }
+                    }
                 }
             }
             FlatItem::ParkedSeparator => {
                 lines.push(render_parked_separator(app, area.width as usize, is_cursor));
+            }
+            FlatItem::BulkMoveStandin { count } => {
+                lines.push(render_bulk_standin(app, *count, area.width as usize));
             }
         }
     }
@@ -195,6 +238,7 @@ fn render_task_line<'a>(
     info: &TaskLineInfo<'_>,
     is_cursor: bool,
     is_flash: bool,
+    is_selected: bool,
     is_context: bool,
     width: usize,
     search_re: Option<&Regex>,
@@ -205,26 +249,40 @@ fn render_task_line<'a>(
     let dim_style = Style::default().fg(app.theme.dim).bg(bg);
     let state_color = if is_context { app.theme.dim } else { app.theme.state_color(task.state) };
 
-    // Row background: flash uses flash_bg, cursor uses selection_bg, normal uses background
+    // Row background: flash > cursor > selected > normal
     let row_bg = if is_flash {
         app.theme.flash_bg
     } else if is_cursor {
         app.theme.selection_bg
+    } else if is_selected {
+        app.theme.bulk_selection_bg
     } else {
         bg
     };
 
-    // Column 0 reservation: left border accent for selected/flash, space for non-selected
-    if is_cursor || is_flash {
-        let border_color = if is_flash {
-            app.theme.yellow
-        } else {
-            app.theme.selection_border
-        };
+    // Column 0 reservation: left border accent for cursor/flash/selected, space otherwise
+    let has_selection = !app.selection.is_empty();
+    if is_flash {
         spans.push(Span::styled(
             "\u{258E}",
             Style::default()
-                .fg(border_color)
+                .fg(app.theme.yellow)
+                .bg(row_bg),
+        ));
+    } else if is_cursor && (!has_selection || is_selected) {
+        // Cursor bar only shows if no selection active, or cursor row is itself selected
+        spans.push(Span::styled(
+            "\u{258E}",
+            Style::default()
+                .fg(app.theme.selection_border)
+                .bg(row_bg),
+        ));
+    } else if is_selected {
+        // Selected but not cursor: show ▌ bar in highlight color
+        spans.push(Span::styled(
+            "\u{258C}",
+            Style::default()
+                .fg(app.theme.highlight)
                 .bg(row_bg),
         ));
     } else {
@@ -509,8 +567,8 @@ fn render_task_line<'a>(
         spans.push(Span::styled(indicator, hl_style));
     }
 
-    // Highlight cursor line or flash line
-    if is_cursor || is_flash {
+    // Highlight cursor line, flash line, or selected line
+    if is_cursor || is_flash || is_selected {
         let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
         if content_width < width {
             spans.push(Span::styled(
@@ -548,6 +606,57 @@ fn abbreviated_id(task: &Task) -> Option<String> {
     Some(after_prefix[dot_pos..].to_string())
 }
 
+/// Render the bulk inline editor line (tags:/deps: label + edit buffer + cursor).
+/// Returns the line and the column offset of the edit text start (for autocomplete anchor).
+fn render_bulk_editor_line<'a>(app: &'a App, label: &str, width: usize) -> (Line<'a>, u16) {
+    let bg = app.theme.background;
+    let mut spans: Vec<Span> = Vec::new();
+
+    // Indent + label
+    spans.push(Span::styled("  ", Style::default().bg(bg)));
+    spans.push(Span::styled(
+        format!("{} ", label),
+        Style::default().fg(app.theme.dim).bg(bg),
+    ));
+
+    let prefix_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let edit_col = prefix_width as u16;
+
+    // Edit buffer with cursor
+    let buf = &app.edit_buffer;
+    let cursor_pos = app.edit_cursor.min(buf.len());
+    let title_style = Style::default().fg(app.theme.text_bright).bg(bg);
+    let cursor_style = Style::default()
+        .fg(app.theme.background)
+        .bg(app.theme.text_bright);
+
+    let before = &buf[..cursor_pos];
+    if !before.is_empty() {
+        spans.push(Span::styled(before.to_string(), title_style));
+    }
+    if cursor_pos < buf.len() {
+        let cursor_char = &buf[cursor_pos..cursor_pos + 1];
+        spans.push(Span::styled(cursor_char.to_string(), cursor_style));
+        let after = &buf[cursor_pos + 1..];
+        if !after.is_empty() {
+            spans.push(Span::styled(after.to_string(), title_style));
+        }
+    } else {
+        spans.push(Span::styled(" ".to_string(), cursor_style));
+    }
+
+    // Fill remaining width
+    let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    if content_width < width {
+        spans.push(Span::styled(
+            " ".repeat(width - content_width),
+            Style::default().bg(bg),
+        ));
+    }
+
+    (Line::from(spans), edit_col)
+}
+
 /// Render the parked section separator
 fn render_parked_separator<'a>(app: &'a App, width: usize, is_cursor: bool) -> Line<'a> {
     let bg = if is_cursor {
@@ -583,6 +692,36 @@ fn render_parked_separator<'a>(app: &'a App, width: usize, is_cursor: bool) -> L
         "\u{2500}".repeat(dashes_before),
         label,
         "\u{2500}".repeat(dashes_after.max(2))
+    );
+
+    spans.push(Span::styled(line_text, style));
+    Line::from(spans)
+}
+
+/// Render the bulk move stand-in row: "━━━ N tasks ━━━"
+fn render_bulk_standin<'a>(app: &'a App, count: usize, width: usize) -> Line<'a> {
+    let bg = app.theme.selection_bg;
+    let style = Style::default().fg(app.theme.highlight).bg(bg).add_modifier(Modifier::BOLD);
+
+    let mut spans: Vec<Span> = Vec::new();
+    spans.push(Span::styled(
+        "\u{258E}",
+        Style::default().fg(app.theme.selection_border).bg(bg),
+    ));
+
+    let label = format!(
+        " {} task{} ",
+        count,
+        if count == 1 { "" } else { "s" }
+    );
+    let bar_char = "\u{2501}"; // ━ heavy horizontal
+    let dashes_before = 3;
+    let dashes_after = width.saturating_sub(label.len() + dashes_before + 2);
+    let line_text = format!(
+        "{}{}{}",
+        bar_char.repeat(dashes_before),
+        label,
+        bar_char.repeat(dashes_after.max(2))
     );
 
     spans.push(Span::styled(line_text, style));

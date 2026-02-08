@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use regex::Regex;
+use std::collections::HashSet;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -151,6 +152,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::Move => handle_move(app, key),
         Mode::Triage => handle_triage(app, key),
         Mode::Confirm => handle_confirm(app, key),
+        Mode::Select => handle_select(app, key),
     }
 }
 
@@ -559,6 +561,27 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             }
         }
 
+        // SELECT mode: v enters select and toggles current task
+        (KeyModifiers::NONE, KeyCode::Char('v')) => {
+            if matches!(app.view, View::Track(_)) {
+                enter_select_mode(app);
+            }
+        }
+
+        // Range select: V begins range selection mode
+        (KeyModifiers::SHIFT, KeyCode::Char('V')) => {
+            if matches!(app.view, View::Track(_)) {
+                begin_range_select(app);
+            }
+        }
+
+        // Select all: Ctrl+A
+        (m, KeyCode::Char('a')) if m.contains(KeyModifiers::CONTROL) => {
+            if matches!(app.view, View::Track(_)) {
+                select_all(app);
+            }
+        }
+
         _ => {}
     }
 }
@@ -706,11 +729,827 @@ fn begin_filter_tag_select(app: &mut App) {
     app.autocomplete = Some(ac);
 }
 
+// ---------------------------------------------------------------------------
+// SELECT mode (bulk operations)
+// ---------------------------------------------------------------------------
+
+/// Enter SELECT mode and toggle the task under the cursor.
+fn enter_select_mode(app: &mut App) {
+    if let Some((_, task_id, _)) = app.cursor_task_id() {
+        app.selection.insert(task_id);
+        app.mode = Mode::Select;
+    }
+}
+
+/// Begin range selection: set anchor at current cursor position.
+fn begin_range_select(app: &mut App) {
+    let track_id = match app.current_track_id() {
+        Some(id) => id.to_string(),
+        None => return,
+    };
+    let cursor = app.track_states.get(&track_id).map_or(0, |s| s.cursor);
+
+    // Select current task and set anchor
+    if let Some((_, task_id, _)) = app.cursor_task_id() {
+        app.selection.insert(task_id);
+    }
+    app.range_anchor = Some(cursor);
+    app.mode = Mode::Select;
+}
+
+/// Finalize range selection: select all items between anchor and cursor, clear anchor.
+fn finalize_range_select(app: &mut App) {
+    let track_id = match app.current_track_id() {
+        Some(id) => id.to_string(),
+        None => return,
+    };
+    let flat_items = app.build_flat_items(&track_id);
+    let cursor = app.track_states.get(&track_id).map_or(0, |s| s.cursor);
+    let anchor = match app.range_anchor {
+        Some(a) => a,
+        None => return,
+    };
+
+    let track = match App::find_track_in_project(&app.project, &track_id) {
+        Some(t) => t,
+        None => return,
+    };
+
+    let (start, end) = if cursor <= anchor {
+        (cursor, anchor)
+    } else {
+        (anchor, cursor)
+    };
+
+    for i in start..=end {
+        if let Some(FlatItem::Task { section, path, is_context, .. }) = flat_items.get(i) {
+            if *is_context { continue; }
+            if let Some(task) = resolve_task_from_flat(track, *section, path) {
+                if let Some(id) = &task.id {
+                    app.selection.insert(id.clone());
+                }
+            }
+        }
+    }
+
+    app.range_anchor = None;
+}
+
+/// Select all visible (non-context, non-separator) tasks in the current track view.
+fn select_all(app: &mut App) {
+    let track_id = match app.current_track_id() {
+        Some(id) => id.to_string(),
+        None => return,
+    };
+    let flat_items = app.build_flat_items(&track_id);
+    let track = match App::find_track_in_project(&app.project, &track_id) {
+        Some(t) => t,
+        None => return,
+    };
+
+    app.selection.clear();
+    for item in &flat_items {
+        if let FlatItem::Task { section, path, is_context, .. } = item {
+            if *is_context { continue; }
+            if let Some(task) = resolve_task_from_flat(track, *section, path) {
+                if let Some(id) = &task.id {
+                    app.selection.insert(id.clone());
+                }
+            }
+        }
+    }
+
+    if !app.selection.is_empty() {
+        app.mode = Mode::Select;
+    }
+}
+
+/// Clear selection and return to Navigate mode.
+fn clear_selection(app: &mut App) {
+    app.selection.clear();
+    app.range_anchor = None;
+    app.mode = Mode::Navigate;
+}
+
+/// Handle keys in SELECT mode.
+fn handle_select(app: &mut App, key: KeyEvent) {
+    // Conflict popup intercepts Esc
+    if app.conflict_text.is_some() {
+        if matches!(key.code, KeyCode::Esc) {
+            app.conflict_text = None;
+        }
+        return;
+    }
+
+    // Help overlay intercepts ? and Esc
+    if app.show_help {
+        match key.code {
+            KeyCode::Char('?') | KeyCode::Esc => {
+                app.show_help = false;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // Clear any transient status message on keypress
+    app.status_message = None;
+
+    match (key.modifiers, key.code) {
+        // Esc: cancel range mode first; then detail nav; then clear selection
+        (_, KeyCode::Esc) => {
+            if app.range_anchor.is_some() {
+                app.range_anchor = None;
+                return;
+            }
+            if let View::Detail { .. } = &app.view {
+                // Return from detail view but keep selection
+                if let Some((parent_track, parent_task)) = app.detail_stack.pop() {
+                    let return_idx = app.detail_state.as_ref().map(|ds| ds.return_view_idx).unwrap_or(0);
+                    app.detail_state = None;
+                    app.view = View::Detail {
+                        track_id: parent_track.clone(),
+                        task_id: parent_task.clone(),
+                    };
+                    let regions = if let Some(track) = App::find_track_in_project(&app.project, &parent_track) {
+                        if let Some(task) = crate::ops::task_ops::find_task_in_track(track, &parent_task) {
+                            App::build_detail_regions(task)
+                        } else {
+                            vec![DetailRegion::Title]
+                        }
+                    } else {
+                        vec![DetailRegion::Title]
+                    };
+                    let region = if regions.contains(&DetailRegion::Subtasks) {
+                        DetailRegion::Subtasks
+                    } else {
+                        regions.first().copied().unwrap_or(DetailRegion::Title)
+                    };
+                    app.detail_state = Some(super::app::DetailState {
+                        region,
+                        scroll_offset: 0,
+                        regions,
+                        return_view_idx: return_idx,
+                        editing: false,
+                        edit_buffer: String::new(),
+                        edit_cursor_line: 0,
+                        edit_cursor_col: 0,
+                        edit_original: String::new(),
+                        subtask_cursor: 0,
+                        flat_subtask_ids: Vec::new(),
+                        multiline_selection_anchor: None,
+                    });
+                } else {
+                    let return_idx = app.detail_state.as_ref().map(|ds| ds.return_view_idx).unwrap_or(0);
+                    app.view = View::Track(return_idx);
+                    app.close_detail_fully();
+                }
+            } else {
+                clear_selection(app);
+            }
+        }
+
+        // v: toggle selection on cursor task
+        (KeyModifiers::NONE, KeyCode::Char('v')) => {
+            if let Some((_, task_id, _)) = app.cursor_task_id() {
+                if app.selection.contains(&task_id) {
+                    app.selection.remove(&task_id);
+                    // Auto-exit if selection becomes empty
+                    if app.selection.is_empty() {
+                        app.mode = Mode::Navigate;
+                    }
+                } else {
+                    app.selection.insert(task_id);
+                }
+            }
+        }
+
+        // V: toggle range select — if anchor active, finalize; otherwise begin
+        (KeyModifiers::SHIFT, KeyCode::Char('V')) => {
+            if app.range_anchor.is_some() {
+                finalize_range_select(app);
+            } else {
+                begin_range_select(app);
+            }
+        }
+
+        // Select none: N or Ctrl+Shift+A (must be before Ctrl+A)
+        (KeyModifiers::SHIFT, KeyCode::Char('N')) => {
+            clear_selection(app);
+        }
+        (m, KeyCode::Char('a')) if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) => {
+            clear_selection(app);
+        }
+        (m, KeyCode::Char('A')) if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) => {
+            clear_selection(app);
+        }
+        // Kitty protocol may report Ctrl+Shift+A as Char('A') with CONTROL only (shift implied by uppercase)
+        (m, KeyCode::Char('A')) if m.contains(KeyModifiers::CONTROL) => {
+            clear_selection(app);
+        }
+
+        // Select all: Ctrl+A or A (shift+a)
+        (m, KeyCode::Char('a')) if m.contains(KeyModifiers::CONTROL) => {
+            select_all(app);
+        }
+        (KeyModifiers::SHIFT, KeyCode::Char('A')) => {
+            select_all(app);
+        }
+
+        // Cursor movement
+        (KeyModifiers::NONE, KeyCode::Up | KeyCode::Char('k')) => {
+            move_cursor(app, -1);
+        }
+        (KeyModifiers::NONE, KeyCode::Down | KeyCode::Char('j')) => {
+            move_cursor(app, 1);
+        }
+        (KeyModifiers::NONE, KeyCode::Char('g')) => {
+            jump_to_top(app);
+        }
+        (KeyModifiers::SHIFT, KeyCode::Char('G')) => {
+            jump_to_bottom(app);
+        }
+        (_, KeyCode::Home) => {
+            jump_to_top(app);
+        }
+        (_, KeyCode::End) => {
+            jump_to_bottom(app);
+        }
+
+        // Expand/collapse
+        (KeyModifiers::NONE, KeyCode::Right | KeyCode::Char('l')) => {
+            expand_or_enter(app);
+        }
+        (KeyModifiers::NONE, KeyCode::Left | KeyCode::Char('h')) => {
+            collapse_or_parent(app);
+        }
+
+        // Enter: open detail view (selection preserved)
+        (KeyModifiers::NONE, KeyCode::Enter) => {
+            // Temporarily switch to Navigate for the handler, then restore Select
+            handle_enter(app);
+            // Stay in Select mode (selection preserved across detail drill-in)
+            if !matches!(app.view, View::Detail { .. }) {
+                // If we didn't enter detail, stay in Select
+                app.mode = Mode::Select;
+            } else {
+                // In detail view, mode stays Select so we return to Select on Esc
+                app.mode = Mode::Select;
+            }
+        }
+
+        // Bulk state changes
+        (KeyModifiers::NONE, KeyCode::Char('x')) => {
+            bulk_state_change(app, crate::model::TaskState::Done);
+        }
+        (KeyModifiers::NONE, KeyCode::Char('b')) => {
+            bulk_state_change(app, crate::model::TaskState::Blocked);
+        }
+        (KeyModifiers::NONE, KeyCode::Char('o')) => {
+            bulk_state_change(app, crate::model::TaskState::Todo);
+        }
+        (KeyModifiers::NONE, KeyCode::Char('~')) => {
+            bulk_state_change(app, crate::model::TaskState::Parked);
+        }
+
+        // Bulk tagging
+        (KeyModifiers::NONE, KeyCode::Char('t')) => {
+            begin_bulk_tag_edit(app);
+        }
+
+        // Bulk dependency edit
+        (KeyModifiers::NONE, KeyCode::Char('d')) => {
+            begin_bulk_dep_edit(app);
+        }
+
+        // Bulk move within track
+        (KeyModifiers::NONE, KeyCode::Char('m')) => {
+            begin_bulk_move(app);
+        }
+
+        // Bulk move to track
+        (KeyModifiers::SHIFT, KeyCode::Char('M')) => {
+            begin_bulk_cross_track_move(app);
+        }
+
+        // Help overlay
+        (KeyModifiers::NONE, KeyCode::Char('?')) => {
+            app.show_help = true;
+        }
+
+        // Search
+        (KeyModifiers::NONE, KeyCode::Char('/')) => {
+            // Allow searching while in select mode (mode will be restored)
+            app.mode = Mode::Search;
+            app.search_input.clear();
+            app.search_draft.clear();
+            app.search_history_index = None;
+            app.search_wrap_message = None;
+            app.search_match_count = None;
+            app.search_zero_confirmed = false;
+        }
+
+        // Undo/redo
+        (KeyModifiers::NONE, KeyCode::Char('u') | KeyCode::Char('z')) => {
+            perform_undo(app);
+        }
+        (m, KeyCode::Char('z')) if m.contains(KeyModifiers::CONTROL) => {
+            perform_undo(app);
+        }
+        (m, KeyCode::Char('y')) if m.contains(KeyModifiers::CONTROL) => {
+            perform_redo(app);
+        }
+        (KeyModifiers::SHIFT, KeyCode::Char('Z')) => {
+            perform_redo(app);
+        }
+
+        // Tab switching clears selection
+        (KeyModifiers::NONE, KeyCode::Tab) => {
+            clear_selection(app);
+            switch_tab(app, 1);
+        }
+        (KeyModifiers::SHIFT, KeyCode::BackTab) => {
+            clear_selection(app);
+            switch_tab(app, -1);
+        }
+        (KeyModifiers::NONE, KeyCode::Char(c @ '1'..='9')) => {
+            let idx = (c as usize) - ('1' as usize);
+            if idx < app.active_track_ids.len() {
+                clear_selection(app);
+                app.view = View::Track(idx);
+            }
+        }
+        (KeyModifiers::NONE, KeyCode::Char('i')) => {
+            clear_selection(app);
+            app.view = View::Inbox;
+        }
+        (KeyModifiers::NONE, KeyCode::Char('r')) => {
+            clear_selection(app);
+            app.view = View::Recent;
+        }
+        (KeyModifiers::NONE, KeyCode::Char('0') | KeyCode::Char('`')) => {
+            clear_selection(app);
+            app.tracks_name_col_min = 0;
+            app.view = View::Tracks;
+        }
+
+        // Quit: Ctrl+Q
+        (m, KeyCode::Char('q')) if m.contains(KeyModifiers::CONTROL) => {
+            app.should_quit = true;
+        }
+
+        _ => {}
+    }
+}
+
+/// Apply an absolute state change to all selected tasks (B4).
+fn bulk_state_change(app: &mut App, target_state: crate::model::TaskState) {
+    app.range_anchor = None;
+    let track_id = match app.current_track_id() {
+        Some(id) => id.to_string(),
+        None => return,
+    };
+    let selected: Vec<String> = app.selection.iter().cloned().collect();
+    if selected.is_empty() {
+        return;
+    }
+
+    let mut ops: Vec<Operation> = Vec::new();
+    let mut any_changed = false;
+
+    for task_id in &selected {
+        let track = match app.find_track_mut(&track_id) {
+            Some(t) => t,
+            None => continue,
+        };
+        let task = match task_ops::find_task_mut_in_track(track, task_id) {
+            Some(t) => t,
+            None => continue,
+        };
+
+        let old_state = task.state;
+        if old_state == target_state {
+            continue;
+        }
+
+        let old_resolved = task.metadata.iter().find_map(|m| {
+            if let Metadata::Resolved(d) = m { Some(d.clone()) } else { None }
+        });
+
+        // Apply the state change
+        match target_state {
+            crate::model::TaskState::Done => task_ops::set_done(task),
+            crate::model::TaskState::Blocked => task_ops::set_blocked(task),
+            crate::model::TaskState::Todo => task_ops::set_state(task, crate::model::TaskState::Todo),
+            crate::model::TaskState::Parked => task_ops::set_parked(task),
+            crate::model::TaskState::Active => task_ops::set_state(task, crate::model::TaskState::Active),
+        }
+
+        let new_state = task.state;
+        let new_resolved = task.metadata.iter().find_map(|m| {
+            if let Metadata::Resolved(d) = m { Some(d.clone()) } else { None }
+        });
+
+        if old_state != new_state {
+            // Cancel any pending ToDone move if un-doing Done
+            if old_state == crate::model::TaskState::Done {
+                app.cancel_pending_move(&track_id, task_id);
+            }
+
+            ops.push(Operation::StateChange {
+                track_id: track_id.clone(),
+                task_id: task_id.clone(),
+                old_state,
+                new_state,
+                old_resolved,
+                new_resolved,
+            });
+
+            // Schedule pending move if transitioning to Done
+            if new_state == crate::model::TaskState::Done {
+                if let Some(track) = App::find_track_in_project(&app.project, &track_id) {
+                    if task_ops::is_top_level_in_section(track, task_id, SectionKind::Backlog) {
+                        app.pending_moves.push(PendingMove {
+                            kind: PendingMoveKind::ToDone,
+                            track_id: track_id.clone(),
+                            task_id: task_id.clone(),
+                            deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+                        });
+                    }
+                }
+            }
+
+            any_changed = true;
+        }
+    }
+
+    if any_changed {
+        app.undo_stack.push(Operation::Bulk(ops));
+        let _ = app.save_track(&track_id);
+    }
+}
+
+/// Open the inline editor for bulk tag editing (B5).
+fn begin_bulk_tag_edit(app: &mut App) {
+    app.range_anchor = None;
+    if app.selection.is_empty() {
+        return;
+    }
+    app.edit_buffer = String::new();
+    app.edit_cursor = 0;
+    app.edit_selection_anchor = None;
+    app.edit_target = Some(EditTarget::BulkTags);
+    app.edit_history = Some(EditHistory::new("", 0, 0));
+
+    // Activate tag autocomplete
+    let candidates = app.collect_all_tags();
+    if !candidates.is_empty() {
+        let mut ac = AutocompleteState::new(AutocompleteKind::Tag, candidates);
+        ac.filter("");
+        app.autocomplete = Some(ac);
+    }
+
+    app.mode = Mode::Edit;
+}
+
+/// Confirm bulk tag edit: parse +tag/-tag tokens and apply to all selected tasks (B5).
+fn confirm_bulk_tag_edit(app: &mut App) {
+    let buffer = app.edit_buffer.clone();
+    let track_id = match app.current_track_id() {
+        Some(id) => id.to_string(),
+        None => return,
+    };
+
+    // Parse tokens: +tag adds, -tag removes, bare = add
+    let (adds, removes) = parse_bulk_tokens(&buffer);
+    if adds.is_empty() && removes.is_empty() {
+        app.mode = Mode::Select;
+        return;
+    }
+
+    let selected: Vec<String> = app.selection.iter().cloned().collect();
+    let mut ops: Vec<Operation> = Vec::new();
+
+    for task_id in &selected {
+        let track = match App::find_track_in_project(&app.project, &track_id) {
+            Some(t) => t,
+            None => continue,
+        };
+        let task = match task_ops::find_task_in_track(track, task_id) {
+            Some(t) => t,
+            None => continue,
+        };
+
+        let old_tags = task.tags.iter().map(|t| format!("#{}", t)).collect::<Vec<_>>().join(" ");
+        let mut new_tags = task.tags.clone();
+
+        for tag in &adds {
+            let clean = tag.strip_prefix('#').unwrap_or(tag).to_string();
+            if !new_tags.contains(&clean) {
+                new_tags.push(clean);
+            }
+        }
+        for tag in &removes {
+            let clean = tag.strip_prefix('#').unwrap_or(tag).to_string();
+            new_tags.retain(|t| t != &clean);
+        }
+
+        let new_tags_str = new_tags.iter().map(|t| format!("#{}", t)).collect::<Vec<_>>().join(" ");
+        if old_tags != new_tags_str {
+            // Apply the change
+            let track_mut = app.find_track_mut(&track_id).unwrap();
+            let task_mut = task_ops::find_task_mut_in_track(track_mut, task_id).unwrap();
+            task_mut.tags = new_tags;
+            task_mut.mark_dirty();
+
+            ops.push(Operation::FieldEdit {
+                track_id: track_id.clone(),
+                task_id: task_id.clone(),
+                field: "tags".to_string(),
+                old_value: old_tags,
+                new_value: new_tags_str,
+            });
+        }
+    }
+
+    if !ops.is_empty() {
+        app.undo_stack.push(Operation::Bulk(ops));
+        let _ = app.save_track(&track_id);
+    }
+
+    app.mode = Mode::Select;
+}
+
+/// Open the inline editor for bulk dependency editing (B6).
+fn begin_bulk_dep_edit(app: &mut App) {
+    app.range_anchor = None;
+    if app.selection.is_empty() {
+        return;
+    }
+    app.edit_buffer = String::new();
+    app.edit_cursor = 0;
+    app.edit_selection_anchor = None;
+    app.edit_target = Some(EditTarget::BulkDeps);
+    app.edit_history = Some(EditHistory::new("", 0, 0));
+
+    // Activate task ID autocomplete
+    let candidates = app.collect_all_task_ids();
+    if !candidates.is_empty() {
+        let mut ac = AutocompleteState::new(AutocompleteKind::TaskId, candidates);
+        ac.filter("");
+        app.autocomplete = Some(ac);
+    }
+
+    app.mode = Mode::Edit;
+}
+
+/// Confirm bulk dep edit: parse +ID/-ID tokens and apply to all selected tasks (B6).
+fn confirm_bulk_dep_edit(app: &mut App) {
+    let buffer = app.edit_buffer.clone();
+    let track_id = match app.current_track_id() {
+        Some(id) => id.to_string(),
+        None => return,
+    };
+
+    let (adds, removes) = parse_bulk_tokens(&buffer);
+    if adds.is_empty() && removes.is_empty() {
+        app.mode = Mode::Select;
+        return;
+    }
+
+    let selected: Vec<String> = app.selection.iter().cloned().collect();
+    let mut ops: Vec<Operation> = Vec::new();
+
+    for task_id in &selected {
+        let track = match App::find_track_in_project(&app.project, &track_id) {
+            Some(t) => t,
+            None => continue,
+        };
+        let task = match task_ops::find_task_in_track(track, task_id) {
+            Some(t) => t,
+            None => continue,
+        };
+
+        // Get current deps
+        let old_deps: Vec<String> = task.metadata.iter().find_map(|m| {
+            if let Metadata::Dep(deps) = m { Some(deps.clone()) } else { None }
+        }).unwrap_or_default();
+        let old_value = old_deps.join(", ");
+
+        let mut new_deps = old_deps.clone();
+        for dep in &adds {
+            if !new_deps.contains(dep) {
+                new_deps.push(dep.clone());
+            }
+        }
+        for dep in &removes {
+            new_deps.retain(|d| d != dep);
+        }
+
+        let new_value = new_deps.join(", ");
+        if old_value != new_value {
+            let track_mut = app.find_track_mut(&track_id).unwrap();
+            let task_mut = task_ops::find_task_mut_in_track(track_mut, task_id).unwrap();
+            task_mut.metadata.retain(|m| !matches!(m, Metadata::Dep(_)));
+            if !new_deps.is_empty() {
+                task_mut.metadata.push(Metadata::Dep(new_deps));
+            }
+            task_mut.mark_dirty();
+
+            ops.push(Operation::FieldEdit {
+                track_id: track_id.clone(),
+                task_id: task_id.clone(),
+                field: "deps".to_string(),
+                old_value,
+                new_value,
+            });
+        }
+    }
+
+    if !ops.is_empty() {
+        app.undo_stack.push(Operation::Bulk(ops));
+        let _ = app.save_track(&track_id);
+    }
+
+    app.mode = Mode::Select;
+}
+
+/// Parse a multi-token bulk edit string: "+foo -bar baz" → adds: [foo, baz], removes: [bar]
+fn parse_bulk_tokens(input: &str) -> (Vec<String>, Vec<String>) {
+    let mut adds = Vec::new();
+    let mut removes = Vec::new();
+    for token in input.split_whitespace() {
+        if let Some(tag) = token.strip_prefix('-') {
+            let clean = tag.strip_prefix('#').unwrap_or(tag);
+            if !clean.is_empty() {
+                removes.push(clean.to_string());
+            }
+        } else if let Some(tag) = token.strip_prefix('+') {
+            let clean = tag.strip_prefix('#').unwrap_or(tag);
+            if !clean.is_empty() {
+                adds.push(clean.to_string());
+            }
+        } else {
+            let clean = token.strip_prefix('#').unwrap_or(token);
+            if !clean.is_empty() {
+                adds.push(clean.to_string());
+            }
+        }
+    }
+    (adds, removes)
+}
+
+/// Enter move mode for bulk-selected tasks (B7).
+fn begin_bulk_move(app: &mut App) {
+    app.range_anchor = None;
+    let track_id = match app.current_track_id() {
+        Some(id) => id.to_string(),
+        None => return,
+    };
+    if app.selection.is_empty() {
+        return;
+    }
+
+    // Snapshot selected IDs before mutable borrow
+    let selected_ids: Vec<String> = app.selection.iter().cloned().collect();
+    let cursor = app.track_states.get(&track_id).map_or(0, |s| s.cursor);
+
+    let track = match app.find_track_mut(&track_id) {
+        Some(t) => t,
+        None => return,
+    };
+    let backlog = match track.section_tasks_mut(SectionKind::Backlog) {
+        Some(t) => t,
+        None => return,
+    };
+
+    // Collect indices of selected top-level tasks
+    let mut to_remove_indices: Vec<usize> = Vec::new();
+    for (i, task) in backlog.iter().enumerate() {
+        if let Some(id) = &task.id {
+            if selected_ids.contains(id) {
+                to_remove_indices.push(i);
+            }
+        }
+    }
+
+    if to_remove_indices.is_empty() {
+        return;
+    }
+
+    // Remove tasks in reverse order to preserve indices
+    let mut removed_tasks: Vec<(usize, crate::model::Task)> = Vec::new();
+    for &idx in to_remove_indices.iter().rev() {
+        let task = backlog.remove(idx);
+        removed_tasks.push((idx, task));
+    }
+    removed_tasks.reverse(); // Restore original order
+
+    // Determine initial insertion position (at the cursor's current position in the reduced list)
+    let insert_pos = cursor.min(backlog.len());
+
+    app.move_state = Some(MoveState::BulkTask {
+        track_id: track_id.clone(),
+        removed_tasks,
+        insert_pos,
+    });
+    app.mode = Mode::Move;
+}
+
+fn begin_bulk_cross_track_move(app: &mut App) {
+    app.range_anchor = None;
+    let source_track_id = match app.current_track_id() {
+        Some(id) => id.to_string(),
+        None => return,
+    };
+    if app.selection.is_empty() {
+        return;
+    }
+
+    // Build candidate tracks: all non-archived tracks except current
+    let candidates: Vec<String> = app
+        .project
+        .config
+        .tracks
+        .iter()
+        .filter(|t| t.state != "archived" && t.id != source_track_id)
+        .map(|t| format!("{} ({})", t.name, t.id.to_uppercase()))
+        .collect();
+
+    if candidates.is_empty() {
+        app.status_message = Some("No other tracks to move to".to_string());
+        return;
+    }
+
+    app.edit_buffer.clear();
+    app.edit_cursor = 0;
+    app.autocomplete = Some(AutocompleteState::new(AutocompleteKind::Tag, candidates));
+    if let Some(ac) = &mut app.autocomplete {
+        ac.filter("");
+    }
+
+    app.triage_state = Some(super::app::TriageState {
+        source: TriageSource::BulkCrossTrackMove {
+            source_track_id,
+        },
+        step: super::app::TriageStep::SelectTrack,
+        popup_anchor: None,
+        position_cursor: 1, // default to Bottom
+    });
+    app.mode = Mode::Triage;
+}
+
+/// Move the bulk-move stand-in position up or down by one.
+fn move_bulk_standin(app: &mut App, direction: i32) {
+    let (track_id, max_pos) = match &app.move_state {
+        Some(MoveState::BulkTask { track_id, .. }) => {
+            let tid = track_id.clone();
+            let backlog_len = App::find_track_in_project(&app.project, &tid)
+                .and_then(|t| Some(t.backlog().len()))
+                .unwrap_or(0);
+            (tid, backlog_len)
+        }
+        _ => return,
+    };
+    if let Some(MoveState::BulkTask { insert_pos, .. }) = &mut app.move_state {
+        let new_pos = (*insert_pos as i32 + direction).clamp(0, max_pos as i32) as usize;
+        *insert_pos = new_pos;
+    }
+    // Update cursor to track the stand-in position
+    if let Some(MoveState::BulkTask { insert_pos, .. }) = &app.move_state {
+        let pos = *insert_pos;
+        if let Some(state) = app.track_states.get_mut(&track_id) {
+            state.cursor = pos;
+        }
+    }
+}
+
+/// Move the bulk-move stand-in to the top or bottom of the backlog.
+fn move_bulk_standin_to_boundary(app: &mut App, to_top: bool) {
+    let (track_id, max_pos) = match &app.move_state {
+        Some(MoveState::BulkTask { track_id, .. }) => {
+            let tid = track_id.clone();
+            let backlog_len = App::find_track_in_project(&app.project, &tid)
+                .and_then(|t| Some(t.backlog().len()))
+                .unwrap_or(0);
+            (tid, backlog_len)
+        }
+        _ => return,
+    };
+    let new_pos = if to_top { 0 } else { max_pos };
+    if let Some(MoveState::BulkTask { insert_pos, .. }) = &mut app.move_state {
+        *insert_pos = new_pos;
+    }
+    if let Some(state) = app.track_states.get_mut(&track_id) {
+        state.cursor = new_pos;
+    }
+}
+
 fn handle_search(app: &mut App, key: KeyEvent) {
     match (key.modifiers, key.code) {
         // Cancel search
         (_, KeyCode::Esc) => {
-            app.mode = Mode::Navigate;
+            app.mode = if app.selection.is_empty() { Mode::Navigate } else { Mode::Select };
             app.search_input.clear();
             app.search_history_index = None;
             // Recompute match count for last_search (mode is now Navigate)
@@ -734,7 +1573,7 @@ fn handle_search(app: &mut App, key: KeyEvent) {
                 execute_search_dir(app, 0);
                 app.search_zero_confirmed = app.search_match_count == Some(0);
             }
-            app.mode = Mode::Navigate;
+            app.mode = if app.selection.is_empty() { Mode::Navigate } else { Mode::Select };
             app.search_input.clear();
             app.search_history_index = None;
             app.search_wrap_message = None;
@@ -832,19 +1671,60 @@ fn perform_undo(app: &mut App) {
         }
     }
 
+    // Check if this is a Bulk operation — collect affected task IDs for multi-flash
+    let bulk_task_ids = collect_bulk_task_ids(app.undo_stack.peek_last_undo());
+
     let inbox = app.project.inbox.as_mut();
     if let Some(nav) = app.undo_stack.undo(&mut app.project.tracks, inbox) {
         apply_nav_side_effects(app, &nav, true);
-        navigate_to_undo_target(app, &nav);
+        if !bulk_task_ids.is_empty() {
+            // Bulk undo: save affected tracks, flash all affected tasks, don't navigate
+            app.flash_tasks(bulk_task_ids);
+        } else {
+            navigate_to_undo_target(app, &nav);
+        }
     }
 }
 
 fn perform_redo(app: &mut App) {
+    // Check if this is a Bulk operation — collect affected task IDs for multi-flash
+    let bulk_task_ids = collect_bulk_task_ids(app.undo_stack.peek_last_redo());
+
     let inbox = app.project.inbox.as_mut();
     if let Some(nav) = app.undo_stack.redo(&mut app.project.tracks, inbox) {
         apply_nav_side_effects(app, &nav, false);
-        navigate_to_undo_target(app, &nav);
+        if !bulk_task_ids.is_empty() {
+            app.flash_tasks(bulk_task_ids);
+        } else {
+            navigate_to_undo_target(app, &nav);
+        }
     }
+}
+
+/// Collect task IDs from a Bulk operation for multi-flash.
+/// Returns empty set for non-Bulk operations.
+fn collect_bulk_task_ids(op: Option<&Operation>) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    if let Some(Operation::Bulk(ops)) = op {
+        for sub_op in ops {
+            match sub_op {
+                Operation::StateChange { task_id, .. }
+                | Operation::TitleEdit { task_id, .. }
+                | Operation::TaskAdd { task_id, .. }
+                | Operation::SubtaskAdd { task_id, .. }
+                | Operation::TaskMove { task_id, .. }
+                | Operation::FieldEdit { task_id, .. } => {
+                    ids.insert(task_id.clone());
+                }
+                Operation::CrossTrackMove { task_id_old, task_id_new, .. } => {
+                    ids.insert(task_id_old.clone());
+                    ids.insert(task_id_new.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    ids
 }
 
 /// Apply side effects that undo/redo can't handle internally (e.g., config changes, saves).
@@ -852,22 +1732,34 @@ fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo: bool) {
     match nav {
         UndoNavTarget::Task { track_id, .. } => {
             let _ = app.save_track(track_id);
-            // For cross-track moves, also save the other track
-            let other_track = {
-                let op = if is_undo {
-                    app.undo_stack.peek_last_redo()
-                } else {
-                    app.undo_stack.peek_last_undo()
-                };
-                if let Some(Operation::CrossTrackMove { source_track_id, target_track_id, .. }) = op {
-                    let other = if track_id == source_track_id { target_track_id } else { source_track_id };
-                    Some(other.clone())
-                } else {
-                    None
-                }
+            // For cross-track moves (including bulk), also save other tracks
+            let op = if is_undo {
+                app.undo_stack.peek_last_redo()
+            } else {
+                app.undo_stack.peek_last_undo()
             };
-            if let Some(other) = other_track {
-                let _ = app.save_track(&other);
+            let mut extra_tracks: Vec<String> = Vec::new();
+            match op {
+                Some(Operation::CrossTrackMove { source_track_id, target_track_id, .. }) => {
+                    let other = if track_id == source_track_id { target_track_id } else { source_track_id };
+                    extra_tracks.push(other.clone());
+                }
+                Some(Operation::Bulk(ops)) => {
+                    for sub_op in ops {
+                        if let Operation::CrossTrackMove { source_track_id, target_track_id, .. } = sub_op {
+                            if source_track_id != track_id {
+                                extra_tracks.push(source_track_id.clone());
+                            }
+                            if target_track_id != track_id {
+                                extra_tracks.push(target_track_id.clone());
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            for other in &extra_tracks {
+                let _ = app.save_track(other);
             }
         }
         UndoNavTarget::TracksView { track_id } => {
@@ -1822,13 +2714,13 @@ fn confirm_edit(app: &mut App) {
     let target = match app.edit_target.take() {
         Some(t) => t,
         None => {
-            app.mode = Mode::Navigate;
+            app.mode = if app.selection.is_empty() { Mode::Navigate } else { Mode::Select };
             return;
         }
     };
 
     let title = app.edit_buffer.clone();
-    app.mode = Mode::Navigate;
+    app.mode = if app.selection.is_empty() { Mode::Navigate } else { Mode::Select };
     app.pre_edit_cursor = None;
 
     match target {
@@ -2216,6 +3108,12 @@ fn confirm_edit(app: &mut App) {
                 reset_cursor_for_filter(app, prev_task_id.as_deref());
             }
         }
+        EditTarget::BulkTags => {
+            confirm_bulk_tag_edit(app);
+        }
+        EditTarget::BulkDeps => {
+            confirm_bulk_dep_edit(app);
+        }
     }
 }
 
@@ -2246,7 +3144,7 @@ fn tracks_find_cursor_pos(app: &App, target_id: &str) -> Option<usize> {
 fn cancel_edit(app: &mut App) {
     let target = app.edit_target.take();
     let saved_cursor = app.pre_edit_cursor.take();
-    app.mode = Mode::Navigate;
+    app.mode = if app.selection.is_empty() { Mode::Navigate } else { Mode::Select };
     app.autocomplete = None;
 
     match target {
@@ -2309,6 +3207,10 @@ fn cancel_edit(app: &mut App) {
             let prev_task_id = get_cursor_task_id(app);
             app.filter_state.tag_filter = None;
             reset_cursor_for_filter(app, prev_task_id.as_deref());
+        }
+        // BulkTags/BulkDeps: cancel just returns to Select mode (no cleanup needed)
+        Some(EditTarget::BulkTags) | Some(EditTarget::BulkDeps) => {
+            // Selection persists, mode already set to Select above
         }
         // For existing title/tags edit, cancel means revert (unchanged since we didn't write)
         _ => {}
@@ -2449,6 +3351,7 @@ fn enter_move_mode(app: &mut App) {
 fn handle_move(app: &mut App, key: KeyEvent) {
     let is_track_move = matches!(&app.move_state, Some(MoveState::Track { .. }));
     let is_inbox_move = matches!(&app.move_state, Some(MoveState::InboxItem { .. }));
+    let is_bulk_move = matches!(&app.move_state, Some(MoveState::BulkTask { .. }));
 
     match (key.modifiers, key.code) {
         // Confirm
@@ -2515,9 +3418,36 @@ fn handle_move(app: &mut App, key: KeyEvent) {
                             });
                         }
                     }
+                    MoveState::BulkTask { track_id, removed_tasks, insert_pos } => {
+                        // Build undo ops from original positions before reinserting
+                        let count = removed_tasks.len();
+                        let mut ops: Vec<Operation> = Vec::new();
+                        for (orig_idx, task) in &removed_tasks {
+                            if let Some(id) = &task.id {
+                                ops.push(Operation::TaskMove {
+                                    track_id: track_id.clone(),
+                                    task_id: id.clone(),
+                                    old_index: *orig_idx,
+                                    new_index: insert_pos,
+                                });
+                            }
+                        }
+                        // Insert tasks at the current position
+                        let track = app.find_track_mut(&track_id).unwrap();
+                        let backlog = track.section_tasks_mut(SectionKind::Backlog).unwrap();
+                        for (i, (_, task)) in removed_tasks.into_iter().enumerate() {
+                            let idx = (insert_pos + i).min(backlog.len());
+                            backlog.insert(idx, task);
+                        }
+                        let _ = app.save_track(&track_id);
+                        if !ops.is_empty() {
+                            app.undo_stack.push(Operation::Bulk(ops));
+                        }
+                        app.status_message = Some(format!("{} tasks moved", count));
+                    }
                 }
             }
-            app.mode = Mode::Navigate;
+            app.mode = if app.selection.is_empty() { Mode::Navigate } else { Mode::Select };
         }
         // Cancel: restore original position
         (_, KeyCode::Esc) => {
@@ -2595,13 +3525,25 @@ fn handle_move(app: &mut App, key: KeyEvent) {
                             .collect();
                         app.tracks_cursor = original_index;
                     }
+                    MoveState::BulkTask { track_id, removed_tasks, .. } => {
+                        // Restore tasks to original positions
+                        let track = app.find_track_mut(&track_id).unwrap();
+                        let backlog = track.section_tasks_mut(SectionKind::Backlog).unwrap();
+                        for (orig_idx, task) in removed_tasks.into_iter() {
+                            let idx = orig_idx.min(backlog.len());
+                            backlog.insert(idx, task);
+                        }
+                        let _ = app.save_track(&track_id);
+                    }
                 }
             }
-            app.mode = Mode::Navigate;
+            app.mode = if app.selection.is_empty() { Mode::Navigate } else { Mode::Select };
         }
         // Move up
         (KeyModifiers::NONE, KeyCode::Up | KeyCode::Char('k')) => {
-            if is_inbox_move {
+            if is_bulk_move {
+                move_bulk_standin(app, -1);
+            } else if is_inbox_move {
                 move_inbox_item(app, -1);
             } else if is_track_move {
                 move_track_in_list(app, -1);
@@ -2611,7 +3553,9 @@ fn handle_move(app: &mut App, key: KeyEvent) {
         }
         // Move down
         (KeyModifiers::NONE, KeyCode::Down | KeyCode::Char('j')) => {
-            if is_inbox_move {
+            if is_bulk_move {
+                move_bulk_standin(app, 1);
+            } else if is_inbox_move {
                 move_inbox_item(app, 1);
             } else if is_track_move {
                 move_track_in_list(app, 1);
@@ -2621,7 +3565,9 @@ fn handle_move(app: &mut App, key: KeyEvent) {
         }
         // Move to top
         (KeyModifiers::NONE, KeyCode::Char('g')) => {
-            if is_inbox_move {
+            if is_bulk_move {
+                move_bulk_standin_to_boundary(app, true);
+            } else if is_inbox_move {
                 move_inbox_to_boundary(app, true);
             } else if is_track_move {
                 move_track_to_boundary(app, true);
@@ -2630,7 +3576,9 @@ fn handle_move(app: &mut App, key: KeyEvent) {
             }
         }
         (m, KeyCode::Up) if m.contains(KeyModifiers::SUPER) => {
-            if is_inbox_move {
+            if is_bulk_move {
+                move_bulk_standin_to_boundary(app, true);
+            } else if is_inbox_move {
                 move_inbox_to_boundary(app, true);
             } else if is_track_move {
                 move_track_to_boundary(app, true);
@@ -2639,7 +3587,9 @@ fn handle_move(app: &mut App, key: KeyEvent) {
             }
         }
         (_, KeyCode::Home) => {
-            if is_inbox_move {
+            if is_bulk_move {
+                move_bulk_standin_to_boundary(app, true);
+            } else if is_inbox_move {
                 move_inbox_to_boundary(app, true);
             } else if is_track_move {
                 move_track_to_boundary(app, true);
@@ -2649,7 +3599,9 @@ fn handle_move(app: &mut App, key: KeyEvent) {
         }
         // Move to bottom
         (KeyModifiers::SHIFT, KeyCode::Char('G')) => {
-            if is_inbox_move {
+            if is_bulk_move {
+                move_bulk_standin_to_boundary(app, false);
+            } else if is_inbox_move {
                 move_inbox_to_boundary(app, false);
             } else if is_track_move {
                 move_track_to_boundary(app, false);
@@ -2658,7 +3610,9 @@ fn handle_move(app: &mut App, key: KeyEvent) {
             }
         }
         (m, KeyCode::Down) if m.contains(KeyModifiers::SUPER) => {
-            if is_inbox_move {
+            if is_bulk_move {
+                move_bulk_standin_to_boundary(app, false);
+            } else if is_inbox_move {
                 move_inbox_to_boundary(app, false);
             } else if is_track_move {
                 move_track_to_boundary(app, false);
@@ -2667,7 +3621,9 @@ fn handle_move(app: &mut App, key: KeyEvent) {
             }
         }
         (_, KeyCode::End) => {
-            if is_inbox_move {
+            if is_bulk_move {
+                move_bulk_standin_to_boundary(app, false);
+            } else if is_inbox_move {
                 move_inbox_to_boundary(app, false);
             } else if is_track_move {
                 move_track_to_boundary(app, false);
@@ -2951,6 +3907,7 @@ fn is_non_selectable(item: &FlatItem) -> bool {
     match item {
         FlatItem::ParkedSeparator => true,
         FlatItem::Task { is_context, .. } => *is_context,
+        FlatItem::BulkMoveStandin { .. } => false,
     }
 }
 
@@ -4711,17 +5668,19 @@ fn activate_autocomplete_for_region(app: &mut App, region: DetailRegion) {
 fn autocomplete_filter_text(buffer: &str, kind: AutocompleteKind) -> String {
     match kind {
         AutocompleteKind::Tag => {
-            // Get last word (which may start with #)
+            // Get last word (which may start with #, +, or -)
             let word = buffer.rsplit_once(' ').map(|(_, w)| w).unwrap_or(buffer);
+            let word = word.strip_prefix('+').or_else(|| word.strip_prefix('-')).unwrap_or(word);
             word.strip_prefix('#').unwrap_or(word).to_string()
         }
         AutocompleteKind::TaskId => {
-            // Get last entry (after comma or space)
+            // Get last entry (after comma or space), strip +/- prefix for bulk edit
             let word = buffer
                 .rsplit(|c: char| c == ',' || c.is_whitespace())
                 .next()
                 .unwrap_or(buffer)
                 .trim();
+            let word = word.strip_prefix('+').or_else(|| word.strip_prefix('-')).unwrap_or(word);
             word.to_string()
         }
         AutocompleteKind::FilePath => {
@@ -5055,7 +6014,7 @@ fn handle_triage_select_track(app: &mut App, key: KeyEvent) {
     match (key.modifiers, key.code) {
         // Cancel
         (_, KeyCode::Esc) => {
-            app.mode = Mode::Navigate;
+            app.mode = if app.selection.is_empty() { Mode::Navigate } else { Mode::Select };
             app.triage_state = None;
             app.autocomplete = None;
             app.edit_buffer.clear();
@@ -5126,7 +6085,7 @@ fn handle_triage_select_position(app: &mut App, key: KeyEvent, track_id: &str) {
     match (key.modifiers, key.code) {
         // Cancel
         (_, KeyCode::Esc) => {
-            app.mode = Mode::Navigate;
+            app.mode = if app.selection.is_empty() { Mode::Navigate } else { Mode::Select };
             app.triage_state = None;
             app.autocomplete = None;
             app.edit_buffer.clear();
@@ -5181,6 +6140,7 @@ fn dispatch_triage_or_move(app: &mut App, track_id: &str, position: InsertPositi
     match source {
         TriageSource::Inbox { .. } => execute_triage(app, track_id, position),
         TriageSource::CrossTrackMove { .. } => execute_cross_track_move(app, track_id, position),
+        TriageSource::BulkCrossTrackMove { .. } => execute_bulk_cross_track_move(app, track_id, position),
     }
 }
 
@@ -5479,6 +6439,158 @@ fn execute_cross_track_move(app: &mut App, target_track_id: &str, position: Inse
 
     // Clean up triage state
     app.mode = Mode::Navigate;
+    app.triage_state = None;
+    app.autocomplete = None;
+    app.edit_buffer.clear();
+}
+
+/// Execute bulk cross-track move: move all selected tasks to the target track
+fn execute_bulk_cross_track_move(app: &mut App, target_track_id: &str, position: InsertPosition) {
+    let source_track_id = match &app.triage_state {
+        Some(ts) => match &ts.source {
+            TriageSource::BulkCrossTrackMove { source_track_id } => source_track_id.clone(),
+            _ => return,
+        },
+        None => return,
+    };
+
+    let target_prefix = app.track_prefix(target_track_id).unwrap_or("").to_string();
+
+    // Collect selected task IDs in backlog order
+    let selected_ids: Vec<String> = {
+        let track = match App::find_track_in_project(&app.project, &source_track_id) {
+            Some(t) => t,
+            None => return,
+        };
+        let backlog = track.backlog();
+        backlog
+            .iter()
+            .filter_map(|t| {
+                t.id.as_ref().filter(|id| app.selection.contains(*id)).cloned()
+            })
+            .collect()
+    };
+
+    if selected_ids.is_empty() {
+        app.triage_state = None;
+        app.mode = if app.selection.is_empty() { Mode::Navigate } else { Mode::Select };
+        return;
+    }
+
+    let mut ops: Vec<Operation> = Vec::new();
+    let mut new_ids: Vec<String> = Vec::new();
+
+    for task_id in &selected_ids {
+        // Get next ID number (must re-query each time since we're inserting)
+        let target_track = match App::find_track_in_project(&app.project, target_track_id) {
+            Some(t) => t,
+            None => continue,
+        };
+        let new_num = task_ops::next_id_number(target_track, &target_prefix);
+        let new_id = format!("{}-{:03}", target_prefix, new_num);
+
+        // Remove from source
+        let source_track = match app.find_track_mut(&source_track_id) {
+            Some(t) => t,
+            None => continue,
+        };
+        let source_tasks = match source_track.section_tasks_mut(SectionKind::Backlog) {
+            Some(t) => t,
+            None => continue,
+        };
+        let idx = match source_tasks.iter().position(|t| t.id.as_deref() == Some(task_id)) {
+            Some(i) => i,
+            None => continue,
+        };
+        let mut task = source_tasks.remove(idx);
+        let source_index = idx;
+
+        // Set new ID and depth
+        let old_id = task_id.clone();
+        task.id = Some(new_id.clone());
+        task.depth = 0;
+        task.mark_dirty();
+        task_ops::renumber_subtasks(&mut task, &new_id);
+
+        // Insert into target backlog
+        let target_track = match app.find_track_mut(target_track_id) {
+            Some(t) => t,
+            None => continue,
+        };
+        let target_tasks = match target_track.section_tasks_mut(SectionKind::Backlog) {
+            Some(t) => t,
+            None => continue,
+        };
+        let target_index = match &position {
+            InsertPosition::Top => {
+                // Insert at the front, but after previously inserted tasks
+                let insert_at = ops.len().min(target_tasks.len());
+                target_tasks.insert(insert_at, task);
+                insert_at
+            }
+            InsertPosition::Bottom => {
+                let idx = target_tasks.len();
+                target_tasks.push(task);
+                idx
+            }
+            InsertPosition::After(after_id) => {
+                let after_idx = target_tasks
+                    .iter()
+                    .position(|t| t.id.as_deref() == Some(after_id.as_str()))
+                    .unwrap_or(target_tasks.len().saturating_sub(1));
+                target_tasks.insert(after_idx + 1, task);
+                after_idx + 1
+            }
+        };
+
+        // Update dep references across all tracks
+        task_ops::update_dep_references(&mut app.project.tracks, &old_id, &new_id);
+
+        ops.push(Operation::CrossTrackMove {
+            source_track_id: source_track_id.clone(),
+            target_track_id: target_track_id.to_string(),
+            task_id_old: old_id,
+            task_id_new: new_id.clone(),
+            source_index,
+            target_index,
+            source_parent_id: None,
+            old_depth: 0,
+        });
+
+        new_ids.push(new_id);
+    }
+
+    if !ops.is_empty() {
+        // Save affected tracks
+        let _ = app.save_track(&source_track_id);
+        let _ = app.save_track(target_track_id);
+
+        let count = ops.len();
+        app.undo_stack.push(Operation::Bulk(ops));
+
+        // Update selection to use new IDs
+        for old_id in &selected_ids {
+            app.selection.remove(old_id);
+        }
+        for new_id in &new_ids {
+            app.selection.insert(new_id.clone());
+        }
+
+        // Adjust cursor
+        if let Some(track_id) = app.current_track_id().map(|s| s.to_string()) {
+            let flat_items = app.build_flat_items(&track_id);
+            let state = app.get_track_state(&track_id);
+            if state.cursor >= flat_items.len() && !flat_items.is_empty() {
+                state.cursor = flat_items.len() - 1;
+            }
+        }
+
+        let target_name = app.track_name(target_track_id).to_string();
+        app.status_message = Some(format!("{} tasks moved to {}", count, target_name));
+    }
+
+    // Clean up triage state
+    app.mode = if app.selection.is_empty() { Mode::Navigate } else { Mode::Select };
     app.triage_state = None;
     app.autocomplete = None;
     app.edit_buffer.clear();

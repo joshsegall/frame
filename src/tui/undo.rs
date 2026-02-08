@@ -242,6 +242,10 @@ pub fn nav_target_for_op(op: &Operation, is_undo: bool) -> Option<UndoNavTarget>
                 })
             }
         }
+        Operation::Bulk(ops) => {
+            // Navigate to the first operation's target
+            ops.first().and_then(|op| nav_target_for_op(op, is_undo))
+        }
         Operation::SyncMarker => None,
     }
 }
@@ -402,6 +406,8 @@ pub enum Operation {
         /// Original depth of the task before move
         old_depth: usize,
     },
+    /// A batch of operations applied as a single undo step (bulk SELECT mode actions)
+    Bulk(Vec<Operation>),
     /// External file change sync marker — undo cannot cross this
     SyncMarker,
 }
@@ -740,6 +746,17 @@ fn apply_inverse(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
             task_ops::update_dep_references(tracks, task_id_new, task_id_old);
             None // Both tracks saved by caller
         }
+        Operation::Bulk(ops) => {
+            // Apply inverse of each sub-operation in reverse order
+            // Bulk operations don't involve inbox, so pass None for each sub-op
+            let mut result = None;
+            for op in ops.iter().rev() {
+                if let Some(track_id) = apply_inverse(op, tracks, None) {
+                    result = Some(track_id);
+                }
+            }
+            result
+        }
         Operation::SyncMarker => None,
     }
 }
@@ -1006,6 +1023,16 @@ fn apply_forward(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
             // Update dep references
             task_ops::update_dep_references(tracks, task_id_old, task_id_new);
             None // Both tracks saved by caller
+        }
+        Operation::Bulk(ops) => {
+            // Apply each sub-operation forward in order
+            let mut result = None;
+            for op in ops.iter() {
+                if let Some(track_id) = apply_forward(op, tracks, None) {
+                    result = Some(track_id);
+                }
+            }
+            result
         }
         Operation::SyncMarker => None,
     }

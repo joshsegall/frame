@@ -24,6 +24,8 @@ pub struct Theme {
     pub search_match_bg: Color,
     pub search_match_fg: Color,
     pub flash_bg: Color,
+    /// Background for selected rows in SELECT mode
+    pub bulk_selection_bg: Color,
     /// Per-tag colors
     pub tag_colors: HashMap<String, Color>,
 }
@@ -56,6 +58,7 @@ impl Default for Theme {
             search_match_bg: Color::Rgb(0x40, 0xE0, 0xD0),
             search_match_fg: Color::Rgb(0x0C, 0x00, 0x1B),
             flash_bg: Color::Rgb(0x3D, 0x2E, 0x10),
+            bulk_selection_bg: Color::Rgb(0x0F, 0x1A, 0x3D),
             tag_colors,
         }
     }
@@ -99,6 +102,7 @@ impl Theme {
                     "search_match_bg" => theme.search_match_bg = color,
                     "search_match_fg" => theme.search_match_fg = color,
                     "flash_bg" => theme.flash_bg = color,
+                    "bulk_selection_bg" | "selection_bg_bulk" => theme.bulk_selection_bg = color,
                     _ => {}
                 }
             }
