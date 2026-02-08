@@ -30,7 +30,11 @@ pub fn render_conflict_popup(frame: &mut Frame, app: &App, area: Rect) {
     styled_lines.push((" External Change Conflict".into(), header_style));
     styled_lines.push(("".into(), text_style));
 
-    for s in wrap_text(" ", "The task you were editing was modified externally.", inner_w) {
+    for s in wrap_text(
+        " ",
+        "The task you were editing was modified externally.",
+        inner_w,
+    ) {
         styled_lines.push((s, text_style));
     }
     for s in wrap_text(" ", "Your unsaved text is shown below:", inner_w) {

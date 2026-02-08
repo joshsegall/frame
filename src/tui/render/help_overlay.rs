@@ -52,7 +52,16 @@ pub fn render_help_overlay(frame: &mut Frame, app: &mut App, area: Rect) {
 
         // Left column
         if row < left.len() {
-            render_entry(&left[row], &mut spans, key_w, col_w, key_style, desc_style, header_style, blank_style);
+            render_entry(
+                &left[row],
+                &mut spans,
+                key_w,
+                col_w,
+                key_style,
+                desc_style,
+                header_style,
+                blank_style,
+            );
         } else {
             spans.push(Span::styled(" ".repeat(col_w), blank_style));
         }
@@ -62,7 +71,16 @@ pub fn render_help_overlay(frame: &mut Frame, app: &mut App, area: Rect) {
 
         // Right column
         if row < right.len() {
-            render_entry(&right[row], &mut spans, key_w, col_w, key_style, desc_style, header_style, blank_style);
+            render_entry(
+                &right[row],
+                &mut spans,
+                key_w,
+                col_w,
+                key_style,
+                desc_style,
+                header_style,
+                blank_style,
+            );
         }
 
         lines.push(Line::from(spans));
@@ -110,7 +128,8 @@ pub fn render_help_overlay(frame: &mut Frame, app: &mut App, area: Rect) {
         .style(Style::default().bg(bg));
 
     if can_scroll_up && can_scroll_down {
-        block = block.title_top(Span::styled(" \u{25B2} ", Style::default().fg(dim).bg(bg)))
+        block = block
+            .title_top(Span::styled(" \u{25B2} ", Style::default().fg(dim).bg(bg)))
             .title_bottom(Span::styled(" \u{25BC} ", Style::default().fg(dim).bg(bg)));
     } else if can_scroll_up {
         block = block.title_top(Span::styled(" \u{25B2} ", Style::default().fg(dim).bg(bg)));
@@ -220,6 +239,7 @@ fn build_track_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("/".into(), "Search".into()),
         HelpEntry::Binding("J".into(), "Jump to task".into()),
         HelpEntry::Binding("D".into(), "Show deps".into()),
+        HelpEntry::Binding("T".into(), "Tag colors".into()),
         HelpEntry::Binding("C".into(), "Set cc-focus".into()),
         HelpEntry::Binding(".".into(), "Repeat last action".into()),
         HelpEntry::Binding("z/u".into(), "Undo".into()),
@@ -240,6 +260,7 @@ fn build_detail_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("g/G".into(), "Top / bottom".into()),
         HelpEntry::Binding("J".into(), "Jump to task".into()),
         HelpEntry::Binding("D".into(), "Show deps".into()),
+        HelpEntry::Binding("T".into(), "Tag colors".into()),
         HelpEntry::Binding("Esc".into(), "Back".into()),
     ];
 
@@ -285,6 +306,7 @@ fn build_tracks_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("Tab".into(), "Next view".into()),
         HelpEntry::Binding("/".into(), "Search".into()),
         HelpEntry::Binding("J".into(), "Jump to task".into()),
+        HelpEntry::Binding("T".into(), "Tag colors".into()),
         HelpEntry::Binding("z/u".into(), "Undo".into()),
         HelpEntry::Binding("Z".into(), "Redo".into()),
         HelpEntry::Binding("?".into(), "Help".into()),
@@ -317,6 +339,7 @@ fn build_inbox_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Header("Views & Other".into()),
         HelpEntry::Binding("Tab".into(), "Next view".into()),
         HelpEntry::Binding("J".into(), "Jump to task".into()),
+        HelpEntry::Binding("T".into(), "Tag colors".into()),
         HelpEntry::Binding("z/u".into(), "Undo".into()),
         HelpEntry::Binding("Z".into(), "Redo".into()),
         HelpEntry::Binding("?".into(), "Help".into()),
@@ -344,6 +367,7 @@ fn build_recent_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Header("Views & Other".into()),
         HelpEntry::Binding("Tab".into(), "Next view".into()),
         HelpEntry::Binding("J".into(), "Jump to task".into()),
+        HelpEntry::Binding("T".into(), "Tag colors".into()),
         HelpEntry::Binding("z/u".into(), "Undo".into()),
         HelpEntry::Binding("Z".into(), "Redo".into()),
         HelpEntry::Binding("?".into(), "Help".into()),

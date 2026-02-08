@@ -357,7 +357,11 @@ pub fn delete_track(
 }
 
 /// Move a track file to archive/_tracks/ directory
-pub fn archive_track_file(frame_dir: &Path, track_id: &str, file_path: &str) -> Result<(), TrackError> {
+pub fn archive_track_file(
+    frame_dir: &Path,
+    track_id: &str,
+    file_path: &str,
+) -> Result<(), TrackError> {
     let source = frame_dir.join(file_path);
     let archive_dir = frame_dir.join("archive").join("_tracks");
     fs::create_dir_all(&archive_dir).map_err(ProjectError::IoError)?;
@@ -367,8 +371,15 @@ pub fn archive_track_file(frame_dir: &Path, track_id: &str, file_path: &str) -> 
 }
 
 /// Restore a track file from archive/_tracks/ back to tracks/
-pub fn restore_track_file(frame_dir: &Path, track_id: &str, file_path: &str) -> Result<(), TrackError> {
-    let archive_path = frame_dir.join("archive").join("_tracks").join(format!("{}.md", track_id));
+pub fn restore_track_file(
+    frame_dir: &Path,
+    track_id: &str,
+    file_path: &str,
+) -> Result<(), TrackError> {
+    let archive_path = frame_dir
+        .join("archive")
+        .join("_tracks")
+        .join(format!("{}.md", track_id));
     let dest = frame_dir.join(file_path);
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(ProjectError::IoError)?;
@@ -512,7 +523,10 @@ pub fn rename_track_prefix(
     result.tracks_affected = affected_tracks.len();
 
     // Update config prefix
-    config.ids.prefixes.insert(track_id.to_string(), new_prefix.to_string());
+    config
+        .ids
+        .prefixes
+        .insert(track_id.to_string(), new_prefix.to_string());
 
     Ok(result)
 }
@@ -547,7 +561,11 @@ fn rename_dep_references(track: &mut Track, old_prefix: &str, new_prefix: &str) 
 }
 
 /// Rename dep references in a list of tasks (recursive).
-fn rename_deps_in_tasks(tasks: &mut [crate::model::Task], old_prefix: &str, new_prefix: &str) -> usize {
+fn rename_deps_in_tasks(
+    tasks: &mut [crate::model::Task],
+    old_prefix: &str,
+    new_prefix: &str,
+) -> usize {
     let mut count = 0;
     for task in tasks.iter_mut() {
         for m in &mut task.metadata {
@@ -820,7 +838,8 @@ file = "tracks/old.md"
 
     #[test]
     fn test_is_track_not_empty_with_tasks() {
-        let track = crate::parse::parse_track("# Test\n\n## Backlog\n\n- [ ] `T-001` Task\n\n## Done\n");
+        let track =
+            crate::parse::parse_track("# Test\n\n## Backlog\n\n- [ ] `T-001` Task\n\n## Done\n");
         let tmp = TempDir::new().unwrap();
         let frame_dir = tmp.path().join("frame");
         fs::create_dir_all(&frame_dir).unwrap();
@@ -842,7 +861,11 @@ file = "tracks/old.md"
     fn test_delete_track() {
         let (tmp, frame_dir, mut config, mut doc) = setup_test_project();
         // Create the track file
-        fs::write(frame_dir.join("tracks/main.md"), "# Main\n\n## Backlog\n\n## Done\n").unwrap();
+        fs::write(
+            frame_dir.join("tracks/main.md"),
+            "# Main\n\n## Backlog\n\n## Done\n",
+        )
+        .unwrap();
         delete_track(&frame_dir, &mut doc, &mut config, "main").unwrap();
         assert!(!frame_dir.join("tracks/main.md").exists());
         assert_eq!(config.tracks.len(), 2);
@@ -883,7 +906,11 @@ file = "tracks/old.md"
     #[test]
     fn test_rename_track_name() {
         let (tmp, frame_dir, mut config, mut doc) = setup_test_project();
-        fs::write(frame_dir.join("tracks/main.md"), "# Main\n\n## Backlog\n\n## Done\n").unwrap();
+        fs::write(
+            frame_dir.join("tracks/main.md"),
+            "# Main\n\n## Backlog\n\n## Done\n",
+        )
+        .unwrap();
         rename_track_name(&frame_dir, &mut doc, &mut config, "main", "Main Track").unwrap();
         assert_eq!(config.tracks[0].name, "Main Track");
         let content = fs::read_to_string(frame_dir.join("tracks/main.md")).unwrap();
@@ -937,19 +964,31 @@ file = "tracks/old.md"
 ## Done
 ";
         let mut config = ProjectConfig {
-            project: crate::model::config::ProjectInfo { name: "test".into() },
+            project: crate::model::config::ProjectInfo {
+                name: "test".into(),
+            },
             agent: Default::default(),
             tracks: vec![],
             clean: Default::default(),
             ids: crate::model::config::IdConfig {
-                prefixes: [("effects".into(), "EFF".into()), ("other".into(), "OTH".into())].into(),
+                prefixes: [
+                    ("effects".into(), "EFF".into()),
+                    ("other".into(), "OTH".into()),
+                ]
+                .into(),
             },
             ui: Default::default(),
         };
 
         let mut tracks = vec![
-            ("effects".to_string(), crate::parse::parse_track(track_content)),
-            ("other".to_string(), crate::parse::parse_track(other_track_content)),
+            (
+                "effects".to_string(),
+                crate::parse::parse_track(track_content),
+            ),
+            (
+                "other".to_string(),
+                crate::parse::parse_track(other_track_content),
+            ),
         ];
 
         let result = rename_track_prefix(&mut config, &mut tracks, "effects", "EFF", "FX").unwrap();
@@ -969,7 +1008,9 @@ file = "tracks/old.md"
     #[test]
     fn test_rename_track_prefix_collision() {
         let mut config = ProjectConfig {
-            project: crate::model::config::ProjectInfo { name: "test".into() },
+            project: crate::model::config::ProjectInfo {
+                name: "test".into(),
+            },
             agent: Default::default(),
             tracks: vec![],
             clean: Default::default(),

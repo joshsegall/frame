@@ -63,10 +63,7 @@ pub fn render_inbox_view(frame: &mut Frame, app: &mut App, area: Rect) {
                     .bg(app.theme.selection_bg),
             ));
         } else {
-            spans.push(Span::styled(
-                " ",
-                Style::default().bg(app.theme.background),
-            ));
+            spans.push(Span::styled(" ", Style::default().bg(app.theme.background)));
         }
 
         let num_style = Style::default().fg(app.theme.dim).bg(bg);
@@ -77,8 +74,7 @@ pub fn render_inbox_view(frame: &mut Frame, app: &mut App, area: Rect) {
             && app.mode == Mode::Edit
             && matches!(
                 &app.edit_target,
-                Some(EditTarget::NewInboxItem { .. })
-                    | Some(EditTarget::ExistingInboxTitle { .. })
+                Some(EditTarget::NewInboxItem { .. }) | Some(EditTarget::ExistingInboxTitle { .. })
             );
         let editing_tags = is_cursor
             && app.mode == Mode::Edit
@@ -116,7 +112,8 @@ pub fn render_inbox_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 .add_modifier(Modifier::BOLD);
             // Truncate title at available width
             let prefix_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-            let tag_width: usize = item.tags.iter().map(|t| t.len() + 2).sum::<usize>() + if item.tags.is_empty() { 0 } else { 2 };
+            let tag_width: usize = item.tags.iter().map(|t| t.len() + 2).sum::<usize>()
+                + if item.tags.is_empty() { 0 } else { 2 };
             let available = (area.width as usize).saturating_sub(prefix_width + tag_width + 1);
             let display_title = super::truncate_with_ellipsis(&item.title, available);
             push_highlighted_spans(

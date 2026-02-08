@@ -35,7 +35,9 @@ fn render_tabs(frame: &mut Frame, app: &App, area: Rect) -> Vec<usize> {
     spans.push(Span::styled(" ", bg_style));
     spans.push(Span::styled(
         "\u{25B6}",
-        Style::default().fg(app.theme.purple).bg(app.theme.background),
+        Style::default()
+            .fg(app.theme.purple)
+            .bg(app.theme.background),
     ));
     spans.push(Span::styled(" ", bg_style));
 
@@ -52,14 +54,19 @@ fn render_tabs(frame: &mut Frame, app: &App, area: Rect) -> Vec<usize> {
             spans.push(Span::styled(format!(" {} ", name), style));
             spans.push(Span::styled(
                 "\u{2605}",
-                Style::default()
-                    .fg(app.theme.purple)
-                    .bg(if is_current { app.theme.selection_bg } else { app.theme.background }),
+                Style::default().fg(app.theme.purple).bg(if is_current {
+                    app.theme.selection_bg
+                } else {
+                    app.theme.background
+                }),
             ));
             spans.push(Span::styled(
                 " ",
-                Style::default()
-                    .bg(if is_current { app.theme.selection_bg } else { app.theme.background }),
+                Style::default().bg(if is_current {
+                    app.theme.selection_bg
+                } else {
+                    app.theme.background
+                }),
             ));
         } else {
             spans.push(Span::styled(format!(" {} ", name), style));
@@ -77,14 +84,16 @@ fn render_tabs(frame: &mut Frame, app: &App, area: Rect) -> Vec<usize> {
     // Inbox tab with count (*N)
     let inbox_count = app.inbox_count();
     let is_inbox = app.view == View::Inbox;
-    let tab_bg = if is_inbox { app.theme.selection_bg } else { app.theme.background };
+    let tab_bg = if is_inbox {
+        app.theme.selection_bg
+    } else {
+        app.theme.background
+    };
     let style = tab_style(app, is_inbox);
     spans.push(Span::styled(" ", style));
     spans.push(Span::styled(
         "*",
-        Style::default()
-            .fg(app.theme.purple)
-            .bg(tab_bg),
+        Style::default().fg(app.theme.purple).bg(tab_bg),
     ));
     if inbox_count > 0 {
         spans.push(Span::styled(format!("{} ", inbox_count), style));
@@ -118,7 +127,10 @@ fn render_separator(frame: &mut Frame, app: &App, area: Rect, sep_cols: &[usize]
     if is_track_view && filter.is_active() {
         // Build indicator spans: "filter: " + state + " " + #tag
         let mut indicator_spans: Vec<Span> = Vec::new();
-        indicator_spans.push(Span::styled("filter: ", Style::default().fg(app.theme.purple).bg(bg)));
+        indicator_spans.push(Span::styled(
+            "filter: ",
+            Style::default().fg(app.theme.purple).bg(bg),
+        ));
 
         if let Some(sf) = &filter.state_filter {
             let state_color = match sf {
@@ -146,7 +158,10 @@ fn render_separator(frame: &mut Frame, app: &App, area: Rect, sep_cols: &[usize]
         }
 
         // Calculate indicator width
-        let indicator_width: usize = indicator_spans.iter().map(|s| s.content.chars().count()).sum();
+        let indicator_width: usize = indicator_spans
+            .iter()
+            .map(|s| s.content.chars().count())
+            .sum();
         // +2: one space before indicator, one space after (right edge buffer)
         let separator_end = width.saturating_sub(indicator_width + 2);
 
@@ -185,8 +200,7 @@ fn render_separator(frame: &mut Frame, app: &App, area: Rect, sep_cols: &[usize]
                 line.push('\u{2500}');
             }
         }
-        let sep_widget = Paragraph::new(line)
-            .style(Style::default().fg(dim).bg(bg));
+        let sep_widget = Paragraph::new(line).style(Style::default().fg(dim).bg(bg));
         frame.render_widget(sep_widget, area);
     }
 }

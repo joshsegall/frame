@@ -20,17 +20,11 @@ pub enum UndoNavTarget {
         position_hint: Option<usize>,
     },
     /// Navigate to the tracks overview and flash a track row
-    TracksView {
-        track_id: String,
-    },
+    TracksView { track_id: String },
     /// Navigate to the inbox view, optionally to a specific item index
-    Inbox {
-        cursor: Option<usize>,
-    },
+    Inbox { cursor: Option<usize> },
     /// Navigate to the recent view
-    Recent {
-        cursor: Option<usize>,
-    },
+    Recent { cursor: Option<usize> },
 }
 
 /// Derive a navigation target from an operation
@@ -97,7 +91,12 @@ pub fn nav_target_for_op(op: &Operation, is_undo: bool) -> Option<UndoNavTarget>
                 })
             }
         }
-        Operation::FieldEdit { track_id, task_id, field, .. } => {
+        Operation::FieldEdit {
+            track_id,
+            task_id,
+            field,
+            ..
+        } => {
             let detail_region = match field.as_str() {
                 "note" => Some(DetailRegion::Note),
                 "deps" => Some(DetailRegion::Deps),
@@ -113,42 +112,63 @@ pub fn nav_target_for_op(op: &Operation, is_undo: bool) -> Option<UndoNavTarget>
                 position_hint: None,
             })
         }
-        Operation::TrackMove { track_id, .. } => {
-            Some(UndoNavTarget::TracksView {
-                track_id: track_id.clone(),
-            })
-        }
+        Operation::TrackMove { track_id, .. } => Some(UndoNavTarget::TracksView {
+            track_id: track_id.clone(),
+        }),
         Operation::InboxAdd { index } => {
             if is_undo {
                 // Item was removed by undo — stay at same cursor
-                Some(UndoNavTarget::Inbox { cursor: Some(index.saturating_sub(1).max(0)) })
+                Some(UndoNavTarget::Inbox {
+                    cursor: Some(index.saturating_sub(1).max(0)),
+                })
             } else {
-                Some(UndoNavTarget::Inbox { cursor: Some(*index) })
+                Some(UndoNavTarget::Inbox {
+                    cursor: Some(*index),
+                })
             }
         }
         Operation::InboxDelete { index, .. } => {
             if is_undo {
                 // Item was restored
-                Some(UndoNavTarget::Inbox { cursor: Some(*index) })
+                Some(UndoNavTarget::Inbox {
+                    cursor: Some(*index),
+                })
             } else {
-                Some(UndoNavTarget::Inbox { cursor: Some(index.saturating_sub(1).max(0)) })
+                Some(UndoNavTarget::Inbox {
+                    cursor: Some(index.saturating_sub(1).max(0)),
+                })
             }
         }
-        Operation::InboxTitleEdit { index, .. }
-        | Operation::InboxTagsEdit { index, .. } => {
-            Some(UndoNavTarget::Inbox { cursor: Some(*index) })
+        Operation::InboxTitleEdit { index, .. } | Operation::InboxTagsEdit { index, .. } => {
+            Some(UndoNavTarget::Inbox {
+                cursor: Some(*index),
+            })
         }
-        Operation::InboxMove { old_index, new_index } => {
+        Operation::InboxMove {
+            old_index,
+            new_index,
+        } => {
             if is_undo {
-                Some(UndoNavTarget::Inbox { cursor: Some(*old_index) })
+                Some(UndoNavTarget::Inbox {
+                    cursor: Some(*old_index),
+                })
             } else {
-                Some(UndoNavTarget::Inbox { cursor: Some(*new_index) })
+                Some(UndoNavTarget::Inbox {
+                    cursor: Some(*new_index),
+                })
             }
         }
-        Operation::InboxTriage { inbox_index, track_id, task_id, .. } => {
+        Operation::InboxTriage {
+            inbox_index,
+            track_id,
+            task_id,
+            ..
+        } => {
             if is_undo {
                 // Item restored to inbox
-                Some(UndoNavTarget::Inbox { cursor: Some(*inbox_index) })
+                Some(UndoNavTarget::Inbox {
+                    cursor: Some(*inbox_index),
+                })
             } else {
                 // Item triaged to track
                 Some(UndoNavTarget::Task {
@@ -161,7 +181,11 @@ pub fn nav_target_for_op(op: &Operation, is_undo: bool) -> Option<UndoNavTarget>
             }
         }
         Operation::SectionMove {
-            track_id, task_id, from_section: _, to_section, from_index,
+            track_id,
+            task_id,
+            from_section: _,
+            to_section,
+            from_index,
         } => {
             if is_undo {
                 // Task moved back to original section — navigate to task in track view
@@ -187,7 +211,9 @@ pub fn nav_target_for_op(op: &Operation, is_undo: bool) -> Option<UndoNavTarget>
                 }
             }
         }
-        Operation::Reopen { track_id, task_id, .. } => {
+        Operation::Reopen {
+            track_id, task_id, ..
+        } => {
             if is_undo {
                 // Task was put back in Done section — navigate to Recent view
                 Some(UndoNavTarget::Recent { cursor: None })
@@ -202,27 +228,30 @@ pub fn nav_target_for_op(op: &Operation, is_undo: bool) -> Option<UndoNavTarget>
                 })
             }
         }
-        Operation::TrackAdd { track_id } => {
-            Some(UndoNavTarget::TracksView {
-                track_id: track_id.clone(),
-            })
-        }
+        Operation::TrackAdd { track_id } => Some(UndoNavTarget::TracksView {
+            track_id: track_id.clone(),
+        }),
         Operation::TrackNameEdit { track_id, .. }
         | Operation::TrackShelve { track_id, .. }
         | Operation::TrackArchive { track_id, .. }
-        | Operation::TrackDelete { track_id, .. } => {
-            Some(UndoNavTarget::TracksView {
-                track_id: track_id.clone(),
-            })
-        }
-        Operation::TrackCcFocus { old_focus, new_focus } => {
+        | Operation::TrackDelete { track_id, .. } => Some(UndoNavTarget::TracksView {
+            track_id: track_id.clone(),
+        }),
+        Operation::TrackCcFocus {
+            old_focus,
+            new_focus,
+        } => {
             let focus = if is_undo { old_focus } else { new_focus };
             Some(UndoNavTarget::TracksView {
                 track_id: focus.clone().unwrap_or_default(),
             })
         }
         Operation::CrossTrackMove {
-            source_track_id, target_track_id, task_id_old, task_id_new, ..
+            source_track_id,
+            target_track_id,
+            task_id_old,
+            task_id_new,
+            ..
         } => {
             if is_undo {
                 Some(UndoNavTarget::Task {
@@ -311,10 +340,7 @@ pub enum Operation {
         index: usize,
     },
     /// An inbox item was deleted
-    InboxDelete {
-        index: usize,
-        item: InboxItem,
-    },
+    InboxDelete { index: usize, item: InboxItem },
     /// An inbox item's title was edited
     InboxTitleEdit {
         index: usize,
@@ -328,10 +354,7 @@ pub enum Operation {
         new_tags: Vec<String>,
     },
     /// An inbox item was moved (reordered)
-    InboxMove {
-        old_index: usize,
-        new_index: usize,
-    },
+    InboxMove { old_index: usize, new_index: usize },
     /// An inbox item was triaged into a track
     InboxTriage {
         /// The inbox item that was removed
@@ -359,9 +382,7 @@ pub enum Operation {
         done_index: usize,
     },
     /// A new track was created (in TUI)
-    TrackAdd {
-        track_id: String,
-    },
+    TrackAdd { track_id: String },
     /// A track's display name was edited
     TrackNameEdit {
         track_id: String,
@@ -375,10 +396,7 @@ pub enum Operation {
         was_active: bool,
     },
     /// A track was archived
-    TrackArchive {
-        track_id: String,
-        old_state: String,
-    },
+    TrackArchive { track_id: String, old_state: String },
     /// A track was deleted (empty track only)
     TrackDelete {
         track_id: String,
@@ -446,7 +464,11 @@ impl UndoStack {
 
     /// Undo the last operation. Returns navigation target for the UI.
     /// Applies the inverse operation to the track data. Does NOT save to disk.
-    pub fn undo(&mut self, tracks: &mut [(String, Track)], inbox: Option<&mut crate::model::inbox::Inbox>) -> Option<UndoNavTarget> {
+    pub fn undo(
+        &mut self,
+        tracks: &mut [(String, Track)],
+        inbox: Option<&mut crate::model::inbox::Inbox>,
+    ) -> Option<UndoNavTarget> {
         let op = self.undo.pop()?;
 
         // Can't undo past a sync marker
@@ -464,7 +486,11 @@ impl UndoStack {
     }
 
     /// Redo the last undone operation. Returns navigation target for the UI.
-    pub fn redo(&mut self, tracks: &mut [(String, Track)], inbox: Option<&mut crate::model::inbox::Inbox>) -> Option<UndoNavTarget> {
+    pub fn redo(
+        &mut self,
+        tracks: &mut [(String, Track)],
+        inbox: Option<&mut crate::model::inbox::Inbox>,
+    ) -> Option<UndoNavTarget> {
         let op = self.redo.pop()?;
 
         if matches!(op, Operation::SyncMarker) {
@@ -494,7 +520,11 @@ impl UndoStack {
 }
 
 /// Apply the inverse of an operation (for undo)
-fn apply_inverse(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&mut crate::model::inbox::Inbox>) -> Option<String> {
+fn apply_inverse(
+    op: &Operation,
+    tracks: &mut [(String, Track)],
+    inbox: Option<&mut crate::model::inbox::Inbox>,
+) -> Option<String> {
     match op {
         Operation::StateChange {
             track_id,
@@ -508,8 +538,7 @@ fn apply_inverse(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
             task.state = *old_state;
             task.mark_dirty();
             // Restore resolved date
-            task.metadata
-                .retain(|m| m.key() != "resolved");
+            task.metadata.retain(|m| m.key() != "resolved");
             if let Some(date) = old_resolved {
                 task.metadata
                     .push(crate::model::task::Metadata::Resolved(date.clone()));
@@ -546,9 +575,7 @@ fn apply_inverse(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
             // Undo subtask add = remove the subtask from parent
             let track = find_track_mut(tracks, track_id)?;
             let parent = task_ops::find_task_mut_in_track(track, parent_id)?;
-            parent
-                .subtasks
-                .retain(|t| t.id.as_deref() != Some(task_id));
+            parent.subtasks.retain(|t| t.id.as_deref() != Some(task_id));
             parent.mark_dirty();
             Some(track_id.clone())
         }
@@ -607,7 +634,9 @@ fn apply_inverse(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
             }
             None
         }
-        Operation::InboxTitleEdit { index, old_title, .. } => {
+        Operation::InboxTitleEdit {
+            index, old_title, ..
+        } => {
             if let Some(inbox) = inbox {
                 if let Some(item) = inbox.items.get_mut(*index) {
                     item.title = old_title.clone();
@@ -616,7 +645,9 @@ fn apply_inverse(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
             }
             None
         }
-        Operation::InboxTagsEdit { index, old_tags, .. } => {
+        Operation::InboxTagsEdit {
+            index, old_tags, ..
+        } => {
             if let Some(inbox) = inbox {
                 if let Some(item) = inbox.items.get_mut(*index) {
                     item.tags = old_tags.clone();
@@ -625,7 +656,10 @@ fn apply_inverse(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
             }
             None
         }
-        Operation::InboxMove { old_index, new_index } => {
+        Operation::InboxMove {
+            old_index,
+            new_index,
+        } => {
             // Undo move = move back from new_index to old_index
             if let Some(inbox) = inbox {
                 if *new_index < inbox.items.len() {
@@ -636,7 +670,12 @@ fn apply_inverse(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
             }
             None
         }
-        Operation::InboxTriage { inbox_index, item, track_id, task_id } => {
+        Operation::InboxTriage {
+            inbox_index,
+            item,
+            track_id,
+            task_id,
+        } => {
             // Undo triage = remove task from track, re-insert item into inbox
             let track = find_track_mut(tracks, track_id);
             if let Some(track) = track {
@@ -652,7 +691,11 @@ fn apply_inverse(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
             Some(track_id.clone())
         }
         Operation::SectionMove {
-            track_id, task_id, from_section, to_section, from_index,
+            track_id,
+            task_id,
+            from_section,
+            to_section,
+            from_index,
         } => {
             // Undo section move = move task back from to_section to from_section at from_index
             let track = find_track_mut(tracks, track_id)?;
@@ -667,7 +710,13 @@ fn apply_inverse(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
             }
             Some(track_id.clone())
         }
-        Operation::Reopen { track_id, task_id, old_state, old_resolved, done_index } => {
+        Operation::Reopen {
+            track_id,
+            task_id,
+            old_state,
+            old_resolved,
+            done_index,
+        } => {
             // Undo reopen = restore state to Done. Task may be in Backlog (after flush)
             // or still in Done section (during grace period).
             let track = find_track_mut(tracks, track_id)?;
@@ -675,7 +724,10 @@ fn apply_inverse(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
             // Try to find and remove from Backlog (post-flush case)
             let from_backlog = {
                 if let Some(backlog) = track.section_tasks_mut(SectionKind::Backlog) {
-                    if let Some(idx) = backlog.iter().position(|t| t.id.as_deref() == Some(task_id)) {
+                    if let Some(idx) = backlog
+                        .iter()
+                        .position(|t| t.id.as_deref() == Some(task_id))
+                    {
                         Some(backlog.remove(idx))
                     } else {
                         None
@@ -690,7 +742,8 @@ fn apply_inverse(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
                 task.state = *old_state;
                 task.metadata.retain(|m| m.key() != "resolved");
                 if let Some(date) = old_resolved {
-                    task.metadata.push(crate::model::task::Metadata::Resolved(date.clone()));
+                    task.metadata
+                        .push(crate::model::task::Metadata::Resolved(date.clone()));
                 }
                 task.mark_dirty();
                 if let Some(done) = track.section_tasks_mut(SectionKind::Done) {
@@ -704,20 +757,29 @@ fn apply_inverse(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
                 task.state = *old_state;
                 task.metadata.retain(|m| m.key() != "resolved");
                 if let Some(date) = old_resolved {
-                    task.metadata.push(crate::model::task::Metadata::Resolved(date.clone()));
+                    task.metadata
+                        .push(crate::model::task::Metadata::Resolved(date.clone()));
                 }
                 task.mark_dirty();
             }
             Some(track_id.clone())
         }
         Operation::CrossTrackMove {
-            source_track_id, target_track_id, task_id_old, task_id_new,
-            source_index, source_parent_id, old_depth, ..
+            source_track_id,
+            target_track_id,
+            task_id_old,
+            task_id_new,
+            source_index,
+            source_parent_id,
+            old_depth,
+            ..
         } => {
             // Undo: remove task from target, rename back to old ID, insert into source
             let target_track = find_track_mut(tracks, target_track_id)?;
             let target_tasks = target_track.section_tasks_mut(SectionKind::Backlog)?;
-            let idx = target_tasks.iter().position(|t| t.id.as_deref() == Some(task_id_new))?;
+            let idx = target_tasks
+                .iter()
+                .position(|t| t.id.as_deref() == Some(task_id_new))?;
             let mut task = target_tasks.remove(idx);
 
             // Rename ID back
@@ -762,7 +824,11 @@ fn apply_inverse(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
 }
 
 /// Apply an operation forward (for redo)
-fn apply_forward(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&mut crate::model::inbox::Inbox>) -> Option<String> {
+fn apply_forward(
+    op: &Operation,
+    tracks: &mut [(String, Track)],
+    inbox: Option<&mut crate::model::inbox::Inbox>,
+) -> Option<String> {
     match op {
         Operation::StateChange {
             track_id,
@@ -775,8 +841,7 @@ fn apply_forward(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
             let task = task_ops::find_task_mut_in_track(track, task_id)?;
             task.state = *new_state;
             task.mark_dirty();
-            task.metadata
-                .retain(|m| m.key() != "resolved");
+            task.metadata.retain(|m| m.key() != "resolved");
             if let Some(date) = new_resolved {
                 task.metadata
                     .push(crate::model::task::Metadata::Resolved(date.clone()));
@@ -886,7 +951,9 @@ fn apply_forward(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
             }
             None
         }
-        Operation::InboxTitleEdit { index, new_title, .. } => {
+        Operation::InboxTitleEdit {
+            index, new_title, ..
+        } => {
             if let Some(inbox) = inbox {
                 if let Some(item) = inbox.items.get_mut(*index) {
                     item.title = new_title.clone();
@@ -895,7 +962,9 @@ fn apply_forward(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
             }
             None
         }
-        Operation::InboxTagsEdit { index, new_tags, .. } => {
+        Operation::InboxTagsEdit {
+            index, new_tags, ..
+        } => {
             if let Some(inbox) = inbox {
                 if let Some(item) = inbox.items.get_mut(*index) {
                     item.tags = new_tags.clone();
@@ -904,7 +973,10 @@ fn apply_forward(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
             }
             None
         }
-        Operation::InboxMove { old_index, new_index } => {
+        Operation::InboxMove {
+            old_index,
+            new_index,
+        } => {
             if let Some(inbox) = inbox {
                 if *old_index < inbox.items.len() {
                     let item = inbox.items.remove(*old_index);
@@ -914,7 +986,13 @@ fn apply_forward(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
             }
             None
         }
-        Operation::InboxTriage { inbox_index, track_id, task_id, item, .. } => {
+        Operation::InboxTriage {
+            inbox_index,
+            track_id,
+            task_id,
+            item,
+            ..
+        } => {
             // Redo triage = remove from inbox, add task to track
             if let Some(inbox) = inbox {
                 if *inbox_index < inbox.items.len() {
@@ -925,14 +1003,16 @@ fn apply_forward(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
             let track = find_track_mut(tracks, track_id);
             if let Some(track) = track {
                 if let Some(tasks) = track.section_tasks_mut(SectionKind::Backlog) {
-                    let mut task = Task::new(TaskState::Todo, Some(task_id.clone()), item.title.clone());
+                    let mut task =
+                        Task::new(TaskState::Todo, Some(task_id.clone()), item.title.clone());
                     task.tags = item.tags.clone();
                     task.metadata.push(crate::model::task::Metadata::Added(
                         chrono::Local::now().format("%Y-%m-%d").to_string(),
                     ));
                     if let Some(body) = &item.body {
                         if !body.is_empty() {
-                            task.metadata.push(crate::model::task::Metadata::Note(body.clone()));
+                            task.metadata
+                                .push(crate::model::task::Metadata::Note(body.clone()));
                         }
                     }
                     tasks.push(task);
@@ -941,13 +1021,19 @@ fn apply_forward(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
             Some(track_id.clone())
         }
         Operation::SectionMove {
-            track_id, task_id, from_section, to_section, ..
+            track_id,
+            task_id,
+            from_section,
+            to_section,
+            ..
         } => {
             // Redo section move = move task from from_section to to_section
             let track = find_track_mut(tracks, track_id)?;
             let task = {
                 let source = track.section_tasks_mut(*from_section)?;
-                let idx = source.iter().position(|t| t.id.as_deref() == Some(task_id))?;
+                let idx = source
+                    .iter()
+                    .position(|t| t.id.as_deref() == Some(task_id))?;
                 source.remove(idx)
             };
             if let Some(dest) = track.section_tasks_mut(*to_section) {
@@ -955,7 +1041,9 @@ fn apply_forward(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
             }
             Some(track_id.clone())
         }
-        Operation::Reopen { track_id, task_id, .. } => {
+        Operation::Reopen {
+            track_id, task_id, ..
+        } => {
             // Redo reopen = set task to Todo (it's in Done section), then move to Backlog
             let track = find_track_mut(tracks, track_id)?;
 
@@ -990,22 +1078,32 @@ fn apply_forward(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
             Some(track_id.clone())
         }
         Operation::CrossTrackMove {
-            source_track_id, target_track_id, task_id_old, task_id_new,
-            target_index, source_parent_id, ..
+            source_track_id,
+            target_track_id,
+            task_id_old,
+            task_id_new,
+            target_index,
+            source_parent_id,
+            ..
         } => {
             // Redo: remove from source, rename to new ID, insert into target
             let task = if let Some(parent_id) = source_parent_id {
                 // Was a subtask — remove from parent
                 let source_track = find_track_mut(tracks, source_track_id)?;
                 let parent = task_ops::find_task_mut_in_track(source_track, parent_id)?;
-                let idx = parent.subtasks.iter().position(|t| t.id.as_deref() == Some(task_id_old))?;
+                let idx = parent
+                    .subtasks
+                    .iter()
+                    .position(|t| t.id.as_deref() == Some(task_id_old))?;
                 let task = parent.subtasks.remove(idx);
                 parent.mark_dirty();
                 task
             } else {
                 let source_track = find_track_mut(tracks, source_track_id)?;
                 let source_tasks = source_track.section_tasks_mut(SectionKind::Backlog)?;
-                let idx = source_tasks.iter().position(|t| t.id.as_deref() == Some(task_id_old))?;
+                let idx = source_tasks
+                    .iter()
+                    .position(|t| t.id.as_deref() == Some(task_id_old))?;
                 source_tasks.remove(idx)
             };
 
@@ -1050,7 +1148,8 @@ fn apply_field_value(task: &mut Task, field: &str, value: &str) {
             task.mark_dirty();
         }
         "deps" => {
-            task.metadata.retain(|m| !matches!(m, crate::model::task::Metadata::Dep(_)));
+            task.metadata
+                .retain(|m| !matches!(m, crate::model::task::Metadata::Dep(_)));
             let deps: Vec<String> = value
                 .split(|c: char| c == ',' || c.is_whitespace())
                 .map(|s| s.trim().to_string())
@@ -1062,14 +1161,17 @@ fn apply_field_value(task: &mut Task, field: &str, value: &str) {
             task.mark_dirty();
         }
         "spec" => {
-            task.metadata.retain(|m| !matches!(m, crate::model::task::Metadata::Spec(_)));
+            task.metadata
+                .retain(|m| !matches!(m, crate::model::task::Metadata::Spec(_)));
             if !value.trim().is_empty() {
-                task.metadata.push(crate::model::task::Metadata::Spec(value.trim().to_string()));
+                task.metadata
+                    .push(crate::model::task::Metadata::Spec(value.trim().to_string()));
             }
             task.mark_dirty();
         }
         "refs" => {
-            task.metadata.retain(|m| !matches!(m, crate::model::task::Metadata::Ref(_)));
+            task.metadata
+                .retain(|m| !matches!(m, crate::model::task::Metadata::Ref(_)));
             let refs: Vec<String> = value
                 .split(',')
                 .map(|s| s.trim().to_string())
@@ -1081,9 +1183,11 @@ fn apply_field_value(task: &mut Task, field: &str, value: &str) {
             task.mark_dirty();
         }
         "note" => {
-            task.metadata.retain(|m| !matches!(m, crate::model::task::Metadata::Note(_)));
+            task.metadata
+                .retain(|m| !matches!(m, crate::model::task::Metadata::Note(_)));
             if !value.is_empty() {
-                task.metadata.push(crate::model::task::Metadata::Note(value.to_string()));
+                task.metadata
+                    .push(crate::model::task::Metadata::Note(value.to_string()));
             }
             task.mark_dirty();
         }
@@ -1091,10 +1195,7 @@ fn apply_field_value(task: &mut Task, field: &str, value: &str) {
     }
 }
 
-fn find_track_mut<'a>(
-    tracks: &'a mut [(String, Track)],
-    track_id: &str,
-) -> Option<&'a mut Track> {
+fn find_track_mut<'a>(tracks: &'a mut [(String, Track)], track_id: &str) -> Option<&'a mut Track> {
     tracks
         .iter_mut()
         .find(|(id, _)| id == track_id)
@@ -1106,10 +1207,23 @@ mod tests {
     use super::*;
 
     /// Helper to unwrap Task variant fields
-    fn expect_task(nav: UndoNavTarget) -> (String, String, Option<DetailRegion>, bool, Option<usize>) {
+    fn expect_task(
+        nav: UndoNavTarget,
+    ) -> (String, String, Option<DetailRegion>, bool, Option<usize>) {
         match nav {
-            UndoNavTarget::Task { track_id, task_id, detail_region, task_removed, position_hint } =>
-                (track_id, task_id, detail_region, task_removed, position_hint),
+            UndoNavTarget::Task {
+                track_id,
+                task_id,
+                detail_region,
+                task_removed,
+                position_hint,
+            } => (
+                track_id,
+                task_id,
+                detail_region,
+                task_removed,
+                position_hint,
+            ),
             other => panic!("expected Task, got {:?}", other),
         }
     }
@@ -1147,8 +1261,7 @@ mod tests {
             old_title: "old".into(),
             new_title: "new".into(),
         };
-        let (_, task_id, _, task_removed, _) =
-            expect_task(nav_target_for_op(&op, false).unwrap());
+        let (_, task_id, _, task_removed, _) = expect_task(nav_target_for_op(&op, false).unwrap());
         assert_eq!(task_id, "T-002");
         assert!(!task_removed);
     }
@@ -1173,8 +1286,7 @@ mod tests {
             task_id: "T-003".into(),
             position_index: 2,
         };
-        let (_, task_id, _, task_removed, _) =
-            expect_task(nav_target_for_op(&op, false).unwrap());
+        let (_, task_id, _, task_removed, _) = expect_task(nav_target_for_op(&op, false).unwrap());
         assert!(!task_removed);
         assert_eq!(task_id, "T-003");
     }
@@ -1186,8 +1298,7 @@ mod tests {
             parent_id: "T-010".into(),
             task_id: "T-010.1".into(),
         };
-        let (_, task_id, _, task_removed, _) =
-            expect_task(nav_target_for_op(&op, true).unwrap());
+        let (_, task_id, _, task_removed, _) = expect_task(nav_target_for_op(&op, true).unwrap());
         assert_eq!(task_id, "T-010");
         assert!(!task_removed);
     }
@@ -1199,8 +1310,7 @@ mod tests {
             parent_id: "T-010".into(),
             task_id: "T-010.1".into(),
         };
-        let (_, task_id, _, _, _) =
-            expect_task(nav_target_for_op(&op, false).unwrap());
+        let (_, task_id, _, _, _) = expect_task(nav_target_for_op(&op, false).unwrap());
         assert_eq!(task_id, "T-010.1");
     }
 
@@ -1212,8 +1322,7 @@ mod tests {
             old_index: 0,
             new_index: 3,
         };
-        let (_, task_id, detail_region, _, _) =
-            expect_task(nav_target_for_op(&op, true).unwrap());
+        let (_, task_id, detail_region, _, _) = expect_task(nav_target_for_op(&op, true).unwrap());
         assert_eq!(task_id, "T-005");
         assert!(detail_region.is_none());
     }
@@ -1227,8 +1336,7 @@ mod tests {
             old_value: "old note".into(),
             new_value: "new note".into(),
         };
-        let (_, _, detail_region, _, _) =
-            expect_task(nav_target_for_op(&op, true).unwrap());
+        let (_, _, detail_region, _, _) = expect_task(nav_target_for_op(&op, true).unwrap());
         assert_eq!(detail_region, Some(DetailRegion::Note));
     }
 
@@ -1241,8 +1349,7 @@ mod tests {
             old_value: "".into(),
             new_value: "T-001".into(),
         };
-        let (_, _, detail_region, _, _) =
-            expect_task(nav_target_for_op(&op, false).unwrap());
+        let (_, _, detail_region, _, _) = expect_task(nav_target_for_op(&op, false).unwrap());
         assert_eq!(detail_region, Some(DetailRegion::Deps));
     }
 
@@ -1255,8 +1362,7 @@ mod tests {
             old_value: "#foo".into(),
             new_value: "#bar".into(),
         };
-        let (_, _, detail_region, _, _) =
-            expect_task(nav_target_for_op(&op, true).unwrap());
+        let (_, _, detail_region, _, _) = expect_task(nav_target_for_op(&op, true).unwrap());
         assert!(detail_region.is_none());
     }
 
@@ -1269,8 +1375,7 @@ mod tests {
             old_value: "".into(),
             new_value: "spec.md".into(),
         };
-        let (_, _, detail_region, _, _) =
-            expect_task(nav_target_for_op(&op, true).unwrap());
+        let (_, _, detail_region, _, _) = expect_task(nav_target_for_op(&op, true).unwrap());
         assert_eq!(detail_region, Some(DetailRegion::Spec));
     }
 
@@ -1283,8 +1388,7 @@ mod tests {
             old_value: "".into(),
             new_value: "ref.md".into(),
         };
-        let (_, _, detail_region, _, _) =
-            expect_task(nav_target_for_op(&op, true).unwrap());
+        let (_, _, detail_region, _, _) = expect_task(nav_target_for_op(&op, true).unwrap());
         assert_eq!(detail_region, Some(DetailRegion::Refs));
     }
 

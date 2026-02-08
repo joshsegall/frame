@@ -37,7 +37,13 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut flat_items = app.build_flat_items(&track_id);
 
     // Insert bulk move stand-in at the insertion position
-    if let Some(MoveState::BulkTask { track_id: ref ms_tid, insert_pos, ref removed_tasks, .. }) = app.move_state {
+    if let Some(MoveState::BulkTask {
+        track_id: ref ms_tid,
+        insert_pos,
+        ref removed_tasks,
+        ..
+    }) = app.move_state
+    {
         if ms_tid == &track_id {
             let count = removed_tasks.len();
             let idx = insert_pos.min(flat_items.len());
@@ -98,7 +104,11 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Compute range preview bounds for V-select
     let range_preview: Option<(usize, usize)> = app.range_anchor.map(|anchor| {
-        if cursor <= anchor { (cursor, anchor) } else { (anchor, cursor) }
+        if cursor <= anchor {
+            (cursor, anchor)
+        } else {
+            (anchor, cursor)
+        }
     });
 
     for (item, row) in flat_items[scroll..end].iter().zip(scroll..end) {
@@ -118,12 +128,16 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 if let Some(task) = resolve_task(track, *section, path) {
                     // Context rows (filter ancestors) are never selectable
                     let effective_cursor = is_cursor && !is_context;
-                    let is_flash = !is_context && task.id.as_deref()
-                        .is_some_and(|id| app.is_flashing(id));
-                    let in_range = !is_context && range_preview
-                        .is_some_and(|(start, end)| row >= start && row <= end);
-                    let is_selected = !is_context && (in_range || task.id.as_deref()
-                        .is_some_and(|id| app.selection.contains(id)));
+                    let is_flash =
+                        !is_context && task.id.as_deref().is_some_and(|id| app.is_flashing(id));
+                    let in_range = !is_context
+                        && range_preview.is_some_and(|(start, end)| row >= start && row <= end);
+                    let is_selected = !is_context
+                        && (in_range
+                            || task
+                                .id
+                                .as_deref()
+                                .is_some_and(|id| app.selection.contains(id)));
                     let (line, col) = render_task_line(
                         app,
                         task,
@@ -142,7 +156,9 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
                         search_re.as_ref(),
                     );
                     if let Some(prefix_w) = col {
-                        let word_offset = app.autocomplete.as_ref()
+                        let word_offset = app
+                            .autocomplete
+                            .as_ref()
                             .map(|ac| ac.word_start_in_buffer(&app.edit_buffer) as u16)
                             .unwrap_or(0);
                         let screen_y = area.y + (row - scroll) as u16;
@@ -160,9 +176,8 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
                                 _ => None,
                             };
                             if let Some(label) = label {
-                                let (editor_line, ec) = render_bulk_editor_line(
-                                    app, label, area.width as usize,
-                                );
+                                let (editor_line, ec) =
+                                    render_bulk_editor_line(app, label, area.width as usize);
                                 let screen_y = area.y + lines.len() as u16;
                                 let screen_x = area.x + ec;
                                 edit_anchor = Some((screen_x, screen_y));
@@ -192,9 +207,7 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
         let screen_y = area.y + cursor.saturating_sub(scroll) as u16;
         let screen_x = area.x + 4;
         app.autocomplete_anchor = Some((screen_x, screen_y));
-    } else if app.mode == Mode::Edit
-        && matches!(app.edit_target, Some(EditTarget::FilterTag))
-    {
+    } else if app.mode == Mode::Edit && matches!(app.edit_target, Some(EditTarget::FilterTag)) {
         // Filter tag selection: anchor autocomplete to the cursor row
         let screen_y = area.y + cursor.saturating_sub(scroll) as u16;
         let screen_x = area.x + 4;
@@ -247,7 +260,11 @@ fn render_task_line<'a>(
     let mut edit_col: Option<u16> = None;
     let bg = app.theme.background;
     let dim_style = Style::default().fg(app.theme.dim).bg(bg);
-    let state_color = if is_context { app.theme.dim } else { app.theme.state_color(task.state) };
+    let state_color = if is_context {
+        app.theme.dim
+    } else {
+        app.theme.state_color(task.state)
+    };
 
     // Row background: flash > cursor > selected > normal
     let row_bg = if is_flash {
@@ -265,25 +282,19 @@ fn render_task_line<'a>(
     if is_flash {
         spans.push(Span::styled(
             "\u{258E}",
-            Style::default()
-                .fg(app.theme.yellow)
-                .bg(row_bg),
+            Style::default().fg(app.theme.yellow).bg(row_bg),
         ));
     } else if is_cursor && (!has_selection || is_selected) {
         // Cursor bar only shows if no selection active, or cursor row is itself selected
         spans.push(Span::styled(
             "\u{258E}",
-            Style::default()
-                .fg(app.theme.selection_border)
-                .bg(row_bg),
+            Style::default().fg(app.theme.selection_border).bg(row_bg),
         ));
     } else if is_selected {
         // Selected but not cursor: show ▌ bar in highlight color
         spans.push(Span::styled(
             "\u{258C}",
-            Style::default()
-                .fg(app.theme.highlight)
-                .bg(row_bg),
+            Style::default().fg(app.theme.highlight).bg(row_bg),
         ));
     } else {
         spans.push(Span::styled(" ", Style::default().bg(bg)));
@@ -370,9 +381,7 @@ fn render_task_line<'a>(
         && app.edit_target.as_ref().is_some_and(|et| match et {
             EditTarget::NewTask { task_id, .. }
             | EditTarget::ExistingTitle { task_id, .. }
-            | EditTarget::ExistingTags { task_id, .. } => {
-                task.id.as_deref() == Some(task_id)
-            }
+            | EditTarget::ExistingTags { task_id, .. } => task.id.as_deref() == Some(task_id),
             _ => false,
         });
     let is_editing_tags = is_cursor
@@ -411,7 +420,10 @@ fn render_task_line<'a>(
                 if sel_start > 0 {
                     spans.push(Span::styled(buf[..sel_start].to_string(), title_style));
                 }
-                spans.push(Span::styled(buf[sel_start..sel_end].to_string(), selection_style));
+                spans.push(Span::styled(
+                    buf[sel_start..sel_end].to_string(),
+                    selection_style,
+                ));
                 if sel_end < buf.len() {
                     spans.push(Span::styled(buf[sel_end..].to_string(), title_style));
                 }
@@ -458,7 +470,8 @@ fn render_task_line<'a>(
             .add_modifier(Modifier::BOLD);
         // Truncate title if it would overflow the available width
         let prefix_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-        let tag_width: usize = task.tags.iter().map(|t| t.len() + 2).sum::<usize>() + if task.tags.is_empty() { 0 } else { 2 };
+        let tag_width: usize = task.tags.iter().map(|t| t.len() + 2).sum::<usize>()
+            + if task.tags.is_empty() { 0 } else { 2 };
         let available = width.saturating_sub(prefix_width + tag_width + 1);
         let display_title = super::truncate_with_ellipsis(&task.title, available);
         push_highlighted_spans(
@@ -490,7 +503,10 @@ fn render_task_line<'a>(
                 if sel_start > 0 {
                     spans.push(Span::styled(buf[..sel_start].to_string(), tag_edit_style));
                 }
-                spans.push(Span::styled(buf[sel_start..sel_end].to_string(), selection_style));
+                spans.push(Span::styled(
+                    buf[sel_start..sel_end].to_string(),
+                    selection_style,
+                ));
                 if sel_end < buf.len() {
                     spans.push(Span::styled(buf[sel_end..].to_string(), tag_edit_style));
                 }
@@ -677,10 +693,7 @@ fn render_parked_separator<'a>(app: &'a App, width: usize, is_cursor: bool) -> L
                 .bg(app.theme.selection_bg),
         ));
     } else {
-        spans.push(Span::styled(
-            " ",
-            Style::default().bg(app.theme.background),
-        ));
+        spans.push(Span::styled(" ", Style::default().bg(app.theme.background)));
     }
 
     let label = " Parked ";
@@ -701,7 +714,10 @@ fn render_parked_separator<'a>(app: &'a App, width: usize, is_cursor: bool) -> L
 /// Render the bulk move stand-in row: "━━━ N tasks ━━━"
 fn render_bulk_standin<'a>(app: &'a App, count: usize, width: usize) -> Line<'a> {
     let bg = app.theme.selection_bg;
-    let style = Style::default().fg(app.theme.highlight).bg(bg).add_modifier(Modifier::BOLD);
+    let style = Style::default()
+        .fg(app.theme.highlight)
+        .bg(bg)
+        .add_modifier(Modifier::BOLD);
 
     let mut spans: Vec<Span> = Vec::new();
     spans.push(Span::styled(
@@ -709,11 +725,7 @@ fn render_bulk_standin<'a>(app: &'a App, count: usize, width: usize) -> Line<'a>
         Style::default().fg(app.theme.selection_border).bg(bg),
     ));
 
-    let label = format!(
-        " {} task{} ",
-        count,
-        if count == 1 { "" } else { "s" }
-    );
+    let label = format!(" {} task{} ", count, if count == 1 { "" } else { "s" });
     let bar_char = "\u{2501}"; // ━ heavy horizontal
     let dashes_before = 3;
     let dashes_after = width.saturating_sub(label.len() + dashes_before + 2);

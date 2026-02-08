@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use ratatui::Frame;
 
 use crate::model::TaskState;
 use crate::tui::app::{App, DepPopupEntry};
@@ -142,9 +142,9 @@ pub fn render_dep_popup(frame: &mut Frame, app: &App, area: Rect) {
                 // Expand/collapse indicator
                 if *has_children {
                     let arrow = if *is_expanded {
-                        "\u{25BE} "
+                        "\u{25BC} "
                     } else {
-                        "\u{25B8} "
+                        "\u{25B6} "
                     };
                     let arrow_style = Style::default().fg(dim).bg(row_bg);
                     spans.push(Span::styled(arrow, arrow_style));
@@ -304,6 +304,9 @@ pub fn render_dep_popup(frame: &mut Frame, app: &App, area: Rect) {
 fn pad_to_width<'a>(spans: &mut Vec<Span<'a>>, target_width: usize, pad_style: Style) {
     let total_used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
     if total_used < target_width {
-        spans.push(Span::styled(" ".repeat(target_width - total_used), pad_style));
+        spans.push(Span::styled(
+            " ".repeat(target_width - total_used),
+            pad_style,
+        ));
     }
 }

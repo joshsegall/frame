@@ -141,6 +141,27 @@ pub fn rename_prefix_key(doc: &mut toml_edit::DocumentMut, old_key: &str, new_ke
     }
 }
 
+/// Set a tag color in [ui.tag_colors], creating the section if needed
+pub fn set_tag_color(doc: &mut toml_edit::DocumentMut, tag: &str, hex_color: &str) {
+    if !doc.contains_key("ui") {
+        doc["ui"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let ui = doc["ui"].as_table_mut().unwrap();
+    if !ui.contains_key("tag_colors") {
+        ui["tag_colors"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    ui["tag_colors"][tag] = toml_edit::value(hex_color);
+}
+
+/// Remove a tag color from [ui.tag_colors]
+pub fn clear_tag_color(doc: &mut toml_edit::DocumentMut, tag: &str) {
+    if let Some(ui) = doc.get_mut("ui").and_then(|u| u.as_table_mut())
+        && let Some(tag_colors) = ui.get_mut("tag_colors").and_then(|tc| tc.as_table_mut())
+    {
+        tag_colors.remove(tag);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,5 +319,77 @@ file = "tracks/effects.md"
         let result = doc.to_string();
         assert!(!result.contains("effects = \"EFF\""));
         assert!(result.contains("fx = \"EFF\""));
+    }
+
+    #[test]
+    fn test_set_tag_color_creates_section() {
+        let config_text = r#"[project]
+name = "test"
+
+[[tracks]]
+id = "effects"
+name = "Effects"
+state = "active"
+file = "tracks/effects.md"
+"#;
+        let mut doc: toml_edit::DocumentMut = config_text.parse().unwrap();
+        set_tag_color(&mut doc, "bug", "#FF4444");
+        let result = doc.to_string();
+        assert!(result.contains("[ui.tag_colors]"));
+        assert!(result.contains("bug = \"#FF4444\""));
+    }
+
+    #[test]
+    fn test_set_tag_color_existing_section() {
+        let config_text = r##"[project]
+name = "test"
+
+[ui.tag_colors]
+bug = "#FF4444"
+
+[[tracks]]
+id = "effects"
+name = "Effects"
+state = "active"
+file = "tracks/effects.md"
+"##;
+        let mut doc: toml_edit::DocumentMut = config_text.parse().unwrap();
+        set_tag_color(&mut doc, "design", "#44DDFF");
+        set_tag_color(&mut doc, "bug", "#CC66FF");
+        let result = doc.to_string();
+        assert!(result.contains(r##"design = "#44DDFF""##));
+        assert!(result.contains(r##"bug = "#CC66FF""##));
+    }
+
+    #[test]
+    fn test_clear_tag_color() {
+        let config_text = r##"[project]
+name = "test"
+
+[ui.tag_colors]
+bug = "#FF4444"
+design = "#44DDFF"
+
+[[tracks]]
+id = "effects"
+name = "Effects"
+state = "active"
+file = "tracks/effects.md"
+"##;
+        let mut doc: toml_edit::DocumentMut = config_text.parse().unwrap();
+        clear_tag_color(&mut doc, "bug");
+        let result = doc.to_string();
+        assert!(!result.contains("bug"));
+        assert!(result.contains(r##"design = "#44DDFF""##));
+    }
+
+    #[test]
+    fn test_clear_tag_color_nonexistent() {
+        let config_text = r#"[project]
+name = "test"
+"#;
+        let mut doc: toml_edit::DocumentMut = config_text.parse().unwrap();
+        // Should not panic
+        clear_tag_color(&mut doc, "bug");
     }
 }

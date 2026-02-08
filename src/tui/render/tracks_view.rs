@@ -72,7 +72,9 @@ pub fn render_tracks_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Detect inline edit state
     let editing_track_id = match (&app.mode, &app.edit_target) {
-        (Mode::Edit, Some(EditTarget::ExistingTrackName { track_id, .. })) => Some(track_id.clone()),
+        (Mode::Edit, Some(EditTarget::ExistingTrackName { track_id, .. })) => {
+            Some(track_id.clone())
+        }
         _ => None,
     };
     let is_new_track_edit = matches!(
@@ -134,7 +136,16 @@ pub fn render_tracks_view(frame: &mut Frame, app: &mut App, area: Rect) {
             let is_cursor = flat_idx == cursor;
             let is_flash = app.is_track_flashing(&tc.id);
             if editing_track_id.as_deref() == Some(&tc.id) && is_cursor {
-                lines.push(render_edit_row(app, tc, flat_idx + 1, num_width, max_name_len, max_id_len, cc_focus, area.width));
+                lines.push(render_edit_row(
+                    app,
+                    tc,
+                    flat_idx + 1,
+                    num_width,
+                    max_name_len,
+                    max_id_len,
+                    cc_focus,
+                    area.width,
+                ));
             } else {
                 lines.push(render_track_row(
                     app,
@@ -200,7 +211,10 @@ fn render_col_names<'a>(app: &'a App, name_col: usize, max_id_len: usize) -> Lin
 
     // Pad to align "id" header with ID column in data rows
     let pre_id_col = name_col - max_id_len;
-    spans.push(Span::styled(" ".repeat(pre_id_col), Style::default().bg(bg)));
+    spans.push(Span::styled(
+        " ".repeat(pre_id_col),
+        Style::default().bg(bg),
+    ));
 
     // "id" header aligned to ID column
     spans.push(Span::styled(
@@ -219,9 +233,18 @@ fn render_col_names<'a>(app: &'a App, name_col: usize, max_id_len: usize) -> Lin
 }
 
 /// Render a section header with name + markdown checkbox sub-headers
-fn render_section_row<'a>(app: &'a App, label: &'static str, name_col: usize, is_dim: bool) -> Line<'a> {
+fn render_section_row<'a>(
+    app: &'a App,
+    label: &'static str,
+    name_col: usize,
+    is_dim: bool,
+) -> Line<'a> {
     let bg = app.theme.background;
-    let label_color = if is_dim { app.theme.dim } else { app.theme.text };
+    let label_color = if is_dim {
+        app.theme.dim
+    } else {
+        app.theme.text
+    };
     let label_style = Style::default()
         .fg(label_color)
         .bg(bg)
@@ -295,15 +318,10 @@ fn render_track_row<'a>(
         };
         spans.push(Span::styled(
             "\u{258E}",
-            Style::default()
-                .fg(border_color)
-                .bg(bg),
+            Style::default().fg(border_color).bg(bg),
         ));
     } else {
-        spans.push(Span::styled(
-            " ",
-            Style::default().bg(app.theme.background),
-        ));
+        spans.push(Span::styled(" ", Style::default().bg(app.theme.background)));
     }
 
     // Number (right-aligned in num_width)
@@ -340,13 +358,19 @@ fn render_track_row<'a>(
     ));
 
     // Stat columns: todo, active, blocked, done, parked
-    let counts = [stats.todo, stats.active, stats.blocked, stats.done, stats.parked];
+    let counts = [
+        stats.todo,
+        stats.active,
+        stats.blocked,
+        stats.done,
+        stats.parked,
+    ];
     let colors = [
         app.theme.text,      // todo
-        app.theme.highlight,  // active
-        app.theme.red,        // blocked
-        app.theme.text,       // done
-        app.theme.yellow,     // parked
+        app.theme.highlight, // active
+        app.theme.red,       // blocked
+        app.theme.text,      // done
+        app.theme.yellow,    // parked
     ];
 
     for (count, color) in counts.iter().zip(colors.iter()) {
@@ -403,7 +427,10 @@ fn render_edit_row<'a>(
 
     // Number
     let num_str = format!("{:>width$}", number, width = num_width);
-    spans.push(Span::styled(num_str, Style::default().fg(app.theme.dim).bg(bg)));
+    spans.push(Span::styled(
+        num_str,
+        Style::default().fg(app.theme.dim).bg(bg),
+    ));
     spans.push(Span::styled("  ", Style::default().bg(bg)));
 
     // Edit buffer with cursor (occupies the name column)
@@ -460,7 +487,13 @@ fn render_edit_row<'a>(
         .map(|(_, track)| task_counts(track))
         .unwrap_or_default();
 
-    let counts = [stats.todo, stats.active, stats.blocked, stats.done, stats.parked];
+    let counts = [
+        stats.todo,
+        stats.active,
+        stats.blocked,
+        stats.done,
+        stats.parked,
+    ];
     let colors = [
         app.theme.text,
         app.theme.highlight,
@@ -517,7 +550,10 @@ fn render_new_track_edit_row<'a>(
 
     // Number
     let num_str = format!("{:>width$}", number, width = num_width);
-    spans.push(Span::styled(num_str, Style::default().fg(app.theme.dim).bg(bg)));
+    spans.push(Span::styled(
+        num_str,
+        Style::default().fg(app.theme.dim).bg(bg),
+    ));
     spans.push(Span::styled("  ", Style::default().bg(bg)));
 
     // Edit buffer with cursor

@@ -12,12 +12,22 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
     let width = area.width as usize;
 
     let line = match &app.mode {
-        Mode::Navigate if app.status_message.is_some() => {
-            render_centered_message(app.status_message.as_deref().unwrap(), width, bg, app.status_is_error, app.theme.text_bright)
-        }
+        Mode::Navigate if app.status_message.is_some() => render_centered_message(
+            app.status_message.as_deref().unwrap(),
+            width,
+            bg,
+            app.status_is_error,
+            app.theme.text_bright,
+        ),
         Mode::Navigate if app.filter_pending => {
             let mut spans = vec![
-                Span::styled(" f", Style::default().fg(app.theme.highlight).bg(bg).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " f",
+                    Style::default()
+                        .fg(app.theme.highlight)
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled("\u{258C}", Style::default().fg(app.theme.highlight).bg(bg)),
             ];
             let hint = "a=active o=todo b=blocked p=parked r=ready t=tag f=clear";
@@ -50,7 +60,10 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
             Line::from(spans)
         }
         Mode::Edit => {
-            let is_filter_tag = matches!(app.edit_target, Some(crate::tui::app::EditTarget::FilterTag));
+            let is_filter_tag = matches!(
+                app.edit_target,
+                Some(crate::tui::app::EditTarget::FilterTag)
+            );
             let is_jump_to = matches!(app.edit_target, Some(crate::tui::app::EditTarget::JumpTo));
             let label = if is_filter_tag {
                 "filter tag:"
@@ -89,10 +102,7 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
             let hint_width = hint.chars().count();
             if content_width + hint_width < width {
                 let padding = width - content_width - hint_width;
-                spans.push(Span::styled(
-                    " ".repeat(padding),
-                    Style::default().bg(bg),
-                ));
+                spans.push(Span::styled(" ".repeat(padding), Style::default().bg(bg)));
                 spans.push(Span::styled(
                     hint,
                     Style::default().fg(app.theme.text_bright).bg(bg),
@@ -101,7 +111,10 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
             Line::from(spans)
         }
         Mode::Move => {
-            let label_text = if let Some(MoveState::BulkTask { ref removed_tasks, .. }) = app.move_state {
+            let label_text = if let Some(MoveState::BulkTask {
+                ref removed_tasks, ..
+            }) = app.move_state
+            {
                 format!("-- MOVE ({}) --", removed_tasks.len())
             } else {
                 "-- MOVE --".to_string()
@@ -132,7 +145,11 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
                 &app.triage_state,
                 Some(ts) if matches!(ts.source, TriageSource::CrossTrackMove { .. } | TriageSource::BulkCrossTrackMove { .. })
             );
-            let label_text = if is_cross_track { "-- MOVE TO TRACK --" } else { "-- TRIAGE --" };
+            let label_text = if is_cross_track {
+                "-- MOVE TO TRACK --"
+            } else {
+                "-- TRIAGE --"
+            };
             let mode_label = Span::styled(
                 label_text,
                 Style::default()
@@ -176,13 +193,21 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
             }
             Line::from(spans)
         }
-        Mode::Select if app.status_message.is_some() => {
-            render_centered_message(app.status_message.as_deref().unwrap(), width, bg, app.status_is_error, app.theme.text_bright)
-        }
+        Mode::Select if app.status_message.is_some() => render_centered_message(
+            app.status_message.as_deref().unwrap(),
+            width,
+            bg,
+            app.status_is_error,
+            app.theme.text_bright,
+        ),
         Mode::Select => {
             let count = app.selection.len();
             let is_range = app.range_anchor.is_some();
-            let label_text = if is_range { "-- RANGE --" } else { "-- SELECT --" };
+            let label_text = if is_range {
+                "-- RANGE --"
+            } else {
+                "-- SELECT --"
+            };
             let mode_label = Span::styled(
                 label_text,
                 Style::default()
@@ -191,8 +216,10 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             );
             let count_text = format!("{} selected", count);
-            let is_bulk_edit = matches!(&app.edit_target,
-                Some(EditTarget::BulkTags { .. }) | Some(EditTarget::BulkDeps { .. }));
+            let is_bulk_edit = matches!(
+                &app.edit_target,
+                Some(EditTarget::BulkTags { .. }) | Some(EditTarget::BulkDeps { .. })
+            );
             let hint = if is_bulk_edit {
                 "Enter confirm  Esc cancel"
             } else if is_range {
@@ -207,28 +234,19 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
             let right_width = count_width + 4 + hint_width;
             if content_width + right_width < width {
                 let padding = width - content_width - right_width;
-                spans.push(Span::styled(
-                    " ".repeat(padding),
-                    Style::default().bg(bg),
-                ));
+                spans.push(Span::styled(" ".repeat(padding), Style::default().bg(bg)));
                 spans.push(Span::styled(
                     count_text,
                     Style::default().fg(app.theme.text_bright).bg(bg),
                 ));
-                spans.push(Span::styled(
-                    " ".repeat(4),
-                    Style::default().bg(bg),
-                ));
+                spans.push(Span::styled(" ".repeat(4), Style::default().bg(bg)));
                 spans.push(Span::styled(
                     hint,
                     Style::default().fg(app.theme.text_bright).bg(bg),
                 ));
             } else if content_width + hint_width < width {
                 let padding = width - content_width - hint_width;
-                spans.push(Span::styled(
-                    " ".repeat(padding),
-                    Style::default().bg(bg),
-                ));
+                spans.push(Span::styled(" ".repeat(padding), Style::default().bg(bg)));
                 spans.push(Span::styled(
                     hint,
                     Style::default().fg(app.theme.text_bright).bg(bg),
@@ -250,7 +268,11 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
             Line::from(spans)
         }
         Mode::Confirm => {
-            let message = app.confirm_state.as_ref().map(|s| s.message.as_str()).unwrap_or("Confirm?");
+            let message = app
+                .confirm_state
+                .as_ref()
+                .map(|s| s.message.as_str())
+                .unwrap_or("Confirm?");
             let mut spans = vec![
                 Span::styled(" ", Style::default().bg(bg)),
                 Span::styled(
@@ -312,15 +334,9 @@ fn build_right_side<'a>(
         let right_width = msg_width + spacer + hint_width;
         if content_width + right_width < width {
             let padding = width - content_width - right_width;
-            spans.push(Span::styled(
-                " ".repeat(padding),
-                Style::default().bg(bg),
-            ));
+            spans.push(Span::styled(" ".repeat(padding), Style::default().bg(bg)));
             spans.push(Span::styled(padded_msg, msg_style));
-            spans.push(Span::styled(
-                " ".repeat(spacer),
-                Style::default().bg(bg),
-            ));
+            spans.push(Span::styled(" ".repeat(spacer), Style::default().bg(bg)));
             spans.push(Span::styled(
                 hint,
                 Style::default().fg(app.theme.text_bright).bg(bg),
@@ -332,10 +348,7 @@ fn build_right_side<'a>(
     // Fallback: no message, just hints
     if content_width + hint_width < width {
         let padding = width - content_width - hint_width;
-        spans.push(Span::styled(
-            " ".repeat(padding),
-            Style::default().bg(bg),
-        ));
+        spans.push(Span::styled(" ".repeat(padding), Style::default().bg(bg)));
         spans.push(Span::styled(
             hint,
             Style::default().fg(app.theme.text_bright).bg(bg),
@@ -374,20 +387,24 @@ fn build_mode_hint<'a>(
     let hint_width = hint.chars().count();
     if content_width + hint_width < width {
         let padding = width - content_width - hint_width;
-        spans.push(Span::styled(
-            " ".repeat(padding),
-            Style::default().bg(bg),
-        ));
-        spans.push(Span::styled(
-            hint,
-            Style::default().fg(text_bright).bg(bg),
-        ));
+        spans.push(Span::styled(" ".repeat(padding), Style::default().bg(bg)));
+        spans.push(Span::styled(hint, Style::default().fg(text_bright).bg(bg)));
     }
 }
 
 /// Render a centered status message spanning the full width.
-fn render_centered_message<'a>(msg: &str, width: usize, bg: Color, is_error: bool, text_bright: Color) -> Line<'a> {
-    let msg_text = if is_error { format!(" {} ", msg) } else { msg.to_string() };
+fn render_centered_message<'a>(
+    msg: &str,
+    width: usize,
+    bg: Color,
+    is_error: bool,
+    text_bright: Color,
+) -> Line<'a> {
+    let msg_text = if is_error {
+        format!(" {} ", msg)
+    } else {
+        msg.to_string()
+    };
     let msg_len = msg_text.chars().count();
     let left_pad = width.saturating_sub(msg_len) / 2;
     let right_pad = width.saturating_sub(msg_len + left_pad);

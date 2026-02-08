@@ -59,14 +59,11 @@ pub fn render_recent_view(frame: &mut Frame, app: &mut App, area: Rect) {
         };
 
         // Check if this task has a pending ToBacklog move (show as reopened)
-        let has_pending_reopen = app
-            .pending_moves
-            .iter()
-            .any(|pm| {
-                pm.kind == PendingMoveKind::ToBacklog
-                    && pm.track_id == entry.track_id
-                    && pm.task_id == entry.id
-            });
+        let has_pending_reopen = app.pending_moves.iter().any(|pm| {
+            pm.kind == PendingMoveKind::ToBacklog
+                && pm.track_id == entry.track_id
+                && pm.task_id == entry.id
+        });
 
         let has_subtasks = !entry.task.subtasks.is_empty();
         let is_expanded = has_subtasks && app.recent_expanded.contains(&entry.id);
@@ -82,36 +79,38 @@ pub fn render_recent_view(frame: &mut Frame, app: &mut App, area: Rect) {
                     .bg(app.theme.selection_bg),
             ));
         } else {
-            spans.push(Span::styled(
-                " ",
-                Style::default().bg(app.theme.background),
-            ));
+            spans.push(Span::styled(" ", Style::default().bg(app.theme.background)));
         }
 
         // Expand/collapse indicator or check mark
         if has_subtasks {
-            let indicator = if is_expanded { "\u{25BE} " } else { "\u{25B8} " };
+            let indicator = if is_expanded {
+                "\u{25BC} "
+            } else {
+                "\u{25B6} "
+            };
             spans.push(Span::styled(
                 indicator,
                 Style::default().fg(app.theme.dim).bg(bg),
             ));
         } else {
-            spans.push(Span::styled(
-                "  ",
-                Style::default().bg(bg),
-            ));
+            spans.push(Span::styled("  ", Style::default().bg(bg)));
         }
 
         // State bracket for the task
         if has_pending_reopen {
             spans.push(Span::styled(
                 "[ ] ",
-                Style::default().fg(app.theme.state_color(TaskState::Todo)).bg(bg),
+                Style::default()
+                    .fg(app.theme.state_color(TaskState::Todo))
+                    .bg(bg),
             ));
         } else {
             spans.push(Span::styled(
                 "[x] ",
-                Style::default().fg(app.theme.state_color(TaskState::Done)).bg(bg),
+                Style::default()
+                    .fg(app.theme.state_color(TaskState::Done))
+                    .bg(bg),
             ));
         }
 
@@ -177,7 +176,16 @@ pub fn render_recent_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
         // Render children if expanded
         if is_expanded {
-            render_subtask_tree(&entry.task.subtasks, &mut lines, app, area, bg, search_re.as_ref(), &[], is_cursor);
+            render_subtask_tree(
+                &entry.task.subtasks,
+                &mut lines,
+                app,
+                area,
+                bg,
+                search_re.as_ref(),
+                &[],
+                is_cursor,
+            );
         }
     }
 
@@ -228,7 +236,11 @@ fn render_subtask_tree<'a>(
 
         // Tree lines from ancestors
         for &ancestor_is_last in ancestor_last {
-            let connector = if ancestor_is_last { "   " } else { "\u{2502}  " };
+            let connector = if ancestor_is_last {
+                "   "
+            } else {
+                "\u{2502}  "
+            };
             spans.push(Span::styled(
                 connector,
                 Style::default().fg(app.theme.dim).bg(bg),
@@ -236,7 +248,11 @@ fn render_subtask_tree<'a>(
         }
 
         // Current branch connector
-        let branch = if is_last { "\u{2514}\u{2500} " } else { "\u{251C}\u{2500} " };
+        let branch = if is_last {
+            "\u{2514}\u{2500} "
+        } else {
+            "\u{251C}\u{2500} "
+        };
         spans.push(Span::styled(
             branch,
             Style::default().fg(app.theme.dim).bg(bg),
@@ -252,7 +268,9 @@ fn render_subtask_tree<'a>(
         };
         spans.push(Span::styled(
             state_str,
-            Style::default().fg(app.theme.state_color(task.state)).bg(bg),
+            Style::default()
+                .fg(app.theme.state_color(task.state))
+                .bg(bg),
         ));
 
         // ID
@@ -272,13 +290,7 @@ fn render_subtask_tree<'a>(
         let prefix_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
         let available = (area.width as usize).saturating_sub(prefix_width + 1);
         let display_title = super::truncate_with_ellipsis(&task.title, available);
-        push_highlighted_spans(
-            &mut spans,
-            &display_title,
-            title_style,
-            hl_style,
-            search_re,
-        );
+        push_highlighted_spans(&mut spans, &display_title, title_style, hl_style, search_re);
 
         lines.push(Line::from(spans));
 

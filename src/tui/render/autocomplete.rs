@@ -38,12 +38,7 @@ pub fn render_autocomplete(frame: &mut Frame, app: &App, content_area: Rect) {
 
     // Width = widest entry across ALL filtered entries + chrome (borders + prefix + padding)
     // Chrome: 1 (left border) + 3 (prefix " ▶ ") + 1 (right padding) + 1 (right border) = 6
-    let max_entry_width = ac
-        .filtered
-        .iter()
-        .map(|s| s.len())
-        .max()
-        .unwrap_or(8);
+    let max_entry_width = ac.filtered.iter().map(|s| s.len()).max().unwrap_or(8);
     let max_width = max_entry_width + 6;
 
     let term_area = frame.area();
@@ -68,7 +63,9 @@ pub fn render_autocomplete(frame: &mut Frame, app: &App, content_area: Rect) {
     // The entry text is inset by 1 (left border) + 3 (prefix " ▸ ") = 4 chars,
     // so shift the popup left by that amount. Clamp to screen bounds.
     let text_inset: u16 = 4;
-    let x = anchor_x.saturating_sub(text_inset).min(term_area.width.saturating_sub(popup_w));
+    let x = anchor_x
+        .saturating_sub(text_inset)
+        .min(term_area.width.saturating_sub(popup_w));
 
     let popup_area = Rect::new(x, y, popup_w, popup_h);
 
@@ -80,7 +77,13 @@ pub fn render_autocomplete(frame: &mut Frame, app: &App, content_area: Rect) {
     };
 
     let mut lines: Vec<Line> = Vec::new();
-    for (i, entry) in ac.filtered.iter().skip(scroll_start).take(MAX_VISIBLE).enumerate() {
+    for (i, entry) in ac
+        .filtered
+        .iter()
+        .skip(scroll_start)
+        .take(MAX_VISIBLE)
+        .enumerate()
+    {
         let actual_idx = scroll_start + i;
         let is_selected = actual_idx == ac.selected;
 
@@ -94,7 +97,11 @@ pub fn render_autocomplete(frame: &mut Frame, app: &App, content_area: Rect) {
         };
 
         let prefix = if is_selected { " \u{25B6} " } else { "   " };
-        let label = format!("{:<width$}", entry, width = (popup_w as usize).saturating_sub(5));
+        let label = format!(
+            "{:<width$}",
+            entry,
+            width = (popup_w as usize).saturating_sub(5)
+        );
 
         lines.push(Line::from(vec![
             Span::styled(prefix, style),
@@ -109,6 +116,8 @@ pub fn render_autocomplete(frame: &mut Frame, app: &App, content_area: Rect) {
         .border_style(Style::default().fg(dim).bg(bg))
         .style(Style::default().bg(bg));
 
-    let paragraph = Paragraph::new(lines).block(block).style(Style::default().bg(bg));
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .style(Style::default().bg(bg));
     frame.render_widget(paragraph, popup_area);
 }

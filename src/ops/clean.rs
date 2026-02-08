@@ -355,7 +355,12 @@ fn assign_dates_in_tasks(
 /// reassigned ID are updated across all tracks.
 fn resolve_duplicate_ids(project: &mut Project, result: &mut CleanResult) {
     // Build ordered track list from config (defines precedence)
-    let track_order: Vec<String> = project.config.tracks.iter().map(|tc| tc.id.clone()).collect();
+    let track_order: Vec<String> = project
+        .config
+        .tracks
+        .iter()
+        .map(|tc| tc.id.clone())
+        .collect();
 
     // Pass 1: Walk all tasks in track order, identify duplicate IDs.
     // First occurrence keeps the ID; subsequent occurrences are collected for reassignment.
@@ -364,7 +369,11 @@ fn resolve_duplicate_ids(project: &mut Project, result: &mut CleanResult) {
     let mut duplicates: Vec<(String, String, String)> = Vec::new();
 
     for config_track_id in &track_order {
-        if let Some((_, track)) = project.tracks.iter().find(|(tid, _)| tid == config_track_id) {
+        if let Some((_, track)) = project
+            .tracks
+            .iter()
+            .find(|(tid, _)| tid == config_track_id)
+        {
             for node in &track.nodes {
                 if let TrackNode::Section { tasks, .. } = node {
                     find_duplicates_in_tasks(
@@ -485,11 +494,7 @@ fn find_duplicates_in_tasks(
     duplicates: &mut Vec<(String, String, String)>,
 ) {
     for task in tasks {
-        if task
-            .id
-            .as_ref()
-            .is_some_and(|id| !seen.insert(id.clone()))
-        {
+        if task.id.as_ref().is_some_and(|id| !seen.insert(id.clone())) {
             let id = task.id.as_ref().unwrap();
             duplicates.push((id.clone(), track_id.to_string(), task.title.clone()));
         }
@@ -1417,7 +1422,10 @@ mod tests {
 
         assert_eq!(result.duplicates_resolved.len(), 1);
         assert_eq!(result.duplicates_resolved[0].original_id, "M-001");
-        assert_eq!(result.duplicates_resolved[0].title, "Duplicate in same track");
+        assert_eq!(
+            result.duplicates_resolved[0].title,
+            "Duplicate in same track"
+        );
 
         let backlog = project.tracks[0].1.backlog();
         assert_eq!(backlog[0].id.as_deref(), Some("M-001"));

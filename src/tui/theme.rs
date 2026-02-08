@@ -64,6 +64,11 @@ impl Default for Theme {
     }
 }
 
+/// Parse a hex color string like "#FF4444" into an RGB Color (public for use by tag color popup)
+pub fn parse_hex_color_pub(hex: &str) -> Option<Color> {
+    parse_hex_color(hex)
+}
+
 /// Parse a hex color string like "#FF4444" into an RGB Color
 fn parse_hex_color(hex: &str) -> Option<Color> {
     let hex = hex.strip_prefix('#')?;

@@ -890,7 +890,10 @@ fn test_track_rename_name() {
     let tmp = tempfile::TempDir::new().unwrap();
     create_test_project(tmp.path());
 
-    run_fr_ok(tmp.path(), &["track", "rename", "side", "--name", "New Side"]);
+    run_fr_ok(
+        tmp.path(),
+        &["track", "rename", "side", "--name", "New Side"],
+    );
 
     let config = fs::read_to_string(tmp.path().join("frame/project.toml")).unwrap();
     assert!(config.contains("\"New Side\""));

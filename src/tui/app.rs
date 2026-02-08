@@ -39,10 +39,7 @@ pub enum View {
     /// Recently completed tasks
     Recent,
     /// Detail view for a single task
-    Detail {
-        track_id: String,
-        task_id: String,
-    },
+    Detail { track_id: String, task_id: String },
 }
 
 /// Regions in the detail view that can be navigated
@@ -93,7 +90,8 @@ impl EditHistory {
         }
         // Truncate any redo entries
         self.entries.truncate(self.position + 1);
-        self.entries.push((buffer.to_string(), cursor_pos, cursor_line));
+        self.entries
+            .push((buffer.to_string(), cursor_pos, cursor_line));
         self.position = self.entries.len() - 1;
     }
 
@@ -265,9 +263,7 @@ pub enum TriageStep {
     /// Step 1: selecting which track to send the item to
     SelectTrack,
     /// Step 2: selecting position within the track (t=top, b=bottom, a=after)
-    SelectPosition {
-        track_id: String,
-    },
+    SelectPosition { track_id: String },
 }
 
 /// Source of a triage/move operation
@@ -281,9 +277,7 @@ pub enum TriageSource {
         task_id: String,
     },
     /// Bulk cross-track move of selected tasks
-    BulkCrossTrackMove {
-        source_track_id: String,
-    },
+    BulkCrossTrackMove { source_track_id: String },
 }
 
 /// State for the triage flow
@@ -388,9 +382,15 @@ pub enum RepeatableAction {
     /// Set absolute state (x=Done, b=Blocked, o=Todo, ~=Parked)
     SetState(TaskState),
     /// Tag edit: adds and removes (e.g., +cc +ready -design)
-    TagEdit { adds: Vec<String>, removes: Vec<String> },
+    TagEdit {
+        adds: Vec<String>,
+        removes: Vec<String>,
+    },
     /// Dep edit: adds and removes (e.g., +EFF-014 -EFF-003)
-    DepEdit { adds: Vec<String>, removes: Vec<String> },
+    DepEdit {
+        adds: Vec<String>,
+        removes: Vec<String>,
+    },
     /// Toggle cc tag
     ToggleCcTag,
     /// Enter edit mode on a region (e=Title, t=Tags, @=Refs, d=Deps, n=Note)
@@ -411,9 +411,7 @@ pub enum RepeatEditRegion {
 #[derive(Debug, Clone)]
 pub enum DepPopupEntry {
     /// Section header ("Blocked by" or "Blocking")
-    SectionHeader {
-        label: &'static str,
-    },
+    SectionHeader { label: &'static str },
     /// A dependency task entry
     Task {
         task_id: String,
@@ -455,6 +453,35 @@ pub struct DepPopupState {
     pub visited: HashSet<String>,
     /// Inverse dep index: task_id -> list of task_ids that depend on it
     pub inverse_deps: HashMap<String, Vec<String>>,
+}
+
+/// Fixed color palette for tag color assignment
+pub const TAG_COLOR_PALETTE: &[(&str, &str)] = &[
+    ("red", "#FF4444"),
+    ("yellow", "#FFD700"),
+    ("green", "#44FF88"),
+    ("cyan", "#44DDFF"),
+    ("blue", "#4488FF"),
+    ("purple", "#CC66FF"),
+    ("pink", "#FB4196"),
+    ("white", "#FFFFFF"),
+    ("dim", "#5A5580"),
+    ("text", "#A09BFE"),
+];
+
+/// State for the tag color editor popup
+#[derive(Debug, Clone)]
+pub struct TagColorPopupState {
+    /// Sorted list of (tag_name, current_hex_color_or_none)
+    pub tags: Vec<(String, Option<String>)>,
+    /// Cursor index into the tag list
+    pub cursor: usize,
+    /// Scroll offset for long lists
+    pub scroll_offset: usize,
+    /// Whether the palette picker is open on the current tag
+    pub picker_open: bool,
+    /// Selected swatch index in the palette (0..PALETTE.len())
+    pub picker_cursor: usize,
 }
 
 /// Current interaction mode
@@ -509,10 +536,7 @@ pub enum EditTarget {
         original_title: String,
     },
     /// Editing an existing inbox item's tags
-    ExistingInboxTags {
-        index: usize,
-        original_tags: String,
-    },
+    ExistingInboxTags { index: usize, original_tags: String },
     /// Creating a new track (name edit in Tracks view)
     NewTrackName,
     /// Editing an existing track's name (in Tracks view)
@@ -545,9 +569,7 @@ pub enum MoveState {
         original_index: usize,
     },
     /// Moving an inbox item
-    InboxItem {
-        original_index: usize,
-    },
+    InboxItem { original_index: usize },
     /// Bulk move of selected tasks within a track
     BulkTask {
         track_id: String,
@@ -707,6 +729,8 @@ pub struct App {
     pub command_palette: Option<super::command_actions::CommandPaletteState>,
     /// Dep popup state (overlay showing dependency relationships)
     pub dep_popup: Option<DepPopupState>,
+    /// Tag color editor popup state
+    pub tag_color_popup: Option<TagColorPopupState>,
 }
 
 impl App {
@@ -812,6 +836,7 @@ impl App {
             last_action: None,
             command_palette: None,
             dep_popup: None,
+            tag_color_popup: None,
         }
     }
 
@@ -984,8 +1009,7 @@ impl App {
                 )?;
                 // Now remove the resolved date (kept during grace period for sort stability)
                 let track = self.find_track_mut(&pm.track_id)?;
-                let task =
-                    crate::ops::task_ops::find_task_mut_in_track(track, &pm.task_id)?;
+                let task = crate::ops::task_ops::find_task_mut_in_track(track, &pm.task_id)?;
                 task.metadata.retain(|m| m.key() != "resolved");
                 task.mark_dirty();
                 Some(pm.track_id.clone())
@@ -1002,8 +1026,7 @@ impl App {
             .filter(|pm| now >= pm.deadline)
             .cloned()
             .collect();
-        self.pending_moves
-            .retain(|pm| now < pm.deadline);
+        self.pending_moves.retain(|pm| now < pm.deadline);
 
         let mut modified = Vec::new();
         for pm in &expired {
@@ -1028,6 +1051,41 @@ impl App {
             }
         }
         modified
+    }
+
+    /// Open the tag color editor popup
+    pub fn open_tag_color_popup(&mut self) {
+        let tag_names = self.collect_all_tags();
+        let tags: Vec<(String, Option<String>)> = tag_names
+            .into_iter()
+            .map(|tag| {
+                // Check config first (explicit user setting), then theme defaults
+                let hex = self
+                    .project
+                    .config
+                    .ui
+                    .tag_colors
+                    .get(&tag)
+                    .cloned()
+                    .or_else(|| {
+                        self.theme.tag_colors.get(&tag).and_then(|color| {
+                            if let ratatui::style::Color::Rgb(r, g, b) = color {
+                                Some(format!("#{:02X}{:02X}{:02X}", r, g, b))
+                            } else {
+                                None
+                            }
+                        })
+                    });
+                (tag, hex)
+            })
+            .collect();
+        self.tag_color_popup = Some(TagColorPopupState {
+            tags,
+            cursor: 0,
+            scroll_offset: 0,
+            picker_open: false,
+            picker_cursor: 0,
+        });
     }
 
     /// Collect all unique tags from config tag_colors + all tasks in the project
@@ -1246,7 +1304,11 @@ impl App {
         };
 
         // Switch to the target track's tab
-        let track_idx = match self.active_track_ids.iter().position(|id| id == &target_track_id) {
+        let track_idx = match self
+            .active_track_ids
+            .iter()
+            .position(|id| id == &target_track_id)
+        {
             Some(idx) => idx,
             None => return false,
         };
@@ -1416,9 +1478,9 @@ impl App {
         }
 
         // "Blocking" section
-        state.entries.push(DepPopupEntry::SectionHeader {
-            label: "Blocking",
-        });
+        state
+            .entries
+            .push(DepPopupEntry::SectionHeader { label: "Blocking" });
         if downstream_ids.is_empty() {
             state.entries.push(DepPopupEntry::Nothing);
         } else {
@@ -1478,11 +1540,7 @@ impl App {
                 ids
             } else {
                 // In "Blocking": children are what this dep is also blocking
-                state
-                    .inverse_deps
-                    .get(dep_id)
-                    .cloned()
-                    .unwrap_or_default()
+                state.inverse_deps.get(dep_id).cloned().unwrap_or_default()
             };
             let has_children = !children_ids.is_empty();
 
@@ -1606,11 +1664,7 @@ impl App {
 
     /// Save the inbox to disk with file locking. Records save time.
     pub fn save_inbox(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let inbox = self
-            .project
-            .inbox
-            .as_ref()
-            .ok_or("no inbox loaded")?;
+        let inbox = self.project.inbox.as_ref().ok_or("no inbox loaded")?;
         let _lock = FileLock::acquire_default(&self.project.frame_dir)?;
         project_io::save_inbox(&self.project.frame_dir, inbox)?;
         self.last_save_at = Some(Instant::now());
@@ -1623,8 +1677,8 @@ impl App {
             .track_file(track_id)
             .ok_or("track not found")?
             .to_string();
-        let track = Self::find_track_in_project(&self.project, track_id)
-            .ok_or("track not found")?;
+        let track =
+            Self::find_track_in_project(&self.project, track_id).ok_or("track not found")?;
         let _lock = FileLock::acquire_default(&self.project.frame_dir)?;
         project_io::save_track(&self.project.frame_dir, &file, track)?;
         self.last_save_at = Some(Instant::now());
@@ -1710,10 +1764,14 @@ impl App {
                             if let Some(old_track) =
                                 Self::find_track_in_project(&self.project, &track_id)
                             {
-                                let old_task =
-                                    crate::ops::task_ops::find_task_in_track(old_track, edit_task_id);
-                                let new_task =
-                                    crate::ops::task_ops::find_task_in_track(&new_track, edit_task_id);
+                                let old_task = crate::ops::task_ops::find_task_in_track(
+                                    old_track,
+                                    edit_task_id,
+                                );
+                                let new_task = crate::ops::task_ops::find_task_in_track(
+                                    &new_track,
+                                    edit_task_id,
+                                );
 
                                 match (old_task, new_task) {
                                     (Some(old), Some(new)) if old.title != new.title => {
@@ -1767,7 +1825,11 @@ impl App {
         regions.push(DetailRegion::Tags);
 
         // Added date
-        if task.metadata.iter().any(|m| matches!(m, Metadata::Added(_))) {
+        if task
+            .metadata
+            .iter()
+            .any(|m| matches!(m, Metadata::Added(_)))
+        {
             regions.push(DetailRegion::Added);
         }
 
@@ -2083,7 +2145,13 @@ fn apply_filter(items: &mut Vec<FlatItem>, track: &Track, filter: &FilterState, 
     for (i, item) in items.iter().enumerate() {
         if matches!(item, FlatItem::ParkedSeparator) {
             let has_parked = items[i + 1..].iter().enumerate().any(|(j, fi)| {
-                matches!(fi, FlatItem::Task { section: SectionKind::Parked, .. }) && keep[i + 1 + j]
+                matches!(
+                    fi,
+                    FlatItem::Task {
+                        section: SectionKind::Parked,
+                        ..
+                    }
+                ) && keep[i + 1 + j]
             });
             keep[i] = has_parked;
         }
@@ -2094,7 +2162,9 @@ fn apply_filter(items: &mut Vec<FlatItem>, track: &Track, filter: &FilterState, 
     items.retain_mut(|item| {
         let retained = keep[idx];
         if retained
-            && let FlatItem::Task { is_context: ctx, .. } = item
+            && let FlatItem::Task {
+                is_context: ctx, ..
+            } = item
         {
             *ctx = context[idx];
         }
@@ -2188,10 +2258,7 @@ pub fn save_ui_state(app: &App) {
             "track".to_string(),
             app.active_track_ids.get(*idx).cloned().unwrap_or_default(),
         ),
-        View::Detail { track_id, .. } => (
-            "track".to_string(),
-            track_id.clone(),
-        ),
+        View::Detail { track_id, .. } => ("track".to_string(), track_id.clone()),
         View::Tracks => ("tracks".to_string(), String::new()),
         View::Inbox => ("inbox".to_string(), String::new()),
         View::Recent => ("recent".to_string(), String::new()),
@@ -2260,8 +2327,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     execute!(stdout, EnterAlternateScreen)?;
 
     // Enable Kitty keyboard protocol if the terminal supports it
-    let kitty_enabled = crossterm::terminal::supports_keyboard_enhancement()
-        .unwrap_or(false);
+    let kitty_enabled = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
     if kitty_enabled {
         execute!(
             stdout,
@@ -2345,7 +2411,10 @@ fn run_event_loop(
                     app.last_save_at = None; // consume the suppression
                 } else if !all_paths.is_empty() {
                     // External change detected
-                    if matches!(app.mode, Mode::Edit | Mode::Move | Mode::Triage | Mode::Confirm | Mode::Command) {
+                    if matches!(
+                        app.mode,
+                        Mode::Edit | Mode::Move | Mode::Triage | Mode::Confirm | Mode::Command
+                    ) {
                         // Queue reload for when we leave modal mode
                         app.pending_reload_paths.extend(all_paths);
                     } else {
@@ -2442,7 +2511,8 @@ fn run_auto_clean(app: &mut App) {
 
     if has_changes {
         // Collect affected track IDs
-        let mut affected_tracks: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut affected_tracks: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         for id_a in &result.ids_assigned {
             affected_tracks.insert(id_a.track_id.clone());
         }
@@ -2462,7 +2532,13 @@ fn run_auto_clean(app: &mut App) {
         app.undo_stack.push(crate::tui::undo::Operation::SyncMarker);
 
         // Show subtle status message
-        let count = result.ids_assigned.len() + result.dates_assigned.len() + result.duplicates_resolved.len();
-        app.status_message = Some(format!("Auto-cleaned: {} fix{}", count, if count == 1 { "" } else { "es" }));
+        let count = result.ids_assigned.len()
+            + result.dates_assigned.len()
+            + result.duplicates_resolved.len();
+        app.status_message = Some(format!(
+            "Auto-cleaned: {} fix{}",
+            count,
+            if count == 1 { "" } else { "es" }
+        ));
     }
 }

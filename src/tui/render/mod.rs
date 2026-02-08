@@ -8,6 +8,7 @@ pub mod inbox_view;
 pub mod recent_view;
 pub mod status_row;
 pub mod tab_bar;
+pub mod tag_color_popup;
 pub mod track_view;
 pub mod tracks_view;
 
@@ -63,6 +64,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // Dep popup overlay (rendered on top of content)
     if app.dep_popup.is_some() {
         dep_popup::render_dep_popup(frame, app, chunks[1]);
+    }
+
+    // Tag color editor popup overlay
+    if app.tag_color_popup.is_some() {
+        tag_color_popup::render_tag_color_popup(frame, app, chunks[1]);
     }
 
     // Help overlay (rendered on top of everything)
@@ -147,14 +153,11 @@ fn render_triage_position_popup(frame: &mut Frame, app: &App) {
         .map(|(i, (label, key))| {
             let is_selected = i as u8 == cursor;
             let (indicator, style) = if is_selected {
-                ("▸ ", selected_style)
+                ("▶ ", selected_style)
             } else {
                 ("  ", normal_style)
             };
-            let mut spans = vec![
-                Span::styled(indicator, style),
-                Span::styled(*label, style),
-            ];
+            let mut spans = vec![Span::styled(indicator, style), Span::styled(*label, style)];
             if !key.is_empty() {
                 spans.push(Span::styled(format!(" {}", key), hint_style));
             }
@@ -175,7 +178,9 @@ fn render_triage_position_popup(frame: &mut Frame, app: &App) {
         anchor_y.saturating_sub(popup_h)
     };
     let text_inset: u16 = 4;
-    let x = anchor_x.saturating_sub(text_inset).min(term_area.width.saturating_sub(popup_w));
+    let x = anchor_x
+        .saturating_sub(text_inset)
+        .min(term_area.width.saturating_sub(popup_w));
 
     let popup_area = Rect::new(x, y, popup_w, popup_h);
 

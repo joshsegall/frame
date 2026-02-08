@@ -54,16 +54,16 @@ pub fn render_command_palette(frame: &mut Frame, app: &App, area: Rect) {
     // Pad to fill width
     let input_used: usize = 3 + cp.input.chars().count() + 1;
     if input_used < inner_w {
-        input_spans.push(Span::styled(
-            " ".repeat(inner_w - input_used),
-            blank_style,
-        ));
+        input_spans.push(Span::styled(" ".repeat(inner_w - input_used), blank_style));
     }
     lines.push(Line::from(input_spans));
 
     // Separator
     let sep = "\u{2500}".repeat(inner_w);
-    lines.push(Line::from(Span::styled(sep, Style::default().fg(dim).bg(bg))));
+    lines.push(Line::from(Span::styled(
+        sep,
+        Style::default().fg(dim).bg(bg),
+    )));
 
     // Results
     if cp.results.is_empty() {
@@ -120,13 +120,20 @@ pub fn render_command_palette(frame: &mut Frame, app: &App, area: Rect) {
                 .bg(row_bg)
                 .add_modifier(Modifier::BOLD);
 
-            let indicator = if is_selected { " \u{25B8} " } else { "   " };
+            let indicator = if is_selected { " \u{25B6} " } else { "   " };
             let mut spans: Vec<Span> = vec![Span::styled(indicator, indicator_style)];
 
             // Build label with matched character highlights
             let label = &scored.action.label;
             let label_chars: Vec<char> = label.chars().collect();
-            push_highlighted_chars(&mut spans, &label_chars, &scored.label_matched, label_style, hl_style, is_selected);
+            push_highlighted_chars(
+                &mut spans,
+                &label_chars,
+                &scored.label_matched,
+                label_style,
+                hl_style,
+                is_selected,
+            );
 
             // Right-align shortcut with matched character highlights
             let shortcut_text = scored.action.shortcut.unwrap_or("");
@@ -138,12 +145,16 @@ pub fn render_command_palette(frame: &mut Frame, app: &App, area: Rect) {
                 let padding = inner_w - label_len - shortcut_len;
                 spans.push(Span::styled(" ".repeat(padding), row_pad));
                 let shortcut_chars: Vec<char> = shortcut_text.chars().collect();
-                push_highlighted_chars(&mut spans, &shortcut_chars, &scored.shortcut_matched, sc_style, hl_style, is_selected);
+                push_highlighted_chars(
+                    &mut spans,
+                    &shortcut_chars,
+                    &scored.shortcut_matched,
+                    sc_style,
+                    hl_style,
+                    is_selected,
+                );
             } else if label_len < inner_w {
-                spans.push(Span::styled(
-                    " ".repeat(inner_w - label_len),
-                    row_pad,
-                ));
+                spans.push(Span::styled(" ".repeat(inner_w - label_len), row_pad));
             }
 
             lines.push(Line::from(spans));
@@ -154,18 +165,11 @@ pub fn render_command_palette(frame: &mut Frame, app: &App, area: Rect) {
     lines.push(Line::from(Span::styled(" ".repeat(inner_w), blank_style)));
 
     // Footer: "  N of M actions"
-    let footer_text = format!(
-        "   {} of {} actions",
-        cp.results.len(),
-        cp.total_count
-    );
+    let footer_text = format!("   {} of {} actions", cp.results.len(), cp.total_count);
     let footer_len = footer_text.chars().count();
     let mut footer_spans = vec![Span::styled(footer_text, footer_style)];
     if footer_len < inner_w {
-        footer_spans.push(Span::styled(
-            " ".repeat(inner_w - footer_len),
-            blank_style,
-        ));
+        footer_spans.push(Span::styled(" ".repeat(inner_w - footer_len), blank_style));
     }
     lines.push(Line::from(footer_spans));
 

@@ -67,10 +67,7 @@ pub fn fuzzy_score(query: &str, target: &str) -> Option<(i32, Vec<usize>)> {
     let mut search_from = 0;
 
     for &qc in &query_lower {
-        match target_lower[search_from..]
-            .iter()
-            .position(|&tc| tc == qc)
-        {
+        match target_lower[search_from..].iter().position(|&tc| tc == qc) {
             Some(pos) => {
                 let idx = search_from + pos;
                 matched_indices.push(idx);
@@ -87,7 +84,10 @@ pub fn fuzzy_score(query: &str, target: &str) -> Option<(i32, Vec<usize>)> {
     for (mi, &idx) in matched_indices.iter().enumerate() {
         // Word boundary bonus: start of string or after space/hyphen/paren
         let is_word_start = idx == 0
-            || matches!(target_chars.get(idx.wrapping_sub(1)), Some(' ' | '-' | '(' | ':'));
+            || matches!(
+                target_chars.get(idx.wrapping_sub(1)),
+                Some(' ' | '-' | '(' | ':')
+            );
         if is_word_start {
             score += 10;
         }
@@ -273,6 +273,13 @@ fn static_actions() -> Vec<PaletteAction> {
             label: "Show dependencies".into(),
             shortcut: Some("D"),
             contexts: &[ViewContext::TrackView, ViewContext::DetailView],
+            category: ActionCategory::Navigate,
+        },
+        PaletteAction {
+            id: "tag_colors",
+            label: "Edit tag colors".into(),
+            shortcut: Some("T"),
+            contexts: &[ViewContext::Global],
             category: ActionCategory::Navigate,
         },
         PaletteAction {
@@ -724,7 +731,10 @@ impl CommandPaletteState {
         }
         // The label format is "Switch to track: {name}"
         // Find which track index by matching the shortcut (1-9)
-        scored.action.shortcut.and_then(|s| s.parse::<usize>().ok().map(|n| n - 1))
+        scored
+            .action
+            .shortcut
+            .and_then(|s| s.parse::<usize>().ok().map(|n| n - 1))
     }
 }
 

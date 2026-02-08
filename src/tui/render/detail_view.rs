@@ -58,7 +58,9 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
     let is_flashing = app.is_flashing(&task_id);
 
     let detail_state = app.detail_state.as_ref();
-    let current_region = detail_state.map(|ds| ds.region).unwrap_or(DetailRegion::Title);
+    let current_region = detail_state
+        .map(|ds| ds.region)
+        .unwrap_or(DetailRegion::Title);
     let editing = detail_state.is_some_and(|ds| ds.editing);
     let selected_subtask_id = detail_state.and_then(|ds| {
         if ds.region == DetailRegion::Subtasks {
@@ -72,9 +74,7 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
     let text_style = Style::default().fg(app.theme.text).bg(bg);
     let bright_style = Style::default().fg(app.theme.text_bright).bg(bg);
     let dim_style = Style::default().fg(app.theme.dim).bg(bg);
-    let region_indicator_style = Style::default()
-        .fg(app.theme.highlight)
-        .bg(bg);
+    let region_indicator_style = Style::default().fg(app.theme.highlight).bg(bg);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut active_region_line: Option<usize> = None;
@@ -119,16 +119,16 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
         // State symbol
         spans.push(Span::styled(
             state_sym,
-            Style::default().fg(state_color).bg(bg).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(state_color)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(" ", Style::default().bg(bg)));
 
         // ID
         if let Some(ref id) = task.id {
-            spans.push(Span::styled(
-                format!("{} ", id),
-                text_style,
-            ));
+            spans.push(Span::styled(format!("{} ", id), text_style));
         }
 
         // Title
@@ -251,7 +251,11 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             active_region_line = Some(lines.len());
         }
         let spec = task.metadata.iter().find_map(|m| {
-            if let Metadata::Spec(s) = m { Some(s.clone()) } else { None }
+            if let Metadata::Spec(s) = m {
+                Some(s.clone())
+            } else {
+                None
+            }
         });
 
         if is_active && editing && app.mode == Mode::Edit {
@@ -299,7 +303,11 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
         } else if !refs.is_empty() {
             for (i, ref_path) in refs.iter().enumerate() {
                 let mut spans: Vec<Span> = Vec::new();
-                spans.push(region_indicator(is_active && i == 0, region_indicator_style, bg));
+                spans.push(region_indicator(
+                    is_active && i == 0,
+                    region_indicator_style,
+                    bg,
+                ));
                 if i == 0 {
                     spans.push(Span::styled("ref: ", dim_style));
                 } else {
@@ -330,7 +338,11 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             active_region_line = Some(lines.len());
         }
         let note = task.metadata.iter().find_map(|m| {
-            if let Metadata::Note(n) = m { Some(n.clone()) } else { None }
+            if let Metadata::Note(n) = m {
+                Some(n.clone())
+            } else {
+                None
+            }
         });
 
         if is_active && editing && app.mode == Mode::Edit {
@@ -356,7 +368,10 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
                 for (line_idx, edit_line) in edit_lines.iter().enumerate() {
                     let mut spans: Vec<Span> = Vec::new();
-                    spans.push(Span::styled(note_indent.to_string(), Style::default().bg(bg)));
+                    spans.push(Span::styled(
+                        note_indent.to_string(),
+                        Style::default().bg(bg),
+                    ));
 
                     let has_cursor = line_idx == ds.edit_cursor_line;
                     let line_sel = sel_range.and_then(|(s, e)| {
@@ -414,7 +429,10 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
 
                 let mut spans: Vec<Span> = Vec::new();
-                spans.push(Span::styled(note_indent.to_string(), Style::default().bg(bg)));
+                spans.push(Span::styled(
+                    note_indent.to_string(),
+                    Style::default().bg(bg),
+                ));
                 if in_code_block || trimmed.starts_with("```") {
                     spans.push(Span::styled(
                         note_line.to_string(),
@@ -490,7 +508,8 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                     }
                 }
                 // Fill to width
-                let content_width: usize = new_spans.iter().map(|s| s.content.chars().count()).sum();
+                let content_width: usize =
+                    new_spans.iter().map(|s| s.content.chars().count()).sum();
                 let width = area.width as usize;
                 if content_width < width {
                     new_spans.push(Span::styled(
@@ -527,7 +546,9 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Set autocomplete anchor for detail view edits
     if let (Some(prefix_w), Some(line_idx)) = (edit_anchor_col, edit_anchor_line) {
-        let word_offset = app.autocomplete.as_ref()
+        let word_offset = app
+            .autocomplete
+            .as_ref()
             .map(|ac| ac.word_start_in_buffer(&app.edit_buffer) as u16)
             .unwrap_or(0);
         let screen_y = area.y + line_idx.saturating_sub(scroll) as u16;
@@ -560,7 +581,10 @@ fn render_edit_inline(spans: &mut Vec<Span<'static>>, app: &App, style: Style) {
                 spans.push(Span::styled(buf[..sel_start].to_string(), style));
             }
             // Selection
-            spans.push(Span::styled(buf[sel_start..sel_end].to_string(), selection_style));
+            spans.push(Span::styled(
+                buf[sel_start..sel_end].to_string(),
+                selection_style,
+            ));
             // After selection
             if sel_end < buf.len() {
                 spans.push(Span::styled(buf[sel_end..].to_string(), style));
@@ -607,8 +631,8 @@ fn render_subtask_tree(
         let is_last = i == tasks.len() - 1;
         let state_color = app.theme.state_color(task.state);
 
-        let is_selected = selected_subtask_id.is_some()
-            && task.id.as_deref() == selected_subtask_id;
+        let is_selected =
+            selected_subtask_id.is_some() && task.id.as_deref() == selected_subtask_id;
 
         let row_bg = if is_selected { selection_bg } else { bg };
         let row_dim_style = Style::default().fg(app.theme.dim).bg(row_bg);
@@ -693,7 +717,11 @@ fn render_subtask_tree(
 }
 
 /// Region indicator: a small accent mark on the left for the active region
-fn region_indicator(is_active: bool, active_style: Style, bg: ratatui::style::Color) -> Span<'static> {
+fn region_indicator(
+    is_active: bool,
+    active_style: Style,
+    bg: ratatui::style::Color,
+) -> Span<'static> {
     if is_active {
         Span::styled(" \u{258E} ", active_style)
     } else {
@@ -765,4 +793,3 @@ fn find_task_state_across_tracks(app: &App, task_id: &str) -> Option<TaskState> 
     }
     None
 }
-

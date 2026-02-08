@@ -928,8 +928,16 @@ mod tests {
     #[test]
     fn test_is_top_level_in_section() {
         let track = sample_track();
-        assert!(is_top_level_in_section(&track, "T-001", SectionKind::Backlog));
-        assert!(!is_top_level_in_section(&track, "T-003.1", SectionKind::Backlog));
+        assert!(is_top_level_in_section(
+            &track,
+            "T-001",
+            SectionKind::Backlog
+        ));
+        assert!(!is_top_level_in_section(
+            &track,
+            "T-003.1",
+            SectionKind::Backlog
+        ));
         assert!(!is_top_level_in_section(&track, "T-001", SectionKind::Done));
         assert!(is_top_level_in_section(&track, "T-000", SectionKind::Done));
     }

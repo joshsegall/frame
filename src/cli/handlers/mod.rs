@@ -1367,8 +1367,8 @@ fn cmd_track_delete(track_id: String) -> Result<(), Box<dyn std::error::Error>> 
     let _lock = FileLock::acquire_default(&project.frame_dir)?;
 
     // Check if track exists and is empty
-    let track = find_track(&project, &track_id)
-        .ok_or_else(|| format!("track not found: {}", track_id))?;
+    let track =
+        find_track(&project, &track_id).ok_or_else(|| format!("track not found: {}", track_id))?;
 
     if !track_ops::is_track_empty_by_id(&project.frame_dir, track, &track_id) {
         let count = track_ops::total_task_count(track);
@@ -1411,13 +1411,7 @@ fn cmd_track_rename(args: TrackRenameArgs) -> Result<(), Box<dyn std::error::Err
 
     // Handle --id (track ID rename)
     let effective_id = if let Some(ref new_id) = args.new_id {
-        track_ops::rename_track_id(
-            &project.frame_dir,
-            &mut doc,
-            &mut config,
-            &args.id,
-            new_id,
-        )?;
+        track_ops::rename_track_id(&project.frame_dir, &mut doc, &mut config, &args.id, new_id)?;
         println!("id {} → {}", args.id, new_id);
         new_id.clone()
     } else {
@@ -1449,10 +1443,7 @@ fn cmd_track_rename(args: TrackRenameArgs) -> Result<(), Box<dyn std::error::Err
             new_prefix,
         )?;
 
-        println!(
-            "Renaming prefix {} → {}:",
-            old_prefix, new_prefix
-        );
+        println!("Renaming prefix {} → {}:", old_prefix, new_prefix);
         println!("  {} tasks in {}", result.tasks_renamed, effective_id);
         if result.deps_updated > 0 {
             println!(

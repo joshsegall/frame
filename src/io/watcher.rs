@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
-use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher, Config};
+use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 /// Events sent from the file watcher to the TUI event loop.
 #[derive(Debug)]
