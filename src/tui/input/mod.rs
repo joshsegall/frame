@@ -9,7 +9,7 @@ use crate::model::SectionKind;
 use crate::ops::search::{search_inbox, search_tasks};
 use crate::ops::task_ops::{self, InsertPosition};
 
-use super::app::{App, AutocompleteKind, AutocompleteState, DetailRegion, DetailState, EditHistory, EditTarget, FlatItem, Mode, MoveState, PendingMove, PendingMoveKind, StateFilter, TriageSource, View, resolve_task_from_flat};
+use super::app::{App, AutocompleteKind, AutocompleteState, DetailRegion, DetailState, EditHistory, EditTarget, FlatItem, Mode, MoveState, PendingMove, PendingMoveKind, RepeatEditRegion, RepeatableAction, StateFilter, TriageSource, View, resolve_task_from_flat};
 use super::undo::{Operation, UndoNavTarget};
 
 // ---------------------------------------------------------------------------
@@ -602,6 +602,11 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             begin_jump_to(app);
         }
 
+        // Repeat last action: .
+        (KeyModifiers::NONE, KeyCode::Char('.')) => {
+            repeat_last_action(app);
+        }
+
         _ => {}
     }
 }
@@ -1176,6 +1181,11 @@ fn handle_select(app: &mut App, key: KeyEvent) {
             app.view = View::Tracks;
         }
 
+        // Repeat last action: .
+        (KeyModifiers::NONE, KeyCode::Char('.')) => {
+            repeat_last_action(app);
+        }
+
         // Quit: Ctrl+Q
         (m, KeyCode::Char('q')) if m.contains(KeyModifiers::CONTROL) => {
             app.should_quit = true;
@@ -1269,6 +1279,9 @@ fn bulk_state_change(app: &mut App, target_state: crate::model::TaskState) {
     if any_changed {
         app.undo_stack.push(Operation::Bulk(ops));
         let _ = app.save_track(&track_id);
+
+        // Record repeatable action
+        app.last_action = Some(RepeatableAction::SetState(target_state));
     }
 }
 
@@ -1358,6 +1371,12 @@ fn confirm_bulk_tag_edit(app: &mut App) {
     if !ops.is_empty() {
         app.undo_stack.push(Operation::Bulk(ops));
         let _ = app.save_track(&track_id);
+
+        // Record repeatable action
+        app.last_action = Some(RepeatableAction::TagEdit {
+            adds: adds.clone(),
+            removes: removes.clone(),
+        });
     }
 
     app.mode = Mode::Select;
@@ -1452,6 +1471,12 @@ fn confirm_bulk_dep_edit(app: &mut App) {
     if !ops.is_empty() {
         app.undo_stack.push(Operation::Bulk(ops));
         let _ = app.save_track(&track_id);
+
+        // Record repeatable action
+        app.last_action = Some(RepeatableAction::DepEdit {
+            adds: adds.clone(),
+            removes: removes.clone(),
+        });
     }
 
     app.mode = Mode::Select;
@@ -2155,9 +2180,411 @@ fn navigate_to_undo_target(app: &mut App, nav: &UndoNavTarget) {
 }
 
 // ---------------------------------------------------------------------------
+// Repeat last action (.)
+// ---------------------------------------------------------------------------
+
+/// Repeat the last recorded action on the current task (or selection).
+fn repeat_last_action(app: &mut App) {
+    // Only works in track view or detail view
+    if !matches!(app.view, View::Track(_) | View::Detail { .. }) {
+        return;
+    }
+
+    let action = match app.last_action.clone() {
+        Some(a) => a,
+        None => return, // No-op if no stored action
+    };
+
+    // If in SELECT mode with a selection, replay on all selected tasks
+    let in_select = app.mode == Mode::Select && !app.selection.is_empty();
+
+    match action {
+        RepeatableAction::CycleState => {
+            if in_select {
+                // Bulk cycle: apply cycle to each selected task individually
+                repeat_bulk_cycle(app);
+            } else {
+                // Save and restore last_action around the call
+                let saved = app.last_action.take();
+                task_state_action(app, StateAction::Cycle);
+                app.last_action = saved;
+            }
+        }
+        RepeatableAction::SetState(target_state) => {
+            if in_select {
+                let saved = app.last_action.take();
+                bulk_state_change(app, target_state);
+                app.last_action = saved;
+            } else {
+                let sa = match target_state {
+                    crate::model::TaskState::Done => StateAction::Done,
+                    crate::model::TaskState::Blocked => StateAction::ToggleBlocked,
+                    crate::model::TaskState::Todo => StateAction::SetTodo,
+                    crate::model::TaskState::Parked => StateAction::ToggleParked,
+                    crate::model::TaskState::Active => StateAction::Cycle,
+                };
+                let saved = app.last_action.take();
+                task_state_action(app, sa);
+                app.last_action = saved;
+            }
+        }
+        RepeatableAction::TagEdit { adds, removes } => {
+            if in_select {
+                repeat_bulk_tag_apply(app, &adds, &removes);
+            } else {
+                repeat_single_tag_apply(app, &adds, &removes);
+            }
+        }
+        RepeatableAction::DepEdit { adds, removes } => {
+            if in_select {
+                repeat_bulk_dep_apply(app, &adds, &removes);
+            } else {
+                repeat_single_dep_apply(app, &adds, &removes);
+            }
+        }
+        RepeatableAction::ToggleCcTag => {
+            let saved = app.last_action.take();
+            toggle_cc_tag(app);
+            app.last_action = saved;
+        }
+        RepeatableAction::EnterEdit(region) => {
+            // Re-enter edit mode on the same region (don't replay text)
+            match region {
+                RepeatEditRegion::Title => {
+                    if matches!(app.view, View::Detail { .. }) {
+                        detail_enter_edit(app);
+                    } else {
+                        enter_title_edit(app);
+                    }
+                }
+                RepeatEditRegion::Tags => {
+                    if matches!(app.view, View::Detail { .. }) {
+                        detail_jump_to_region_and_edit(app, DetailRegion::Tags);
+                    } else {
+                        enter_tag_edit(app);
+                    }
+                }
+                RepeatEditRegion::Deps => {
+                    if matches!(app.view, View::Detail { .. }) {
+                        detail_jump_to_region_and_edit(app, DetailRegion::Deps);
+                    }
+                }
+                RepeatEditRegion::Refs => {
+                    if matches!(app.view, View::Detail { .. }) {
+                        detail_jump_to_region_and_edit(app, DetailRegion::Refs);
+                    }
+                }
+                RepeatEditRegion::Note => {
+                    if matches!(app.view, View::Detail { .. }) {
+                        detail_jump_to_region_and_edit(app, DetailRegion::Note);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Apply tag adds/removes to a single task (for . repeat).
+fn repeat_single_tag_apply(app: &mut App, adds: &[String], removes: &[String]) {
+    let (track_id, task_id) = if let View::Detail { track_id, task_id } = &app.view {
+        (track_id.clone(), task_id.clone())
+    } else if let Some((track_id, task_id, _)) = app.cursor_task_id() {
+        (track_id, task_id)
+    } else {
+        return;
+    };
+
+    let old_tags = App::find_track_in_project(&app.project, &track_id)
+        .and_then(|t| task_ops::find_task_in_track(t, &task_id))
+        .map(|t| t.tags.clone())
+        .unwrap_or_default();
+
+    let mut new_tags = old_tags.clone();
+    for tag in adds {
+        if !new_tags.contains(tag) {
+            new_tags.push(tag.clone());
+        }
+    }
+    for tag in removes {
+        new_tags.retain(|t| t != tag);
+    }
+
+    if old_tags == new_tags {
+        return; // No change — silently skip
+    }
+
+    let old_value = old_tags.iter().map(|t| format!("#{}", t)).collect::<Vec<_>>().join(" ");
+    let new_value = new_tags.iter().map(|t| format!("#{}", t)).collect::<Vec<_>>().join(" ");
+
+    let track = match app.find_track_mut(&track_id) {
+        Some(t) => t,
+        None => return,
+    };
+    if let Some(task) = task_ops::find_task_mut_in_track(track, &task_id) {
+        task.tags = new_tags;
+        task.mark_dirty();
+    }
+    let _ = app.save_track(&track_id);
+
+    app.undo_stack.push(Operation::FieldEdit {
+        track_id,
+        task_id,
+        field: "tags".to_string(),
+        old_value,
+        new_value,
+    });
+}
+
+/// Apply tag adds/removes to all selected tasks (for . repeat in SELECT mode).
+fn repeat_bulk_tag_apply(app: &mut App, adds: &[String], removes: &[String]) {
+    let track_id = match app.current_track_id() {
+        Some(id) => id.to_string(),
+        None => return,
+    };
+
+    let selected: Vec<String> = app.selection.iter().cloned().collect();
+    let mut ops: Vec<Operation> = Vec::new();
+
+    for task_id in &selected {
+        let old_tags = App::find_track_in_project(&app.project, &track_id)
+            .and_then(|t| task_ops::find_task_in_track(t, task_id))
+            .map(|t| t.tags.clone())
+            .unwrap_or_default();
+
+        let mut new_tags = old_tags.clone();
+        for tag in adds {
+            if !new_tags.contains(tag) {
+                new_tags.push(tag.clone());
+            }
+        }
+        for tag in removes {
+            new_tags.retain(|t| t != tag);
+        }
+
+        if old_tags == new_tags {
+            continue;
+        }
+
+        let old_value = old_tags.iter().map(|t| format!("#{}", t)).collect::<Vec<_>>().join(" ");
+        let new_value = new_tags.iter().map(|t| format!("#{}", t)).collect::<Vec<_>>().join(" ");
+
+        let track = match app.find_track_mut(&track_id) {
+            Some(t) => t,
+            None => continue,
+        };
+        if let Some(task) = task_ops::find_task_mut_in_track(track, task_id) {
+            task.tags = new_tags;
+            task.mark_dirty();
+        }
+
+        ops.push(Operation::FieldEdit {
+            track_id: track_id.clone(),
+            task_id: task_id.clone(),
+            field: "tags".to_string(),
+            old_value,
+            new_value,
+        });
+    }
+
+    if !ops.is_empty() {
+        app.undo_stack.push(Operation::Bulk(ops));
+        let _ = app.save_track(&track_id);
+    }
+}
+
+/// Apply dep adds/removes to a single task (for . repeat).
+fn repeat_single_dep_apply(app: &mut App, adds: &[String], removes: &[String]) {
+    let (track_id, task_id) = if let View::Detail { track_id, task_id } = &app.view {
+        (track_id.clone(), task_id.clone())
+    } else if let Some((track_id, task_id, _)) = app.cursor_task_id() {
+        (track_id, task_id)
+    } else {
+        return;
+    };
+
+    let old_deps = App::find_track_in_project(&app.project, &track_id)
+        .and_then(|t| task_ops::find_task_in_track(t, &task_id))
+        .and_then(|t| t.metadata.iter().find_map(|m| {
+            if let Metadata::Dep(deps) = m { Some(deps.clone()) } else { None }
+        }))
+        .unwrap_or_default();
+
+    let mut new_deps = old_deps.clone();
+    for dep in adds {
+        if !new_deps.contains(dep) {
+            new_deps.push(dep.clone());
+        }
+    }
+    for dep in removes {
+        new_deps.retain(|d| d != dep);
+    }
+
+    if old_deps == new_deps {
+        return; // No change — silently skip
+    }
+
+    let old_value = old_deps.join(", ");
+    let new_value = new_deps.join(", ");
+
+    let track = match app.find_track_mut(&track_id) {
+        Some(t) => t,
+        None => return,
+    };
+    if let Some(task) = task_ops::find_task_mut_in_track(track, &task_id) {
+        task.metadata.retain(|m| !matches!(m, Metadata::Dep(_)));
+        if !new_deps.is_empty() {
+            task.metadata.push(Metadata::Dep(new_deps));
+        }
+        task.mark_dirty();
+    }
+    let _ = app.save_track(&track_id);
+
+    app.undo_stack.push(Operation::FieldEdit {
+        track_id,
+        task_id,
+        field: "deps".to_string(),
+        old_value,
+        new_value,
+    });
+}
+
+/// Apply dep adds/removes to all selected tasks (for . repeat in SELECT mode).
+fn repeat_bulk_dep_apply(app: &mut App, adds: &[String], removes: &[String]) {
+    let track_id = match app.current_track_id() {
+        Some(id) => id.to_string(),
+        None => return,
+    };
+
+    let selected: Vec<String> = app.selection.iter().cloned().collect();
+    let mut ops: Vec<Operation> = Vec::new();
+
+    for task_id in &selected {
+        let old_deps = App::find_track_in_project(&app.project, &track_id)
+            .and_then(|t| task_ops::find_task_in_track(t, task_id))
+            .and_then(|t| t.metadata.iter().find_map(|m| {
+                if let Metadata::Dep(deps) = m { Some(deps.clone()) } else { None }
+            }))
+            .unwrap_or_default();
+
+        let mut new_deps = old_deps.clone();
+        for dep in adds {
+            if !new_deps.contains(dep) {
+                new_deps.push(dep.clone());
+            }
+        }
+        for dep in removes {
+            new_deps.retain(|d| d != dep);
+        }
+
+        if old_deps == new_deps {
+            continue;
+        }
+
+        let old_value = old_deps.join(", ");
+        let new_value = new_deps.join(", ");
+
+        let track = match app.find_track_mut(&track_id) {
+            Some(t) => t,
+            None => continue,
+        };
+        if let Some(task) = task_ops::find_task_mut_in_track(track, task_id) {
+            task.metadata.retain(|m| !matches!(m, Metadata::Dep(_)));
+            if !new_deps.is_empty() {
+                task.metadata.push(Metadata::Dep(new_deps));
+            }
+            task.mark_dirty();
+        }
+
+        ops.push(Operation::FieldEdit {
+            track_id: track_id.clone(),
+            task_id: task_id.clone(),
+            field: "deps".to_string(),
+            old_value,
+            new_value,
+        });
+    }
+
+    if !ops.is_empty() {
+        app.undo_stack.push(Operation::Bulk(ops));
+        let _ = app.save_track(&track_id);
+    }
+}
+
+/// Apply cycle state to each selected task individually (for . repeat of Space).
+fn repeat_bulk_cycle(app: &mut App) {
+    let track_id = match app.current_track_id() {
+        Some(id) => id.to_string(),
+        None => return,
+    };
+
+    let selected: Vec<String> = app.selection.iter().cloned().collect();
+    let mut ops: Vec<Operation> = Vec::new();
+    let mut any_changed = false;
+
+    for task_id in &selected {
+        let track = match app.find_track_mut(&track_id) {
+            Some(t) => t,
+            None => continue,
+        };
+        let task = match task_ops::find_task_mut_in_track(track, task_id) {
+            Some(t) => t,
+            None => continue,
+        };
+
+        let old_state = task.state;
+        let old_resolved = task.metadata.iter().find_map(|m| {
+            if let Metadata::Resolved(d) = m { Some(d.clone()) } else { None }
+        });
+
+        task_ops::cycle_state(task);
+
+        let new_state = task.state;
+        let new_resolved = task.metadata.iter().find_map(|m| {
+            if let Metadata::Resolved(d) = m { Some(d.clone()) } else { None }
+        });
+
+        if old_state != new_state {
+            if old_state == crate::model::TaskState::Done {
+                app.cancel_pending_move(&track_id, task_id);
+            }
+
+            ops.push(Operation::StateChange {
+                track_id: track_id.clone(),
+                task_id: task_id.clone(),
+                old_state,
+                new_state,
+                old_resolved,
+                new_resolved,
+            });
+
+            if new_state == crate::model::TaskState::Done {
+                if let Some(track) = App::find_track_in_project(&app.project, &track_id) {
+                    if task_ops::is_top_level_in_section(track, task_id, SectionKind::Backlog) {
+                        app.pending_moves.push(PendingMove {
+                            kind: PendingMoveKind::ToDone,
+                            track_id: track_id.clone(),
+                            task_id: task_id.clone(),
+                            deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+                        });
+                    }
+                }
+            }
+
+            any_changed = true;
+        }
+    }
+
+    if any_changed {
+        app.undo_stack.push(Operation::Bulk(ops));
+        let _ = app.save_track(&track_id);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Task state changes
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Copy)]
 enum StateAction {
     Cycle,
     Done,
@@ -2234,6 +2661,15 @@ fn task_state_action(app: &mut App, action: StateAction) {
             new_resolved,
         });
 
+        // Record repeatable action
+        app.last_action = Some(match action {
+            StateAction::Cycle => RepeatableAction::CycleState,
+            StateAction::Done => RepeatableAction::SetState(crate::model::TaskState::Done),
+            StateAction::SetTodo => RepeatableAction::SetState(crate::model::TaskState::Todo),
+            StateAction::ToggleBlocked => RepeatableAction::SetState(crate::model::TaskState::Blocked),
+            StateAction::ToggleParked => RepeatableAction::SetState(crate::model::TaskState::Parked),
+        });
+
         // If task is now Done and is a top-level Backlog task, schedule pending move
         if new_state == crate::model::task::TaskState::Done {
             let is_top_level_backlog = task_ops::is_top_level_in_section(
@@ -2283,6 +2719,9 @@ fn toggle_cc_tag(app: &mut App) {
         let _ = task_ops::add_tag(track, &task_id, "cc");
     }
     let _ = app.save_track(&track_id);
+
+    // Record repeatable action
+    app.last_action = Some(RepeatableAction::ToggleCcTag);
 }
 
 /// Set the current track as cc-focus (track view or tracks view).
@@ -2966,6 +3405,9 @@ fn confirm_edit(app: &mut App) {
                             });
 
                             let _ = app.save_track(&track_id);
+
+                            // Record repeatable action
+                            app.last_action = Some(RepeatableAction::EnterEdit(RepeatEditRegion::Title));
                         }
                     }
                 } else {
@@ -2984,6 +3426,9 @@ fn confirm_edit(app: &mut App) {
                     });
 
                     let _ = app.save_track(&track_id);
+
+                    // Record repeatable action
+                    app.last_action = Some(RepeatableAction::EnterEdit(RepeatEditRegion::Title));
                 }
             }
             drain_pending_for_track(app, &track_id);
@@ -3000,6 +3445,15 @@ fn confirm_edit(app: &mut App) {
                     .map(|s| s.strip_prefix('#').unwrap_or(s).to_string())
                     .filter(|s| !s.is_empty()),
             );
+
+            // Compute tag diff for repeat
+            let old_tag_set: Vec<String> = original_tags
+                .split_whitespace()
+                .map(|s| s.strip_prefix('#').unwrap_or(s).to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let tag_adds: Vec<String> = new_tags.iter().filter(|t| !old_tag_set.contains(t)).cloned().collect();
+            let tag_removes: Vec<String> = old_tag_set.iter().filter(|t| !new_tags.contains(t)).cloned().collect();
 
             let track = match app.find_track_mut(&track_id) {
                 Some(t) => t,
@@ -3019,6 +3473,14 @@ fn confirm_edit(app: &mut App) {
                     old_value: original_tags,
                     new_value,
                 });
+
+                // Record repeatable action
+                if !tag_adds.is_empty() || !tag_removes.is_empty() {
+                    app.last_action = Some(RepeatableAction::TagEdit {
+                        adds: tag_adds,
+                        removes: tag_removes,
+                    });
+                }
             }
             drain_pending_for_track(app, &track_id);
         }
@@ -5074,6 +5536,9 @@ fn confirm_detail_multiline(app: &mut App) {
             old_value: original,
             new_value,
         });
+
+        // Record repeatable action
+        app.last_action = Some(RepeatableAction::EnterEdit(RepeatEditRegion::Note));
     }
 
     // Exit edit mode
@@ -5261,6 +5726,19 @@ fn confirm_detail_edit(app: &mut App) {
             }
         }
         _ => {}
+    }
+
+    // Record repeatable action for detail view edits
+    let repeat_region = match region {
+        DetailRegion::Title => Some(RepeatEditRegion::Title),
+        DetailRegion::Tags => Some(RepeatEditRegion::Tags),
+        DetailRegion::Deps => Some(RepeatEditRegion::Deps),
+        DetailRegion::Refs => Some(RepeatEditRegion::Refs),
+        DetailRegion::Note => Some(RepeatEditRegion::Note),
+        _ => None,
+    };
+    if let Some(r) = repeat_region {
+        app.last_action = Some(RepeatableAction::EnterEdit(r));
     }
 
     // Exit edit mode

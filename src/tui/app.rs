@@ -380,6 +380,33 @@ impl FilterState {
     }
 }
 
+/// An action that can be repeated with the `.` key
+#[derive(Debug, Clone)]
+pub enum RepeatableAction {
+    /// Cycle state (Space)
+    CycleState,
+    /// Set absolute state (x=Done, b=Blocked, o=Todo, ~=Parked)
+    SetState(TaskState),
+    /// Tag edit: adds and removes (e.g., +cc +ready -design)
+    TagEdit { adds: Vec<String>, removes: Vec<String> },
+    /// Dep edit: adds and removes (e.g., +EFF-014 -EFF-003)
+    DepEdit { adds: Vec<String>, removes: Vec<String> },
+    /// Toggle cc tag
+    ToggleCcTag,
+    /// Enter edit mode on a region (e=Title, t=Tags, @=Refs, d=Deps, n=Note)
+    EnterEdit(RepeatEditRegion),
+}
+
+/// Which region to re-enter edit mode for (used by RepeatableAction::EnterEdit)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepeatEditRegion {
+    Title,
+    Tags,
+    Deps,
+    Refs,
+    Note,
+}
+
 /// Current interaction mode
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
@@ -622,6 +649,8 @@ pub struct App {
     pub selection: HashSet<String>,
     /// Anchor flat-item index for V range select preview (None = not in range select mode)
     pub range_anchor: Option<usize>,
+    /// Last repeatable action for `.` key (persists across tab switches)
+    pub last_action: Option<RepeatableAction>,
 }
 
 impl App {
@@ -724,6 +753,7 @@ impl App {
             filter_pending: false,
             selection: HashSet::new(),
             range_anchor: None,
+            last_action: None,
         }
     }
 

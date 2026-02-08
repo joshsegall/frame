@@ -220,6 +220,7 @@ fn build_track_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("/".into(), "Search".into()),
         HelpEntry::Binding("J".into(), "Jump to task".into()),
         HelpEntry::Binding("C".into(), "Set cc-focus".into()),
+        HelpEntry::Binding(".".into(), "Repeat last action".into()),
         HelpEntry::Binding("z/u".into(), "Undo".into()),
         HelpEntry::Binding("Z".into(), "Redo".into()),
         HelpEntry::Binding("?".into(), "Help".into()),
