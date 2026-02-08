@@ -237,6 +237,7 @@ fn build_detail_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("Tab".into(), "Next editable region".into()),
         HelpEntry::Binding("S-Tab".into(), "Prev editable region".into()),
         HelpEntry::Binding("g/G".into(), "Top / bottom".into()),
+        HelpEntry::Binding("J".into(), "Jump to task".into()),
         HelpEntry::Binding("Esc".into(), "Back".into()),
     ];
 
@@ -247,9 +248,14 @@ fn build_detail_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("@".into(), "Edit refs".into()),
         HelpEntry::Binding("d".into(), "Edit deps".into()),
         HelpEntry::Binding("n".into(), "Edit note".into()),
+        HelpEntry::Blank,
+        HelpEntry::Header("Task State".into()),
         HelpEntry::Binding("Space".into(), "Cycle state".into()),
+        HelpEntry::Binding("x".into(), "Mark done".into()),
+        HelpEntry::Binding("o".into(), "Set todo".into()),
+        HelpEntry::Binding("b".into(), "Set blocked".into()),
+        HelpEntry::Binding("~".into(), "Set parked".into()),
         HelpEntry::Binding("M".into(), "Move to track".into()),
-        HelpEntry::Binding("J".into(), "Jump to task".into()),
     ];
 
     (left, right)

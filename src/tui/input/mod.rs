@@ -153,6 +153,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::Triage => handle_triage(app, key),
         Mode::Confirm => handle_confirm(app, key),
         Mode::Select => handle_select(app, key),
+        Mode::Command => handle_command(app, key),
     }
 }
 
@@ -605,6 +606,11 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
         // Repeat last action: .
         (KeyModifiers::NONE, KeyCode::Char('.')) => {
             repeat_last_action(app);
+        }
+
+        // Command palette: > (Shift+. reports as NONE or SHIFT depending on terminal)
+        (_, KeyCode::Char('>')) => {
+            open_command_palette(app);
         }
 
         _ => {}
@@ -7457,5 +7463,560 @@ fn collapse_recent(app: &mut App) {
     let cursor = app.recent_cursor;
     if let Some(entry) = entries.get(cursor) {
         app.recent_expanded.remove(&entry.id);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Command palette
+// ---------------------------------------------------------------------------
+
+use crate::tui::command_actions::CommandPaletteState;
+
+fn open_command_palette(app: &mut App) {
+    app.show_help = false;
+    app.command_palette = Some(CommandPaletteState::new(app));
+    app.mode = Mode::Command;
+}
+
+fn handle_command(app: &mut App, key: KeyEvent) {
+    match (key.modifiers, key.code) {
+        (_, KeyCode::Esc) => {
+            app.command_palette = None;
+            app.mode = Mode::Navigate;
+        }
+        (_, KeyCode::Enter) => {
+            if let Some(cp) = app.command_palette.take() {
+                if let Some(scored) = cp.results.get(cp.selected) {
+                    let action_id = scored.action.id.to_string();
+                    let track_index = cp.selected_track_index();
+                    app.mode = Mode::Navigate;
+                    dispatch_palette_action(app, &action_id, track_index);
+                } else {
+                    app.mode = Mode::Navigate;
+                }
+            } else {
+                app.mode = Mode::Navigate;
+            }
+        }
+        (_, KeyCode::Up) => {
+            if let Some(cp) = &mut app.command_palette
+                && cp.selected > 0
+            {
+                cp.selected -= 1;
+            }
+        }
+        (_, KeyCode::Down) => {
+            if let Some(cp) = &mut app.command_palette
+                && !cp.results.is_empty()
+                && cp.selected < cp.results.len() - 1
+            {
+                cp.selected += 1;
+            }
+        }
+        (_, KeyCode::Backspace) => {
+            let should_close = app
+                .command_palette
+                .as_ref()
+                .is_some_and(|cp| cp.input.is_empty());
+            if should_close {
+                app.command_palette = None;
+                app.mode = Mode::Navigate;
+            } else if let Some(cp) = &mut app.command_palette {
+                cp.input.pop();
+                cp.cursor = cp.input.len();
+                cp.selected = 0;
+                // Take palette out, update, put back
+                let mut cp = app.command_palette.take().unwrap();
+                cp.update_filter(app);
+                app.command_palette = Some(cp);
+            }
+        }
+        (_, KeyCode::Char(c)) => {
+            if app.command_palette.is_some() {
+                let mut cp = app.command_palette.take().unwrap();
+                cp.input.push(c);
+                cp.cursor = cp.input.len();
+                cp.selected = 0;
+                cp.update_filter(app);
+                app.command_palette = Some(cp);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn dispatch_palette_action(app: &mut App, action_id: &str, track_index: Option<usize>) {
+    match action_id {
+        // Global
+        "switch_track" => {
+            if let Some(idx) = track_index {
+                if idx < app.active_track_ids.len() {
+                    app.close_detail_fully();
+                    app.view = View::Track(idx);
+                }
+            }
+        }
+        "next_track" => {
+            switch_tab(app, 1);
+        }
+        "open_inbox" => {
+            app.close_detail_fully();
+            app.view = View::Inbox;
+        }
+        "open_recent" => {
+            app.close_detail_fully();
+            app.view = View::Recent;
+        }
+        "open_tracks" => {
+            app.close_detail_fully();
+            app.tracks_name_col_min = 0;
+            app.view = View::Tracks;
+        }
+        "search" => {
+            app.mode = Mode::Search;
+            app.search_input.clear();
+            app.search_draft.clear();
+            app.search_history_index = None;
+            app.search_wrap_message = None;
+            app.search_match_count = None;
+            app.search_zero_confirmed = false;
+        }
+        "jump_to_task" => {
+            begin_jump_to(app);
+        }
+        "toggle_help" => {
+            app.show_help = !app.show_help;
+            app.help_scroll = 0;
+        }
+        "undo" => {
+            perform_undo(app);
+        }
+        "redo" => {
+            perform_redo(app);
+        }
+        "quit" => {
+            app.should_quit = true;
+        }
+
+        // Track view: state changes
+        "cycle_state" => {
+            if matches!(app.view, View::Recent) {
+                reopen_recent_task(app);
+            } else {
+                task_state_action(app, StateAction::Cycle);
+            }
+        }
+        "set_todo" => {
+            task_state_action(app, StateAction::SetTodo);
+        }
+        "mark_done" => {
+            if matches!(app.view, View::Inbox) {
+                inbox_delete_item(app);
+            } else {
+                task_state_action(app, StateAction::Done);
+            }
+        }
+        "set_blocked" => {
+            task_state_action(app, StateAction::ToggleBlocked);
+        }
+        "set_parked" => {
+            task_state_action(app, StateAction::ToggleParked);
+        }
+        "toggle_cc" => {
+            toggle_cc_tag(app);
+        }
+        "mark_done_wontdo" => {
+            compound_done_with_tag(app, "wontdo");
+        }
+        "mark_done_duplicate" => {
+            compound_done_with_tag(app, "duplicate");
+        }
+
+        // Track view: create
+        "add_task_bottom" | "add_inbox_item" => {
+            if matches!(app.view, View::Inbox) {
+                inbox_add_item(app);
+            } else {
+                add_task_action(app, AddPosition::Bottom);
+            }
+        }
+        "insert_after" => {
+            if matches!(app.view, View::Inbox) {
+                inbox_insert_after(app);
+            } else {
+                add_task_action(app, AddPosition::AfterCursor);
+            }
+        }
+        "push_to_top" => {
+            add_task_action(app, AddPosition::Top);
+        }
+        "add_subtask" => {
+            add_subtask_action(app);
+        }
+
+        // Track view: edit
+        "edit_title" => {
+            if matches!(app.view, View::Inbox) {
+                inbox_edit_title(app);
+            } else if matches!(app.view, View::Tracks) {
+                tracks_edit_name(app);
+            } else {
+                enter_title_edit(app);
+            }
+        }
+        "edit_tags" => {
+            if matches!(app.view, View::Detail { .. }) {
+                detail_jump_to_region_and_edit(app, DetailRegion::Tags);
+            } else if matches!(app.view, View::Inbox) {
+                inbox_edit_tags(app);
+            } else {
+                enter_tag_edit(app);
+            }
+        }
+
+        // Track view: move
+        "move_task" => {
+            if matches!(app.view, View::Inbox) {
+                inbox_enter_move_mode(app);
+            } else {
+                enter_move_mode(app);
+            }
+        }
+        "move_to_track" => {
+            begin_cross_track_move(app);
+        }
+        "move_to_top" => {
+            palette_move_to_boundary(app, true);
+        }
+        "move_to_bottom" => {
+            palette_move_to_boundary(app, false);
+        }
+
+        // Track view: filter
+        "filter_active" => {
+            let prev = get_cursor_task_id(app);
+            app.filter_state.state_filter = Some(StateFilter::Active);
+            reset_cursor_for_filter(app, prev.as_deref());
+        }
+        "filter_todo" => {
+            let prev = get_cursor_task_id(app);
+            app.filter_state.state_filter = Some(StateFilter::Todo);
+            reset_cursor_for_filter(app, prev.as_deref());
+        }
+        "filter_blocked" => {
+            let prev = get_cursor_task_id(app);
+            app.filter_state.state_filter = Some(StateFilter::Blocked);
+            reset_cursor_for_filter(app, prev.as_deref());
+        }
+        "filter_ready" => {
+            let prev = get_cursor_task_id(app);
+            app.filter_state.state_filter = Some(StateFilter::Ready);
+            reset_cursor_for_filter(app, prev.as_deref());
+        }
+        "filter_tag" => {
+            begin_filter_tag_select(app);
+        }
+        "clear_state_filter" => {
+            let prev = get_cursor_task_id(app);
+            app.filter_state.state_filter = None;
+            reset_cursor_for_filter(app, prev.as_deref());
+        }
+        "clear_all_filters" => {
+            let prev = get_cursor_task_id(app);
+            app.filter_state.state_filter = None;
+            app.filter_state.tag_filter = None;
+            reset_cursor_for_filter(app, prev.as_deref());
+        }
+
+        // Track view: select
+        "toggle_select" => {
+            enter_select_mode(app);
+        }
+        "range_select" => {
+            begin_range_select(app);
+        }
+        "select_all" => {
+            select_all(app);
+        }
+        "select_none" => {
+            clear_selection(app);
+        }
+
+        // Track view: navigate
+        "open_detail" => {
+            if matches!(app.view, View::Inbox) {
+                inbox_begin_triage(app);
+            } else if matches!(app.view, View::Recent) {
+                toggle_recent_expand(app);
+            } else {
+                handle_enter(app);
+            }
+        }
+        "collapse_all" => {
+            palette_collapse_all(app);
+        }
+        "expand_all" => {
+            palette_expand_all(app);
+        }
+
+        // Track view: manage
+        "set_cc_focus" => {
+            set_cc_focus_current(app);
+        }
+        "repeat_action" => {
+            repeat_last_action(app);
+        }
+
+        // Detail view
+        "edit_region" => {
+            detail_enter_edit(app);
+        }
+        "edit_refs" => {
+            detail_jump_to_region_and_edit(app, DetailRegion::Refs);
+        }
+        "edit_deps" => {
+            detail_jump_to_region_and_edit(app, DetailRegion::Deps);
+        }
+        "edit_note" => {
+            detail_jump_to_region_and_edit(app, DetailRegion::Note);
+        }
+        "back_to_track" => {
+            // Simulate Esc in detail view
+            if let View::Detail { .. } = &app.view {
+                if let Some((parent_track, parent_task)) = app.detail_stack.pop() {
+                    app.detail_state = None;
+                    app.view = View::Detail {
+                        track_id: parent_track,
+                        task_id: parent_task,
+                    };
+                } else {
+                    let return_idx = app.detail_state.as_ref().map(|ds| ds.return_view_idx).unwrap_or(0);
+                    app.view = View::Track(return_idx);
+                    app.close_detail_fully();
+                }
+            }
+        }
+
+        // Inbox view
+        "delete_inbox_item" => {
+            inbox_delete_item(app);
+        }
+        "begin_triage" => {
+            inbox_begin_triage(app);
+        }
+
+        // Recent view
+        "reopen_todo" => {
+            reopen_recent_task(app);
+        }
+        "toggle_expand" => {
+            toggle_recent_expand(app);
+        }
+
+        // Tracks view
+        "open_track" => {
+            handle_enter(app);
+        }
+        "add_track" => {
+            tracks_add_track(app);
+        }
+        "edit_track_name" => {
+            tracks_edit_name(app);
+        }
+        "shelve_activate" => {
+            tracks_toggle_shelve(app);
+        }
+        "archive_delete" => {
+            tracks_archive_or_delete(app);
+        }
+        "reorder_track" => {
+            enter_move_mode(app);
+        }
+
+        _ => {}
+    }
+}
+
+/// Compound action: add a tag and mark done in one step (palette-only).
+fn compound_done_with_tag(app: &mut App, tag: &str) {
+    // Only works on track view tasks
+    let (track_id, task_id, _section) = match app.cursor_task_id() {
+        Some(info) => info,
+        None => return,
+    };
+
+    let track = match app.find_track_mut(&track_id) {
+        Some(t) => t,
+        None => return,
+    };
+    let task = match crate::ops::task_ops::find_task_mut_in_track(track, &task_id) {
+        Some(t) => t,
+        None => return,
+    };
+
+    let old_state = task.state;
+    let old_tags: Vec<String> = task.tags.clone();
+    let old_resolved = task
+        .metadata
+        .iter()
+        .find_map(|m| {
+            if let Metadata::Resolved(d) = m {
+                Some(d.clone())
+            } else {
+                None
+            }
+        });
+
+    // Add the tag if not present
+    if !task.tags.iter().any(|t| t == tag) {
+        task.tags.push(tag.to_string());
+        task.dirty = true;
+    }
+
+    // Set done
+    task_ops::set_done(task);
+
+    let new_state = task.state;
+    let new_tags = task.tags.clone();
+    let new_resolved = task
+        .metadata
+        .iter()
+        .find_map(|m| {
+            if let Metadata::Resolved(d) = m {
+                Some(d.clone())
+            } else {
+                None
+            }
+        });
+
+    // Push undo for tag change first (so it undoes second)
+    if old_tags != new_tags {
+        let old_val = old_tags.iter().map(|t| format!("#{}", t)).collect::<Vec<_>>().join(" ");
+        let new_val = new_tags.iter().map(|t| format!("#{}", t)).collect::<Vec<_>>().join(" ");
+        app.undo_stack.push(Operation::FieldEdit {
+            track_id: track_id.clone(),
+            task_id: task_id.clone(),
+            field: "tags".to_string(),
+            old_value: old_val,
+            new_value: new_val,
+        });
+    }
+
+    // Push undo for state change
+    if old_state != new_state {
+        app.undo_stack.push(Operation::StateChange {
+            track_id: track_id.clone(),
+            task_id: task_id.clone(),
+            old_state,
+            new_state,
+            old_resolved,
+            new_resolved,
+        });
+
+        // Schedule pending move to Done section if appropriate
+        if new_state == crate::model::TaskState::Done {
+            let is_top_level_backlog = task_ops::is_top_level_in_section(
+                App::find_track_in_project(&app.project, &track_id).unwrap(),
+                &task_id,
+                SectionKind::Backlog,
+            );
+            if is_top_level_backlog {
+                app.pending_moves.push(PendingMove {
+                    kind: PendingMoveKind::ToDone,
+                    track_id: track_id.clone(),
+                    task_id: task_id.clone(),
+                    deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+                });
+            }
+        }
+    }
+
+    let _ = app.save_track(&track_id);
+}
+
+/// Move the cursor task to the top or bottom of the backlog (palette-only, skips MOVE mode).
+fn palette_move_to_boundary(app: &mut App, to_top: bool) {
+    let (track_id, task_id, section) = match app.cursor_task_id() {
+        Some(info) => info,
+        None => return,
+    };
+    if section != SectionKind::Backlog {
+        return;
+    }
+    let track = match app.find_track_mut(&track_id) {
+        Some(t) => t,
+        None => return,
+    };
+    let backlog = match track.section_tasks_mut(SectionKind::Backlog) {
+        Some(b) => b,
+        None => return,
+    };
+    let current_idx = match backlog.iter().position(|t| t.id.as_deref() == Some(&task_id)) {
+        Some(i) => i,
+        None => return,
+    };
+    let target_idx = if to_top { 0 } else { backlog.len() - 1 };
+    if current_idx == target_idx {
+        return;
+    }
+    let task = backlog.remove(current_idx);
+    let new_idx = if to_top { 0 } else { backlog.len() };
+    backlog.insert(new_idx, task);
+    let _ = app.save_track(&track_id);
+
+    app.undo_stack.push(Operation::TaskMove {
+        track_id,
+        task_id,
+        old_index: current_idx,
+        new_index: new_idx,
+    });
+}
+
+/// Collapse all expanded tasks in the current track view.
+fn palette_collapse_all(app: &mut App) {
+    let track_id = match app.current_track_id() {
+        Some(id) => id.to_string(),
+        None => return,
+    };
+    if let Some(state) = app.track_states.get_mut(&track_id) {
+        state.expanded.clear();
+    }
+}
+
+/// Expand all tasks in the current track view.
+fn palette_expand_all(app: &mut App) {
+    let track_id = match app.current_track_id() {
+        Some(id) => id.to_string(),
+        None => return,
+    };
+    let track = match App::find_track_in_project(&app.project, &track_id) {
+        Some(t) => t,
+        None => return,
+    };
+    // Collect all expand keys for tasks with children
+    let mut keys_to_expand = Vec::new();
+    fn collect_expand_keys(
+        tasks: &[crate::model::Task],
+        section: SectionKind,
+        path: &mut Vec<usize>,
+        keys: &mut Vec<String>,
+    ) {
+        for (i, task) in tasks.iter().enumerate() {
+            path.push(i);
+            if !task.subtasks.is_empty() {
+                keys.push(super::app::task_expand_key(task, section, path));
+                collect_expand_keys(&task.subtasks, section, path, keys);
+            }
+            path.pop();
+        }
+    }
+    let mut path = Vec::new();
+    collect_expand_keys(track.backlog(), SectionKind::Backlog, &mut path, &mut keys_to_expand);
+    collect_expand_keys(track.parked(), SectionKind::Parked, &mut path, &mut keys_to_expand);
+
+    if let Some(state) = app.track_states.get_mut(&track_id) {
+        for key in keys_to_expand {
+            state.expanded.insert(key);
+        }
     }
 }

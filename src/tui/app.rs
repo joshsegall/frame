@@ -422,6 +422,8 @@ pub enum Mode {
     Confirm,
     /// Multi-select mode for bulk operations (track view only)
     Select,
+    /// Command palette mode (fuzzy action launcher)
+    Command,
 }
 
 /// What kind of edit operation is in progress
@@ -651,6 +653,8 @@ pub struct App {
     pub range_anchor: Option<usize>,
     /// Last repeatable action for `.` key (persists across tab switches)
     pub last_action: Option<RepeatableAction>,
+    /// Command palette state (active during Mode::Command)
+    pub command_palette: Option<super::command_actions::CommandPaletteState>,
 }
 
 impl App {
@@ -754,6 +758,7 @@ impl App {
             selection: HashSet::new(),
             range_anchor: None,
             last_action: None,
+            command_palette: None,
         }
     }
 
@@ -2063,7 +2068,7 @@ fn run_event_loop(
                     app.last_save_at = None; // consume the suppression
                 } else if !all_paths.is_empty() {
                     // External change detected
-                    if matches!(app.mode, Mode::Edit | Mode::Move | Mode::Triage | Mode::Confirm) {
+                    if matches!(app.mode, Mode::Edit | Mode::Move | Mode::Triage | Mode::Confirm | Mode::Command) {
                         // Queue reload for when we leave modal mode
                         app.pending_reload_paths.extend(all_paths);
                     } else {

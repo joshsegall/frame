@@ -1,4 +1,5 @@
 pub mod autocomplete;
+pub mod command_palette;
 pub mod conflict_popup;
 pub mod detail_view;
 pub mod help_overlay;
@@ -61,6 +62,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // Help overlay (rendered on top of everything)
     if app.show_help {
         help_overlay::render_help_overlay(frame, app, frame.area());
+    }
+
+    // Command palette overlay (rendered on top of everything)
+    if app.command_palette.is_some() {
+        command_palette::render_command_palette(frame, app, chunks[1]);
     }
 
     // Conflict popup (rendered on top of everything)
