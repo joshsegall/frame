@@ -731,6 +731,12 @@ pub struct App {
     pub dep_popup: Option<DepPopupState>,
     /// Tag color editor popup state
     pub tag_color_popup: Option<TagColorPopupState>,
+    /// Debug mode: show raw KeyEvent info in status row
+    pub key_debug: bool,
+    /// Last raw KeyEvent description (for debug display)
+    pub last_key_event: Option<String>,
+    /// Whether Kitty keyboard protocol is active
+    pub kitty_enabled: bool,
 }
 
 impl App {
@@ -837,6 +843,9 @@ impl App {
             command_palette: None,
             dep_popup: None,
             tag_color_popup: None,
+            key_debug: false,
+            last_key_event: None,
+            kitty_enabled: false,
         }
     }
 
@@ -2326,17 +2335,19 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
 
-    // Enable Kitty keyboard protocol if the terminal supports it
-    let kitty_enabled = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
-    if kitty_enabled {
-        execute!(
-            stdout,
-            PushKeyboardEnhancementFlags(
-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-            )
-        )?;
-    }
+    // Always enable Kitty keyboard protocol — the detection via
+    // supports_keyboard_enhancement() is unreliable (many terminals that support it,
+    // like Warp, fail the probe). Terminals that don't support the protocol simply
+    // ignore the escape sequence, so this is safe to send unconditionally.
+    let kitty_enabled = execute!(
+        stdout,
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+        )
+    )
+    .is_ok();
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -2346,12 +2357,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = disable_raw_mode();
-        if kitty_enabled {
-            let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
-        }
+        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
         original_hook(panic_info);
     }));
+
+    // Record kitty protocol status on app for debug display
+    app.kitty_enabled = kitty_enabled;
 
     // Run event loop
     let result = run_event_loop(&mut terminal, &mut app, watcher.as_ref());
@@ -2361,13 +2373,42 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // Restore terminal
     disable_raw_mode()?;
-    if kitty_enabled {
-        execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
-    }
+    let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
     result
+}
+
+/// Format a KeyEvent into a compact debug string like "Left mod=CTRL|ALT" or "Char('a') mod=NONE"
+fn format_key_debug(key: &crossterm::event::KeyEvent) -> String {
+    use crossterm::event::KeyModifiers;
+    let code = format!("{:?}", key.code);
+    let mut mods = Vec::new();
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        mods.push("CTRL");
+    }
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        mods.push("ALT");
+    }
+    if key.modifiers.contains(KeyModifiers::SHIFT) {
+        mods.push("SHIFT");
+    }
+    if key.modifiers.contains(KeyModifiers::SUPER) {
+        mods.push("SUPER");
+    }
+    if key.modifiers.contains(KeyModifiers::HYPER) {
+        mods.push("HYPER");
+    }
+    if key.modifiers.contains(KeyModifiers::META) {
+        mods.push("META");
+    }
+    let mod_str = if mods.is_empty() {
+        "NONE".to_string()
+    } else {
+        mods.join("|")
+    };
+    format!("{} mod={} state={:?}", code, mod_str, key.state)
 }
 
 fn run_event_loop(
@@ -2428,6 +2469,11 @@ fn run_event_loop(
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
+            // Capture raw key event for debug display
+            if app.key_debug {
+                app.last_key_event = Some(format_key_debug(&key));
+            }
+
             let old_view = app.view.clone();
             input::handle_key(app, key);
 

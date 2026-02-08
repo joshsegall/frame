@@ -261,6 +261,14 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             app.should_quit = true;
         }
 
+        // Toggle key debug overlay: Ctrl+D
+        (m, KeyCode::Char('d')) if m.contains(KeyModifiers::CONTROL) => {
+            app.key_debug = !app.key_debug;
+            if !app.key_debug {
+                app.last_key_event = None;
+            }
+        }
+
         // Quit: Q (first press shows confirmation)
         (KeyModifiers::SHIFT, KeyCode::Char('Q')) => {
             app.quit_pending = true;
@@ -3327,9 +3335,14 @@ fn handle_edit(app: &mut App, key: KeyEvent) {
                 cancel_edit(app);
             }
         }
-        // Select all (Ctrl+A)
+        // Home / Ctrl+A (macOS Cmd+Left sends ^A): jump to start of line
         (m, KeyCode::Char('a')) if m.contains(KeyModifiers::CONTROL) => {
-            app.edit_selection_anchor = Some(0);
+            app.edit_selection_anchor = None;
+            app.edit_cursor = 0;
+        }
+        // End / Ctrl+E (macOS Cmd+Right sends ^E): jump to end of line
+        (m, KeyCode::Char('e')) if m.contains(KeyModifiers::CONTROL) => {
+            app.edit_selection_anchor = None;
             app.edit_cursor = app.edit_buffer.len();
         }
         // Copy (Ctrl+C)
@@ -3421,15 +3434,37 @@ fn handle_edit(app: &mut App, key: KeyEvent) {
         (m, KeyCode::Right) if m.contains(KeyModifiers::SUPER) => {
             app.edit_cursor = app.edit_buffer.len();
         }
-        // Word movement (Alt or Ctrl, with or without Shift)
-        (m, KeyCode::Left)
-            if m.contains(KeyModifiers::ALT) || m.contains(KeyModifiers::CONTROL) =>
-        {
+        // Ctrl+Left/Right: jump to start/end of line (Ctrl+arrow in terminals)
+        (m, KeyCode::Left) if m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) => {
+            app.edit_selection_anchor = None;
+            app.edit_cursor = 0;
+        }
+        (m, KeyCode::Right) if m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) => {
+            app.edit_selection_anchor = None;
+            app.edit_cursor = app.edit_buffer.len();
+        }
+        // Home/End keys: jump to start/end of line
+        (_, KeyCode::Home) => {
+            app.edit_selection_anchor = None;
+            app.edit_cursor = 0;
+        }
+        (_, KeyCode::End) => {
+            app.edit_selection_anchor = None;
+            app.edit_cursor = app.edit_buffer.len();
+        }
+        // Word movement (Alt+arrow, with or without Shift)
+        (m, KeyCode::Left) if m.contains(KeyModifiers::ALT) => {
             app.edit_cursor = word_boundary_left(&app.edit_buffer, app.edit_cursor);
         }
-        (m, KeyCode::Right)
-            if m.contains(KeyModifiers::ALT) || m.contains(KeyModifiers::CONTROL) =>
-        {
+        (m, KeyCode::Right) if m.contains(KeyModifiers::ALT) => {
+            app.edit_cursor = word_boundary_right(&app.edit_buffer, app.edit_cursor);
+        }
+        // Readline word movement: Alt+B (backward) / Alt+F (forward)
+        // Warp and other terminals translate Alt+Left/Right to these
+        (m, KeyCode::Char('b')) if m.contains(KeyModifiers::ALT) => {
+            app.edit_cursor = word_boundary_left(&app.edit_buffer, app.edit_cursor);
+        }
+        (m, KeyCode::Char('f')) if m.contains(KeyModifiers::ALT) => {
             app.edit_cursor = word_boundary_right(&app.edit_buffer, app.edit_cursor);
         }
         // Backspace: delete selection or single char
@@ -5582,14 +5617,20 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
             app.edit_history = None;
             confirm_detail_multiline(app);
         }
-        // Select all (Ctrl+A)
+        // Home / Ctrl+A (macOS Cmd+Left sends ^A): jump to start of line
         (m, KeyCode::Char('a')) if m.contains(KeyModifiers::CONTROL) => {
             if let Some(ds) = &mut app.detail_state {
-                ds.multiline_selection_anchor = Some((0, 0));
-                let line_count = ds.edit_buffer.split('\n').count();
-                let last_len = ds.edit_buffer.split('\n').last().map_or(0, |l| l.len());
-                ds.edit_cursor_line = line_count.saturating_sub(1);
-                ds.edit_cursor_col = last_len;
+                ds.multiline_selection_anchor = None;
+                ds.edit_cursor_col = 0;
+            }
+        }
+        // End / Ctrl+E (macOS Cmd+Right sends ^E): jump to end of line
+        (m, KeyCode::Char('e')) if m.contains(KeyModifiers::CONTROL) => {
+            if let Some(ds) = &mut app.detail_state {
+                ds.multiline_selection_anchor = None;
+                let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
+                let line_len = edit_lines.get(ds.edit_cursor_line).map_or(0, |l| l.len());
+                ds.edit_cursor_col = line_len;
             }
         }
         // Copy (Ctrl+C)
@@ -5788,19 +5829,60 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                 ds.edit_cursor_col = line_len;
             }
         }
-        // Word movement (Alt or Ctrl, with or without Shift)
-        (m, KeyCode::Left)
-            if m.contains(KeyModifiers::ALT) || m.contains(KeyModifiers::CONTROL) =>
-        {
+        // Ctrl+Left/Right: jump to start/end of line (Ctrl+arrow in terminals)
+        (m, KeyCode::Left) if m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) => {
+            if let Some(ds) = &mut app.detail_state {
+                ds.multiline_selection_anchor = None;
+                ds.edit_cursor_col = 0;
+            }
+        }
+        (m, KeyCode::Right) if m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) => {
+            if let Some(ds) = &mut app.detail_state {
+                ds.multiline_selection_anchor = None;
+                let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
+                let line_len = edit_lines.get(ds.edit_cursor_line).map_or(0, |l| l.len());
+                ds.edit_cursor_col = line_len;
+            }
+        }
+        // Home/End keys: jump to start/end of line
+        (_, KeyCode::Home) => {
+            if let Some(ds) = &mut app.detail_state {
+                ds.multiline_selection_anchor = None;
+                ds.edit_cursor_col = 0;
+            }
+        }
+        (_, KeyCode::End) => {
+            if let Some(ds) = &mut app.detail_state {
+                ds.multiline_selection_anchor = None;
+                let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
+                let line_len = edit_lines.get(ds.edit_cursor_line).map_or(0, |l| l.len());
+                ds.edit_cursor_col = line_len;
+            }
+        }
+        // Word movement (Alt+arrow, with or without Shift)
+        (m, KeyCode::Left) if m.contains(KeyModifiers::ALT) => {
             if let Some(ds) = &mut app.detail_state {
                 let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
                 let line = &edit_lines[ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1))];
                 ds.edit_cursor_col = word_boundary_left(line, ds.edit_cursor_col);
             }
         }
-        (m, KeyCode::Right)
-            if m.contains(KeyModifiers::ALT) || m.contains(KeyModifiers::CONTROL) =>
-        {
+        (m, KeyCode::Right) if m.contains(KeyModifiers::ALT) => {
+            if let Some(ds) = &mut app.detail_state {
+                let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
+                let line = &edit_lines[ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1))];
+                ds.edit_cursor_col = word_boundary_right(line, ds.edit_cursor_col);
+            }
+        }
+        // Readline word movement: Alt+B (backward) / Alt+F (forward)
+        (m, KeyCode::Char('b')) if m.contains(KeyModifiers::ALT) => {
+            if let Some(ds) = &mut app.detail_state {
+                let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
+                let line = &edit_lines[ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1))];
+                ds.edit_cursor_col = word_boundary_left(line, ds.edit_cursor_col);
+            }
+        }
+        (m, KeyCode::Char('f')) if m.contains(KeyModifiers::ALT) => {
             if let Some(ds) = &mut app.detail_state {
                 let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
                 let line = &edit_lines[ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1))];

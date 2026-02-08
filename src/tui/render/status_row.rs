@@ -294,6 +294,61 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
         }
     };
 
+    // In key debug mode, show the raw KeyEvent instead of the normal status row
+    let line = if app.key_debug {
+        let kitty_tag = if app.kitty_enabled { "kitty:on" } else { "kitty:off" };
+        if let Some(ref event_str) = app.last_key_event {
+            let mut spans = vec![
+                Span::styled(
+                    " KEY ",
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::LightYellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" ", Style::default().bg(bg)),
+                Span::styled(
+                    event_str.clone(),
+                    Style::default().fg(Color::LightYellow).bg(bg),
+                ),
+            ];
+            let right = format!("{}  ^D off", kitty_tag);
+            let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+            let right_width = right.chars().count();
+            if content_width + right_width + 2 < width {
+                let padding = width - content_width - right_width;
+                spans.push(Span::styled(" ".repeat(padding), Style::default().bg(bg)));
+                spans.push(Span::styled(right, Style::default().fg(app.theme.dim).bg(bg)));
+            }
+            Line::from(spans)
+        } else {
+            let text = format!(" KEY DEBUG ON  {}  press any key...  ^D off", kitty_tag);
+            let mut spans = vec![
+                Span::styled(
+                    " KEY DEBUG ON ",
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::LightYellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  {}  press any key...  ^D off", kitty_tag),
+                    Style::default().fg(app.theme.dim).bg(bg),
+                ),
+            ];
+            let content_width = text.chars().count();
+            if content_width < width {
+                spans.push(Span::styled(
+                    " ".repeat(width - content_width),
+                    Style::default().bg(bg),
+                ));
+            }
+            Line::from(spans)
+        }
+    } else {
+        line
+    };
+
     let paragraph = Paragraph::new(line).style(Style::default().bg(bg));
     frame.render_widget(paragraph, area);
 }
