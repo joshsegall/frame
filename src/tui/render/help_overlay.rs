@@ -169,6 +169,13 @@ fn build_track_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("ft".into(), "Filter by tag".into()),
         HelpEntry::Binding("f Space".into(), "Clear state filter".into()),
         HelpEntry::Binding("ff".into(), "Clear all filters".into()),
+        HelpEntry::Blank,
+        HelpEntry::Header("Views".into()),
+        HelpEntry::Binding("1-9".into(), "Track N".into()),
+        HelpEntry::Binding("Tab".into(), "Next track".into()),
+        HelpEntry::Binding("0/`".into(), "Tracks overview".into()),
+        HelpEntry::Binding("i".into(), "Inbox".into()),
+        HelpEntry::Binding("r".into(), "Recent".into()),
     ];
 
     let right = vec![
@@ -190,12 +197,7 @@ fn build_track_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("x/b/o/~".into(), "Bulk state".into()),
         HelpEntry::Binding("t/d/m/M".into(), "Bulk tag/dep/move".into()),
         HelpEntry::Blank,
-        HelpEntry::Header("Views & Other".into()),
-        HelpEntry::Binding("1-9".into(), "Track N".into()),
-        HelpEntry::Binding("Tab".into(), "Next track".into()),
-        HelpEntry::Binding("0/`".into(), "Tracks overview".into()),
-        HelpEntry::Binding("i".into(), "Inbox".into()),
-        HelpEntry::Binding("r".into(), "Recent".into()),
+        HelpEntry::Header("Other".into()),
         HelpEntry::Binding("/".into(), "Search".into()),
         HelpEntry::Binding("J".into(), "Jump to task".into()),
         HelpEntry::Binding("C".into(), "Set cc-focus".into()),
