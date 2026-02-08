@@ -73,6 +73,15 @@ pub fn render_tracks_view(frame: &mut Frame, app: &mut App, area: Rect) {
     // border(1) + num + "  " + name + "  " + id
     let name_col = 1 + num_width + 2 + max_name_len + 2 + max_id_len;
 
+    // Project name header
+    lines.push(Line::from(Span::styled(
+        format!(" Project: {}", app.project.config.project.name),
+        Style::default()
+            .fg(app.theme.text)
+            .bg(app.theme.background)
+            .add_modifier(Modifier::BOLD),
+    )));
+
     // Top header: short state names aligned to stat columns
     lines.push(render_col_names(app, name_col, max_id_len));
 

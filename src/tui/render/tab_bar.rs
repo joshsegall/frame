@@ -109,6 +109,34 @@ fn render_tabs(frame: &mut Frame, app: &App, area: Rect) -> Vec<usize> {
     sep_cols.push(spans.iter().map(|s| s.content.chars().count()).sum());
     spans.push(sep.clone());
 
+    // Right-justify project name in remaining space
+    let tabs_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let total_width = area.width as usize;
+    let name = &app.project.config.project.name;
+    let name_chars: Vec<char> = name.chars().collect();
+    let name_len = name_chars.len();
+    let available = total_width.saturating_sub(tabs_width);
+    let bg_style = Style::default().bg(app.theme.background);
+    let name_style = Style::default().fg(app.theme.text).bg(app.theme.background);
+
+    if available >= name_len + 2 {
+        // Full name fits: pad to right-align " name "
+        let pad = available - name_len - 2;
+        if pad > 0 {
+            spans.push(Span::styled(" ".repeat(pad), bg_style));
+        }
+        spans.push(Span::styled(format!(" {} ", name), name_style));
+    } else if available >= 4 {
+        // Truncated: " trunc\u{2026} " fills all available space
+        let max_chars = available - 3; // 1 leading space + ellipsis + 1 trailing space
+        let truncated: String = name_chars[..max_chars].iter().collect();
+        spans.push(Span::styled(
+            format!(" {}\u{2026} ", truncated),
+            name_style,
+        ));
+    }
+    // else: no space, project name hidden
+
     let line = Line::from(spans);
     let tabs = Paragraph::new(line).style(Style::default().bg(app.theme.background));
     frame.render_widget(tabs, area);
