@@ -1284,8 +1284,10 @@ fn cmd_track(args: TrackCmd) -> Result<(), Box<dyn std::error::Error>> {
         TrackAction::Shelve(a) => cmd_track_state_change(a.id, "shelve"),
         TrackAction::Activate(a) => cmd_track_state_change(a.id, "activate"),
         TrackAction::Archive(a) => cmd_track_state_change(a.id, "archive"),
+        TrackAction::Delete(a) => cmd_track_delete(a.id),
         TrackAction::Mv(a) => cmd_track_mv(a),
         TrackAction::CcFocus(a) => cmd_track_cc_focus(a),
+        TrackAction::Rename(a) => cmd_track_rename(a),
     }
 }
 
@@ -1357,6 +1359,142 @@ fn cmd_track_cc_focus(args: TrackIdArg) -> Result<(), Box<dyn std::error::Error>
     config_io::write_config(&project.frame_dir, &doc)?;
 
     println!("cc-focus → {}", args.id);
+    Ok(())
+}
+
+fn cmd_track_delete(track_id: String) -> Result<(), Box<dyn std::error::Error>> {
+    let project = load_project_cwd()?;
+    let _lock = FileLock::acquire_default(&project.frame_dir)?;
+
+    // Check if track exists and is empty
+    let track = find_track(&project, &track_id)
+        .ok_or_else(|| format!("track not found: {}", track_id))?;
+
+    if !track_ops::is_track_empty_by_id(&project.frame_dir, track, &track_id) {
+        let count = track_ops::total_task_count(track);
+        return Err(format!(
+            "track \"{}\" has {} tasks. Use `fr track archive` instead.",
+            track_id, count
+        )
+        .into());
+    }
+
+    let (mut config, mut doc) = config_io::read_config(&project.frame_dir)?;
+    track_ops::delete_track(&project.frame_dir, &mut doc, &mut config, &track_id)?;
+    config_io::write_config(&project.frame_dir, &doc)?;
+
+    println!("deleted track \"{}\"", track_id);
+    Ok(())
+}
+
+fn cmd_track_rename(args: TrackRenameArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let mut project = load_project_cwd()?;
+    let _lock = FileLock::acquire_default(&project.frame_dir)?;
+
+    if args.name.is_none() && args.new_id.is_none() && args.prefix.is_none() {
+        return Err("specify at least one of --name, --id, or --prefix".into());
+    }
+
+    let (mut config, mut doc) = config_io::read_config(&project.frame_dir)?;
+
+    // Handle --name
+    if let Some(ref new_name) = args.name {
+        track_ops::rename_track_name(
+            &project.frame_dir,
+            &mut doc,
+            &mut config,
+            &args.id,
+            new_name,
+        )?;
+        println!("renamed \"{}\" → \"{}\"", args.id, new_name);
+    }
+
+    // Handle --id (track ID rename)
+    let effective_id = if let Some(ref new_id) = args.new_id {
+        track_ops::rename_track_id(
+            &project.frame_dir,
+            &mut doc,
+            &mut config,
+            &args.id,
+            new_id,
+        )?;
+        println!("id {} → {}", args.id, new_id);
+        new_id.clone()
+    } else {
+        args.id.clone()
+    };
+
+    // Handle --prefix (bulk rewrite)
+    if let Some(ref new_prefix) = args.prefix {
+        let old_prefix = config
+            .ids
+            .prefixes
+            .get(&effective_id)
+            .cloned()
+            .ok_or_else(|| format!("no prefix configured for track '{}'", effective_id))?;
+
+        // Reload tracks for in-memory mutation
+        let cwd = std::env::current_dir().map_err(|e| format!("could not get cwd: {}", e))?;
+        let root = project_io::discover_project(&cwd)?;
+        project = project_io::load_project(&root)?;
+        // Re-read config to get latest state after potential --name/--id changes
+        let (latest_config, _) = config_io::read_config(&project.frame_dir)?;
+        project.config = latest_config;
+
+        let result = track_ops::rename_track_prefix(
+            &mut project.config,
+            &mut project.tracks,
+            &effective_id,
+            &old_prefix,
+            new_prefix,
+        )?;
+
+        println!(
+            "Renaming prefix {} → {}:",
+            old_prefix, new_prefix
+        );
+        println!("  {} tasks in {}", result.tasks_renamed, effective_id);
+        if result.deps_updated > 0 {
+            println!(
+                "  {} dep references across {} other tracks",
+                result.deps_updated, result.tracks_affected
+            );
+        }
+
+        if args.dry_run {
+            println!("(dry run — no changes written)");
+            return Ok(());
+        }
+
+        if !args.yes && result.tasks_renamed > 0 {
+            // Interactive confirmation
+            eprint!("Proceed? [y/n] ");
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            if !input.trim().eq_ignore_ascii_case("y") {
+                println!("cancelled");
+                return Ok(());
+            }
+        }
+
+        // Save all affected tracks
+        for (track_id, track) in &project.tracks {
+            if let Some(file) = project
+                .config
+                .tracks
+                .iter()
+                .find(|tc| tc.id == *track_id)
+                .map(|tc| tc.file.as_str())
+            {
+                project_io::save_track(&project.frame_dir, file, track)?;
+            }
+        }
+
+        // Update prefix in config doc
+        config_io::set_prefix(&mut doc, &effective_id, new_prefix);
+    }
+
+    config_io::write_config(&project.frame_dir, &doc)?;
     Ok(())
 }
 

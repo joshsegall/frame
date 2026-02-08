@@ -288,6 +288,8 @@ pub struct ConfirmState {
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
     DeleteInboxItem { index: usize },
+    ArchiveTrack { track_id: String },
+    DeleteTrack { track_id: String },
 }
 
 /// The kind of pending section move (grace period)
@@ -360,6 +362,13 @@ pub enum EditTarget {
         index: usize,
         original_tags: String,
     },
+    /// Creating a new track (name edit in Tracks view)
+    NewTrackName,
+    /// Editing an existing track's name (in Tracks view)
+    ExistingTrackName {
+        track_id: String,
+        original_name: String,
+    },
 }
 
 /// State for MOVE mode
@@ -425,6 +434,8 @@ pub struct App {
     pub track_states: HashMap<String, TrackViewState>,
     /// Cursor for tracks view
     pub tracks_cursor: usize,
+    /// Minimum name column width for tracks view (prevents columns shifting left mid-session)
+    pub tracks_name_col_min: usize,
     /// Cursor for inbox view
     pub inbox_cursor: usize,
     /// Cursor for recent view
@@ -559,6 +570,7 @@ impl App {
             active_track_ids,
             track_states,
             tracks_cursor: 0,
+            tracks_name_col_min: 0,
             inbox_cursor: 0,
             recent_cursor: 0,
             inbox_scroll: 0,

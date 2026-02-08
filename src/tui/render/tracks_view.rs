@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::ops::track_ops::task_counts;
-use crate::tui::app::App;
+use crate::tui::app::{App, EditTarget, Mode};
 
 use super::push_highlighted_spans;
 
@@ -17,7 +17,7 @@ const HEADERS: [&str; 5] = ["todo", "act", "blk", "done", "park"];
 const CHECKBOXES: [&str; 5] = ["[ ]", "[>]", "[-]", "[x]", "[~]"];
 
 /// Render the tracks overview as a grid with state columns
-pub fn render_tracks_view(frame: &mut Frame, app: &App, area: Rect) {
+pub fn render_tracks_view(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     let cursor = app.tracks_cursor;
 
@@ -41,7 +41,7 @@ pub fn render_tracks_view(frame: &mut Frame, app: &App, area: Rect) {
     // Calculate name column width from longest track name
     let total_tracks = active_tracks.len() + shelved_tracks.len() + archived_tracks.len();
     let num_width = if total_tracks >= 10 { 2 } else { 1 };
-    let max_name_len = app
+    let computed_name_len = app
         .project
         .config
         .tracks
@@ -49,6 +49,9 @@ pub fn render_tracks_view(frame: &mut Frame, app: &App, area: Rect) {
         .map(|tc| tc.name.chars().count())
         .max()
         .unwrap_or(10);
+    // Columns can grow but not shrink within a single Tracks view session
+    let max_name_len = computed_name_len.max(app.tracks_name_col_min);
+    app.tracks_name_col_min = max_name_len;
     let max_id_len = app
         .project
         .config
@@ -67,24 +70,57 @@ pub fn render_tracks_view(frame: &mut Frame, app: &App, area: Rect) {
 
     let mut flat_idx = 0usize;
 
+    // Detect inline edit state
+    let editing_track_id = match (&app.mode, &app.edit_target) {
+        (Mode::Edit, Some(EditTarget::ExistingTrackName { track_id, .. })) => Some(track_id.clone()),
+        _ => None,
+    };
+    let is_new_track_edit = matches!(
+        (&app.mode, &app.edit_target),
+        (Mode::Edit, Some(EditTarget::NewTrackName))
+    );
+
     // Active section
-    if !active_tracks.is_empty() {
+    if !active_tracks.is_empty() || is_new_track_edit {
         lines.push(render_section_row(app, "Active", name_col, false));
         for tc in &active_tracks {
             let is_cursor = flat_idx == cursor;
             let is_flash = app.is_track_flashing(&tc.id);
-            lines.push(render_track_row(
+            if editing_track_id.as_deref() == Some(&tc.id) && is_cursor {
+                lines.push(render_edit_row(
+                    app,
+                    tc,
+                    flat_idx + 1,
+                    num_width,
+                    max_name_len,
+                    max_id_len,
+                    cc_focus,
+                    area.width,
+                ));
+            } else {
+                lines.push(render_track_row(
+                    app,
+                    tc,
+                    flat_idx + 1,
+                    num_width,
+                    max_name_len,
+                    max_id_len,
+                    is_cursor,
+                    is_flash,
+                    cc_focus,
+                    area.width,
+                    search_re.as_ref(),
+                ));
+            }
+            flat_idx += 1;
+        }
+        // New track edit row at the bottom of active section
+        if is_new_track_edit {
+            lines.push(render_new_track_edit_row(
                 app,
-                tc,
                 flat_idx + 1,
                 num_width,
-                max_name_len,
-                max_id_len,
-                is_cursor,
-                is_flash,
-                cc_focus,
                 area.width,
-                search_re.as_ref(),
             ));
             flat_idx += 1;
         }
@@ -97,19 +133,23 @@ pub fn render_tracks_view(frame: &mut Frame, app: &App, area: Rect) {
         for tc in &shelved_tracks {
             let is_cursor = flat_idx == cursor;
             let is_flash = app.is_track_flashing(&tc.id);
-            lines.push(render_track_row(
-                app,
-                tc,
-                flat_idx + 1,
-                num_width,
-                max_name_len,
-                max_id_len,
-                is_cursor,
-                is_flash,
-                cc_focus,
-                area.width,
-                search_re.as_ref(),
-            ));
+            if editing_track_id.as_deref() == Some(&tc.id) && is_cursor {
+                lines.push(render_edit_row(app, tc, flat_idx + 1, num_width, max_name_len, max_id_len, cc_focus, area.width));
+            } else {
+                lines.push(render_track_row(
+                    app,
+                    tc,
+                    flat_idx + 1,
+                    num_width,
+                    max_name_len,
+                    max_id_len,
+                    is_cursor,
+                    is_flash,
+                    cc_focus,
+                    area.width,
+                    search_re.as_ref(),
+                ));
+            }
             flat_idx += 1;
         }
         lines.push(Line::from(""));
@@ -336,6 +376,184 @@ fn render_track_row<'a>(
                 Style::default().bg(bg),
             ));
         }
+    }
+
+    Line::from(spans)
+}
+
+/// Render an inline edit row for existing track name editing (preserves column layout)
+fn render_edit_row<'a>(
+    app: &'a App,
+    tc: &crate::model::TrackConfig,
+    number: usize,
+    num_width: usize,
+    max_name_len: usize,
+    max_id_len: usize,
+    cc_focus: Option<&str>,
+    width: u16,
+) -> Line<'a> {
+    let bg = app.theme.selection_bg;
+    let mut spans: Vec<Span> = Vec::new();
+
+    // Selection border
+    spans.push(Span::styled(
+        "\u{258E}",
+        Style::default().fg(app.theme.selection_border).bg(bg),
+    ));
+
+    // Number
+    let num_str = format!("{:>width$}", number, width = num_width);
+    spans.push(Span::styled(num_str, Style::default().fg(app.theme.dim).bg(bg)));
+    spans.push(Span::styled("  ", Style::default().bg(bg)));
+
+    // Edit buffer with cursor (occupies the name column)
+    let cursor_pos = app.edit_cursor;
+    let buffer = &app.edit_buffer;
+    let text_style = Style::default().fg(app.theme.text_bright).bg(bg);
+    let cursor_style = Style::default().fg(app.theme.highlight).bg(bg);
+    let buf_char_len;
+
+    if cursor_pos < buffer.len() {
+        let (before, rest) = buffer.split_at(cursor_pos);
+        let mut chars = rest.chars();
+        let cursor_char = chars.next().unwrap_or(' ');
+        let after: String = chars.collect();
+        buf_char_len = buffer.chars().count();
+
+        spans.push(Span::styled(before.to_string(), text_style));
+        spans.push(Span::styled(
+            cursor_char.to_string(),
+            Style::default()
+                .fg(app.theme.background)
+                .bg(app.theme.highlight)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(after, text_style));
+    } else {
+        buf_char_len = buffer.chars().count() + 1; // +1 for cursor block
+        spans.push(Span::styled(buffer.to_string(), text_style));
+        spans.push(Span::styled("\u{258C}", cursor_style));
+    }
+
+    // Pad name area to max_name_len so ID + stat columns stay aligned
+    if buf_char_len < max_name_len {
+        spans.push(Span::styled(
+            " ".repeat(max_name_len - buf_char_len),
+            Style::default().bg(bg),
+        ));
+    }
+
+    // ID prefix column
+    spans.push(Span::styled("  ", Style::default().bg(bg)));
+    let id_style = Style::default().fg(app.theme.text).bg(bg);
+    spans.push(Span::styled(
+        format!("{:<width$}", tc.id.to_uppercase(), width = max_id_len),
+        id_style,
+    ));
+
+    // Stat columns
+    let stats = app
+        .project
+        .tracks
+        .iter()
+        .find(|(id, _)| id == &tc.id)
+        .map(|(_, track)| task_counts(track))
+        .unwrap_or_default();
+
+    let counts = [stats.todo, stats.active, stats.blocked, stats.done, stats.parked];
+    let colors = [
+        app.theme.text,
+        app.theme.highlight,
+        app.theme.red,
+        app.theme.text,
+        app.theme.yellow,
+    ];
+
+    for (count, color) in counts.iter().zip(colors.iter()) {
+        let style = Style::default().fg(*color).bg(bg);
+        spans.push(Span::styled(
+            format!("{:>width$}", count, width = COL_W),
+            style,
+        ));
+    }
+
+    // cc-focus indicator
+    if cc_focus == Some(tc.id.as_str()) {
+        spans.push(Span::styled("  ", Style::default().bg(bg)));
+        spans.push(Span::styled(
+            "\u{2605} cc",
+            Style::default().fg(app.theme.purple).bg(bg),
+        ));
+    }
+
+    // Pad to full width
+    let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let w = width as usize;
+    if content_width < w {
+        spans.push(Span::styled(
+            " ".repeat(w - content_width),
+            Style::default().bg(bg),
+        ));
+    }
+
+    Line::from(spans)
+}
+
+/// Render an inline edit row for new track name entry
+fn render_new_track_edit_row<'a>(
+    app: &'a App,
+    number: usize,
+    num_width: usize,
+    width: u16,
+) -> Line<'a> {
+    let bg = app.theme.selection_bg;
+    let mut spans: Vec<Span> = Vec::new();
+
+    // Selection border
+    spans.push(Span::styled(
+        "\u{258E}",
+        Style::default().fg(app.theme.selection_border).bg(bg),
+    ));
+
+    // Number
+    let num_str = format!("{:>width$}", number, width = num_width);
+    spans.push(Span::styled(num_str, Style::default().fg(app.theme.dim).bg(bg)));
+    spans.push(Span::styled("  ", Style::default().bg(bg)));
+
+    // Edit buffer with cursor
+    let cursor_pos = app.edit_cursor;
+    let buffer = &app.edit_buffer;
+    let text_style = Style::default().fg(app.theme.text_bright).bg(bg);
+    let cursor_style = Style::default().fg(app.theme.highlight).bg(bg);
+
+    if cursor_pos < buffer.len() {
+        let (before, rest) = buffer.split_at(cursor_pos);
+        let mut chars = rest.chars();
+        let cursor_char = chars.next().unwrap_or(' ');
+        let after: String = chars.collect();
+
+        spans.push(Span::styled(before.to_string(), text_style));
+        spans.push(Span::styled(
+            cursor_char.to_string(),
+            Style::default()
+                .fg(app.theme.background)
+                .bg(app.theme.highlight)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(after, text_style));
+    } else {
+        spans.push(Span::styled(buffer.to_string(), text_style));
+        spans.push(Span::styled("\u{258C}", cursor_style));
+    }
+
+    // Pad to full width
+    let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let w = width as usize;
+    if content_width < w {
+        spans.push(Span::styled(
+            " ".repeat(w - content_width),
+            Style::default().bg(bg),
+        ));
     }
 
     Line::from(spans)

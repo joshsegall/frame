@@ -880,3 +880,107 @@ fn test_found_from() {
     let show_out = run_fr_ok(tmp.path(), &["show", id]);
     assert!(show_out.contains("Found while working on M-001"));
 }
+
+// ---------------------------------------------------------------------------
+// Track rename / delete tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_track_rename_name() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    run_fr_ok(tmp.path(), &["track", "rename", "side", "--name", "New Side"]);
+
+    let config = fs::read_to_string(tmp.path().join("frame/project.toml")).unwrap();
+    assert!(config.contains("\"New Side\""));
+
+    // Track file header should be updated
+    let track_content = fs::read_to_string(tmp.path().join("frame/tracks/side.md")).unwrap();
+    assert!(track_content.starts_with("# New Side"));
+}
+
+#[test]
+fn test_track_rename_id() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    run_fr_ok(tmp.path(), &["track", "rename", "side", "--new-id", "aux"]);
+
+    // Old file should be gone, new file exists
+    assert!(!tmp.path().join("frame/tracks/side.md").exists());
+    assert!(tmp.path().join("frame/tracks/aux.md").exists());
+
+    // Config should reference the new id
+    let config = fs::read_to_string(tmp.path().join("frame/project.toml")).unwrap();
+    assert!(config.contains("\"aux\""));
+    assert!(config.contains("tracks/aux.md"));
+}
+
+#[test]
+fn test_track_rename_prefix_yes() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    let out = run_fr_ok(
+        tmp.path(),
+        &["track", "rename", "side", "--prefix", "AUX", "--yes"],
+    );
+    assert!(out.contains("Renaming prefix S → AUX"));
+
+    // Tasks should have new prefix
+    let track_content = fs::read_to_string(tmp.path().join("frame/tracks/side.md")).unwrap();
+    assert!(track_content.contains("AUX-001"));
+    assert!(track_content.contains("AUX-002"));
+    assert!(!track_content.contains("`S-001`"));
+
+    // Config should have new prefix
+    let config = fs::read_to_string(tmp.path().join("frame/project.toml")).unwrap();
+    assert!(config.contains("\"AUX\""));
+}
+
+#[test]
+fn test_track_rename_prefix_dry_run() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    let out = run_fr_ok(
+        tmp.path(),
+        &["track", "rename", "side", "--prefix", "AUX", "--dry-run"],
+    );
+    assert!(out.contains("dry run"));
+
+    // Tasks should NOT have changed
+    let track_content = fs::read_to_string(tmp.path().join("frame/tracks/side.md")).unwrap();
+    assert!(track_content.contains("`S-001`"));
+    assert!(track_content.contains("`S-002`"));
+}
+
+#[test]
+fn test_track_delete_empty() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    // Create a new empty track, then delete it
+    run_fr_ok(tmp.path(), &["track", "new", "empty", "Empty Track"]);
+    assert!(tmp.path().join("frame/tracks/empty.md").exists());
+
+    run_fr_ok(tmp.path(), &["track", "delete", "empty"]);
+
+    // Track file should be gone
+    assert!(!tmp.path().join("frame/tracks/empty.md").exists());
+
+    // Config should no longer reference it
+    let config = fs::read_to_string(tmp.path().join("frame/project.toml")).unwrap();
+    assert!(!config.contains("\"empty\""));
+}
+
+#[test]
+fn test_track_delete_non_empty_fails() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    let (_, stderr, success) = run_fr(tmp.path(), &["track", "delete", "main"]);
+    assert!(!success);
+    assert!(stderr.contains("tasks") || stderr.contains("not empty") || stderr.contains("has"));
+}

@@ -17,8 +17,20 @@ pub enum TrackError {
     InvalidTransition(String),
     #[error("invalid position: {0}")]
     InvalidPosition(String),
+    #[error("track is not empty: {0}")]
+    NotEmpty(String),
+    #[error("prefix collision: {0}")]
+    PrefixCollision(String),
     #[error("project error: {0}")]
     ProjectError(#[from] ProjectError),
+}
+
+/// Result summary for a prefix rename operation
+#[derive(Debug, Default)]
+pub struct RenameResult {
+    pub tasks_renamed: usize,
+    pub deps_updated: usize,
+    pub tracks_affected: usize,
 }
 
 /// Create a new track: creates the .md file and adds it to config.
@@ -284,6 +296,297 @@ fn count_tasks(tasks: &[crate::model::Task], stats: &mut TrackStats, _section: S
     }
 }
 
+/// Check if a track has zero tasks and no archive file
+pub fn is_track_empty(frame_dir: &Path, track: &Track) -> bool {
+    // Check all sections for any tasks
+    for node in &track.nodes {
+        if let TrackNode::Section { tasks, .. } = node {
+            if !tasks.is_empty() {
+                return false;
+            }
+        }
+    }
+    // Check for archive file
+    let tc_id = track.title.to_lowercase().replace(' ', "-");
+    let archive_path = frame_dir.join("archive").join(format!("{}.md", tc_id));
+    !archive_path.exists()
+}
+
+/// Check if a track has zero tasks and no archive file (by track id)
+pub fn is_track_empty_by_id(frame_dir: &Path, track: &Track, track_id: &str) -> bool {
+    // Check all sections for any tasks
+    for node in &track.nodes {
+        if let TrackNode::Section { tasks, .. } = node {
+            if !tasks.is_empty() {
+                return false;
+            }
+        }
+    }
+    // Check for archive file
+    let archive_path = frame_dir.join("archive").join(format!("{}.md", track_id));
+    !archive_path.exists()
+}
+
+/// Delete a track entirely. Only works if the track is empty (no tasks, no archive file).
+pub fn delete_track(
+    frame_dir: &Path,
+    doc: &mut toml_edit::DocumentMut,
+    config: &mut ProjectConfig,
+    track_id: &str,
+) -> Result<(), TrackError> {
+    let tc = config
+        .tracks
+        .iter()
+        .find(|t| t.id == track_id)
+        .ok_or_else(|| TrackError::NotFound(track_id.to_string()))?;
+
+    let track_file = frame_dir.join(&tc.file);
+
+    // Remove the track file
+    if track_file.exists() {
+        fs::remove_file(&track_file).map_err(ProjectError::IoError)?;
+    }
+
+    // Remove from config
+    config_io::remove_track_from_config(doc, track_id);
+    config_io::remove_prefix(doc, track_id);
+    config.tracks.retain(|t| t.id != track_id);
+    config.ids.prefixes.remove(track_id);
+
+    Ok(())
+}
+
+/// Move a track file to archive/_tracks/ directory
+pub fn archive_track_file(frame_dir: &Path, track_id: &str, file_path: &str) -> Result<(), TrackError> {
+    let source = frame_dir.join(file_path);
+    let archive_dir = frame_dir.join("archive").join("_tracks");
+    fs::create_dir_all(&archive_dir).map_err(ProjectError::IoError)?;
+    let dest = archive_dir.join(format!("{}.md", track_id));
+    fs::rename(&source, &dest).map_err(ProjectError::IoError)?;
+    Ok(())
+}
+
+/// Restore a track file from archive/_tracks/ back to tracks/
+pub fn restore_track_file(frame_dir: &Path, track_id: &str, file_path: &str) -> Result<(), TrackError> {
+    let archive_path = frame_dir.join("archive").join("_tracks").join(format!("{}.md", track_id));
+    let dest = frame_dir.join(file_path);
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).map_err(ProjectError::IoError)?;
+    }
+    fs::rename(&archive_path, &dest).map_err(ProjectError::IoError)?;
+    Ok(())
+}
+
+/// Rename a track's display name in config and in the track file's # Title header
+pub fn rename_track_name(
+    frame_dir: &Path,
+    doc: &mut toml_edit::DocumentMut,
+    config: &mut ProjectConfig,
+    track_id: &str,
+    new_name: &str,
+) -> Result<(), TrackError> {
+    let tc = config
+        .tracks
+        .iter_mut()
+        .find(|t| t.id == track_id)
+        .ok_or_else(|| TrackError::NotFound(track_id.to_string()))?;
+
+    tc.name = new_name.to_string();
+    config_io::update_track_name(doc, track_id, new_name);
+
+    // Update the # Title line in the track file
+    let track_path = frame_dir.join(&tc.file);
+    if track_path.exists() {
+        let content = fs::read_to_string(&track_path).map_err(ProjectError::IoError)?;
+        let new_content = if let Some(first_line_end) = content.find('\n') {
+            format!("# {}{}", new_name, &content[first_line_end..])
+        } else {
+            format!("# {}", new_name)
+        };
+        fs::write(&track_path, new_content).map_err(ProjectError::IoError)?;
+    }
+
+    Ok(())
+}
+
+/// Rename a track's ID: updates config, moves track file, moves archive file if exists, updates prefix key
+pub fn rename_track_id(
+    frame_dir: &Path,
+    doc: &mut toml_edit::DocumentMut,
+    config: &mut ProjectConfig,
+    old_id: &str,
+    new_id: &str,
+) -> Result<(), TrackError> {
+    // Check for collision
+    if config.tracks.iter().any(|t| t.id == new_id) {
+        return Err(TrackError::AlreadyExists(new_id.to_string()));
+    }
+
+    let tc = config
+        .tracks
+        .iter_mut()
+        .find(|t| t.id == old_id)
+        .ok_or_else(|| TrackError::NotFound(old_id.to_string()))?;
+
+    let old_file = tc.file.clone();
+    let new_file = format!("tracks/{}.md", new_id);
+
+    // Move track file
+    let old_path = frame_dir.join(&old_file);
+    let new_path = frame_dir.join(&new_file);
+    if old_path.exists() {
+        fs::rename(&old_path, &new_path).map_err(ProjectError::IoError)?;
+    }
+
+    // Move archive file if exists
+    let old_archive = frame_dir.join("archive").join(format!("{}.md", old_id));
+    if old_archive.exists() {
+        let new_archive = frame_dir.join("archive").join(format!("{}.md", new_id));
+        fs::rename(&old_archive, &new_archive).map_err(ProjectError::IoError)?;
+    }
+
+    // Update config
+    tc.id = new_id.to_string();
+    tc.file = new_file;
+
+    config_io::update_track_id(doc, old_id, new_id);
+    config_io::rename_prefix_key(doc, old_id, new_id);
+
+    // Update in-memory prefix map
+    if let Some(prefix) = config.ids.prefixes.remove(old_id) {
+        config.ids.prefixes.insert(new_id.to_string(), prefix);
+    }
+
+    // Update cc_focus if it pointed to the old id
+    if config.agent.cc_focus.as_deref() == Some(old_id) {
+        config.agent.cc_focus = Some(new_id.to_string());
+        config_io::set_cc_focus(doc, new_id);
+    }
+
+    Ok(())
+}
+
+/// Rename a track's prefix: bulk-rewrites all task IDs in the track and dep references across all tracks.
+/// Returns a summary of changes. Does NOT write to disk — caller must save all affected tracks/config.
+pub fn rename_track_prefix(
+    config: &mut ProjectConfig,
+    project_tracks: &mut [(String, Track)],
+    track_id: &str,
+    old_prefix: &str,
+    new_prefix: &str,
+) -> Result<RenameResult, TrackError> {
+    // Check for prefix collision
+    for (tid, prefix) in &config.ids.prefixes {
+        if tid != track_id && prefix.eq_ignore_ascii_case(new_prefix) {
+            return Err(TrackError::PrefixCollision(new_prefix.to_string()));
+        }
+    }
+
+    let mut result = RenameResult::default();
+
+    // Rewrite task IDs in the target track
+    let track = project_tracks
+        .iter_mut()
+        .find(|(id, _)| id == track_id)
+        .map(|(_, t)| t)
+        .ok_or_else(|| TrackError::NotFound(track_id.to_string()))?;
+
+    for node in &mut track.nodes {
+        if let TrackNode::Section { tasks, .. } = node {
+            result.tasks_renamed += rename_task_ids(tasks, old_prefix, new_prefix);
+        }
+    }
+
+    // Update dep references across ALL tracks
+    let mut affected_tracks = std::collections::HashSet::new();
+    for (tid, track) in project_tracks.iter_mut() {
+        if tid == track_id {
+            continue; // Already handled above
+        }
+        let count = rename_dep_references(track, old_prefix, new_prefix);
+        if count > 0 {
+            result.deps_updated += count;
+            affected_tracks.insert(tid.clone());
+        }
+    }
+    result.tracks_affected = affected_tracks.len();
+
+    // Update config prefix
+    config.ids.prefixes.insert(track_id.to_string(), new_prefix.to_string());
+
+    Ok(result)
+}
+
+/// Rename task IDs in a list of tasks (recursive). Returns count of tasks renamed.
+fn rename_task_ids(tasks: &mut [crate::model::Task], old_prefix: &str, new_prefix: &str) -> usize {
+    let mut count = 0;
+    for task in tasks.iter_mut() {
+        if let Some(ref mut id) = task.id {
+            if let Some(rest) = id.strip_prefix(old_prefix) {
+                if rest.starts_with('-') {
+                    *id = format!("{}{}", new_prefix, rest);
+                    task.mark_dirty();
+                    count += 1;
+                }
+            }
+        }
+        count += rename_task_ids(&mut task.subtasks, old_prefix, new_prefix);
+    }
+    count
+}
+
+/// Rename dep references in a track. Returns count of deps renamed.
+fn rename_dep_references(track: &mut Track, old_prefix: &str, new_prefix: &str) -> usize {
+    let mut count = 0;
+    for node in &mut track.nodes {
+        if let TrackNode::Section { tasks, .. } = node {
+            count += rename_deps_in_tasks(tasks, old_prefix, new_prefix);
+        }
+    }
+    count
+}
+
+/// Rename dep references in a list of tasks (recursive).
+fn rename_deps_in_tasks(tasks: &mut [crate::model::Task], old_prefix: &str, new_prefix: &str) -> usize {
+    let mut count = 0;
+    for task in tasks.iter_mut() {
+        for m in &mut task.metadata {
+            if let crate::model::task::Metadata::Dep(deps) = m {
+                for dep in deps.iter_mut() {
+                    if let Some(rest) = dep.strip_prefix(old_prefix) {
+                        if rest.starts_with('-') {
+                            *dep = format!("{}{}", new_prefix, rest);
+                            task.dirty = true;
+                            count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        count += rename_deps_in_tasks(&mut task.subtasks, old_prefix, new_prefix);
+    }
+    count
+}
+
+/// Generate a track ID from a display name by slugifying it:
+/// lowercase, spaces to hyphens, strip non-alphanumeric/non-hyphen chars.
+pub fn generate_track_id(name: &str) -> String {
+    name.to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// Count the total number of tasks in a track (across all sections, including subtasks)
+pub fn total_task_count(track: &Track) -> usize {
+    let stats = task_counts(track);
+    stats.active + stats.blocked + stats.todo + stats.parked + stats.done
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -496,5 +799,201 @@ file = "tracks/old.md"
         assert_eq!(stats.todo, 2);
         assert_eq!(stats.parked, 1);
         assert_eq!(stats.done, 1);
+    }
+
+    #[test]
+    fn test_generate_track_id() {
+        assert_eq!(generate_track_id("Effect System"), "effect-system");
+        assert_eq!(generate_track_id("My Cool Track!"), "my-cool-track");
+        assert_eq!(generate_track_id("UI"), "ui");
+        assert_eq!(generate_track_id("  spaces  "), "spaces");
+    }
+
+    #[test]
+    fn test_is_track_empty_by_id() {
+        let track = crate::parse::parse_track("# Empty\n\n## Backlog\n\n## Done\n");
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        fs::create_dir_all(&frame_dir).unwrap();
+        assert!(is_track_empty_by_id(&frame_dir, &track, "empty"));
+    }
+
+    #[test]
+    fn test_is_track_not_empty_with_tasks() {
+        let track = crate::parse::parse_track("# Test\n\n## Backlog\n\n- [ ] `T-001` Task\n\n## Done\n");
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        fs::create_dir_all(&frame_dir).unwrap();
+        assert!(!is_track_empty_by_id(&frame_dir, &track, "test"));
+    }
+
+    #[test]
+    fn test_is_track_not_empty_with_archive() {
+        let track = crate::parse::parse_track("# Test\n\n## Backlog\n\n## Done\n");
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        let archive_dir = frame_dir.join("archive");
+        fs::create_dir_all(&archive_dir).unwrap();
+        fs::write(archive_dir.join("test.md"), "archive content").unwrap();
+        assert!(!is_track_empty_by_id(&frame_dir, &track, "test"));
+    }
+
+    #[test]
+    fn test_delete_track() {
+        let (tmp, frame_dir, mut config, mut doc) = setup_test_project();
+        // Create the track file
+        fs::write(frame_dir.join("tracks/main.md"), "# Main\n\n## Backlog\n\n## Done\n").unwrap();
+        delete_track(&frame_dir, &mut doc, &mut config, "main").unwrap();
+        assert!(!frame_dir.join("tracks/main.md").exists());
+        assert_eq!(config.tracks.len(), 2);
+        assert!(config.tracks.iter().all(|t| t.id != "main"));
+        drop(tmp);
+    }
+
+    #[test]
+    fn test_archive_track_file() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        fs::create_dir_all(frame_dir.join("tracks")).unwrap();
+        fs::write(frame_dir.join("tracks/test.md"), "# Test\n").unwrap();
+
+        archive_track_file(&frame_dir, "test", "tracks/test.md").unwrap();
+
+        assert!(!frame_dir.join("tracks/test.md").exists());
+        assert!(frame_dir.join("archive/_tracks/test.md").exists());
+        drop(tmp);
+    }
+
+    #[test]
+    fn test_restore_track_file() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        fs::create_dir_all(frame_dir.join("tracks")).unwrap();
+        let archive_dir = frame_dir.join("archive/_tracks");
+        fs::create_dir_all(&archive_dir).unwrap();
+        fs::write(archive_dir.join("test.md"), "# Test\n").unwrap();
+
+        restore_track_file(&frame_dir, "test", "tracks/test.md").unwrap();
+
+        assert!(frame_dir.join("tracks/test.md").exists());
+        assert!(!archive_dir.join("test.md").exists());
+        drop(tmp);
+    }
+
+    #[test]
+    fn test_rename_track_name() {
+        let (tmp, frame_dir, mut config, mut doc) = setup_test_project();
+        fs::write(frame_dir.join("tracks/main.md"), "# Main\n\n## Backlog\n\n## Done\n").unwrap();
+        rename_track_name(&frame_dir, &mut doc, &mut config, "main", "Main Track").unwrap();
+        assert_eq!(config.tracks[0].name, "Main Track");
+        let content = fs::read_to_string(frame_dir.join("tracks/main.md")).unwrap();
+        assert!(content.starts_with("# Main Track"));
+        drop(tmp);
+    }
+
+    #[test]
+    fn test_rename_track_id() {
+        let (tmp, frame_dir, mut config, mut doc) = setup_test_project();
+        fs::write(frame_dir.join("tracks/main.md"), "# Main\n").unwrap();
+        rename_track_id(&frame_dir, &mut doc, &mut config, "main", "primary").unwrap();
+        assert_eq!(config.tracks[0].id, "primary");
+        assert_eq!(config.tracks[0].file, "tracks/primary.md");
+        assert!(frame_dir.join("tracks/primary.md").exists());
+        assert!(!frame_dir.join("tracks/main.md").exists());
+        // cc_focus should have been updated
+        assert_eq!(config.agent.cc_focus.as_deref(), Some("primary"));
+        drop(tmp);
+    }
+
+    #[test]
+    fn test_rename_track_id_collision() {
+        let (_tmp, frame_dir, mut config, mut doc) = setup_test_project();
+        let result = rename_track_id(&frame_dir, &mut doc, &mut config, "main", "side");
+        assert!(matches!(result, Err(TrackError::AlreadyExists(_))));
+    }
+
+    #[test]
+    fn test_rename_track_prefix() {
+        let track_content = "\
+# Effects
+
+## Backlog
+
+- [>] `EFF-001` First task
+  - [ ] `EFF-001.1` Subtask
+- [ ] `EFF-002` Second task
+  - dep: EFF-001
+
+## Done
+";
+        let other_track_content = "\
+# Other
+
+## Backlog
+
+- [ ] `OTH-001` Other task
+  - dep: EFF-001, EFF-002
+
+## Done
+";
+        let mut config = ProjectConfig {
+            project: crate::model::config::ProjectInfo { name: "test".into() },
+            agent: Default::default(),
+            tracks: vec![],
+            clean: Default::default(),
+            ids: crate::model::config::IdConfig {
+                prefixes: [("effects".into(), "EFF".into()), ("other".into(), "OTH".into())].into(),
+            },
+            ui: Default::default(),
+        };
+
+        let mut tracks = vec![
+            ("effects".to_string(), crate::parse::parse_track(track_content)),
+            ("other".to_string(), crate::parse::parse_track(other_track_content)),
+        ];
+
+        let result = rename_track_prefix(&mut config, &mut tracks, "effects", "EFF", "FX").unwrap();
+        assert_eq!(result.tasks_renamed, 3); // EFF-001, EFF-001.1, EFF-002
+        assert_eq!(result.deps_updated, 2); // EFF-001 and EFF-002 in other track
+        assert_eq!(result.tracks_affected, 1); // other track
+        assert_eq!(config.ids.prefixes.get("effects").unwrap(), "FX");
+
+        // Verify task IDs were renamed
+        let effects = &tracks[0].1;
+        let backlog = effects.backlog();
+        assert_eq!(backlog[0].id.as_deref(), Some("FX-001"));
+        assert_eq!(backlog[0].subtasks[0].id.as_deref(), Some("FX-001.1"));
+        assert_eq!(backlog[1].id.as_deref(), Some("FX-002"));
+    }
+
+    #[test]
+    fn test_rename_track_prefix_collision() {
+        let mut config = ProjectConfig {
+            project: crate::model::config::ProjectInfo { name: "test".into() },
+            agent: Default::default(),
+            tracks: vec![],
+            clean: Default::default(),
+            ids: crate::model::config::IdConfig {
+                prefixes: [("a".into(), "AAA".into()), ("b".into(), "BBB".into())].into(),
+            },
+            ui: Default::default(),
+        };
+
+        let track_content = "# A\n\n## Backlog\n\n## Done\n";
+        let mut tracks = vec![
+            ("a".to_string(), crate::parse::parse_track(track_content)),
+            ("b".to_string(), crate::parse::parse_track(track_content)),
+        ];
+
+        let result = rename_track_prefix(&mut config, &mut tracks, "a", "AAA", "BBB");
+        assert!(matches!(result, Err(TrackError::PrefixCollision(_))));
+    }
+
+    #[test]
+    fn test_total_task_count() {
+        let track = crate::parse::parse_track(
+            "# Test\n\n## Backlog\n\n- [ ] `T-001` A\n- [ ] `T-002` B\n\n## Done\n\n- [x] `T-003` C\n",
+        );
+        assert_eq!(total_task_count(&track), 3);
     }
 }

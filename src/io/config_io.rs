@@ -79,6 +79,68 @@ pub fn update_track_state(doc: &mut toml_edit::DocumentMut, track_id: &str, new_
     }
 }
 
+/// Remove a track entry from the config document by id
+pub fn remove_track_from_config(doc: &mut toml_edit::DocumentMut, track_id: &str) {
+    if let Some(tracks) = doc["tracks"].as_array_of_tables_mut() {
+        let mut idx_to_remove = None;
+        for (i, table) in tracks.iter().enumerate() {
+            if table.get("id").and_then(|v| v.as_str()) == Some(track_id) {
+                idx_to_remove = Some(i);
+                break;
+            }
+        }
+        if let Some(idx) = idx_to_remove {
+            tracks.remove(idx);
+        }
+    }
+}
+
+/// Update the name field of a track in the config document
+pub fn update_track_name(doc: &mut toml_edit::DocumentMut, track_id: &str, new_name: &str) {
+    if let Some(tracks) = doc["tracks"].as_array_of_tables_mut() {
+        for table in tracks.iter_mut() {
+            if table.get("id").and_then(|v| v.as_str()) == Some(track_id) {
+                table["name"] = toml_edit::value(new_name);
+                break;
+            }
+        }
+    }
+}
+
+/// Update the id field of a track in the config document
+pub fn update_track_id(doc: &mut toml_edit::DocumentMut, old_id: &str, new_id: &str) {
+    if let Some(tracks) = doc["tracks"].as_array_of_tables_mut() {
+        for table in tracks.iter_mut() {
+            if table.get("id").and_then(|v| v.as_str()) == Some(old_id) {
+                table["id"] = toml_edit::value(new_id);
+                table["file"] = toml_edit::value(format!("tracks/{}.md", new_id));
+                break;
+            }
+        }
+    }
+}
+
+/// Remove an entry from [ids.prefixes]
+pub fn remove_prefix(doc: &mut toml_edit::DocumentMut, track_id: &str) {
+    if let Some(ids) = doc.get_mut("ids").and_then(|i| i.as_table_mut()) {
+        if let Some(prefixes) = ids.get_mut("prefixes").and_then(|p| p.as_table_mut()) {
+            prefixes.remove(track_id);
+        }
+    }
+}
+
+/// Move a prefix entry from old_key to new_key in [ids.prefixes]
+pub fn rename_prefix_key(doc: &mut toml_edit::DocumentMut, old_key: &str, new_key: &str) {
+    if let Some(ids) = doc.get_mut("ids").and_then(|i| i.as_table_mut()) {
+        if let Some(prefixes) = ids.get_mut("prefixes").and_then(|p| p.as_table_mut()) {
+            if let Some(value) = prefixes.get(old_key).cloned() {
+                prefixes.remove(old_key);
+                prefixes.insert(new_key, value);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +222,81 @@ file = "tracks/infra.md"
         let config: ProjectConfig = toml::from_str(&result).unwrap();
         assert_eq!(config.tracks.len(), 3);
         assert_eq!(config.tracks[2].id, "modules");
+    }
+
+    #[test]
+    fn test_remove_track_from_config() {
+        let config_text = sample_config();
+        let mut doc: toml_edit::DocumentMut = config_text.parse().unwrap();
+        remove_track_from_config(&mut doc, "effects");
+        let result = doc.to_string();
+        let config: ProjectConfig = toml::from_str(&result).unwrap();
+        assert_eq!(config.tracks.len(), 1);
+        assert_eq!(config.tracks[0].id, "infra");
+    }
+
+    #[test]
+    fn test_update_track_name() {
+        let config_text = sample_config();
+        let mut doc: toml_edit::DocumentMut = config_text.parse().unwrap();
+        update_track_name(&mut doc, "effects", "New Effects");
+        let result = doc.to_string();
+        let config: ProjectConfig = toml::from_str(&result).unwrap();
+        assert_eq!(config.tracks[0].name, "New Effects");
+        assert_eq!(config.tracks[1].name, "Infrastructure");
+    }
+
+    #[test]
+    fn test_update_track_id() {
+        let config_text = sample_config();
+        let mut doc: toml_edit::DocumentMut = config_text.parse().unwrap();
+        update_track_id(&mut doc, "effects", "fx");
+        let result = doc.to_string();
+        let config: ProjectConfig = toml::from_str(&result).unwrap();
+        assert_eq!(config.tracks[0].id, "fx");
+        assert_eq!(config.tracks[0].file, "tracks/fx.md");
+    }
+
+    #[test]
+    fn test_remove_prefix() {
+        let config_text = r#"[project]
+name = "test"
+
+[ids.prefixes]
+effects = "EFF"
+infra = "INF"
+
+[[tracks]]
+id = "effects"
+name = "Effects"
+state = "active"
+file = "tracks/effects.md"
+"#;
+        let mut doc: toml_edit::DocumentMut = config_text.parse().unwrap();
+        remove_prefix(&mut doc, "effects");
+        let result = doc.to_string();
+        assert!(!result.contains("effects = \"EFF\""));
+        assert!(result.contains("infra = \"INF\""));
+    }
+
+    #[test]
+    fn test_rename_prefix_key() {
+        let config_text = r#"[project]
+name = "test"
+
+[ids.prefixes]
+effects = "EFF"
+
+[[tracks]]
+id = "effects"
+name = "Effects"
+state = "active"
+file = "tracks/effects.md"
+"#;
+        let mut doc: toml_edit::DocumentMut = config_text.parse().unwrap();
+        rename_prefix_key(&mut doc, "effects", "fx");
+        let result = doc.to_string();
+        assert!(!result.contains("effects = \"EFF\""));
+        assert!(result.contains("fx = \"EFF\""));
     }
 }

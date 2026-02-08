@@ -228,6 +228,11 @@ fr check --json
 | `fr track archive <id>` | Archive a finished track |
 | `fr track mv <id> <position>` | Reorder active tracks (0-indexed) |
 | `fr track cc-focus <id>` | Set the cc-focus track |
+| `fr track rename <id> --name "name"` | Rename a track's display name |
+| `fr track rename <id> --new-id <new-id>` | Change a track's ID (moves file) |
+| `fr track rename <id> --prefix <PREFIX> --yes` | Bulk-rewrite task ID prefixes |
+| `fr track rename <id> --prefix <PREFIX> --dry-run` | Preview prefix rename |
+| `fr track delete <id>` | Delete an empty track |
 
 ### Maintenance
 

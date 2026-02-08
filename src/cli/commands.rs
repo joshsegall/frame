@@ -304,10 +304,14 @@ pub enum TrackAction {
     Activate(TrackIdArg),
     /// Archive a track
     Archive(TrackIdArg),
+    /// Delete an empty track
+    Delete(TrackIdArg),
     /// Move (reorder) a track
     Mv(TrackMvArgs),
     /// Set the cc-focus track
     CcFocus(TrackIdArg),
+    /// Rename a track (name, id, or prefix)
+    Rename(TrackRenameArgs),
 }
 
 #[derive(Args)]
@@ -330,6 +334,27 @@ pub struct TrackMvArgs {
     pub id: String,
     /// New position (0-indexed among active tracks)
     pub position: usize,
+}
+
+#[derive(Args)]
+pub struct TrackRenameArgs {
+    /// Track ID
+    pub id: String,
+    /// New display name
+    #[arg(long)]
+    pub name: Option<String>,
+    /// New track ID
+    #[arg(long, value_name = "NEW_ID")]
+    pub new_id: Option<String>,
+    /// New prefix (bulk-rewrites task IDs)
+    #[arg(long)]
+    pub prefix: Option<String>,
+    /// Preview changes without writing
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Auto-confirm prefix rename
+    #[arg(long, short)]
+    pub yes: bool,
 }
 
 // ---------------------------------------------------------------------------

@@ -202,6 +202,25 @@ pub fn nav_target_for_op(op: &Operation, is_undo: bool) -> Option<UndoNavTarget>
                 })
             }
         }
+        Operation::TrackAdd { track_id } => {
+            Some(UndoNavTarget::TracksView {
+                track_id: track_id.clone(),
+            })
+        }
+        Operation::TrackNameEdit { track_id, .. }
+        | Operation::TrackShelve { track_id, .. }
+        | Operation::TrackArchive { track_id, .. }
+        | Operation::TrackDelete { track_id, .. } => {
+            Some(UndoNavTarget::TracksView {
+                track_id: track_id.clone(),
+            })
+        }
+        Operation::TrackCcFocus { old_focus, new_focus } => {
+            let focus = if is_undo { old_focus } else { new_focus };
+            Some(UndoNavTarget::TracksView {
+                track_id: focus.clone().unwrap_or_default(),
+            })
+        }
         Operation::SyncMarker => None,
     }
 }
@@ -313,6 +332,39 @@ pub enum Operation {
         old_resolved: Option<String>,
         /// Original index in the Done section
         done_index: usize,
+    },
+    /// A new track was created (in TUI)
+    TrackAdd {
+        track_id: String,
+    },
+    /// A track's display name was edited
+    TrackNameEdit {
+        track_id: String,
+        old_name: String,
+        new_name: String,
+    },
+    /// A track's state was toggled between active and shelved
+    TrackShelve {
+        track_id: String,
+        /// true = was active (now shelved), false = was shelved (now active)
+        was_active: bool,
+    },
+    /// A track was archived
+    TrackArchive {
+        track_id: String,
+        old_state: String,
+    },
+    /// A track was deleted (empty track only)
+    TrackDelete {
+        track_id: String,
+        track_name: String,
+        old_state: String,
+        prefix: Option<String>,
+    },
+    /// The cc-focus track was changed
+    TrackCcFocus {
+        old_focus: Option<String>,
+        new_focus: Option<String>,
     },
     /// External file change sync marker — undo cannot cross this
     SyncMarker,
@@ -489,6 +541,13 @@ fn apply_inverse(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
         }
         // TrackMove is handled by the caller (needs config access)
         Operation::TrackMove { .. } => None,
+        // Track management operations are handled by the caller (need config + filesystem access)
+        Operation::TrackAdd { .. }
+        | Operation::TrackNameEdit { .. }
+        | Operation::TrackShelve { .. }
+        | Operation::TrackArchive { .. }
+        | Operation::TrackDelete { .. }
+        | Operation::TrackCcFocus { .. } => None,
         Operation::InboxAdd { index } => {
             // Undo add = remove the item
             if let Some(inbox) = inbox {
@@ -713,6 +772,13 @@ fn apply_forward(op: &Operation, tracks: &mut [(String, Track)], inbox: Option<&
         }
         // TrackMove is handled by the caller (needs config access)
         Operation::TrackMove { .. } => None,
+        // Track management operations are handled by the caller (need config + filesystem access)
+        Operation::TrackAdd { .. }
+        | Operation::TrackNameEdit { .. }
+        | Operation::TrackShelve { .. }
+        | Operation::TrackArchive { .. }
+        | Operation::TrackDelete { .. }
+        | Operation::TrackCcFocus { .. } => None,
         Operation::InboxAdd { index } => {
             // Redo add = re-insert a blank item
             if let Some(inbox) = inbox {

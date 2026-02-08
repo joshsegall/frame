@@ -342,6 +342,7 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
         }
         (KeyModifiers::NONE, KeyCode::Char('0') | KeyCode::Char('`')) => {
             app.close_detail_fully();
+            app.tracks_name_col_min = 0;
             app.view = View::Tracks;
         }
 
@@ -424,10 +425,12 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             task_state_action(app, StateAction::ToggleParked);
         }
 
-        // Add task (track view) or add inbox item (inbox view)
+        // Add task (track view), add inbox item (inbox view), or add track (tracks view)
         (KeyModifiers::NONE, KeyCode::Char('a')) => {
             if matches!(app.view, View::Inbox) {
                 inbox_add_item(app);
+            } else if matches!(app.view, View::Tracks) {
+                tracks_add_track(app);
             } else {
                 add_task_action(app, AddPosition::Bottom);
             }
@@ -446,12 +449,14 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             add_subtask_action(app);
         }
 
-        // Inline title edit (track view), edit (inbox view), or enter edit mode (detail view)
+        // Inline title edit (track view), edit (inbox view), edit track name (tracks view), or enter edit mode (detail view)
         (KeyModifiers::NONE, KeyCode::Char('e')) => {
             if matches!(app.view, View::Detail { .. }) {
                 detail_enter_edit(app);
             } else if matches!(app.view, View::Inbox) {
                 inbox_edit_title(app);
+            } else if matches!(app.view, View::Tracks) {
+                tracks_edit_name(app);
             } else {
                 enter_title_edit(app);
             }
@@ -475,6 +480,20 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
         (KeyModifiers::NONE, KeyCode::Char('d')) => {
             if matches!(app.view, View::Detail { .. }) {
                 detail_jump_to_region_and_edit(app, DetailRegion::Deps);
+            }
+        }
+
+        // Shelve toggle (tracks view only)
+        (KeyModifiers::NONE, KeyCode::Char('s')) => {
+            if matches!(app.view, View::Tracks) {
+                tracks_toggle_shelve(app);
+            }
+        }
+
+        // Archive/delete track (tracks view only)
+        (KeyModifiers::SHIFT, KeyCode::Char('D')) => {
+            if matches!(app.view, View::Tracks) {
+                tracks_archive_or_delete(app);
             }
         }
 
@@ -670,29 +689,163 @@ fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo: bool) {
             let _ = app.save_track(track_id);
         }
         UndoNavTarget::TracksView { track_id } => {
-            // TrackMove: reorder in config and save
             // Find the operation on the redo/undo stack (it was just moved there)
             let op = if is_undo {
-                app.undo_stack.peek_last_redo()
+                app.undo_stack.peek_last_redo().cloned()
             } else {
-                app.undo_stack.peek_last_undo()
+                app.undo_stack.peek_last_undo().cloned()
             };
-            if let Some(Operation::TrackMove { old_index, new_index, .. }) = op {
-                let target_index = if is_undo { *old_index } else { *new_index };
-                let _ = crate::ops::track_ops::reorder_tracks(
-                    &mut app.project.config,
-                    track_id,
-                    target_index,
-                );
-                app.active_track_ids = app
-                    .project
-                    .config
-                    .tracks
-                    .iter()
-                    .filter(|t| t.state == "active")
-                    .map(|t| t.id.clone())
-                    .collect();
-                save_config(app);
+            match op {
+                Some(Operation::TrackMove { old_index, new_index, .. }) => {
+                    let target_index = if is_undo { old_index } else { new_index };
+                    let _ = crate::ops::track_ops::reorder_tracks(
+                        &mut app.project.config,
+                        track_id,
+                        target_index,
+                    );
+                    rebuild_active_track_ids(app);
+                    save_config(app);
+                }
+                Some(Operation::TrackCcFocus { old_focus, new_focus }) => {
+                    let target = if is_undo { old_focus } else { new_focus };
+                    app.project.config.agent.cc_focus = target;
+                    save_config(app);
+                }
+                Some(Operation::TrackNameEdit { track_id: tid, old_name, new_name }) => {
+                    let target_name = if is_undo { &old_name } else { &new_name };
+                    if let Some(tc) = app.project.config.tracks.iter_mut().find(|t| t.id == tid) {
+                        tc.name = target_name.clone();
+                    }
+                    save_config(app);
+                    // Update track file header
+                    update_track_header(app, &tid, target_name);
+                    let _ = app.save_track(&tid);
+                }
+                Some(Operation::TrackShelve { track_id: tid, was_active }) => {
+                    // Undo: restore original state; Redo: re-apply toggle
+                    let new_state = if is_undo {
+                        if was_active { "active" } else { "shelved" }
+                    } else {
+                        if was_active { "shelved" } else { "active" }
+                    };
+                    if let Some(tc) = app.project.config.tracks.iter_mut().find(|t| t.id == tid) {
+                        tc.state = new_state.to_string();
+                    }
+                    rebuild_active_track_ids(app);
+                    save_config(app);
+                }
+                Some(Operation::TrackArchive { track_id: tid, old_state }) => {
+                    if is_undo {
+                        // Restore from archived to old_state
+                        if let Some(tc) = app.project.config.tracks.iter_mut().find(|t| t.id == tid) {
+                            tc.state = old_state.clone();
+                        }
+                        // Restore track file from archive/_tracks/
+                        if let Some(file) = app.track_file(&tid).map(|f| f.to_string()) {
+                            let _ = crate::ops::track_ops::restore_track_file(
+                                &app.project.frame_dir,
+                                &tid,
+                                &file,
+                            );
+                        }
+                        rebuild_active_track_ids(app);
+                        save_config(app);
+                        // Reload track into memory
+                        if let Some(new_track) = app.read_track_from_disk(&tid) {
+                            if !app.project.tracks.iter().any(|(id, _)| id == &tid) {
+                                app.project.tracks.push((tid.clone(), new_track));
+                            } else {
+                                app.replace_track(&tid, new_track);
+                            }
+                        }
+                    } else {
+                        // Re-archive
+                        if let Some(tc) = app.project.config.tracks.iter_mut().find(|t| t.id == tid) {
+                            tc.state = "archived".to_string();
+                        }
+                        if let Some(file) = app.track_file(&tid).map(|f| f.to_string()) {
+                            let _ = crate::ops::track_ops::archive_track_file(
+                                &app.project.frame_dir,
+                                &tid,
+                                &file,
+                            );
+                        }
+                        rebuild_active_track_ids(app);
+                        save_config(app);
+                    }
+                }
+                Some(Operation::TrackAdd { track_id: tid }) => {
+                    if is_undo {
+                        // Remove the track
+                        let file = app.track_file(&tid).map(|f| f.to_string());
+                        if let Some(file) = &file {
+                            let _ = std::fs::remove_file(app.project.frame_dir.join(file));
+                        }
+                        app.project.config.tracks.retain(|t| t.id != tid);
+                        app.project.config.ids.prefixes.remove(&tid);
+                        app.project.tracks.retain(|(id, _)| id != &tid);
+                        rebuild_active_track_ids(app);
+                        save_config(app);
+                    } else {
+                        // Re-create the track (minimal)
+                        let name = tid.clone(); // best effort — use ID as name for redo
+                        let tc = crate::model::TrackConfig {
+                            id: tid.clone(),
+                            name: name.clone(),
+                            state: "active".to_string(),
+                            file: format!("tracks/{}.md", tid),
+                        };
+                        let existing_prefixes: Vec<String> = app.project.config.ids.prefixes.values().cloned().collect();
+                        let prefix = crate::ops::track_ops::generate_prefix(&tid, &existing_prefixes);
+                        let track_content = format!("# {}\n\n## Backlog\n\n## Done\n", name);
+                        let track_path = app.project.frame_dir.join(&tc.file);
+                        let _ = std::fs::write(&track_path, &track_content);
+                        app.project.config.tracks.push(tc);
+                        app.project.config.ids.prefixes.insert(tid.clone(), prefix);
+                        if let Ok(text) = std::fs::read_to_string(&track_path) {
+                            let track = crate::parse::parse_track(&text);
+                            app.project.tracks.push((tid.clone(), track));
+                        }
+                        rebuild_active_track_ids(app);
+                        save_config(app);
+                    }
+                }
+                Some(Operation::TrackDelete { track_id: tid, track_name, old_state, prefix }) => {
+                    if is_undo {
+                        // Re-create the track
+                        let tc = crate::model::TrackConfig {
+                            id: tid.clone(),
+                            name: track_name.clone(),
+                            state: old_state.clone(),
+                            file: format!("tracks/{}.md", tid),
+                        };
+                        let track_content = format!("# {}\n\n## Backlog\n\n## Done\n", track_name);
+                        let track_path = app.project.frame_dir.join(&tc.file);
+                        let _ = std::fs::write(&track_path, &track_content);
+                        app.project.config.tracks.push(tc);
+                        if let Some(p) = &prefix {
+                            app.project.config.ids.prefixes.insert(tid.clone(), p.clone());
+                        }
+                        if let Ok(text) = std::fs::read_to_string(&track_path) {
+                            let track = crate::parse::parse_track(&text);
+                            app.project.tracks.push((tid.clone(), track));
+                        }
+                        rebuild_active_track_ids(app);
+                        save_config(app);
+                    } else {
+                        // Re-delete the track
+                        let file = app.track_file(&tid).map(|f| f.to_string());
+                        if let Some(file) = &file {
+                            let _ = std::fs::remove_file(app.project.frame_dir.join(file));
+                        }
+                        app.project.config.tracks.retain(|t| t.id != tid);
+                        app.project.config.ids.prefixes.remove(&tid);
+                        app.project.tracks.retain(|(id, _)| id != &tid);
+                        rebuild_active_track_ids(app);
+                        save_config(app);
+                    }
+                }
+                _ => {}
             }
         }
         UndoNavTarget::Inbox { .. } => {
@@ -803,6 +956,7 @@ fn navigate_to_undo_target(app: &mut App, nav: &UndoNavTarget) {
                 app.close_detail_fully();
             }
 
+            app.tracks_name_col_min = 0;
             app.view = View::Tracks;
 
             // Move cursor to the track row
@@ -996,6 +1150,8 @@ fn set_cc_focus_current(app: &mut App) {
         _ => return,
     };
 
+    let old_focus = app.project.config.agent.cc_focus.clone();
+
     // Toggle: if already cc-focus, clear it; otherwise set it
     if app.project.config.agent.cc_focus.as_deref() == Some(&track_id) {
         app.project.config.agent.cc_focus = None;
@@ -1003,7 +1159,15 @@ fn set_cc_focus_current(app: &mut App) {
         app.project.config.agent.cc_focus = Some(track_id.clone());
     }
 
+    let new_focus = app.project.config.agent.cc_focus.clone();
+
     save_config(app);
+
+    app.undo_stack.push(Operation::TrackCcFocus {
+        old_focus,
+        new_focus,
+    });
+
     app.status_message = match &app.project.config.agent.cc_focus {
         Some(id) => Some(format!("cc-focus \u{25B6} {}", id)),
         None => Some("cc-focus cleared".to_string()),
@@ -1765,7 +1929,116 @@ fn confirm_edit(app: &mut App) {
             }
             let _ = app.save_inbox();
         }
+        EditTarget::NewTrackName => {
+            let name = app.edit_buffer.clone();
+            if name.trim().is_empty() {
+                // Empty name: cancelled
+                return;
+            }
+            let track_id = crate::ops::track_ops::generate_track_id(&name);
+            if track_id.is_empty() {
+                app.status_message = Some("invalid track name".to_string());
+                return;
+            }
+            // Check for ID collision
+            if app.project.config.tracks.iter().any(|tc| tc.id == track_id) {
+                app.status_message = Some(format!("track \"{}\" already exists", track_id));
+                return;
+            }
+
+            // Generate prefix from ID
+            let existing_prefixes: Vec<String> = app.project.config.ids.prefixes.values().cloned().collect();
+            let prefix = crate::ops::track_ops::generate_prefix(&track_id, &existing_prefixes);
+
+            // Create track file and add to config
+            let tc = crate::model::TrackConfig {
+                id: track_id.clone(),
+                name: name.clone(),
+                state: "active".to_string(),
+                file: format!("tracks/{}.md", track_id),
+            };
+
+            // Write track file
+            let track_content = format!("# {}\n\n## Backlog\n\n## Done\n", name);
+            let track_path = app.project.frame_dir.join(&tc.file);
+            let _ = std::fs::write(&track_path, &track_content);
+
+            // Add to config
+            app.project.config.tracks.push(tc);
+            app.project.config.ids.prefixes.insert(track_id.clone(), prefix);
+            save_config(app);
+
+            // Load the new track into memory
+            if let Ok(text) = std::fs::read_to_string(&track_path) {
+                let track = crate::parse::parse_track(&text);
+                app.project.tracks.push((track_id.clone(), track));
+            }
+
+            rebuild_active_track_ids(app);
+
+            app.undo_stack.push(Operation::TrackAdd {
+                track_id: track_id.clone(),
+            });
+
+            // Move cursor to the new track
+            if let Some(pos) = tracks_find_cursor_pos(app, &track_id) {
+                app.tracks_cursor = pos;
+            }
+
+            app.status_message = Some(format!("created track \"{}\"", track_id));
+        }
+        EditTarget::ExistingTrackName {
+            track_id,
+            original_name,
+        } => {
+            let new_name = app.edit_buffer.clone();
+            if new_name.trim().is_empty() || new_name == original_name {
+                return;
+            }
+
+            // Update config name
+            if let Some(tc) = app.project.config.tracks.iter_mut().find(|t| t.id == track_id) {
+                tc.name = new_name.clone();
+            }
+            save_config(app);
+
+            // Update track file header (first line: "# Name")
+            update_track_header(app, &track_id, &new_name);
+            let _ = app.save_track(&track_id);
+
+            app.undo_stack.push(Operation::TrackNameEdit {
+                track_id: track_id.clone(),
+                old_name: original_name,
+                new_name: new_name.clone(),
+            });
+
+            app.status_message = Some(format!("renamed → \"{}\"", new_name));
+        }
     }
+}
+
+/// Find the cursor position for a track ID in the tracks view (flat order: active, shelved, archived)
+fn tracks_find_cursor_pos(app: &App, target_id: &str) -> Option<usize> {
+    let mut idx = 0;
+    for tc in &app.project.config.tracks {
+        if tc.state == "active" {
+            if tc.id == target_id { return Some(idx); }
+            idx += 1;
+        }
+    }
+    for tc in &app.project.config.tracks {
+        if tc.state == "shelved" {
+            if tc.id == target_id { return Some(idx); }
+            idx += 1;
+        }
+    }
+    for tc in &app.project.config.tracks {
+        if tc.state == "archived" {
+            if tc.id == target_id { return Some(idx); }
+            idx += 1;
+        }
+    }
+    None
 }
 
 fn cancel_edit(app: &mut App) {
@@ -1821,6 +2094,12 @@ fn cancel_edit(app: &mut App) {
             // Restore cursor
             if let Some(cursor) = saved_cursor {
                 app.inbox_cursor = cursor;
+            }
+        }
+        // New track add — just restore cursor (no placeholder to remove)
+        Some(EditTarget::NewTrackName) => {
+            if let Some(cursor) = saved_cursor {
+                app.tracks_cursor = cursor;
             }
         }
         // For existing title/tags edit, cancel means revert (unchanged since we didn't write)
@@ -2823,6 +3102,185 @@ fn tracks_cursor_track_id(app: &App) -> Option<String> {
         }
     }
     ordered.get(app.tracks_cursor).map(|s| s.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Track management (Tracks view actions)
+// ---------------------------------------------------------------------------
+
+/// Enter EDIT mode to add a new track (type name → auto-generate ID)
+fn tracks_add_track(app: &mut App) {
+    // Save cursor for restore on cancel
+    app.pre_edit_cursor = Some(app.tracks_cursor);
+    // Move cursor to the new row position (after all active tracks)
+    let active_count = app.project.config.tracks.iter()
+        .filter(|t| t.state == "active")
+        .count();
+    app.tracks_cursor = active_count;
+    app.edit_buffer.clear();
+    app.edit_cursor = 0;
+    app.edit_target = Some(EditTarget::NewTrackName);
+    app.edit_history = Some(EditHistory::new("", 0, 0));
+    app.edit_selection_anchor = None;
+    app.mode = Mode::Edit;
+}
+
+/// Enter EDIT mode to rename the track under the cursor
+fn tracks_edit_name(app: &mut App) {
+    let track_id = match tracks_cursor_track_id(app) {
+        Some(id) => id,
+        None => return,
+    };
+    let current_name = app.track_name(&track_id).to_string();
+    let cursor_pos = current_name.len();
+    app.edit_buffer = current_name.clone();
+    app.edit_cursor = cursor_pos;
+    app.edit_target = Some(EditTarget::ExistingTrackName {
+        track_id,
+        original_name: current_name.clone(),
+    });
+    app.edit_history = Some(EditHistory::new(&current_name, cursor_pos, 0));
+    app.edit_selection_anchor = None;
+    app.mode = Mode::Edit;
+}
+
+/// Toggle shelve/activate for the track under the cursor
+fn tracks_toggle_shelve(app: &mut App) {
+    let track_id = match tracks_cursor_track_id(app) {
+        Some(id) => id,
+        None => return,
+    };
+
+    let tc = match app.project.config.tracks.iter().find(|t| t.id == track_id) {
+        Some(tc) => tc.clone(),
+        None => return,
+    };
+
+    let was_active = tc.state == "active";
+    let new_state = if was_active { "shelved" } else if tc.state == "shelved" { "active" } else { return };
+
+    // Update config
+    if let Some(tc_mut) = app.project.config.tracks.iter_mut().find(|t| t.id == track_id) {
+        tc_mut.state = new_state.to_string();
+    }
+    save_config(app);
+
+    // Update active_track_ids
+    app.active_track_ids = app
+        .project
+        .config
+        .tracks
+        .iter()
+        .filter(|t| t.state == "active")
+        .map(|t| t.id.clone())
+        .collect();
+
+    app.undo_stack.push(Operation::TrackShelve {
+        track_id: track_id.clone(),
+        was_active,
+    });
+
+    // Clamp cursor
+    let total = tracks_total_count(app);
+    if total > 0 {
+        app.tracks_cursor = app.tracks_cursor.min(total - 1);
+    }
+
+    app.status_message = Some(format!(
+        "{} {} {}",
+        if was_active { "shelved" } else { "activated" },
+        track_id,
+        if was_active { "\u{23F8}" } else { "\u{25B6}" }
+    ));
+}
+
+/// Archive or delete the track under the cursor (with confirmation)
+fn tracks_archive_or_delete(app: &mut App) {
+    let track_id = match tracks_cursor_track_id(app) {
+        Some(id) => id,
+        None => return,
+    };
+
+    let tc = match app.project.config.tracks.iter().find(|t| t.id == track_id) {
+        Some(tc) => tc.clone(),
+        None => return,
+    };
+
+    // Can't archive/delete already-archived tracks
+    if tc.state == "archived" {
+        return;
+    }
+
+    // Check if empty → offer delete, else → offer archive
+    let track = match App::find_track_in_project(&app.project, &track_id) {
+        Some(t) => t,
+        None => return,
+    };
+    let count = crate::ops::track_ops::total_task_count(track);
+    let is_empty = count == 0
+        && !app
+            .project
+            .frame_dir
+            .join(format!("archive/{}.md", track_id))
+            .exists();
+
+    let display_id = track_id.to_uppercase();
+    if is_empty {
+        app.confirm_state = Some(super::app::ConfirmState {
+            message: format!("Delete track \"{}\"? [y/n]", display_id),
+            action: super::app::ConfirmAction::DeleteTrack {
+                track_id,
+            },
+        });
+    } else {
+        app.confirm_state = Some(super::app::ConfirmState {
+            message: format!("Archive track \"{}\"? ({} tasks) [y/n]", display_id, count),
+            action: super::app::ConfirmAction::ArchiveTrack {
+                track_id,
+            },
+        });
+    }
+    app.mode = Mode::Confirm;
+}
+
+/// Count total tracks in all states (for cursor clamping)
+fn tracks_total_count(app: &App) -> usize {
+    app.project.config.tracks.len()
+}
+
+/// Rebuild active_track_ids from config and clamp tracks_cursor
+fn rebuild_active_track_ids(app: &mut App) {
+    app.active_track_ids = app
+        .project
+        .config
+        .tracks
+        .iter()
+        .filter(|t| t.state == "active")
+        .map(|t| t.id.clone())
+        .collect();
+
+    let total = tracks_total_count(app);
+    if total > 0 {
+        app.tracks_cursor = app.tracks_cursor.min(total - 1);
+    } else {
+        app.tracks_cursor = 0;
+    }
+}
+
+/// Update the "# Title" header in a track's literal nodes
+fn update_track_header(app: &mut App, track_id: &str, new_name: &str) {
+    if let Some(track) = app.find_track_mut(track_id) {
+        for node in &mut track.nodes {
+            if let crate::model::track::TrackNode::Literal(lines) = node {
+                for line in lines.iter_mut() {
+                    if line.starts_with("# ") {
+                        *line = format!("# {}", new_name);
+                        return;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Move between regions in the detail view (up/down)
@@ -4557,6 +5015,12 @@ fn handle_confirm(app: &mut App, key: KeyEvent) {
                     super::app::ConfirmAction::DeleteInboxItem { index } => {
                         confirm_inbox_delete(app, index);
                     }
+                    super::app::ConfirmAction::ArchiveTrack { track_id } => {
+                        confirm_archive_track(app, &track_id);
+                    }
+                    super::app::ConfirmAction::DeleteTrack { track_id } => {
+                        confirm_delete_track(app, &track_id);
+                    }
                 }
             }
         }
@@ -4593,6 +5057,76 @@ fn confirm_inbox_delete(app: &mut App, index: usize) {
     } else {
         app.inbox_cursor = app.inbox_cursor.min(count - 1);
     }
+}
+
+fn confirm_archive_track(app: &mut App, track_id: &str) {
+    let old_state = app
+        .project
+        .config
+        .tracks
+        .iter()
+        .find(|t| t.id == track_id)
+        .map(|t| t.state.clone())
+        .unwrap_or_default();
+
+    // Update config state to archived
+    if let Some(tc) = app.project.config.tracks.iter_mut().find(|t| t.id == track_id) {
+        tc.state = "archived".to_string();
+    }
+    save_config(app);
+
+    // Move track file to archive/_tracks/
+    if let Some(file) = app.track_file(track_id).map(|f| f.to_string()) {
+        let _ = crate::ops::track_ops::archive_track_file(
+            &app.project.frame_dir,
+            track_id,
+            &file,
+        );
+    }
+
+    rebuild_active_track_ids(app);
+
+    app.undo_stack.push(Operation::TrackArchive {
+        track_id: track_id.to_string(),
+        old_state,
+    });
+
+    app.status_message = Some(format!("archived \"{}\"", track_id));
+}
+
+fn confirm_delete_track(app: &mut App, track_id: &str) {
+    let tc = match app.project.config.tracks.iter().find(|t| t.id == track_id) {
+        Some(tc) => tc.clone(),
+        None => return,
+    };
+    let prefix = app.project.config.ids.prefixes.get(track_id).cloned();
+
+    // Remove track file
+    if let Some(file) = app.track_file(track_id).map(|f| f.to_string()) {
+        let track_path = app.project.frame_dir.join(&file);
+        let _ = std::fs::remove_file(&track_path);
+    }
+
+    // Remove from config
+    app.project.config.tracks.retain(|t| t.id != track_id);
+    if prefix.is_some() {
+        app.project.config.ids.prefixes.remove(track_id);
+    }
+    save_config(app);
+
+    // Remove from in-memory tracks
+    app.project.tracks.retain(|(id, _)| id != track_id);
+
+    rebuild_active_track_ids(app);
+
+    app.undo_stack.push(Operation::TrackDelete {
+        track_id: track_id.to_string(),
+        track_name: tc.name.clone(),
+        old_state: tc.state.clone(),
+        prefix,
+    });
+
+    app.status_message = Some(format!("deleted track \"{}\"", track_id));
 }
 
 // ---------------------------------------------------------------------------

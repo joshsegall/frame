@@ -216,7 +216,14 @@ fn build_tracks_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Header("Navigation".into()),
         HelpEntry::Binding("\u{25B2}\u{25BC}/jk".into(), "Move cursor".into()),
         HelpEntry::Binding("g/G".into(), "Top / bottom".into()),
+        HelpEntry::Binding("Enter".into(), "Open track".into()),
         HelpEntry::Binding("1-9".into(), "Switch to track N".into()),
+        HelpEntry::Blank,
+        HelpEntry::Header("Track Actions".into()),
+        HelpEntry::Binding("a".into(), "Add new track".into()),
+        HelpEntry::Binding("e".into(), "Edit track name".into()),
+        HelpEntry::Binding("s".into(), "Shelve / activate".into()),
+        HelpEntry::Binding("D".into(), "Archive / delete".into()),
         HelpEntry::Binding("m".into(), "Reorder track".into()),
         HelpEntry::Binding("C".into(), "Set cc-focus".into()),
     ];
@@ -225,6 +232,8 @@ fn build_tracks_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Header("Views & Other".into()),
         HelpEntry::Binding("Tab".into(), "Next view".into()),
         HelpEntry::Binding("/".into(), "Search".into()),
+        HelpEntry::Binding("z/u".into(), "Undo".into()),
+        HelpEntry::Binding("Z".into(), "Redo".into()),
         HelpEntry::Binding("?".into(), "Help".into()),
         HelpEntry::Binding("QQ".into(), "Quit".into()),
     ];
