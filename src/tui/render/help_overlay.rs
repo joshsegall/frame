@@ -70,6 +70,25 @@ pub fn render_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
 
     // Fixed width from content: 2 columns + gap + borders
     let popup_w = ((col_w * 2 + gap) as u16 + 2).min(area.width.saturating_sub(2));
+    let inner_w = (popup_w.saturating_sub(2)) as usize;
+
+    // Footer: blank line + version/URL row
+    let version_left = format!("[>] frame v{}", env!("CARGO_PKG_VERSION"));
+    let url_right = "github.com/joshsegall/frame";
+    let footer_style = desc_style;
+
+    lines.push(Line::from(Span::styled(" ".repeat(inner_w), blank_style)));
+    let usable_w = inner_w.saturating_sub(2); // 1 space padding on each side
+    let padding = usable_w.saturating_sub(version_left.len() + url_right.len());
+    let footer_text = format!(
+        " {}{}{}{}",
+        version_left,
+        " ".repeat(padding),
+        url_right,
+        " ",
+    );
+    lines.push(Line::from(Span::styled(footer_text, footer_style)));
+
     // Dynamic height from content + borders
     let popup_h = ((lines.len() as u16) + 2).min(area.height.saturating_sub(2));
     let overlay_area = centered_rect_fixed(popup_w, popup_h, area);
