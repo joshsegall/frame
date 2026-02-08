@@ -49,12 +49,21 @@ pub fn render_tracks_view(frame: &mut Frame, app: &App, area: Rect) {
         .map(|tc| tc.name.chars().count())
         .max()
         .unwrap_or(10);
+    let max_id_len = app
+        .project
+        .config
+        .tracks
+        .iter()
+        .map(|tc| tc.id.chars().count())
+        .max()
+        .unwrap_or(2);
 
-    // name_col = " " (border) + " " (indent) + num + "  " + name + "  " (gap before stats)
-    let name_col = 1 + 1 + num_width + 2 + max_name_len;
+    // name_col = total width before stat columns in data rows:
+    // border(1) + num + "  " + name + "  " + id
+    let name_col = 1 + num_width + 2 + max_name_len + 2 + max_id_len;
 
     // Top header: short state names aligned to stat columns
-    lines.push(render_col_names(app, name_col));
+    lines.push(render_col_names(app, name_col, max_id_len));
 
     let mut flat_idx = 0usize;
 
@@ -70,6 +79,7 @@ pub fn render_tracks_view(frame: &mut Frame, app: &App, area: Rect) {
                 flat_idx + 1,
                 num_width,
                 max_name_len,
+                max_id_len,
                 is_cursor,
                 is_flash,
                 cc_focus,
@@ -93,6 +103,7 @@ pub fn render_tracks_view(frame: &mut Frame, app: &App, area: Rect) {
                 flat_idx + 1,
                 num_width,
                 max_name_len,
+                max_id_len,
                 is_cursor,
                 is_flash,
                 cc_focus,
@@ -116,6 +127,7 @@ pub fn render_tracks_view(frame: &mut Frame, app: &App, area: Rect) {
                 flat_idx + 1,
                 num_width,
                 max_name_len,
+                max_id_len,
                 is_cursor,
                 is_flash,
                 cc_focus,
@@ -139,14 +151,22 @@ pub fn render_tracks_view(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Render the top header line with short state names
-fn render_col_names<'a>(app: &'a App, name_col: usize) -> Line<'a> {
+fn render_col_names<'a>(app: &'a App, name_col: usize, max_id_len: usize) -> Line<'a> {
     let bg = app.theme.background;
     let header_style = Style::default().fg(app.theme.text).bg(bg);
+    let dim_style = Style::default().fg(app.theme.dim).bg(bg);
 
     let mut spans: Vec<Span> = Vec::new();
 
-    // Pad to align with stat columns
-    spans.push(Span::styled(" ".repeat(name_col), Style::default().bg(bg)));
+    // Pad to align "id" header with ID column in data rows
+    let pre_id_col = name_col - max_id_len;
+    spans.push(Span::styled(" ".repeat(pre_id_col), Style::default().bg(bg)));
+
+    // "id" header aligned to ID column
+    spans.push(Span::styled(
+        format!("{:<width$}", "id", width = max_id_len),
+        dim_style,
+    ));
 
     for header in &HEADERS {
         spans.push(Span::styled(
@@ -200,6 +220,7 @@ fn render_track_row<'a>(
     number: usize,
     num_width: usize,
     max_name_len: usize,
+    max_id_len: usize,
     is_cursor: bool,
     is_flash: bool,
     cc_focus: Option<&str>,
@@ -269,6 +290,14 @@ fn render_track_row<'a>(
             Style::default().bg(bg),
         ));
     }
+
+    // ID prefix column (gap + uppercase left-aligned ID padded to max_id_len)
+    spans.push(Span::styled("  ", Style::default().bg(bg)));
+    let id_style = Style::default().fg(app.theme.text).bg(bg);
+    spans.push(Span::styled(
+        format!("{:<width$}", tc.id.to_uppercase(), width = max_id_len),
+        id_style,
+    ));
 
     // Stat columns: todo, active, blocked, done, parked
     let counts = [stats.todo, stats.active, stats.blocked, stats.done, stats.parked];

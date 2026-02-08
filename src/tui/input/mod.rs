@@ -2790,8 +2790,39 @@ fn handle_enter(app: &mut App) {
                 detail_enter_edit(app);
             }
         }
+        View::Tracks => {
+            // Switch to Track view for the track under cursor
+            let track_id = tracks_cursor_track_id(app);
+            if let Some(id) = track_id {
+                if let Some(idx) = app.active_track_ids.iter().position(|tid| tid == &id) {
+                    app.view = View::Track(idx);
+                }
+            }
+        }
         _ => {}
     }
+}
+
+/// Map the tracks_cursor to the track ID at that position.
+/// The flat order is: active tracks, then shelved, then archived.
+fn tracks_cursor_track_id(app: &App) -> Option<String> {
+    let mut ordered: Vec<&str> = Vec::new();
+    for tc in &app.project.config.tracks {
+        if tc.state == "active" {
+            ordered.push(&tc.id);
+        }
+    }
+    for tc in &app.project.config.tracks {
+        if tc.state == "shelved" {
+            ordered.push(&tc.id);
+        }
+    }
+    for tc in &app.project.config.tracks {
+        if tc.state == "archived" {
+            ordered.push(&tc.id);
+        }
+    }
+    ordered.get(app.tracks_cursor).map(|s| s.to_string())
 }
 
 /// Move between regions in the detail view (up/down)
