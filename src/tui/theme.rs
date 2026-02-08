@@ -33,9 +33,8 @@ impl Default for Theme {
         let mut tag_colors = HashMap::new();
         tag_colors.insert("research".into(), Color::Rgb(0x44, 0x88, 0xFF));
         tag_colors.insert("design".into(), Color::Rgb(0x44, 0xDD, 0xFF));
-        tag_colors.insert("ready".into(), Color::Rgb(0x44, 0xFF, 0x88));
         tag_colors.insert("bug".into(), Color::Rgb(0xFF, 0x44, 0x44));
-        tag_colors.insert("cc".into(), Color::Rgb(0xCC, 0x66, 0xFF));
+        tag_colors.insert("cc".into(), Color::Rgb(0x44, 0xFF, 0x88));
         tag_colors.insert("cc-added".into(), Color::Rgb(0xCC, 0x66, 0xFF));
         tag_colors.insert("needs-input".into(), Color::Rgb(0xFF, 0xD7, 0x00));
 
@@ -164,7 +163,7 @@ mod tests {
         );
         assert_eq!(
             theme.tag_colors.get("cc"),
-            Some(&Color::Rgb(0xCC, 0x66, 0xFF))
+            Some(&Color::Rgb(0x44, 0xFF, 0x88))
         );
     }
 

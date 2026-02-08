@@ -62,9 +62,8 @@ ref_paths = ["doc", "spec", "docs", "design", "papers"]
 # [ui.tag_colors]
 # research = "#4488FF"
 # design = "#44DDFF"
-# ready = "#44FF88"
 # bug = "#FF4444"
-# cc = "#CC66FF"
+# cc = "#44FF88"
 # cc-added = "#CC66FF"
 # needs-input = "#FFD700"
 "##;
