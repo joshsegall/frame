@@ -62,18 +62,26 @@ pub fn parse_inbox(source: &str) -> Inbox {
 
             // Collect body lines (indented lines until blank line or next item)
             let mut body_lines = Vec::new();
+            let mut in_code_fence = false;
             while idx < lines.len() {
                 let body_line = &lines[idx];
                 let body_trimmed = body_line.trim();
 
-                if body_trimmed.is_empty() {
-                    // Blank line — end of this item
-                    break;
+                // Track fenced code blocks so blank lines inside them don't end the body
+                if body_trimmed.starts_with("```") {
+                    in_code_fence = !in_code_fence;
                 }
 
-                if body_trimmed.starts_with("- ") && !body_line.starts_with(' ') {
-                    // Next item at top level
-                    break;
+                if !in_code_fence {
+                    if body_trimmed.is_empty() {
+                        // Blank line — end of this item
+                        break;
+                    }
+
+                    if body_trimmed.starts_with("- ") && !body_line.starts_with(' ') {
+                        // Next item at top level
+                        break;
+                    }
                 }
 
                 // Body line — strip 2 spaces of indent if present
@@ -245,6 +253,36 @@ mod tests {
         let body = inbox.items[0].body.as_ref().unwrap();
         assert!(body.contains("```lace"));
         assert!(body.contains("perform Ask()"));
+    }
+
+    #[test]
+    fn test_parse_inbox_code_block_with_blank_line() {
+        let source = "\
+# Inbox
+
+- Item with code block containing blank line #bug
+  Here's the code:
+  ```
+  fn main() {
+
+      println!(\"hello\");
+  }
+  ```
+  Text after code block.
+
+- Next item
+";
+        let inbox = parse_inbox(source);
+        assert_eq!(inbox.items.len(), 2);
+
+        let body = inbox.items[0].body.as_ref().unwrap();
+        assert!(body.contains("fn main()"));
+        assert!(body.contains("println!"));
+        assert!(body.contains("Text after code block."));
+        // The blank line inside the code block should be preserved
+        assert!(body.contains("\n\n"));
+
+        assert_eq!(inbox.items[1].title, "Next item");
     }
 
     #[test]

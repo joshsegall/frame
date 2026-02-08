@@ -1322,6 +1322,13 @@ fn cmd_track_state_change(
 
     let (mut config, mut doc) = config_io::read_config(&project.frame_dir)?;
 
+    // Capture the track's file path before state change (needed for archive file move)
+    let track_file = config
+        .tracks
+        .iter()
+        .find(|t| t.id == track_id)
+        .map(|t| t.file.clone());
+
     match action {
         "shelve" => track_ops::shelve_track(&mut doc, &mut config, &track_id)?,
         "activate" => track_ops::activate_track(&mut doc, &mut config, &track_id)?,
@@ -1330,6 +1337,14 @@ fn cmd_track_state_change(
     }
 
     config_io::write_config(&project.frame_dir, &doc)?;
+
+    // Move the track file to archive/_tracks/ after archiving
+    if action == "archive" {
+        if let Some(file) = track_file {
+            track_ops::archive_track_file(&project.frame_dir, &track_id, &file)?;
+        }
+    }
+
     println!("{} → {}d", track_id, action);
     Ok(())
 }

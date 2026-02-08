@@ -46,7 +46,6 @@ ref_paths = ["doc", "spec", "docs", "design", "papers"]
 # # include only these file extensions in refs and spec autocomplete
 # ref_extensions = ["md", "txt", "rst", "pdf", "toml", "yaml"]
 # show_key_hints = false
-# tag_style = "foreground"        # "foreground" or "pill"
 #
 # [ui.colors]
 # background = "#0C001B"

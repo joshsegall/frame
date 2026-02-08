@@ -76,8 +76,6 @@ pub struct IdConfig {
 pub struct UiConfig {
     #[serde(default)]
     pub show_key_hints: bool,
-    #[serde(default = "default_tag_style")]
-    pub tag_style: String,
     #[serde(default)]
     pub colors: HashMap<String, String>,
     #[serde(default)]
@@ -100,7 +98,6 @@ impl Default for UiConfig {
     fn default() -> Self {
         UiConfig {
             show_key_hints: false,
-            tag_style: "foreground".to_string(),
             colors: HashMap::new(),
             tag_colors: HashMap::new(),
             ref_extensions: Vec::new(),
@@ -108,8 +105,4 @@ impl Default for UiConfig {
             kitty_keyboard: None,
         }
     }
-}
-
-fn default_tag_style() -> String {
-    "foreground".to_string()
 }
