@@ -1279,7 +1279,7 @@ mod tests {
 
 ## Backlog
 
-- [>] `M-001` Active task #ready
+- [>] `M-001` Active task #core
 - [ ] `M-002` Todo task
 - [-] `M-003` Blocked task
 
@@ -1291,7 +1291,7 @@ mod tests {
         let content = generate_active_md(&project);
         assert!(content.contains("# test — Active Tasks"));
         assert!(content.contains("## Main Track"));
-        assert!(content.contains("- [>] `M-001` Active task #ready"));
+        assert!(content.contains("- [>] `M-001` Active task #core"));
         assert!(content.contains("- [ ] `M-002` Todo task"));
         assert!(content.contains("- [-] `M-003` Blocked task"));
     }

@@ -58,9 +58,9 @@ side = "S"
 
 ## Backlog
 
-- [ ] `M-001` First task #ready
+- [ ] `M-001` First task #core
   - added: 2025-05-01
-- [>] `M-002` Second task #ready #cc
+- [>] `M-002` Second task #core #cc
   - added: 2025-05-02
   - dep: M-001
 - [ ] `M-003` Third task with subtasks
@@ -750,7 +750,7 @@ fn test_import() {
     fs::write(
         &import_file,
         "\
-- [ ] Imported task one #ready
+- [ ] Imported task one #core
 - [ ] Imported task two #design
   - [ ] Imported sub
 ",

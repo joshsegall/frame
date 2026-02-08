@@ -197,7 +197,7 @@ mod tests {
 
     fn simple_import_md() -> &'static str {
         "\
-- [ ] Imported task one #ready
+- [ ] Imported task one #core
 - [ ] Imported task two #design
 - [ ] Imported task three
 "
@@ -205,7 +205,7 @@ mod tests {
 
     fn import_with_subtasks_md() -> &'static str {
         "\
-- [ ] Parent task #ready
+- [ ] Parent task #core
   - [ ] Sub one
   - [ ] Sub two
 - [ ] Another top-level task
@@ -257,7 +257,7 @@ Some description text here.
         assert_eq!(backlog.len(), 5);
         assert_eq!(backlog[2].title, "Imported task one");
         assert_eq!(backlog[2].id.as_deref(), Some("T-003"));
-        assert!(backlog[2].tags.contains(&"ready".to_string()));
+        assert!(backlog[2].tags.contains(&"core".to_string()));
         assert_eq!(backlog[3].id.as_deref(), Some("T-004"));
         assert_eq!(backlog[4].id.as_deref(), Some("T-005"));
 
@@ -500,7 +500,7 @@ Some description text here.
     #[test]
     fn test_import_three_level_nesting() {
         let md = "\
-- [ ] Top level #ready
+- [ ] Top level #core
   - [ ] Sub level
     - [ ] Sub-sub level
 ";

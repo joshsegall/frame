@@ -2,7 +2,7 @@
 
 ## Backlog
 
-- [>] `FM-001` Task with every metadata field #ready #cc
+- [>] `FM-001` Task with every metadata field #cc
   - added: 2025-06-01
   - dep: FM-000, OTHER-001
   - spec: doc/spec/foo.md#bar

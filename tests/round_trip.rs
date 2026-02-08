@@ -208,7 +208,7 @@ fn complex_track_parse_correctness() {
     let eff014 = &backlog[0];
     assert_eq!(eff014.id.as_deref(), Some("EFF-014"));
     assert_eq!(eff014.state, frame::model::TaskState::Active);
-    assert_eq!(eff014.tags, vec!["ready"]);
+    assert_eq!(eff014.tags, vec!["core"]);
     assert_eq!(eff014.subtasks.len(), 3);
 
     // Check 3-level nesting

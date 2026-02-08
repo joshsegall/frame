@@ -74,7 +74,7 @@ The prefix mapping (e.g., `effects` -> `EFF`) is configured in `project.toml` un
 Tags are `#word` tokens at the end of a task line:
 
 ```
-- [>] `EFF-014` Implement effect inference #ready #cc
+- [>] `EFF-014` Implement effect inference #cc
 ```
 
 Tags are stored without the `#` prefix internally.

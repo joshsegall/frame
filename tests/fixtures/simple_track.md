@@ -6,7 +6,7 @@
 
 - [ ] `ST-001` First task
 - [ ] `ST-002` Second task
-- [>] `ST-003` Third task is active #ready
+- [>] `ST-003` Third task is active #core
 
 ## Parked
 

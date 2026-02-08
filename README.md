@@ -14,7 +14,7 @@ work stream (called a **track**). Tasks are checkbox list items with
 optional IDs, tags, dependencies, notes, and subtasks:
 
 ```markdown
-- [>] `EFF-014` Implement effect inference for closures #ready
+- [>] `EFF-014` Implement effect inference for closures #cc
   - dep: EFF-003
   - spec: doc/spec/effects.md#closure-effects
   - note:
@@ -123,7 +123,7 @@ Tracks can be shelved or archived.
 **Position is priority.** Top of the backlog = highest priority.
 Use `m` (TUI) or `fr mv` (CLI) to reprioritize.
 
-**Tags** are freeform labels. Conventional: `#ready`, `#cc`, `#bug`,
+**Tags** are freeform labels. Conventional: `#cc`, `#bug`,
 `#research`, `#design`, `#needs-input`.
 
 **Dependencies** are cross-track references. `fr ready` filters to

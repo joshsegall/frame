@@ -400,12 +400,12 @@ mod tests {
 
     #[test]
     fn test_parse_task_with_id_and_tags() {
-        let input = lines("- [ ] `EFF-003` Implement effect handler desugaring #ready #cc");
+        let input = lines("- [ ] `EFF-003` Implement effect handler desugaring #core #cc");
         let (tasks, _) = parse_tasks(&input, 0, 0, 0);
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].id.as_deref(), Some("EFF-003"));
         assert_eq!(tasks[0].title, "Implement effect handler desugaring");
-        assert_eq!(tasks[0].tags, vec!["ready", "cc"]);
+        assert_eq!(tasks[0].tags, vec!["core", "cc"]);
     }
 
     #[test]
@@ -426,7 +426,7 @@ mod tests {
     #[test]
     fn test_parse_task_with_metadata() {
         let input = lines(
-            "- [>] `EFF-014` Implement effect inference #ready\n\
+            "- [>] `EFF-014` Implement effect inference #core\n\
              \x20\x20- added: 2025-05-10\n\
              \x20\x20- dep: EFF-003\n\
              \x20\x20- spec: doc/spec/effects.md#closure-effects\n\
@@ -447,7 +447,7 @@ mod tests {
     #[test]
     fn test_parse_subtasks() {
         let input = lines(
-            "- [>] `EFF-014` Implement effect inference #ready\n\
+            "- [>] `EFF-014` Implement effect inference #core\n\
              \x20\x20- added: 2025-05-10\n\
              \x20\x20- [ ] `EFF-014.1` Add effect variables\n\
              \x20\x20- [>] `EFF-014.2` Unify effect rows #cc\n\
@@ -506,7 +506,7 @@ mod tests {
     #[test]
     fn test_parse_multiple_deps() {
         let input = lines(
-            "- [-] `EFF-012` Effect-aware DCE #ready\n\
+            "- [-] `EFF-012` Effect-aware DCE #core\n\
              \x20\x20- dep: EFF-014, INFRA-003",
         );
         let (tasks, _) = parse_tasks(&input, 0, 0, 0);
@@ -542,9 +542,9 @@ mod tests {
         assert!(tags.is_empty());
 
         // Only tags (no title text)
-        let (title, tags) = parse_title_and_tags("#ready #cc");
+        let (title, tags) = parse_title_and_tags("#core #cc");
         assert!(title.is_empty());
-        assert_eq!(tags, vec!["ready", "cc"]);
+        assert_eq!(tags, vec!["core", "cc"]);
 
         // Tag-like content in the middle of the title is still title
         let (title, tags) = parse_title_and_tags("Fix #3 parser crash #bug");

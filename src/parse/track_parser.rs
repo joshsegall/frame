@@ -118,10 +118,10 @@ mod tests {
 
 ## Backlog
 
-- [>] `EFF-014` Implement effect inference for closures #ready
+- [>] `EFF-014` Implement effect inference for closures #core
   - added: 2025-05-10
   - dep: EFF-003
-- [ ] `EFF-015` Effect handler optimization pass #ready
+- [ ] `EFF-015` Effect handler optimization pass #core
   - dep: EFF-014
 
 ## Parked
@@ -130,9 +130,9 @@ mod tests {
 
 ## Done
 
-- [x] `EFF-003` Implement effect handler desugaring #ready
+- [x] `EFF-003` Implement effect handler desugaring #core
   - resolved: 2025-05-14
-- [x] `EFF-002` Parse effect declarations #ready
+- [x] `EFF-002` Parse effect declarations #core
   - resolved: 2025-05-12
 ";
 

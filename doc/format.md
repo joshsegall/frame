@@ -69,7 +69,7 @@ Examples:
 
 ```markdown
 - [ ] Task with no ID
-- [>] `EFF-014` Implement inference #ready #cc
+- [>] `EFF-014` Implement inference #cc
   - [ ] `EFF-014.1` First subtask
     - [ ] `EFF-014.1.1` Deep subtask
 ```

@@ -47,7 +47,7 @@ looks for work first (`fr ready --cc`).
 
 Tasks can have:
 - **ID** — track-prefixed identifier (e.g., `EFF-014`)
-- **Tags** — freeform labels (`#ready`, `#cc`, `#bug`, etc.)
+- **Tags** — freeform labels (`#cc`, `#bug`, `#design`, etc.)
 - **Dependencies** (`dep:`) — IDs of tasks that must complete first
 - **Spec** (`spec:`) — path to the specification this task implements
 - **Refs** (`ref:`) — paths to related files (design docs, tests, etc.)
@@ -61,7 +61,6 @@ dotted notation: `EFF-014.1`, `EFF-014.2.1`.
 
 | Tag           | Meaning                                  |
 |---------------|------------------------------------------|
-| `#ready`      | Ready to execute (implementation clear)  |
 | `#cc`         | Agent can take this and run with it      |
 | `#cc-added`   | Filed by the agent                       |
 | `#bug`        | Something broken                         |
@@ -320,7 +319,7 @@ Here's a typical agent work session:
 ```bash
 # 1. Check for available work
 fr ready --cc
-# Output: [infra] [ ] INFRA-015 Add span tracking to HIR nodes #ready #cc
+# Output: [infra] [ ] INFRA-015 Add span tracking to HIR nodes #cc
 
 # 2. Read the task details
 fr show INFRA-015

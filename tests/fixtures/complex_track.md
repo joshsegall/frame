@@ -4,7 +4,7 @@
 
 ## Backlog
 
-- [>] `EFF-014` Implement effect inference for closures #ready
+- [>] `EFF-014` Implement effect inference for closures #core
   - added: 2025-05-10
   - dep: EFF-003
   - spec: doc/spec/effects.md#closure-effects
@@ -32,11 +32,11 @@
     - [ ] `EFF-014.2.1` Handle row polymorphism
     - [ ] `EFF-014.2.2` Implement row simplification
   - [ ] `EFF-014.3` Test with nested closures
-- [ ] `EFF-015` Effect handler optimization pass #ready
+- [ ] `EFF-015` Effect handler optimization pass #core
   - dep: EFF-014
-- [-] `EFF-012` Effect-aware dead code elimination #ready
+- [-] `EFF-012` Effect-aware dead code elimination #core
   - dep: EFF-014, INFRA-003
-- [ ] `EFF-016` Error messages for effect mismatches #ready
+- [ ] `EFF-016` Error messages for effect mismatches #core
 - [ ] `EFF-017` Research: algebraic effect composition #research
 - [ ] `EFF-018` Design doc: effect aliases #design
 
@@ -46,9 +46,9 @@
 
 ## Done
 
-- [x] `EFF-003` Implement effect handler desugaring #ready
+- [x] `EFF-003` Implement effect handler desugaring #core
   - resolved: 2025-05-14
-- [x] `EFF-002` Parse effect declarations #ready
+- [x] `EFF-002` Parse effect declarations #core
   - resolved: 2025-05-12
-- [x] `EFF-001` Define effect syntax #ready
+- [x] `EFF-001` Define effect syntax #core
   - resolved: 2025-05-08

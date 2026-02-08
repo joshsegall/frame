@@ -579,7 +579,7 @@ mod tests {
 
 ## Backlog
 
-- [ ] `T-001` First task #ready
+- [ ] `T-001` First task #core
   - added: 2025-05-01
 - [>] `T-002` Second task
   - added: 2025-05-02
@@ -761,9 +761,9 @@ mod tests {
 
         // Adding again is a no-op
         let mut track2 = sample_track();
-        add_tag(&mut track2, "T-001", "#ready").unwrap(); // with # prefix
+        add_tag(&mut track2, "T-001", "#core").unwrap(); // with # prefix
         let task2 = find_task_in_track(&track2, "T-001").unwrap();
-        assert_eq!(task2.tags.iter().filter(|t| *t == "ready").count(), 1);
+        assert_eq!(task2.tags.iter().filter(|t| *t == "core").count(), 1);
 
         // Remove
         remove_tag(&mut track, "T-001", "bug").unwrap();

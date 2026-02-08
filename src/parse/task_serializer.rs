@@ -112,11 +112,11 @@ mod tests {
             Some("EFF-014".to_string()),
             "Implement effect inference".to_string(),
         );
-        task.tags = vec!["ready".to_string(), "cc".to_string()];
+        task.tags = vec!["core".to_string(), "cc".to_string()];
         let lines = serialize_tasks(&[task], 0);
         assert_eq!(
             lines,
-            vec!["- [>] `EFF-014` Implement effect inference #ready #cc"]
+            vec!["- [>] `EFF-014` Implement effect inference #core #cc"]
         );
     }
 
