@@ -215,6 +215,7 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             return;
         } else {
             app.quit_pending = false;
+            return;
         }
     }
 
@@ -855,7 +856,32 @@ fn handle_select(app: &mut App, key: KeyEvent) {
     // Clear any transient status message on keypress
     app.status_message = None;
 
+    // QQ quit: second Q confirms, any other key cancels
+    if app.quit_pending {
+        if matches!(
+            (key.modifiers, key.code),
+            (KeyModifiers::SHIFT, KeyCode::Char('Q'))
+        ) {
+            app.should_quit = true;
+            return;
+        } else {
+            app.quit_pending = false;
+            return;
+        }
+    }
+
     match (key.modifiers, key.code) {
+        // Quit: Ctrl+Q
+        (m, KeyCode::Char('q')) if m.contains(KeyModifiers::CONTROL) => {
+            app.should_quit = true;
+        }
+
+        // Quit: Q (first press shows confirmation)
+        (KeyModifiers::SHIFT, KeyCode::Char('Q')) => {
+            app.quit_pending = true;
+            app.status_message = Some("press Q again to quit".to_string());
+        }
+
         // Esc: cancel range mode first; then detail nav; then clear selection
         (_, KeyCode::Esc) => {
             if app.range_anchor.is_some() {

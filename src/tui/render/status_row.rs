@@ -163,6 +163,9 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
             }
             Line::from(spans)
         }
+        Mode::Select if app.status_message.is_some() => {
+            render_centered_message(app.status_message.as_deref().unwrap(), width, bg)
+        }
         Mode::Select => {
             let count = app.selection.len();
             let is_range = app.range_anchor.is_some();
