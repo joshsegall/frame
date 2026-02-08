@@ -19,7 +19,7 @@ use regex::Regex;
 use crate::io::lock::FileLock;
 use crate::io::project_io::{self, discover_project, load_project};
 use crate::io::watcher::{FileEvent, FrameWatcher};
-use crate::model::{Project, SectionKind, Task, Track};
+use crate::model::{Metadata, Project, SectionKind, Task, TaskState, Track};
 use crate::parse::{parse_inbox, parse_track};
 
 use super::input;
@@ -322,6 +322,54 @@ pub struct PendingMove {
     pub deadline: Instant,
 }
 
+/// State filter for track view filtering
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateFilter {
+    Active,
+    Todo,
+    Blocked,
+    Parked,
+    /// Ready: todo or active with all deps resolved
+    Ready,
+}
+
+impl StateFilter {
+    /// Display name for the filter indicator
+    pub fn label(self) -> &'static str {
+        match self {
+            StateFilter::Active => "active",
+            StateFilter::Todo => "todo",
+            StateFilter::Blocked => "blocked",
+            StateFilter::Parked => "parked",
+            StateFilter::Ready => "ready",
+        }
+    }
+}
+
+/// Filter state for track view (global across all tracks)
+#[derive(Debug, Clone, Default)]
+pub struct FilterState {
+    /// State filter (at most one active at a time)
+    pub state_filter: Option<StateFilter>,
+    /// Tag filter (at most one tag at a time)
+    pub tag_filter: Option<String>,
+}
+
+impl FilterState {
+    pub fn is_active(&self) -> bool {
+        self.state_filter.is_some() || self.tag_filter.is_some()
+    }
+
+    pub fn clear_all(&mut self) {
+        self.state_filter = None;
+        self.tag_filter = None;
+    }
+
+    pub fn clear_state(&mut self) {
+        self.state_filter = None;
+    }
+}
+
 /// Current interaction mode
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
@@ -381,6 +429,8 @@ pub enum EditTarget {
         track_id: String,
         original_name: String,
     },
+    /// Selecting a tag for filter (using autocomplete)
+    FilterTag,
 }
 
 /// State for MOVE mode
@@ -428,6 +478,9 @@ pub enum FlatItem {
         is_last_sibling: bool,
         /// For building tree continuation lines: whether each ancestor is the last sibling
         ancestor_last: Vec<bool>,
+        /// True if this task is shown only as ancestor context for a matching descendant
+        /// (dimmed, non-selectable, cursor skips over it)
+        is_context: bool,
     },
     /// The "── Parked ──" separator
     ParkedSeparator,
@@ -527,6 +580,10 @@ pub struct App {
     pub pending_moves: Vec<PendingMove>,
     /// Expanded task IDs in the Recent view (for tree structure)
     pub recent_expanded: HashSet<String>,
+    /// Global filter state for track views (not persisted)
+    pub filter_state: FilterState,
+    /// True when 'f' prefix key has been pressed, waiting for second key
+    pub filter_pending: bool,
 }
 
 impl App {
@@ -622,6 +679,8 @@ impl App {
             flash_started: None,
             pending_moves: Vec::new(),
             recent_expanded: HashSet::new(),
+            filter_state: FilterState::default(),
+            filter_pending: false,
         }
     }
 
@@ -1338,6 +1397,11 @@ impl App {
 
         // Done tasks are NOT shown in track view (they're in Recent)
 
+        // Apply filter if active
+        if self.filter_state.is_active() {
+            apply_filter(&mut items, track, &self.filter_state, &self.project);
+        }
+
         items
     }
 }
@@ -1436,6 +1500,7 @@ fn flatten_tasks_inner(
             is_expanded,
             is_last_sibling: is_last,
             ancestor_last: ancestor_last.to_vec(),
+            is_context: false,
         });
 
         if is_expanded {
@@ -1450,6 +1515,149 @@ fn flatten_tasks_inner(
                 &new_ancestor_last,
                 &path,
             );
+        }
+    }
+}
+
+/// Check if a task matches the given filter criteria
+fn task_matches_filter(task: &Task, filter: &FilterState, project: &Project) -> bool {
+    // Check state filter
+    if let Some(sf) = &filter.state_filter {
+        let state_ok = match sf {
+            StateFilter::Active => task.state == TaskState::Active,
+            StateFilter::Todo => task.state == TaskState::Todo,
+            StateFilter::Blocked => task.state == TaskState::Blocked,
+            StateFilter::Parked => task.state == TaskState::Parked,
+            StateFilter::Ready => {
+                (task.state == TaskState::Todo || task.state == TaskState::Active)
+                    && !has_unresolved_deps(task, project)
+            }
+        };
+        if !state_ok {
+            return false;
+        }
+    }
+
+    // Check tag filter
+    if let Some(ref tag) = filter.tag_filter {
+        if !task.tags.iter().any(|t| t == tag) {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Check if a task has unresolved (non-done) dependencies
+fn has_unresolved_deps(task: &Task, project: &Project) -> bool {
+    use crate::ops::task_ops;
+    for m in &task.metadata {
+        if let Metadata::Dep(deps) = m {
+            for dep_id in deps {
+                for (_, track) in &project.tracks {
+                    if let Some(dep_task) = task_ops::find_task_in_track(track, dep_id) {
+                        if dep_task.state != TaskState::Done {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Check if a task or any of its subtasks (recursively) matches the filter
+fn has_matching_descendant(task: &Task, filter: &FilterState, project: &Project) -> bool {
+    for sub in &task.subtasks {
+        if task_matches_filter(sub, filter, project) {
+            return true;
+        }
+        if has_matching_descendant(sub, filter, project) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Apply filter to the flat items list: remove non-matching tasks and mark context-only ancestors.
+/// A task is kept if it matches the filter OR if it has a matching descendant (shown as context).
+fn apply_filter(items: &mut Vec<FlatItem>, track: &Track, filter: &FilterState, project: &Project) {
+    // First pass: determine which items match and which are context-only
+    let mut keep = vec![false; items.len()];
+    let mut context = vec![false; items.len()];
+
+    for (i, item) in items.iter().enumerate() {
+        if let FlatItem::Task { section, path, .. } = item
+            && let Some(task) = resolve_task_from_flat(track, *section, path)
+        {
+            if task_matches_filter(task, filter, project) {
+                keep[i] = true;
+                // Mark all ancestors as context (they need to be shown for hierarchy)
+                mark_ancestors_kept(items, i, &mut keep, &mut context);
+            } else if has_matching_descendant(task, filter, project) {
+                keep[i] = true;
+                context[i] = true;
+            }
+        }
+        // ParkedSeparator: keep if any parked task is kept (handled below)
+    }
+
+    // Keep ParkedSeparator only if at least one Parked task is kept
+    for (i, item) in items.iter().enumerate() {
+        if matches!(item, FlatItem::ParkedSeparator) {
+            let has_parked = items[i + 1..].iter().enumerate().any(|(j, fi)| {
+                matches!(fi, FlatItem::Task { section: SectionKind::Parked, .. }) && keep[i + 1 + j]
+            });
+            keep[i] = has_parked;
+        }
+    }
+
+    // Apply: set is_context flags and remove non-kept items
+    let mut idx = 0;
+    items.retain_mut(|item| {
+        let retained = keep[idx];
+        if retained
+            && let FlatItem::Task { is_context: ctx, .. } = item
+        {
+            *ctx = context[idx];
+        }
+        idx += 1;
+        retained
+    });
+}
+
+/// Mark ancestor items as kept (context) by walking up the path hierarchy
+fn mark_ancestors_kept(
+    items: &[FlatItem],
+    child_idx: usize,
+    keep: &mut [bool],
+    context: &mut [bool],
+) {
+    if let FlatItem::Task { path, section, .. } = &items[child_idx] {
+        if path.len() <= 1 {
+            return; // top-level task, no ancestors
+        }
+        let child_section = *section;
+        // Walk backwards to find ancestor items (shorter path prefixes in the same section)
+        for ancestor_len in 1..path.len() {
+            let ancestor_path = &path[..ancestor_len];
+            for (j, item) in items[..child_idx].iter().enumerate().rev() {
+                if let FlatItem::Task {
+                    path: p,
+                    section: s,
+                    ..
+                } = item
+                    && *s == child_section
+                    && p.as_slice() == ancestor_path
+                {
+                    if !keep[j] {
+                        keep[j] = true;
+                        context[j] = true;
+                    }
+                    break;
+                }
+            }
         }
     }
 }

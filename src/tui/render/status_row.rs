@@ -15,6 +15,15 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
         Mode::Navigate if app.status_message.is_some() => {
             render_centered_message(app.status_message.as_deref().unwrap(), width, bg)
         }
+        Mode::Navigate if app.filter_pending => {
+            let mut spans = vec![
+                Span::styled(" f", Style::default().fg(app.theme.highlight).bg(bg).add_modifier(Modifier::BOLD)),
+                Span::styled("\u{258C}", Style::default().fg(app.theme.highlight).bg(bg)),
+            ];
+            let hint = "a=active o=todo b=blocked p=parked r=ready t=tag f=clear";
+            build_mode_hint(&mut spans, hint, width, bg, app.theme.text_bright);
+            Line::from(spans)
+        }
         Mode::Navigate => {
             if let Some(ref pattern) = app.last_search {
                 let mut spans = vec![Span::styled(
@@ -41,15 +50,28 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
             Line::from(spans)
         }
         Mode::Edit => {
+            let is_filter_tag = matches!(app.edit_target, Some(crate::tui::app::EditTarget::FilterTag));
+            let label = if is_filter_tag { "filter tag:" } else { "-- EDIT --" };
             let mode_label = Span::styled(
-                "-- EDIT --",
+                label,
                 Style::default()
                     .fg(app.theme.highlight)
                     .bg(bg)
                     .add_modifier(Modifier::BOLD),
             );
-            let hint = "Enter confirm  Esc cancel";
+            let hint = if is_filter_tag { "Enter select  Esc cancel" } else { "Enter confirm  Esc cancel" };
             let mut spans = vec![Span::styled(" ", Style::default().bg(bg)), mode_label];
+            if is_filter_tag {
+                spans.push(Span::styled(" ", Style::default().bg(bg)));
+                spans.push(Span::styled(
+                    app.edit_buffer.clone(),
+                    Style::default().fg(app.theme.text_bright).bg(bg),
+                ));
+                spans.push(Span::styled(
+                    "\u{258C}",
+                    Style::default().fg(app.theme.highlight).bg(bg),
+                ));
+            }
             let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
             let hint_width = hint.chars().count();
             if content_width + hint_width < width {

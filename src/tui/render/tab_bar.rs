@@ -4,7 +4,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::tui::app::{App, View};
+use crate::tui::app::{App, StateFilter, View};
 
 /// Render the tab bar: track tabs + special tabs, with separator line below
 pub fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
@@ -108,17 +108,87 @@ fn render_tabs(frame: &mut Frame, app: &App, area: Rect) -> Vec<usize> {
 
 fn render_separator(frame: &mut Frame, app: &App, area: Rect, sep_cols: &[usize]) {
     let width = area.width as usize;
-    let mut line: String = String::with_capacity(width * 3);
-    for col in 0..width {
-        if sep_cols.contains(&col) {
-            line.push('\u{2534}'); // ┴
-        } else {
-            line.push('\u{2500}'); // ─
+    let bg = app.theme.background;
+    let dim = app.theme.dim;
+
+    // Build filter indicator text if filter is active and in track view
+    let is_track_view = matches!(app.view, View::Track(_));
+    let filter = &app.filter_state;
+
+    if is_track_view && filter.is_active() {
+        // Build indicator spans: "filter: " + state + " " + #tag
+        let mut indicator_spans: Vec<Span> = Vec::new();
+        indicator_spans.push(Span::styled("filter: ", Style::default().fg(app.theme.purple).bg(bg)));
+
+        if let Some(sf) = &filter.state_filter {
+            let state_color = match sf {
+                StateFilter::Active => app.theme.state_color(crate::model::TaskState::Active),
+                StateFilter::Todo => app.theme.state_color(crate::model::TaskState::Todo),
+                StateFilter::Blocked => app.theme.state_color(crate::model::TaskState::Blocked),
+                StateFilter::Parked => app.theme.state_color(crate::model::TaskState::Parked),
+                StateFilter::Ready => app.theme.state_color(crate::model::TaskState::Active),
+            };
+            indicator_spans.push(Span::styled(
+                sf.label(),
+                Style::default().fg(state_color).bg(bg),
+            ));
         }
+
+        if let Some(ref tag) = filter.tag_filter {
+            if filter.state_filter.is_some() {
+                indicator_spans.push(Span::styled(" ", Style::default().bg(bg)));
+            }
+            let tag_color = app.theme.tag_color(tag);
+            indicator_spans.push(Span::styled(
+                format!("#{}", tag),
+                Style::default().fg(tag_color).bg(bg),
+            ));
+        }
+
+        // Calculate indicator width
+        let indicator_width: usize = indicator_spans.iter().map(|s| s.content.chars().count()).sum();
+        // +2: one space before indicator, one space after (right edge buffer)
+        let separator_end = width.saturating_sub(indicator_width + 2);
+
+        let mut spans: Vec<Span> = Vec::new();
+        // Build separator chars up to where indicator starts
+        let mut sep_text = String::with_capacity(separator_end * 3);
+        for col in 0..separator_end {
+            if sep_cols.contains(&col) {
+                sep_text.push('\u{2534}');
+            } else {
+                sep_text.push('\u{2500}');
+            }
+        }
+        spans.push(Span::styled(sep_text, Style::default().fg(dim).bg(bg)));
+        spans.push(Span::styled(" ", Style::default().bg(bg)));
+        spans.extend(indicator_spans);
+        // Trailing space
+        let current_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        if current_width < width {
+            spans.push(Span::styled(
+                " ".repeat(width - current_width),
+                Style::default().bg(bg),
+            ));
+        }
+
+        let line = Line::from(spans);
+        let sep_widget = Paragraph::new(line).style(Style::default().bg(bg));
+        frame.render_widget(sep_widget, area);
+    } else {
+        // No filter — plain separator
+        let mut line: String = String::with_capacity(width * 3);
+        for col in 0..width {
+            if sep_cols.contains(&col) {
+                line.push('\u{2534}');
+            } else {
+                line.push('\u{2500}');
+            }
+        }
+        let sep_widget = Paragraph::new(line)
+            .style(Style::default().fg(dim).bg(bg));
+        frame.render_widget(sep_widget, area);
     }
-    let sep_widget = Paragraph::new(line)
-        .style(Style::default().fg(app.theme.dim).bg(app.theme.background));
-    frame.render_widget(sep_widget, area);
 }
 
 /// Style for a tab: highlighted if current, normal otherwise

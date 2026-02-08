@@ -48,9 +48,25 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     if flat_items.is_empty() {
-        let empty = Paragraph::new(" No tasks")
-            .style(Style::default().fg(app.theme.dim).bg(app.theme.background));
-        frame.render_widget(empty, area);
+        if app.filter_state.is_active() {
+            let msg = " no matching tasks ";
+            let bg = app.theme.background;
+            let padding = (area.width as usize).saturating_sub(msg.len() + 1);
+            let warn_style = Style::default()
+                .fg(app.theme.text_bright)
+                .bg(ratatui::style::Color::Rgb(0x8D, 0x0B, 0x0B))
+                .add_modifier(Modifier::BOLD);
+            let line = Line::from(vec![
+                Span::styled(" ".repeat(padding), Style::default().bg(bg)),
+                Span::styled(msg, warn_style),
+            ]);
+            let empty = Paragraph::new(line).style(Style::default().bg(bg));
+            frame.render_widget(empty, area);
+        } else {
+            let empty = Paragraph::new(" No tasks")
+                .style(Style::default().fg(app.theme.dim).bg(app.theme.background));
+            frame.render_widget(empty, area);
+        }
         return;
     }
 
@@ -82,9 +98,12 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 is_expanded,
                 is_last_sibling,
                 ancestor_last,
+                is_context,
             } => {
                 if let Some(task) = resolve_task(track, *section, path) {
-                    let is_flash = task.id.as_deref()
+                    // Context rows (filter ancestors) are never selectable
+                    let effective_cursor = is_cursor && !is_context;
+                    let is_flash = !is_context && task.id.as_deref()
                         .is_some_and(|id| app.is_flashing(id));
                     let (line, col) = render_task_line(
                         app,
@@ -96,8 +115,9 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
                             is_last_sibling: *is_last_sibling,
                             ancestor_last,
                         },
-                        is_cursor,
+                        effective_cursor,
                         is_flash,
+                        *is_context,
                         area.width as usize,
                         search_re.as_ref(),
                     );
@@ -126,6 +146,13 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
         app.autocomplete_anchor = Some(anchor);
     } else if app.mode == Mode::Triage {
         // Cross-track move: anchor autocomplete to the cursor row
+        let screen_y = area.y + cursor.saturating_sub(scroll) as u16;
+        let screen_x = area.x + 4;
+        app.autocomplete_anchor = Some((screen_x, screen_y));
+    } else if app.mode == Mode::Edit
+        && matches!(app.edit_target, Some(EditTarget::FilterTag))
+    {
+        // Filter tag selection: anchor autocomplete to the cursor row
         let screen_y = area.y + cursor.saturating_sub(scroll) as u16;
         let screen_x = area.x + 4;
         app.autocomplete_anchor = Some((screen_x, screen_y));
@@ -168,6 +195,7 @@ fn render_task_line<'a>(
     info: &TaskLineInfo<'_>,
     is_cursor: bool,
     is_flash: bool,
+    is_context: bool,
     width: usize,
     search_re: Option<&Regex>,
 ) -> (Line<'a>, Option<u16>) {
@@ -175,7 +203,7 @@ fn render_task_line<'a>(
     let mut edit_col: Option<u16> = None;
     let bg = app.theme.background;
     let dim_style = Style::default().fg(app.theme.dim).bg(bg);
-    let state_color = app.theme.state_color(task.state);
+    let state_color = if is_context { app.theme.dim } else { app.theme.state_color(task.state) };
 
     // Row background: flash uses flash_bg, cursor uses selection_bg, normal uses background
     let row_bg = if is_flash {
@@ -268,7 +296,7 @@ fn render_task_line<'a>(
         abbreviated_id(task).map_or(String::new(), |s| format!("{} ", s))
     };
     if !id_text.is_empty() {
-        let id_style = if task.state == TaskState::Done {
+        let id_style = if is_context || task.state == TaskState::Done {
             Style::default().fg(app.theme.dim).bg(bg)
         } else if is_cursor {
             Style::default().fg(app.theme.selection_id).bg(bg)
@@ -294,7 +322,9 @@ fn render_task_line<'a>(
         && app.edit_target.as_ref().is_some_and(|et| matches!(et, EditTarget::ExistingTags { task_id, .. } if task.id.as_deref() == Some(task_id)));
 
     // Title (with search highlighting, or edit buffer if editing)
-    let title_style = if is_cursor {
+    let title_style = if is_context {
+        Style::default().fg(app.theme.dim).bg(bg)
+    } else if is_cursor {
         Style::default()
             .fg(app.theme.text_bright)
             .bg(bg)
@@ -445,7 +475,7 @@ fn render_task_line<'a>(
         spans.push(Span::styled("  ", Style::default().bg(bg)));
         for (i, tag) in task.tags.iter().enumerate() {
             let tag_color = app.theme.tag_color(tag);
-            let tag_style = if task.state == TaskState::Done {
+            let tag_style = if is_context || task.state == TaskState::Done {
                 Style::default().fg(app.theme.dim).bg(bg)
             } else {
                 Style::default().fg(tag_color).bg(bg)

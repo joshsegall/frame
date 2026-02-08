@@ -8,7 +8,7 @@ use crate::model::SectionKind;
 use crate::ops::search::{search_inbox, search_tasks};
 use crate::ops::task_ops::{self, InsertPosition};
 
-use super::app::{App, AutocompleteKind, AutocompleteState, DetailRegion, DetailState, EditHistory, EditTarget, FlatItem, Mode, MoveState, PendingMove, PendingMoveKind, TriageSource, View, resolve_task_from_flat};
+use super::app::{App, AutocompleteKind, AutocompleteState, DetailRegion, DetailState, EditHistory, EditTarget, FlatItem, Mode, MoveState, PendingMove, PendingMoveKind, StateFilter, TriageSource, View, resolve_task_from_flat};
 use super::undo::{Operation, UndoNavTarget};
 
 // ---------------------------------------------------------------------------
@@ -190,6 +190,13 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             }
             _ => {}
         }
+        return;
+    }
+
+    // Filter prefix key: 'f' was pressed, now handle second key
+    if app.filter_pending {
+        app.filter_pending = false;
+        handle_filter_key(app, key);
         return;
     }
 
@@ -545,8 +552,158 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             perform_undo(app);
         }
 
+        // Filter prefix key (track view only)
+        (KeyModifiers::NONE, KeyCode::Char('f')) => {
+            if matches!(app.view, View::Track(_)) {
+                app.filter_pending = true;
+            }
+        }
+
         _ => {}
     }
+}
+
+/// Handle the second key after 'f' prefix for filtering
+fn handle_filter_key(app: &mut App, key: KeyEvent) {
+    // Only applies to track view
+    if !matches!(app.view, View::Track(_)) {
+        return;
+    }
+
+    // Capture current task ID before changing filter so we can try to stay on it
+    let prev_task_id = get_cursor_task_id(app);
+
+    match key.code {
+        KeyCode::Char('a') => {
+            app.filter_state.state_filter = Some(StateFilter::Active);
+            reset_cursor_for_filter(app, prev_task_id.as_deref());
+        }
+        KeyCode::Char('o') => {
+            app.filter_state.state_filter = Some(StateFilter::Todo);
+            reset_cursor_for_filter(app, prev_task_id.as_deref());
+        }
+        KeyCode::Char('b') => {
+            app.filter_state.state_filter = Some(StateFilter::Blocked);
+            reset_cursor_for_filter(app, prev_task_id.as_deref());
+        }
+        KeyCode::Char('p') => {
+            app.filter_state.state_filter = Some(StateFilter::Parked);
+            reset_cursor_for_filter(app, prev_task_id.as_deref());
+        }
+        KeyCode::Char('r') => {
+            app.filter_state.state_filter = Some(StateFilter::Ready);
+            reset_cursor_for_filter(app, prev_task_id.as_deref());
+        }
+        KeyCode::Char('t') => {
+            // Open tag autocomplete for filter tag selection
+            begin_filter_tag_select(app);
+        }
+        KeyCode::Char(' ') => {
+            // Clear state filter only, keep tag filter
+            app.filter_state.clear_state();
+            reset_cursor_for_filter(app, prev_task_id.as_deref());
+        }
+        KeyCode::Char('f') => {
+            // Clear all filters
+            app.filter_state.clear_all();
+            reset_cursor_for_filter(app, prev_task_id.as_deref());
+        }
+        _ => {
+            // Unknown second key — ignore silently
+        }
+    }
+}
+
+/// Get the task ID at the current cursor position, if any.
+fn get_cursor_task_id(app: &mut App) -> Option<String> {
+    let track_id = app.current_track_id().map(|s| s.to_string())?;
+    let items = app.build_flat_items(&track_id);
+    let state = app.get_track_state(&track_id);
+    let cursor = state.cursor;
+    if cursor >= items.len() {
+        return None;
+    }
+    if let FlatItem::Task { section, path, .. } = &items[cursor] {
+        let track = App::find_track_in_project(&app.project, &track_id)?;
+        let task = resolve_task_from_flat(track, *section, path)?;
+        return task.id.clone();
+    }
+    None
+}
+
+/// Adjust cursor after filter change: try to stay on the same task ID,
+/// then fall back to keeping screen position, then find nearest selectable.
+fn reset_cursor_for_filter(app: &mut App, prev_task_id: Option<&str>) {
+    if let Some(track_id) = app.current_track_id().map(|s| s.to_string()) {
+        let items = app.build_flat_items(&track_id);
+        let old_cursor = app.get_track_state(&track_id).cursor;
+
+        if items.is_empty() {
+            let state = app.get_track_state(&track_id);
+            state.cursor = 0;
+            state.scroll_offset = 0;
+            return;
+        }
+
+        // First: try to find the same task ID in the filtered results
+        if let Some(target_id) = prev_task_id {
+            if let Some(track) = App::find_track_in_project(&app.project, &track_id) {
+                for (i, item) in items.iter().enumerate() {
+                    if let FlatItem::Task { section, path, is_context, .. } = item {
+                        if *is_context {
+                            continue;
+                        }
+                        if let Some(task) = resolve_task_from_flat(track, *section, path) {
+                            if task.id.as_deref() == Some(target_id) {
+                                app.get_track_state(&track_id).cursor = i;
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Second: try to keep screen position (clamp to valid range)
+        let cursor = old_cursor.min(items.len().saturating_sub(1));
+        if !is_non_selectable(&items[cursor]) {
+            app.get_track_state(&track_id).cursor = cursor;
+            return;
+        }
+
+        // Third: find nearest selectable item (prefer forward, then backward)
+        let forward = items[cursor..].iter().position(|item| !is_non_selectable(item));
+        if let Some(offset) = forward {
+            app.get_track_state(&track_id).cursor = cursor + offset;
+            return;
+        }
+        let backward = items[..cursor].iter().rposition(|item| !is_non_selectable(item));
+        if let Some(pos) = backward {
+            app.get_track_state(&track_id).cursor = pos;
+            return;
+        }
+
+        app.get_track_state(&track_id).cursor = 0;
+    }
+}
+
+/// Begin tag filter selection using tag autocomplete
+fn begin_filter_tag_select(app: &mut App) {
+    let candidates = app.collect_all_tags();
+    if candidates.is_empty() {
+        return;
+    }
+    // Enter Edit mode with a special edit target for filter tag selection
+    app.mode = Mode::Edit;
+    app.edit_buffer = String::new();
+    app.edit_cursor = 0;
+    app.edit_selection_anchor = None;
+    app.edit_target = Some(EditTarget::FilterTag);
+    app.edit_history = Some(EditHistory::new("", 0, 0));
+
+    let mut ac = AutocompleteState::new(AutocompleteKind::Tag, candidates);
+    ac.filter("");
+    app.autocomplete = Some(ac);
 }
 
 fn handle_search(app: &mut App, key: KeyEvent) {
@@ -1445,7 +1602,15 @@ fn handle_edit(app: &mut App, key: KeyEvent) {
                 return;
             }
             // Dismiss autocomplete on Esc (hide, don't destroy — typing will re-show)
+            // For FilterTag: Esc cancels the entire filter tag selection
             (_, KeyCode::Esc) => {
+                if matches!(app.edit_target, Some(EditTarget::FilterTag)) {
+                    app.autocomplete = None;
+                    app.edit_history = None;
+                    app.edit_selection_anchor = None;
+                    cancel_edit(app);
+                    return;
+                }
                 if let Some(ac) = &mut app.autocomplete {
                     ac.visible = false;
                 }
@@ -2041,6 +2206,16 @@ fn confirm_edit(app: &mut App) {
 
             app.status_message = Some(format!("renamed → \"{}\"", new_name));
         }
+        EditTarget::FilterTag => {
+            // Accept the tag from the edit buffer (may have been selected from autocomplete)
+            let tag_text = app.edit_buffer.clone();
+            let tag = tag_text.trim().strip_prefix('#').unwrap_or(tag_text.trim()).to_string();
+            if !tag.is_empty() {
+                let prev_task_id = get_cursor_task_id(app);
+                app.filter_state.tag_filter = Some(tag);
+                reset_cursor_for_filter(app, prev_task_id.as_deref());
+            }
+        }
     }
 }
 
@@ -2128,6 +2303,12 @@ fn cancel_edit(app: &mut App) {
             if let Some(cursor) = saved_cursor {
                 app.tracks_cursor = cursor;
             }
+        }
+        // FilterTag: cancel clears the tag filter
+        Some(EditTarget::FilterTag) => {
+            let prev_task_id = get_cursor_task_id(app);
+            app.filter_state.tag_filter = None;
+            reset_cursor_for_filter(app, prev_task_id.as_deref());
         }
         // For existing title/tags edit, cancel means revert (unchanged since we didn't write)
         _ => {}
@@ -2726,9 +2907,9 @@ fn move_cursor(app: &mut App, delta: i32) {
             let mut new_cursor = state.cursor as i32 + delta;
             new_cursor = new_cursor.clamp(0, item_count as i32 - 1);
 
-            // Skip ParkedSeparator
+            // Skip non-selectable items (separators and context rows)
             let new_cursor = new_cursor as usize;
-            let new_cursor = skip_separator(&flat_items, new_cursor, delta);
+            let new_cursor = skip_non_selectable(&flat_items, new_cursor, delta);
 
             state.cursor = new_cursor;
         }
@@ -2765,20 +2946,43 @@ fn move_cursor(app: &mut App, delta: i32) {
     }
 }
 
-/// Skip over ParkedSeparator items when navigating
-fn skip_separator(items: &[FlatItem], cursor: usize, direction: i32) -> usize {
+/// Check if a flat item is non-selectable (separator or context row)
+fn is_non_selectable(item: &FlatItem) -> bool {
+    match item {
+        FlatItem::ParkedSeparator => true,
+        FlatItem::Task { is_context, .. } => *is_context,
+    }
+}
+
+/// Skip over non-selectable items (separators and context rows) when navigating
+fn skip_non_selectable(items: &[FlatItem], cursor: usize, direction: i32) -> usize {
     if cursor >= items.len() {
         return cursor;
     }
-    if matches!(items[cursor], FlatItem::ParkedSeparator) {
-        let next = (cursor as i32 + direction).clamp(0, items.len() as i32 - 1) as usize;
-        if next != cursor && !matches!(items[next], FlatItem::ParkedSeparator) {
-            return next;
+    if is_non_selectable(&items[cursor]) {
+        // Try moving in the requested direction
+        let mut pos = cursor;
+        while pos < items.len() && is_non_selectable(&items[pos]) {
+            let next = (pos as i32 + direction).clamp(0, items.len() as i32 - 1) as usize;
+            if next == pos {
+                break;
+            }
+            pos = next;
         }
-        // If stuck, try the other direction
-        let prev = (cursor as i32 - direction).clamp(0, items.len() as i32 - 1) as usize;
-        if !matches!(items[prev], FlatItem::ParkedSeparator) {
-            return prev;
+        if pos < items.len() && !is_non_selectable(&items[pos]) {
+            return pos;
+        }
+        // If still stuck, try the other direction from original cursor
+        let mut pos = cursor;
+        while pos < items.len() && is_non_selectable(&items[pos]) {
+            let next = (pos as i32 - direction).clamp(0, items.len() as i32 - 1) as usize;
+            if next == pos {
+                break;
+            }
+            pos = next;
+        }
+        if pos < items.len() && !is_non_selectable(&items[pos]) {
+            return pos;
         }
     }
     cursor
@@ -2791,8 +2995,10 @@ fn jump_to_top(app: &mut App) {
                 Some(id) => id.clone(),
                 None => return,
             };
+            let flat_items = app.build_flat_items(&track_id);
+            let first = flat_items.iter().position(|item| !is_non_selectable(item)).unwrap_or(0);
             let state = app.get_track_state(&track_id);
-            state.cursor = 0;
+            state.cursor = first;
             state.scroll_offset = 0;
         }
         View::Detail { .. } => {
@@ -2828,8 +3034,8 @@ fn jump_to_bottom(app: &mut App) {
                 return;
             }
             let mut target = count - 1;
-            // Skip separator at end
-            target = skip_separator(&flat_items, target, -1);
+            // Skip non-selectable items at end
+            target = skip_non_selectable(&flat_items, target, -1);
             let state = app.get_track_state(&track_id);
             state.cursor = target;
         }

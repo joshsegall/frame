@@ -157,9 +157,18 @@ fn build_track_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("Space".into(), "Cycle state".into()),
         HelpEntry::Binding("o".into(), "Set todo".into()),
         HelpEntry::Binding("x".into(), "Mark done".into()),
-        HelpEntry::Binding("b".into(), "Toggle blocked".into()),
-        HelpEntry::Binding("~".into(), "Toggle parked".into()),
+        HelpEntry::Binding("b".into(), "Set blocked".into()),
+        HelpEntry::Binding("~".into(), "Set parked".into()),
         HelpEntry::Binding("c".into(), "Toggle cc tag".into()),
+        HelpEntry::Blank,
+        HelpEntry::Header("Filter (f+key)".into()),
+        HelpEntry::Binding("fa".into(), "Active only".into()),
+        HelpEntry::Binding("fo".into(), "Todo only".into()),
+        HelpEntry::Binding("fb".into(), "Blocked only".into()),
+        HelpEntry::Binding("fr".into(), "Ready (deps met)".into()),
+        HelpEntry::Binding("ft".into(), "Filter by tag".into()),
+        HelpEntry::Binding("f Space".into(), "Clear state filter".into()),
+        HelpEntry::Binding("ff".into(), "Clear all filters".into()),
     ];
 
     let right = vec![
