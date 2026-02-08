@@ -274,6 +274,16 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
     app.status_message = None;
     app.status_is_error = false;
 
+    // Track consecutive Esc presses; show quit hint after 5
+    if matches!(key.code, KeyCode::Esc) {
+        app.esc_streak = app.esc_streak.saturating_add(1);
+        if app.esc_streak >= 5 {
+            app.status_message = Some("type QQ to quit".to_string());
+        }
+    } else {
+        app.esc_streak = 0;
+    }
+
     // QQ quit: second Q confirms, any other key cancels
     if app.quit_pending {
         if matches!(
@@ -1039,6 +1049,16 @@ fn handle_select(app: &mut App, key: KeyEvent) {
     // Clear any transient status message on keypress
     app.status_message = None;
     app.status_is_error = false;
+
+    // Track consecutive Esc presses; show quit hint after 5
+    if matches!(key.code, KeyCode::Esc) {
+        app.esc_streak = app.esc_streak.saturating_add(1);
+        if app.esc_streak >= 5 {
+            app.status_message = Some("type QQ to quit".to_string());
+        }
+    } else {
+        app.esc_streak = 0;
+    }
 
     // QQ quit: second Q confirms, any other key cancels
     if app.quit_pending {

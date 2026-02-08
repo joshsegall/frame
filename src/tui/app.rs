@@ -692,6 +692,8 @@ pub struct App {
     pub status_message: Option<String>,
     /// If true, status_message renders with error style (bright text on red bg)
     pub status_is_error: bool,
+    /// Consecutive Esc presses in Navigate mode (shows quit hint at 5+)
+    pub esc_streak: u8,
     /// Edit mode: text buffer for inline editing
     pub edit_buffer: String,
     /// Edit mode: cursor position within the buffer
@@ -839,6 +841,7 @@ impl App {
             quit_pending: false,
             status_message: None,
             status_is_error: false,
+            esc_streak: 0,
             edit_buffer: String::new(),
             edit_cursor: 0,
             edit_target: None,
