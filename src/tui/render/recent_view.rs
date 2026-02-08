@@ -123,9 +123,12 @@ pub fn render_recent_view(frame: &mut Frame, app: &mut App, area: Rect) {
         }
 
         let title_style = if is_cursor {
-            Style::default().fg(app.theme.text_bright).bg(bg)
+            Style::default()
+                .fg(app.theme.text_bright)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(app.theme.text).bg(bg)
+            Style::default().fg(app.theme.text_bright).bg(bg)
         };
         let hl_style = Style::default()
             .fg(app.theme.search_match_fg)
@@ -144,22 +147,30 @@ pub fn render_recent_view(frame: &mut Frame, app: &mut App, area: Rect) {
             search_re.as_ref(),
         );
 
-        // Track origin
+        // Track origin (right-justified with 1-space buffer)
+        let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let track_label = &entry.track_name;
+        let track_label_width = track_label.len();
+        let w = area.width as usize;
+        // Position: right edge minus track name minus 1 space buffer
+        let track_start = w.saturating_sub(track_label_width + 1);
+        if content_width < track_start {
+            spans.push(Span::styled(
+                " ".repeat(track_start - content_width),
+                Style::default().bg(bg),
+            ));
+        }
         spans.push(Span::styled(
-            format!("  {}", entry.track_name),
-            Style::default().fg(app.theme.text).bg(bg),
+            track_label.clone(),
+            Style::default().fg(app.theme.dim).bg(bg),
         ));
-
-        // Pad cursor line
-        if is_cursor {
-            let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-            let w = area.width as usize;
-            if content_width < w {
-                spans.push(Span::styled(
-                    " ".repeat(w - content_width),
-                    Style::default().bg(bg),
-                ));
-            }
+        // 1-space right buffer
+        let final_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        if final_width < w {
+            spans.push(Span::styled(
+                " ".repeat(w - final_width),
+                Style::default().bg(bg),
+            ));
         }
 
         lines.push(Line::from(spans));
