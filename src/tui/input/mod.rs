@@ -435,7 +435,10 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
                 add_task_action(app, AddPosition::Bottom);
             }
         }
-        (KeyModifiers::NONE, KeyCode::Char('o') | KeyCode::Char('-')) => {
+        (KeyModifiers::NONE, KeyCode::Char('o')) => {
+            task_state_action(app, StateAction::SetTodo);
+        }
+        (KeyModifiers::NONE, KeyCode::Char('-')) => {
             if matches!(app.view, View::Inbox) {
                 inbox_insert_after(app);
             } else {
@@ -462,8 +465,8 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             }
         }
 
-        // Tag edit: # — detail view jump to tags region, inbox tag edit, or inline tag edit in track view
-        (KeyModifiers::NONE, KeyCode::Char('#')) => {
+        // Tag edit: t — detail view jump to tags region, inbox tag edit, or inline tag edit in track view
+        (KeyModifiers::NONE, KeyCode::Char('t')) => {
             if matches!(app.view, View::Detail { .. }) {
                 detail_jump_to_region_and_edit(app, DetailRegion::Tags);
             } else if matches!(app.view, View::Inbox) {
@@ -1004,6 +1007,7 @@ fn navigate_to_undo_target(app: &mut App, nav: &UndoNavTarget) {
 enum StateAction {
     Cycle,
     Done,
+    SetTodo,
     ToggleBlocked,
     ToggleParked,
 }
@@ -1043,6 +1047,7 @@ fn task_state_action(app: &mut App, action: StateAction) {
     match action {
         StateAction::Cycle => task_ops::cycle_state(task),
         StateAction::Done => task_ops::set_done(task),
+        StateAction::SetTodo => task_ops::set_state(task, crate::model::task::TaskState::Todo),
         StateAction::ToggleBlocked => task_ops::set_blocked(task),
         StateAction::ToggleParked => task_ops::set_parked(task),
     }
