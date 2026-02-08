@@ -162,7 +162,7 @@ With selection active (Select mode):
 | `e` | Edit track name |
 | `s` | Toggle shelve/activate |
 | `X` | Archive or delete track (with confirmation) |
-| `P` | Rename track prefix |
+| `R` | Rename track prefix |
 | `C` | Set cc-focus |
 | `m` | Reorder track (enter move mode) |
 

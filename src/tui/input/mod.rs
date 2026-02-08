@@ -601,7 +601,7 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
         }
 
         // Rename prefix (tracks view only)
-        (KeyModifiers::SHIFT, KeyCode::Char('P')) => {
+        (KeyModifiers::SHIFT, KeyCode::Char('R')) => {
             if matches!(app.view, View::Tracks) {
                 tracks_rename_prefix(app);
             }
