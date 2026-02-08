@@ -273,6 +273,8 @@ pub struct TriageState {
     pub step: TriageStep,
     /// Screen position for the position-selection popup (set when transitioning from track selection)
     pub popup_anchor: Option<(u16, u16)>,
+    /// Cursor for position selection (0=Top, 1=Bottom, 2=Cancel)
+    pub position_cursor: u8,
 }
 
 /// Confirmation prompt state

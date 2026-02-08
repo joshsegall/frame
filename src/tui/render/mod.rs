@@ -102,27 +102,41 @@ fn render_triage_position_popup(frame: &mut Frame, app: &App) {
     let track_name = app.track_name(track_id);
     let title = format!(" {} ", track_name);
 
-    let key_style = Style::default()
+    let cursor = ts.position_cursor;
+
+    let selected_style = Style::default()
         .fg(highlight)
         .bg(bg)
         .add_modifier(Modifier::BOLD);
-    let desc_style = Style::default().fg(text_color).bg(bg);
+    let normal_style = Style::default().fg(text_color).bg(bg);
     let hint_style = Style::default().fg(dim).bg(bg);
 
-    let entries: Vec<Line> = vec![
-        Line::from(vec![
-            Span::styled("  t   ", key_style),
-            Span::styled("Top of backlog  ", desc_style),
-        ]),
-        Line::from(vec![
-            Span::styled("  b   ", key_style),
-            Span::styled("Bottom (default)", desc_style),
-        ]),
-        Line::from(vec![
-            Span::styled("  Esc ", hint_style),
-            Span::styled("Cancel          ", hint_style),
-        ]),
+    let options: &[(&str, &str)] = &[
+        ("Top of backlog  ", "t"),
+        ("Bottom (default)", "b"),
+        ("Cancel          ", ""),
     ];
+
+    let entries: Vec<Line> = options
+        .iter()
+        .enumerate()
+        .map(|(i, (label, key))| {
+            let is_selected = i as u8 == cursor;
+            let (indicator, style) = if is_selected {
+                ("▸ ", selected_style)
+            } else {
+                ("  ", normal_style)
+            };
+            let mut spans = vec![
+                Span::styled(indicator, style),
+                Span::styled(*label, style),
+            ];
+            if !key.is_empty() {
+                spans.push(Span::styled(format!(" {}", key), hint_style));
+            }
+            Line::from(spans)
+        })
+        .collect();
 
     let popup_w: u16 = 24;
     let popup_h: u16 = entries.len() as u16 + 2; // +2 for borders

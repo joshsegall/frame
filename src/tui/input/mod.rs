@@ -4315,7 +4315,7 @@ fn inbox_begin_triage(app: &mut App) {
         .tracks
         .iter()
         .filter(|t| t.state == "active")
-        .map(|t| format!("{} ({})", t.name, t.id))
+        .map(|t| format!("{} ({})", t.name, t.id.to_uppercase()))
         .collect();
 
     if active_tracks.is_empty() {
@@ -4334,6 +4334,7 @@ fn inbox_begin_triage(app: &mut App) {
         inbox_index: app.inbox_cursor,
         step: super::app::TriageStep::SelectTrack,
         popup_anchor: None,
+        position_cursor: 1, // default to Bottom
     });
     app.mode = Mode::Triage;
 }
@@ -4385,13 +4386,13 @@ fn handle_triage_select_track(app: &mut App, key: KeyEvent) {
         (_, KeyCode::Enter) => {
             let selected = app.autocomplete.as_ref().and_then(|ac| ac.selected_entry().map(|s| s.to_string()));
             if let Some(entry) = selected {
-                // Extract track_id from "Track Name (track_id)"
+                // Extract track_id from "Track Name (TRACK_ID)" and lowercase it
                 let track_id = entry
                     .rsplit('(')
                     .next()
                     .and_then(|s| s.strip_suffix(')'))
                     .unwrap_or(&entry)
-                    .to_string();
+                    .to_lowercase();
 
                 // Verify track exists
                 let valid = app.project.config.tracks.iter().any(|t| t.id == track_id);
@@ -4440,11 +4441,39 @@ fn handle_triage_select_position(app: &mut App, key: KeyEvent, track_id: &str) {
             app.edit_buffer.clear();
         }
 
-        // t = top, b = bottom (default), Enter = bottom
+        // Navigate between options: 0=Top, 1=Bottom, 2=Cancel
+        (KeyModifiers::NONE, KeyCode::Up | KeyCode::Char('k')) => {
+            if let Some(ts) = &mut app.triage_state {
+                ts.position_cursor = ts.position_cursor.saturating_sub(1);
+            }
+        }
+        (KeyModifiers::NONE, KeyCode::Down | KeyCode::Char('j')) => {
+            if let Some(ts) = &mut app.triage_state {
+                ts.position_cursor = (ts.position_cursor + 1).min(2);
+            }
+        }
+
+        // Confirm selection
+        (_, KeyCode::Enter) => {
+            let cursor = app.triage_state.as_ref().map(|ts| ts.position_cursor).unwrap_or(1);
+            match cursor {
+                0 => execute_triage(app, track_id, InsertPosition::Top),
+                1 => execute_triage(app, track_id, InsertPosition::Bottom),
+                _ => {
+                    // Cancel
+                    app.mode = Mode::Navigate;
+                    app.triage_state = None;
+                    app.autocomplete = None;
+                    app.edit_buffer.clear();
+                }
+            }
+        }
+
+        // Direct shortcuts still work
         (KeyModifiers::NONE, KeyCode::Char('t')) => {
             execute_triage(app, track_id, InsertPosition::Top);
         }
-        (KeyModifiers::NONE, KeyCode::Char('b')) | (_, KeyCode::Enter) => {
+        (KeyModifiers::NONE, KeyCode::Char('b')) => {
             execute_triage(app, track_id, InsertPosition::Bottom);
         }
 
