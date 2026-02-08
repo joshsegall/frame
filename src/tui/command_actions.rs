@@ -269,6 +269,13 @@ fn static_actions() -> Vec<PaletteAction> {
             category: ActionCategory::Search,
         },
         PaletteAction {
+            id: "show_deps",
+            label: "Show dependencies".into(),
+            shortcut: Some("D"),
+            contexts: &[ViewContext::TrackView, ViewContext::DetailView],
+            category: ActionCategory::Navigate,
+        },
+        PaletteAction {
             id: "toggle_help",
             label: "Toggle help".into(),
             shortcut: Some("?"),

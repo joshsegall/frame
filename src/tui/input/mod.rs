@@ -9,7 +9,7 @@ use crate::model::SectionKind;
 use crate::ops::search::{search_inbox, search_tasks};
 use crate::ops::task_ops::{self, InsertPosition};
 
-use super::app::{App, AutocompleteKind, AutocompleteState, DetailRegion, DetailState, EditHistory, EditTarget, FlatItem, Mode, MoveState, PendingMove, PendingMoveKind, RepeatEditRegion, RepeatableAction, StateFilter, TriageSource, View, resolve_task_from_flat};
+use super::app::{App, AutocompleteKind, AutocompleteState, DepPopupEntry, DetailRegion, DetailState, EditHistory, EditTarget, FlatItem, Mode, MoveState, PendingMove, PendingMoveKind, RepeatEditRegion, RepeatableAction, StateFilter, TriageSource, View, resolve_task_from_flat};
 use super::undo::{Operation, UndoNavTarget};
 
 // ---------------------------------------------------------------------------
@@ -205,6 +205,12 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             }
             _ => {}
         }
+        return;
+    }
+
+    // Dep popup intercepts navigation keys
+    if app.dep_popup.is_some() {
+        handle_dep_popup_key(app, key);
         return;
     }
 
@@ -518,10 +524,14 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             }
         }
 
-        // Archive/delete track (tracks view only)
+        // Archive/delete track (tracks view only) or dep popup (track/detail view)
         (KeyModifiers::SHIFT, KeyCode::Char('D')) => {
             if matches!(app.view, View::Tracks) {
                 tracks_archive_or_delete(app);
+            } else if matches!(app.view, View::Track(_)) {
+                open_dep_popup_from_track_view(app);
+            } else if matches!(app.view, View::Detail { .. }) {
+                open_dep_popup_from_detail_view(app);
             }
         }
 
@@ -7584,6 +7594,13 @@ fn dispatch_palette_action(app: &mut App, action_id: &str, track_index: Option<u
         "jump_to_task" => {
             begin_jump_to(app);
         }
+        "show_deps" => {
+            if matches!(app.view, View::Track(_)) {
+                open_dep_popup_from_track_view(app);
+            } else if matches!(app.view, View::Detail { .. }) {
+                open_dep_popup_from_detail_view(app);
+            }
+        }
         "toggle_help" => {
             app.show_help = !app.show_help;
             app.help_scroll = 0;
@@ -8017,6 +8034,298 @@ fn palette_expand_all(app: &mut App) {
     if let Some(state) = app.track_states.get_mut(&track_id) {
         for key in keys_to_expand {
             state.expanded.insert(key);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dep popup
+// ---------------------------------------------------------------------------
+
+fn open_dep_popup_from_track_view(app: &mut App) {
+    if let Some((track_id, task_id, _section)) = app.cursor_task_id() {
+        app.open_dep_popup(&track_id, &task_id);
+    }
+}
+
+fn open_dep_popup_from_detail_view(app: &mut App) {
+    if let View::Detail {
+        ref track_id,
+        ref task_id,
+    } = app.view
+    {
+        let track_id = track_id.clone();
+        let task_id = task_id.clone();
+        app.open_dep_popup(&track_id, &task_id);
+    }
+}
+
+fn handle_dep_popup_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            app.dep_popup = None;
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            dep_popup_move_cursor(app, 1);
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            dep_popup_move_cursor(app, -1);
+        }
+        KeyCode::Char('g') => {
+            dep_popup_jump_top(app);
+        }
+        KeyCode::Char('G') => {
+            dep_popup_jump_bottom(app);
+        }
+        KeyCode::Char('l') | KeyCode::Right => {
+            dep_popup_expand(app);
+        }
+        KeyCode::Char('h') | KeyCode::Left => {
+            dep_popup_collapse(app);
+        }
+        KeyCode::Enter => {
+            dep_popup_jump_to_task(app);
+        }
+        _ => {}
+    }
+}
+
+fn dep_popup_move_cursor(app: &mut App, direction: i32) {
+    let dp = match &mut app.dep_popup {
+        Some(dp) => dp,
+        None => return,
+    };
+
+    let len = dp.entries.len();
+    if len == 0 {
+        return;
+    }
+
+    let mut new_cursor = dp.cursor;
+    loop {
+        if direction > 0 {
+            if new_cursor + 1 >= len {
+                break;
+            }
+            new_cursor += 1;
+        } else {
+            if new_cursor == 0 {
+                break;
+            }
+            new_cursor -= 1;
+        }
+        // Skip section headers and nothing entries
+        if matches!(
+            dp.entries.get(new_cursor),
+            Some(DepPopupEntry::Task { .. })
+        ) {
+            dp.cursor = new_cursor;
+            break;
+        }
+    }
+
+    // Adjust scroll to keep cursor visible
+    // The visible entry lines start at line 1 (after top blank line)
+    // but the entries map 1:1 to line indices + 1 (blank line offset)
+    dep_popup_adjust_scroll(dp);
+}
+
+fn dep_popup_adjust_scroll(dp: &mut super::app::DepPopupState) {
+    // We don't know the exact popup height here, but we'll use a reasonable estimate.
+    // The actual scroll adjustment happens based on cursor position relative to visible window.
+    // Use a max visible estimate of 15 entries.
+    let visible_entries = 15usize;
+    if dp.cursor < dp.scroll_offset {
+        dp.scroll_offset = dp.cursor;
+    }
+    if dp.cursor >= dp.scroll_offset + visible_entries {
+        dp.scroll_offset = dp.cursor - visible_entries + 1;
+    }
+}
+
+fn dep_popup_jump_top(app: &mut App) {
+    let dp = match &mut app.dep_popup {
+        Some(dp) => dp,
+        None => return,
+    };
+    // Find first selectable entry
+    if let Some(idx) = dp
+        .entries
+        .iter()
+        .position(|e| matches!(e, DepPopupEntry::Task { .. }))
+    {
+        dp.cursor = idx;
+        dep_popup_adjust_scroll(dp);
+    }
+}
+
+fn dep_popup_jump_bottom(app: &mut App) {
+    let dp = match &mut app.dep_popup {
+        Some(dp) => dp,
+        None => return,
+    };
+    // Find last selectable entry
+    if let Some(idx) = dp
+        .entries
+        .iter()
+        .rposition(|e| matches!(e, DepPopupEntry::Task { .. }))
+    {
+        dp.cursor = idx;
+        dep_popup_adjust_scroll(dp);
+    }
+}
+
+fn dep_popup_expand(app: &mut App) {
+    // Get the cursor entry info, then modify state
+    let (expand_key, should_rebuild) = {
+        let dp = match &app.dep_popup {
+            Some(dp) => dp,
+            None => return,
+        };
+        let entry = match dp.entries.get(dp.cursor) {
+            Some(DepPopupEntry::Task {
+                task_id,
+                has_children,
+                is_expanded,
+                is_circular,
+                is_dangling,
+                is_upstream,
+                ..
+            }) => {
+                if *is_circular || *is_dangling || !*has_children || *is_expanded {
+                    return;
+                }
+                let prefix = if *is_upstream { "up" } else { "down" };
+                format!("{}:{}", prefix, task_id)
+            }
+            _ => return,
+        };
+        (entry, true)
+    };
+
+    if should_rebuild {
+        if let Some(dp) = &mut app.dep_popup {
+            dp.expanded.insert(expand_key);
+        }
+        // Rebuild entries
+        let mut dp = app.dep_popup.take().unwrap();
+        app.rebuild_dep_popup_entries(&mut dp);
+        app.dep_popup = Some(dp);
+    }
+}
+
+fn dep_popup_collapse(app: &mut App) {
+    // Get the cursor entry info, then modify state
+    let collapse_key = {
+        let dp = match &app.dep_popup {
+            Some(dp) => dp,
+            None => return,
+        };
+        match dp.entries.get(dp.cursor) {
+            Some(DepPopupEntry::Task {
+                task_id,
+                is_expanded,
+                is_upstream,
+                depth,
+                ..
+            }) => {
+                if *is_expanded {
+                    // Collapse this entry
+                    let prefix = if *is_upstream { "up" } else { "down" };
+                    Some(format!("{}:{}", prefix, task_id))
+                } else if *depth > 0 {
+                    // Move cursor to parent — find the previous entry with depth-1
+                    let cursor = dp.cursor;
+                    let target_depth = depth - 1;
+                    let is_up = *is_upstream;
+                    let mut parent_idx = None;
+                    for i in (0..cursor).rev() {
+                        if let DepPopupEntry::Task {
+                            depth: d,
+                            is_upstream: u,
+                            ..
+                        } = &dp.entries[i]
+                        && *d == target_depth
+                        && *u == is_up
+                        {
+                            parent_idx = Some(i);
+                            break;
+                        }
+                    }
+                    if let Some(idx) = parent_idx {
+                        // Just move cursor to parent, don't collapse
+                        let dp = app.dep_popup.as_mut().unwrap();
+                        dp.cursor = idx;
+                        dep_popup_adjust_scroll(dp);
+                    }
+                    return;
+                } else {
+                    return;
+                }
+            }
+            _ => return,
+        }
+    };
+
+    if let Some(key) = collapse_key {
+        if let Some(dp) = &mut app.dep_popup {
+            dp.expanded.remove(&key);
+        }
+        let mut dp = app.dep_popup.take().unwrap();
+        // Remember cursor task id to restore cursor position
+        let cursor_task_id = match dp.entries.get(dp.cursor) {
+            Some(DepPopupEntry::Task { task_id, .. }) => Some(task_id.clone()),
+            _ => None,
+        };
+        app.rebuild_dep_popup_entries(&mut dp);
+        // Restore cursor position to the same task
+        if let Some(tid) = cursor_task_id {
+            if let Some(idx) = dp
+                .entries
+                .iter()
+                .position(|e| matches!(e, DepPopupEntry::Task { task_id, .. } if task_id == &tid))
+            {
+                dp.cursor = idx;
+            }
+        }
+        dep_popup_adjust_scroll(&mut dp);
+        app.dep_popup = Some(dp);
+    }
+}
+
+fn dep_popup_jump_to_task(app: &mut App) {
+    let (task_id, entry_track_id) = {
+        let dp = match &app.dep_popup {
+            Some(dp) => dp,
+            None => return,
+        };
+        match dp.entries.get(dp.cursor) {
+            Some(DepPopupEntry::Task {
+                task_id,
+                track_id,
+                is_dangling,
+                is_circular,
+                ..
+            }) => {
+                if *is_dangling || *is_circular {
+                    return;
+                }
+                (task_id.clone(), track_id.clone())
+            }
+            _ => return,
+        }
+    };
+
+    // Close popup and jump to the task
+    app.dep_popup = None;
+    if !app.jump_to_task(&task_id) {
+        // jump_to_task fails for Done-section tasks (not in flat items).
+        // Fall back to opening detail view if the task exists in a track.
+        if let Some(track_id) = entry_track_id {
+            app.open_detail(track_id, task_id);
+        } else {
+            app.status_message = Some(format!("task {} not found", task_id));
+            app.status_is_error = true;
         }
     }
 }

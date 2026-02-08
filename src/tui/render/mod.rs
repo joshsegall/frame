@@ -1,6 +1,7 @@
 pub mod autocomplete;
 pub mod command_palette;
 pub mod conflict_popup;
+pub mod dep_popup;
 pub mod detail_view;
 pub mod help_overlay;
 pub mod inbox_view;
@@ -57,6 +58,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         View::Recent => {
             recent_view::render_recent_view(frame, app, chunks[1]);
         }
+    }
+
+    // Dep popup overlay (rendered on top of content)
+    if app.dep_popup.is_some() {
+        dep_popup::render_dep_popup(frame, app, chunks[1]);
     }
 
     // Help overlay (rendered on top of everything)

@@ -219,6 +219,7 @@ fn build_track_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Header("Other".into()),
         HelpEntry::Binding("/".into(), "Search".into()),
         HelpEntry::Binding("J".into(), "Jump to task".into()),
+        HelpEntry::Binding("D".into(), "Show deps".into()),
         HelpEntry::Binding("C".into(), "Set cc-focus".into()),
         HelpEntry::Binding(".".into(), "Repeat last action".into()),
         HelpEntry::Binding("z/u".into(), "Undo".into()),
@@ -238,6 +239,7 @@ fn build_detail_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("S-Tab".into(), "Prev editable region".into()),
         HelpEntry::Binding("g/G".into(), "Top / bottom".into()),
         HelpEntry::Binding("J".into(), "Jump to task".into()),
+        HelpEntry::Binding("D".into(), "Show deps".into()),
         HelpEntry::Binding("Esc".into(), "Back".into()),
     ];
 

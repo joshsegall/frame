@@ -407,6 +407,56 @@ pub enum RepeatEditRegion {
     Note,
 }
 
+/// A single entry in the dep popup's flattened display list
+#[derive(Debug, Clone)]
+pub enum DepPopupEntry {
+    /// Section header ("Blocked by" or "Blocking")
+    SectionHeader {
+        label: &'static str,
+    },
+    /// A dependency task entry
+    Task {
+        task_id: String,
+        title: String,
+        state: Option<TaskState>,
+        track_id: Option<String>,
+        /// Depth in the expand tree (0 = direct dep, 1 = dep's dep, etc.)
+        depth: usize,
+        /// Whether this entry has children that can be expanded
+        has_children: bool,
+        is_expanded: bool,
+        /// True if this is a circular reference
+        is_circular: bool,
+        /// True if the task ID was not found in any track
+        is_dangling: bool,
+        /// True if this is in the "Blocked by" section (vs "Blocking")
+        is_upstream: bool,
+    },
+    /// "(nothing)" placeholder for empty sections
+    Nothing,
+}
+
+/// State for the dep popup overlay
+#[derive(Debug, Clone)]
+pub struct DepPopupState {
+    /// The root task ID whose deps we're showing
+    pub root_task_id: String,
+    /// Track ID of the root task
+    pub root_track_id: String,
+    /// Flattened entries for display
+    pub entries: Vec<DepPopupEntry>,
+    /// Cursor index into entries (skips section headers)
+    pub cursor: usize,
+    /// Scroll offset
+    pub scroll_offset: usize,
+    /// Set of expanded entry keys (task_id + upstream/downstream)
+    pub expanded: HashSet<String>,
+    /// Set of task IDs visited during expansion (for cycle detection)
+    pub visited: HashSet<String>,
+    /// Inverse dep index: task_id -> list of task_ids that depend on it
+    pub inverse_deps: HashMap<String, Vec<String>>,
+}
+
 /// Current interaction mode
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
@@ -655,6 +705,8 @@ pub struct App {
     pub last_action: Option<RepeatableAction>,
     /// Command palette state (active during Mode::Command)
     pub command_palette: Option<super::command_actions::CommandPaletteState>,
+    /// Dep popup state (overlay showing dependency relationships)
+    pub dep_popup: Option<DepPopupState>,
 }
 
 impl App {
@@ -759,6 +811,7 @@ impl App {
             range_anchor: None,
             last_action: None,
             command_palette: None,
+            dep_popup: None,
         }
     }
 
@@ -1247,6 +1300,230 @@ impl App {
         let state = self.get_track_state(track_id);
         for ancestor_id in ancestors_to_expand {
             state.expanded.insert(ancestor_id);
+        }
+    }
+
+    /// Build the inverse dependency index: for each task ID, which tasks depend on it.
+    pub fn build_dep_index(project: &Project) -> HashMap<String, Vec<String>> {
+        let mut index: HashMap<String, Vec<String>> = HashMap::new();
+        for (_, track) in &project.tracks {
+            for node in &track.nodes {
+                if let crate::model::TrackNode::Section { tasks, .. } = node {
+                    Self::collect_deps_recursive(tasks, &mut index);
+                }
+            }
+        }
+        index
+    }
+
+    fn collect_deps_recursive(tasks: &[Task], index: &mut HashMap<String, Vec<String>>) {
+        for task in tasks {
+            if let Some(task_id) = &task.id {
+                for m in &task.metadata {
+                    if let Metadata::Dep(deps) = m {
+                        for dep_id in deps {
+                            index
+                                .entry(dep_id.clone())
+                                .or_default()
+                                .push(task_id.clone());
+                        }
+                    }
+                }
+            }
+            Self::collect_deps_recursive(&task.subtasks, index);
+        }
+    }
+
+    /// Open the dep popup for a given task
+    pub fn open_dep_popup(&mut self, track_id: &str, task_id: &str) {
+        let inverse_deps = Self::build_dep_index(&self.project);
+        let mut state = DepPopupState {
+            root_task_id: task_id.to_string(),
+            root_track_id: track_id.to_string(),
+            entries: Vec::new(),
+            cursor: 0,
+            scroll_offset: 0,
+            expanded: HashSet::new(),
+            visited: HashSet::new(),
+            inverse_deps,
+        };
+        // Build the entry list
+        self.rebuild_dep_popup_entries(&mut state);
+        // Set initial cursor to first selectable entry
+        state.cursor = state
+            .entries
+            .iter()
+            .position(|e| matches!(e, DepPopupEntry::Task { .. }))
+            .unwrap_or(0);
+        self.dep_popup = Some(state);
+    }
+
+    /// Rebuild the flattened entry list for the dep popup.
+    /// Called on open and after expand/collapse.
+    pub fn rebuild_dep_popup_entries(&self, state: &mut DepPopupState) {
+        let task_id = state.root_task_id.clone();
+        state.entries.clear();
+
+        // Gather direct upstream deps (what this task depends on)
+        let mut upstream_ids: Vec<String> = Vec::new();
+        for (_, track) in &self.project.tracks {
+            if let Some(task) = crate::ops::task_ops::find_task_in_track(track, &task_id) {
+                for m in &task.metadata {
+                    if let Metadata::Dep(deps) = m {
+                        upstream_ids.extend(deps.iter().cloned());
+                    }
+                }
+                break;
+            }
+        }
+
+        // Gather direct downstream deps (what this task blocks)
+        let downstream_ids: Vec<String> = state
+            .inverse_deps
+            .get(&task_id)
+            .cloned()
+            .unwrap_or_default();
+
+        // Auto-expand logic: 1-2 entries → expand one level, 3+ → collapsed
+        let auto_expand_upstream = upstream_ids.len() <= 2;
+        let auto_expand_downstream = downstream_ids.len() <= 2;
+        if state.expanded.is_empty() {
+            // Only auto-expand on initial open
+            if auto_expand_upstream {
+                for id in &upstream_ids {
+                    state.expanded.insert(format!("up:{}", id));
+                }
+            }
+            if auto_expand_downstream {
+                for id in &downstream_ids {
+                    state.expanded.insert(format!("down:{}", id));
+                }
+            }
+        }
+
+        // "Blocked by" section
+        state.entries.push(DepPopupEntry::SectionHeader {
+            label: "Blocked by",
+        });
+        if upstream_ids.is_empty() {
+            state.entries.push(DepPopupEntry::Nothing);
+        } else {
+            for dep_id in &upstream_ids {
+                let mut visited = HashSet::new();
+                visited.insert(task_id.to_string());
+                self.add_dep_entry(state, dep_id, 0, true, &mut visited);
+            }
+        }
+
+        // "Blocking" section
+        state.entries.push(DepPopupEntry::SectionHeader {
+            label: "Blocking",
+        });
+        if downstream_ids.is_empty() {
+            state.entries.push(DepPopupEntry::Nothing);
+        } else {
+            for dep_id in &downstream_ids {
+                let mut visited = HashSet::new();
+                visited.insert(task_id.to_string());
+                self.add_dep_entry(state, dep_id, 0, false, &mut visited);
+            }
+        }
+    }
+
+    /// Add a single dep entry and its expanded children recursively
+    fn add_dep_entry(
+        &self,
+        state: &mut DepPopupState,
+        dep_id: &str,
+        depth: usize,
+        is_upstream: bool,
+        visited: &mut HashSet<String>,
+    ) {
+        // Cycle detection
+        if visited.contains(dep_id) {
+            state.entries.push(DepPopupEntry::Task {
+                task_id: dep_id.to_string(),
+                title: String::new(),
+                state: None,
+                track_id: None,
+                depth,
+                has_children: false,
+                is_expanded: false,
+                is_circular: true,
+                is_dangling: false,
+                is_upstream,
+            });
+            return;
+        }
+
+        // Find the task across all tracks
+        let mut found_task: Option<(&str, &Task)> = None;
+        for (tid, track) in &self.project.tracks {
+            if let Some(task) = crate::ops::task_ops::find_task_in_track(track, dep_id) {
+                found_task = Some((tid.as_str(), task));
+                break;
+            }
+        }
+
+        if let Some((found_track_id, task)) = found_task {
+            // Determine if this entry has children (further deps to explore)
+            let children_ids = if is_upstream {
+                // In "Blocked by": children are what this dep itself depends on
+                let mut ids = Vec::new();
+                for m in &task.metadata {
+                    if let Metadata::Dep(deps) = m {
+                        ids.extend(deps.iter().cloned());
+                    }
+                }
+                ids
+            } else {
+                // In "Blocking": children are what this dep is also blocking
+                state
+                    .inverse_deps
+                    .get(dep_id)
+                    .cloned()
+                    .unwrap_or_default()
+            };
+            let has_children = !children_ids.is_empty();
+
+            let expand_key = format!("{}:{}", if is_upstream { "up" } else { "down" }, dep_id);
+            let is_expanded = state.expanded.contains(&expand_key);
+
+            state.entries.push(DepPopupEntry::Task {
+                task_id: dep_id.to_string(),
+                title: task.title.clone(),
+                state: Some(task.state),
+                track_id: Some(found_track_id.to_string()),
+                depth,
+                has_children,
+                is_expanded,
+                is_circular: false,
+                is_dangling: false,
+                is_upstream,
+            });
+
+            // Recurse into expanded children
+            if is_expanded && has_children {
+                visited.insert(dep_id.to_string());
+                for child_id in &children_ids {
+                    self.add_dep_entry(state, child_id, depth + 1, is_upstream, visited);
+                }
+                visited.remove(dep_id);
+            }
+        } else {
+            // Dangling reference
+            state.entries.push(DepPopupEntry::Task {
+                task_id: dep_id.to_string(),
+                title: String::new(),
+                state: None,
+                track_id: None,
+                depth,
+                has_children: false,
+                is_expanded: false,
+                is_circular: false,
+                is_dangling: true,
+                is_upstream,
+            });
         }
     }
 
