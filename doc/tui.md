@@ -57,6 +57,7 @@ Full view of a single task showing all fields as navigable regions: Title, Tags,
 | `N` | Previous search match |
 | `>` | Open command palette |
 | `T` | Open tag color editor |
+| `J` | Jump to task by ID |
 | `z`, `u`, `Ctrl+Z` | Undo |
 | `Z`, `Ctrl+Y`, `Ctrl+Shift+Z` | Redo |
 
@@ -109,7 +110,6 @@ Full view of a single task showing all fields as navigable regions: Title, Tags,
 | `M` | Cross-track move |
 | `C` | Set/clear cc-focus |
 | `D` | Open dependency popup |
-| `J` | Jump to task by ID |
 | `.` | Repeat last action |
 
 **Filtering (prefix key `f`):**
@@ -232,7 +232,7 @@ With selection active (Select mode):
 | Key | Action |
 |-----|--------|
 | `D` | Open dependency popup |
-| `J` | Jump to task by ID |
+| `.` | Repeat last action |
 | `Esc`, `Backspace` | Return to Track view |
 
 ### Edit Mode
@@ -243,12 +243,12 @@ With selection active (Select mode):
 | `Left`, `Right` | Move cursor |
 | `Alt+Left`, `Alt+Right` | Move by word |
 | `Alt+b`, `Alt+f` | Move by word (readline) |
-| `Ctrl+A`, `Home` | Jump to start of line |
+| `Home` | Jump to start of line |
 | `Ctrl+E`, `End` | Jump to end of line |
 | `Backspace` | Delete backward |
 | `Alt+Backspace`, `Ctrl+Backspace` | Delete word backward |
 | `Shift+Left/Right` | Extend selection |
-| `Ctrl+A` | Select all (when cursor not at start) |
+| `Ctrl+A` | Select all |
 | `Ctrl+C` | Copy selection |
 | `Ctrl+X` | Cut selection |
 | `Ctrl+V` | Paste |
@@ -431,7 +431,6 @@ UI-relevant settings in `project.toml`:
 
 ```toml
 [ui]
-show_key_hints = false     # show key hints in status bar
 kitty_keyboard = true      # enhanced keyboard protocol (disable if terminal has issues)
 ref_extensions = ["md"]    # file types for ref/spec autocomplete
 ref_paths = ["doc"]        # directories for ref/spec autocomplete

@@ -9,7 +9,7 @@ name = "{name}"
 
 [agent]
 cc_focus = ""
-default_tags = ["cc-added"]
+default_tags = ["cc"]
 
 [clean]
 auto_clean = true

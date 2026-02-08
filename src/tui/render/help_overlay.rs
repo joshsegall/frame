@@ -279,6 +279,7 @@ fn build_detail_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("b".into(), "Set blocked".into()),
         HelpEntry::Binding("~".into(), "Set parked".into()),
         HelpEntry::Binding("M".into(), "Move to track".into()),
+        HelpEntry::Binding(".".into(), "Repeat last action".into()),
     ];
 
     (left, right)

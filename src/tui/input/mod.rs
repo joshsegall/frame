@@ -3335,10 +3335,10 @@ fn handle_edit(app: &mut App, key: KeyEvent) {
                 cancel_edit(app);
             }
         }
-        // Home / Ctrl+A (macOS Cmd+Left sends ^A): jump to start of line
+        // Select all: Ctrl+A
         (m, KeyCode::Char('a')) if m.contains(KeyModifiers::CONTROL) => {
-            app.edit_selection_anchor = None;
-            app.edit_cursor = 0;
+            app.edit_selection_anchor = Some(0);
+            app.edit_cursor = app.edit_buffer.len();
         }
         // End / Ctrl+E (macOS Cmd+Right sends ^E): jump to end of line
         (m, KeyCode::Char('e')) if m.contains(KeyModifiers::CONTROL) => {
@@ -5617,11 +5617,15 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
             app.edit_history = None;
             confirm_detail_multiline(app);
         }
-        // Home / Ctrl+A (macOS Cmd+Left sends ^A): jump to start of line
+        // Select all: Ctrl+A
         (m, KeyCode::Char('a')) if m.contains(KeyModifiers::CONTROL) => {
             if let Some(ds) = &mut app.detail_state {
-                ds.multiline_selection_anchor = None;
-                ds.edit_cursor_col = 0;
+                ds.multiline_selection_anchor = Some((0, 0));
+                let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
+                let last_line = edit_lines.len().saturating_sub(1);
+                let last_col = edit_lines.last().map_or(0, |l| l.len());
+                ds.edit_cursor_line = last_line;
+                ds.edit_cursor_col = last_col;
             }
         }
         // End / Ctrl+E (macOS Cmd+Right sends ^E): jump to end of line

@@ -550,7 +550,7 @@ fn static_actions() -> Vec<PaletteAction> {
             id: "repeat_action",
             label: "Repeat last action".into(),
             shortcut: Some("."),
-            contexts: &[ViewContext::TrackView],
+            contexts: &[ViewContext::TrackView, ViewContext::DetailView],
             category: ActionCategory::System,
         },
         // -- Detail View --
