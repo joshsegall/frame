@@ -739,6 +739,8 @@ pub struct App {
     pub view: View,
     pub mode: Mode,
     pub should_quit: bool,
+    /// Set to true after a project switch so the event loop can reinitialize the file watcher
+    pub watcher_needs_restart: bool,
     pub theme: Theme,
     /// IDs of active tracks (in display order)
     pub active_track_ids: Vec<String>,
@@ -912,6 +914,7 @@ impl App {
             view: initial_view,
             mode: Mode::Navigate,
             should_quit: false,
+            watcher_needs_restart: false,
             theme,
             active_track_ids,
             track_states,
@@ -2514,7 +2517,7 @@ pub fn run(project_dir_override: Option<&str>) -> Result<(), Box<dyn std::error:
     app.kitty_enabled = kitty_enabled;
 
     // Run event loop
-    let result = run_event_loop(&mut terminal, &mut app, watcher.as_ref());
+    let result = run_event_loop(&mut terminal, &mut app, watcher);
 
     // Save UI state before exit
     save_ui_state(&app);
@@ -2646,10 +2649,15 @@ fn format_key_debug(key: &crossterm::event::KeyEvent) -> String {
 fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
-    watcher: Option<&FrameWatcher>,
+    mut watcher: Option<FrameWatcher>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut save_counter = 0u32;
     loop {
+        // Reinitialize file watcher after project switch
+        if app.watcher_needs_restart {
+            app.watcher_needs_restart = false;
+            watcher = FrameWatcher::start(&app.project.frame_dir).ok();
+        }
         app.clear_expired_flash();
 
         // Flush expired pending moves (only in Navigate mode, like pending_reload)
@@ -2663,7 +2671,7 @@ fn run_event_loop(
         terminal.draw(|frame| render::render(frame, app))?;
 
         // Poll for file watcher events
-        if let Some(w) = watcher {
+        if let Some(w) = watcher.as_ref() {
             let events = w.poll();
             if !events.is_empty() {
                 // Collect all changed paths, dedup

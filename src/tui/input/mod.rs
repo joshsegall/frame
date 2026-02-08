@@ -9555,6 +9555,7 @@ fn handle_project_picker_key(app: &mut App, key: KeyEvent) {
 
                         // Replace app with a fresh App for the new project
                         *app = App::new(project);
+                        app.watcher_needs_restart = true;
 
                         // Restore UI state for the new project
                         super::app::restore_ui_state(app);
