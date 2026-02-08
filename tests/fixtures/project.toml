@@ -3,7 +3,6 @@ name = "lace"
 
 [agent]
 cc_focus = "infra"
-default_tags = ["cc-added"]
 
 [[tracks]]
 id = "effects"
@@ -39,3 +38,6 @@ effects = "EFF"
 unique-types = "UNQ"
 modules = "MOD"
 infra = "INFRA"
+
+[ui]
+default_tags = ["cc-added"]

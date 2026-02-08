@@ -33,7 +33,6 @@ name = "{{PROJECT_NAME}}"
 #
 [agent]
 cc_focus = ""                # track ID for `fr ready --cc` (empty = none)
-default_tags = ["cc"]        # tags always shown in autocomplete
 
 # Clean
 # -----
@@ -50,6 +49,7 @@ archive_per_track = true     # separate archive file per track
 
 [ui]
 kitty_keyboard = true        # enhanced keyboard protocol (set false if your terminal has issues)
+default_tags = ["cc"]        # tags always shown in autocomplete
 # ref_extensions = ["md"]    # file extensions for ref/spec autocomplete (empty = all)
 ref_paths = ["doc", "spec", "docs", "design", "papers"]  # directories for ref/spec autocomplete (empty = whole project)
 

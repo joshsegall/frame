@@ -1238,8 +1238,8 @@ impl App {
             tags.insert(key.clone());
         }
 
-        // Tags from agent default_tags
-        for tag in &self.project.config.agent.default_tags {
+        // Tags from UI default_tags
+        for tag in &self.project.config.ui.default_tags {
             tags.insert(tag.clone());
         }
 

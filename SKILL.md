@@ -272,7 +272,7 @@ directory. The registry lives at `~/.config/frame/projects.toml`.
 
 Tag tasks you create with `#cc-added` so the human knows an agent filed them.
 This is configured as a default tag in `project.toml` under
-`[agent] default_tags`.
+`[ui] default_tags`.
 
 ### When to use `fr inbox` vs `fr add`
 

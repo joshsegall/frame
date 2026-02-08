@@ -149,7 +149,6 @@ Settings for AI agent integration:
 ```toml
 [agent]
 cc_focus = "effects"       # track for `fr ready --cc`
-default_tags = ["cc"]        # tags always shown in autocomplete (even if no tasks use them yet)
 ```
 
 ### `[clean]`
@@ -172,6 +171,7 @@ TUI display settings:
 kitty_keyboard = true      # Kitty keyboard protocol (default: true, set false if terminal has issues)
 ref_extensions = ["md"]    # file extensions for ref/spec autocomplete (empty = all)
 ref_paths = ["doc", "spec", "docs", "design", "papers"]  # directories for ref/spec autocomplete (empty = whole project)
+default_tags = ["cc"]      # tags always shown in autocomplete (even if no tasks use them yet)
 
 [ui.tag_colors]
 bug = "#FF4444"

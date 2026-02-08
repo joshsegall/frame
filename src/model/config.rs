@@ -26,8 +26,6 @@ pub struct ProjectInfo {
 pub struct AgentConfig {
     #[serde(default)]
     pub cc_focus: Option<String>,
-    #[serde(default)]
-    pub default_tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +91,9 @@ pub struct UiConfig {
     /// If empty, the whole project is searched.
     #[serde(default)]
     pub ref_paths: Vec<String>,
+    /// Tags always shown in autocomplete (even if no tasks use them yet).
+    #[serde(default)]
+    pub default_tags: Vec<String>,
     /// Kitty keyboard protocol: true = force on, false = force off, absent = on (default).
     /// Disable if your terminal has issues with enhanced key reporting.
     #[serde(default)]
@@ -107,6 +108,7 @@ impl Default for UiConfig {
             tag_colors: HashMap::new(),
             ref_extensions: Vec::new(),
             ref_paths: Vec::new(),
+            default_tags: Vec::new(),
             kitty_keyboard: None,
         }
     }

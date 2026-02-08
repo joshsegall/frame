@@ -402,7 +402,7 @@ Appears when an external file change conflicts with an in-progress edit. Shows t
 
 Activates automatically during editing:
 
-- **Tag editing** — suggests tags from config `tag_colors`, `agent.default_tags`, and all existing tags
+- **Tag editing** — suggests tags from config `tag_colors`, `ui.default_tags`, and all existing tags
 - **Dep editing** — suggests task IDs from all tracks
 - **Spec/Ref editing** — suggests file paths from the project (up to 3 levels deep, filtered by `ref_extensions` and `ref_paths` config)
 
