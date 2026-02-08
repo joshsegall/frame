@@ -352,10 +352,8 @@ fn render_track_row<'a>(
     // ID prefix column (gap + uppercase left-aligned ID padded to max_id_len)
     spans.push(Span::styled("  ", Style::default().bg(bg)));
     let id_style = Style::default().fg(app.theme.text).bg(bg);
-    spans.push(Span::styled(
-        format!("{:<width$}", tc.id.to_uppercase(), width = max_id_len),
-        id_style,
-    ));
+    let id_text = format!("{:<width$}", tc.id.to_uppercase(), width = max_id_len);
+    push_highlighted_spans(&mut spans, &id_text, id_style, hl_style, search_re);
 
     // Stat columns: todo, active, blocked, done, parked
     let counts = [

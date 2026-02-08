@@ -372,7 +372,11 @@ fn render_task_line<'a>(
         } else {
             Style::default().fg(app.theme.text).bg(bg)
         };
-        spans.push(Span::styled(id_text, id_style));
+        let highlight_style = Style::default()
+            .fg(app.theme.search_match_fg)
+            .bg(app.theme.search_match_bg)
+            .add_modifier(Modifier::BOLD);
+        push_highlighted_spans(&mut spans, &id_text, id_style, highlight_style, search_re);
     }
 
     // Check if this task is being edited inline (title or tags)
@@ -547,6 +551,10 @@ fn render_task_line<'a>(
         }
     } else if !task.tags.is_empty() {
         spans.push(Span::styled("  ", Style::default().bg(bg)));
+        let tag_hl_style = Style::default()
+            .fg(app.theme.search_match_fg)
+            .bg(app.theme.search_match_bg)
+            .add_modifier(Modifier::BOLD);
         for (i, tag) in task.tags.iter().enumerate() {
             let tag_color = app.theme.tag_color(tag);
             let tag_style = if is_context || task.state == TaskState::Done {
@@ -557,7 +565,13 @@ fn render_task_line<'a>(
             if i > 0 {
                 spans.push(Span::styled(" ", Style::default().bg(bg)));
             }
-            spans.push(Span::styled(format!("#{}", tag), tag_style));
+            push_highlighted_spans(
+                &mut spans,
+                &format!("#{}", tag),
+                tag_style,
+                tag_hl_style,
+                search_re,
+            );
         }
     }
 

@@ -115,10 +115,18 @@ pub fn render_recent_view(frame: &mut Frame, app: &mut App, area: Rect) {
         }
 
         if !entry.id.is_empty() {
-            spans.push(Span::styled(
-                format!("{} ", entry.id),
-                Style::default().fg(app.theme.text).bg(bg),
-            ));
+            let id_style = Style::default().fg(app.theme.text).bg(bg);
+            let hl_style = Style::default()
+                .fg(app.theme.search_match_fg)
+                .bg(app.theme.search_match_bg)
+                .add_modifier(Modifier::BOLD);
+            push_highlighted_spans(
+                &mut spans,
+                &format!("{} ", entry.id),
+                id_style,
+                hl_style,
+                search_re.as_ref(),
+            );
         }
 
         let title_style = if is_cursor {
@@ -275,10 +283,18 @@ fn render_subtask_tree<'a>(
 
         // ID
         if let Some(ref id) = task.id {
-            spans.push(Span::styled(
-                format!("{} ", id),
-                Style::default().fg(app.theme.dim).bg(bg),
-            ));
+            let id_style = Style::default().fg(app.theme.dim).bg(bg);
+            let hl_style = Style::default()
+                .fg(app.theme.search_match_fg)
+                .bg(app.theme.search_match_bg)
+                .add_modifier(Modifier::BOLD);
+            push_highlighted_spans(
+                &mut spans,
+                &format!("{} ", id),
+                id_style,
+                hl_style,
+                search_re,
+            );
         }
 
         // Title

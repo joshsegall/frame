@@ -143,15 +143,23 @@ pub fn render_inbox_view(frame: &mut Frame, app: &mut App, area: Rect) {
             }
         } else if !item.tags.is_empty() {
             spans.push(Span::styled("  ", Style::default().bg(bg)));
+            let tag_hl_style = Style::default()
+                .fg(app.theme.search_match_fg)
+                .bg(app.theme.search_match_bg)
+                .add_modifier(Modifier::BOLD);
             for (j, tag) in item.tags.iter().enumerate() {
                 if j > 0 {
                     spans.push(Span::styled(" ", Style::default().bg(bg)));
                 }
                 let tag_color = app.theme.tag_color(tag);
-                spans.push(Span::styled(
-                    format!("#{}", tag),
-                    Style::default().fg(tag_color).bg(bg),
-                ));
+                let tag_style = Style::default().fg(tag_color).bg(bg);
+                push_highlighted_spans(
+                    &mut spans,
+                    &format!("#{}", tag),
+                    tag_style,
+                    tag_hl_style,
+                    search_re.as_ref(),
+                );
             }
         }
 
@@ -171,14 +179,25 @@ pub fn render_inbox_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
         // Body text (dimmed, indented)
         if let Some(body) = &item.body {
+            let body_style =
+                Style::default().fg(app.theme.text).bg(app.theme.background);
+            let body_hl_style = Style::default()
+                .fg(app.theme.search_match_fg)
+                .bg(app.theme.search_match_bg)
+                .add_modifier(Modifier::BOLD);
             for body_line in body.lines() {
-                let body_spans = vec![
-                    Span::styled("      ", Style::default().bg(app.theme.background)),
-                    Span::styled(
-                        body_line.to_string(),
-                        Style::default().fg(app.theme.text).bg(app.theme.background),
-                    ),
-                ];
+                let mut body_spans: Vec<Span> = Vec::new();
+                body_spans.push(Span::styled(
+                    "      ",
+                    Style::default().bg(app.theme.background),
+                ));
+                push_highlighted_spans(
+                    &mut body_spans,
+                    body_line,
+                    body_style,
+                    body_hl_style,
+                    search_re.as_ref(),
+                );
                 display_lines.push((Some(i), Line::from(body_spans)));
             }
         }
