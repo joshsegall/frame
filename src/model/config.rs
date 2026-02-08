@@ -40,10 +40,13 @@ pub struct TrackConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CleanConfig {
+    /// Default: see src/templates/project.toml
     #[serde(default = "default_true")]
     pub auto_clean: bool,
+    /// Default: see src/templates/project.toml
     #[serde(default = "default_done_threshold")]
     pub done_threshold: usize,
+    /// Default: see src/templates/project.toml
     #[serde(default = "default_true")]
     pub archive_per_track: bool,
 }
@@ -58,10 +61,12 @@ impl Default for CleanConfig {
     }
 }
 
+/// Default: see src/templates/project.toml
 fn default_true() -> bool {
     true
 }
 
+/// Default: see src/templates/project.toml
 fn default_done_threshold() -> usize {
     250
 }

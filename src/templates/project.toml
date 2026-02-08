@@ -1,0 +1,70 @@
+# Frame project configuration
+# Docs: https://github.com/[owner]/frame
+
+[project]
+name = "{{PROJECT_NAME}}"
+
+# Tracks
+# ------
+# Each [[tracks]] entry defines a workstream. State is one of:
+#   active   – shown in tabs and listings
+#   shelved  – hidden from default views, preserved for later
+#   archived – moved to frame/archive/, read-only
+#
+# Example:
+#
+# [[tracks]]
+# id = "api"
+# name = "API Layer"
+# state = "active"
+# file = "tracks/api.md"
+
+# ID Prefixes
+# -----------
+# Maps track IDs to the uppercase prefix used for task IDs.
+# e.g. track "api" with prefix "API" generates API-001, API-002, etc.
+#
+# [ids.prefixes]
+# api = "API"
+
+# Agent
+# -----
+# Settings for AI coding agent integration.
+#
+[agent]
+cc_focus = ""                # track ID for `fr ready --cc` (empty = none)
+default_tags = ["cc"]        # tags always shown in autocomplete
+
+# Clean
+# -----
+# Auto-clean and archival settings.
+
+[clean]
+auto_clean = true            # run clean after file reload in TUI
+done_threshold = 250         # max done tasks per track before archiving
+archive_per_track = true     # separate archive file per track
+
+# UI
+# --
+# TUI display settings.
+
+[ui]
+kitty_keyboard = true        # enhanced keyboard protocol (set false if your terminal has issues)
+# ref_extensions = ["md"]    # file extensions for ref/spec autocomplete (empty = all)
+ref_paths = ["doc", "spec", "docs", "design", "papers"]  # directories for ref/spec autocomplete (empty = whole project)
+
+# Tag Colors
+# ----------
+# Assign colors to tags. Values are hex colors.
+#
+# [ui.tag_colors]
+# bug = "#FF4444"
+# design = "#44DDFF"
+# ready = "#44FF88"
+# cc = "#CC66FF"
+
+# Color Overrides
+# ---------------
+# Override default state/UI colors.
+#
+# [ui.colors]

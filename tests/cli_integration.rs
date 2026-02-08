@@ -987,3 +987,41 @@ fn test_track_delete_non_empty_fails() {
     assert!(!success);
     assert!(stderr.contains("tasks") || stderr.contains("not empty") || stderr.contains("has"));
 }
+
+// ---------------------------------------------------------------------------
+// Init tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_init_with_tracks() {
+    let tmp = tempfile::TempDir::new().unwrap();
+
+    let out = run_fr_ok(
+        tmp.path(),
+        &["init", "--name", "Test Project", "--track", "api", "API Layer"],
+    );
+    assert!(out.contains("Initialized"));
+    assert!(out.contains("Test Project"));
+
+    // project.toml exists and is valid TOML
+    let toml_content =
+        fs::read_to_string(tmp.path().join("frame/project.toml")).unwrap();
+    let parsed: toml::Value = toml::from_str(&toml_content).unwrap();
+    assert_eq!(
+        parsed["project"]["name"].as_str().unwrap(),
+        "Test Project"
+    );
+
+    // Contains expected sections from the template
+    assert!(toml_content.contains("[clean]"));
+    assert!(toml_content.contains("[ui]"));
+    assert!(toml_content.contains("[agent]"));
+    assert!(toml_content.contains("[[tracks]]"));
+    assert!(toml_content.contains("id = \"api\""));
+    assert!(toml_content.contains("[ids.prefixes]"));
+
+    // Track file exists
+    assert!(tmp.path().join("frame/tracks/api.md").exists());
+    // Inbox exists
+    assert!(tmp.path().join("frame/inbox.md").exists());
+}

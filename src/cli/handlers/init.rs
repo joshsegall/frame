@@ -4,68 +4,7 @@ use crate::cli::commands::InitArgs;
 use crate::io::project_io;
 use crate::ops::track_ops::generate_prefix;
 
-const PROJECT_TOML_TEMPLATE: &str = r##"[project]
-name = "{name}"
-
-[agent]
-cc_focus = ""
-default_tags = ["cc"]
-
-[clean]
-auto_clean = true
-done_threshold = 250
-archive_per_track = true
-
-# Directories to search for spec: and ref: path validation and autocomplete.
-# Paths are relative to the project root (parent of frame/).
-ref_paths = ["doc", "spec", "docs", "design", "papers"]
-
-# --- Tracks ---
-# Add tracks with [[tracks]] entries, or use: fr track new <id> "name"
-#
-# [[tracks]]
-# id = "example"
-# name = "Example Track"
-# state = "active"
-# file = "tracks/example.md"
-
-# --- ID Prefixes ---
-# Map track IDs to uppercase prefixes for task numbering.
-# Auto-generated when tracks are created. Edit freely.
-#
-# [ids.prefixes]
-# example = "EXA"
-
-# --- UI Customization ---
-# Uncomment and edit to override defaults.
-
-[ui]
-# # search only these directories for references and spec autocomplete
-ref_paths = ["doc", "spec", "docs", "design", "papers"]
-
-# # include only these file extensions in refs and spec autocomplete
-# ref_extensions = ["md", "txt", "rst", "pdf", "toml", "yaml"]
-# show_key_hints = false
-#
-# [ui.colors]
-# background = "#0C001B"
-# text = "#A09BFE"
-# text_bright = "#FFFFFF"
-# highlight = "#FB4196"
-# dim = "#5A5580"
-# red = "#FF4444"
-# yellow = "#FFD700"
-# green = "#44FF88"
-# cyan = "#44DDFF"
-#
-# [ui.tag_colors]
-# research = "#4488FF"
-# design = "#44DDFF"
-# bug = "#FF4444"
-# cc = "#44FF88"
-# cc-added = "#CC66FF"
-# needs-input = "#FFD700"
-"##;
+const PROJECT_TOML_TEMPLATE: &str = include_str!("../../templates/project.toml");
 
 const INBOX_TEMPLATE: &str = "# Inbox\n";
 
@@ -120,45 +59,36 @@ fn parse_track_pairs(args: &[String]) -> Vec<(&str, &str)> {
         .collect()
 }
 
-/// Render project.toml with tracks and prefixes replacing the commented examples.
+/// Render project.toml from the embedded template.
+///
+/// Replaces `{{PROJECT_NAME}}` with the project name. If tracks are provided,
+/// appends `[[tracks]]` entries and `[ids.prefixes]` table at the end.
 fn render_project_toml(
     name: &str,
     tracks: &[(&str, &str)],
     prefixes: &[(String, String)],
 ) -> String {
-    let base = PROJECT_TOML_TEMPLATE.replace("{name}", name);
+    let mut output = PROJECT_TOML_TEMPLATE.replace("{{PROJECT_NAME}}", name);
 
     if tracks.is_empty() {
-        return base;
+        return output;
     }
 
-    // Build track entries
-    let mut track_section = String::new();
+    // Append track entries
     for (id, tname) in tracks {
-        track_section.push_str(&format!(
+        output.push_str(&format!(
             "\n[[tracks]]\nid = \"{}\"\nname = \"{}\"\nstate = \"active\"\nfile = \"tracks/{}.md\"\n",
             id, tname, id
         ));
     }
 
-    // Build prefix entries
-    let mut prefix_section = String::new();
-    prefix_section.push_str("\n[ids.prefixes]\n");
+    // Append prefix table
+    output.push_str("\n[ids.prefixes]\n");
     for (id, pfx) in prefixes {
-        prefix_section.push_str(&format!("{} = \"{}\"\n", id, pfx));
+        output.push_str(&format!("{} = \"{}\"\n", id, pfx));
     }
 
-    // Replace commented track section with real entries
-    let result = base.replace(
-        "# --- Tracks ---\n# Add tracks with [[tracks]] entries, or use: fr track new <id> \"name\"\n#\n# [[tracks]]\n# id = \"example\"\n# name = \"Example Track\"\n# state = \"active\"\n# file = \"tracks/example.md\"",
-        &format!("# --- Tracks ---{}", track_section.trim_end()),
-    );
-
-    // Replace commented prefix section with real entries
-    result.replace(
-        "# --- ID Prefixes ---\n# Map track IDs to uppercase prefixes for task numbering.\n# Auto-generated when tracks are created. Edit freely.\n#\n# [ids.prefixes]\n# example = \"EXA\"",
-        &format!("# --- ID Prefixes ---\n# Map track IDs to uppercase prefixes for task numbering.\n# Auto-generated when tracks are created. Edit freely.\n{}", prefix_section.trim_end()),
-    )
+    output
 }
 
 pub fn cmd_init(args: InitArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -281,30 +211,82 @@ mod tests {
     }
 
     #[test]
+    fn test_template_embedding() {
+        assert!(!PROJECT_TOML_TEMPLATE.is_empty());
+        assert!(PROJECT_TOML_TEMPLATE.contains("{{PROJECT_NAME}}"));
+    }
+
+    #[test]
     fn test_render_project_toml_no_tracks() {
-        let result = render_project_toml("Test Project", &[], &[]);
-        assert!(result.contains("name = \"Test Project\""));
-        assert!(result.contains("# [[tracks]]"));
-        assert!(result.contains("# [ids.prefixes]"));
+        let result = render_project_toml("My Project", &[], &[]);
+        assert!(result.contains("name = \"My Project\""));
+        assert!(!result.contains("{{PROJECT_NAME}}"));
+        // Template has commented-out examples (# [[tracks]]), but no real entries
+        assert!(!result.contains("\n[[tracks]]"));
+        assert!(!result.contains("\n[ids.prefixes]"));
+        assert!(result.contains("[clean]"));
+        assert!(result.contains("[ui]"));
     }
 
     #[test]
     fn test_render_project_toml_with_tracks() {
-        let tracks = vec![("effects", "Effect System"), ("infra", "Infrastructure")];
+        let tracks = vec![("api", "API Layer"), ("ui", "UI")];
         let prefixes = vec![
-            ("effects".to_string(), "EFF".to_string()),
-            ("infra".to_string(), "INF".to_string()),
+            ("api".to_string(), "API".to_string()),
+            ("ui".to_string(), "UI".to_string()),
         ];
         let result = render_project_toml("Test", &tracks, &prefixes);
-        assert!(result.contains("id = \"effects\""));
-        assert!(result.contains("name = \"Effect System\""));
-        assert!(result.contains("file = \"tracks/effects.md\""));
-        assert!(result.contains("id = \"infra\""));
+        assert!(result.contains("[[tracks]]"));
+        assert!(result.contains("id = \"api\""));
+        assert!(result.contains("name = \"API Layer\""));
+        assert!(result.contains("file = \"tracks/api.md\""));
+        assert!(result.contains("id = \"ui\""));
+        assert!(result.contains("name = \"UI\""));
         assert!(result.contains("[ids.prefixes]"));
-        assert!(result.contains("effects = \"EFF\""));
-        assert!(result.contains("infra = \"INF\""));
-        // Should NOT contain commented examples
-        assert!(!result.contains("# id = \"example\""));
-        assert!(!result.contains("# example = \"EXA\""));
+        assert!(result.contains("api = \"API\""));
+        assert!(result.contains("ui = \"UI\""));
+    }
+
+    #[test]
+    fn test_render_prefix_collision() {
+        // "api" and "app" would both naively get "API" — generate_prefix handles this
+        let tracks = vec![("api", "API Service"), ("app", "Application")];
+        let mut existing_prefixes: Vec<String> = Vec::new();
+        let mut prefixes = Vec::new();
+        for (id, _) in &tracks {
+            let pfx = generate_prefix(id, &existing_prefixes);
+            existing_prefixes.push(pfx.clone());
+            prefixes.push((id.to_string(), pfx));
+        }
+        // Prefixes must be distinct
+        assert_ne!(prefixes[0].1, prefixes[1].1);
+
+        let result = render_project_toml("Test", &tracks, &prefixes);
+        assert!(result.contains(&format!("api = \"{}\"", prefixes[0].1)));
+        assert!(result.contains(&format!("app = \"{}\"", prefixes[1].1)));
+    }
+
+    #[test]
+    fn test_render_round_trip_no_tracks() {
+        let result = render_project_toml("Round Trip", &[], &[]);
+        let parsed: crate::model::config::ProjectConfig = toml::from_str(&result).unwrap();
+        assert_eq!(parsed.project.name, "Round Trip");
+    }
+
+    #[test]
+    fn test_render_round_trip_with_tracks() {
+        let tracks = vec![("api", "API Layer"), ("ui", "UI")];
+        let prefixes = vec![
+            ("api".to_string(), "API".to_string()),
+            ("ui".to_string(), "UI".to_string()),
+        ];
+        let result = render_project_toml("Round Trip", &tracks, &prefixes);
+        let parsed: crate::model::config::ProjectConfig = toml::from_str(&result).unwrap();
+        assert_eq!(parsed.project.name, "Round Trip");
+        assert_eq!(parsed.tracks.len(), 2);
+        assert_eq!(parsed.tracks[0].id, "api");
+        assert_eq!(parsed.tracks[1].id, "ui");
+        assert_eq!(parsed.ids.prefixes.get("api").unwrap(), "API");
+        assert_eq!(parsed.ids.prefixes.get("ui").unwrap(), "UI");
     }
 }

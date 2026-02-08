@@ -171,7 +171,7 @@ TUI display settings:
 [ui]
 kitty_keyboard = true      # Kitty keyboard protocol (default: true, set false if terminal has issues)
 ref_extensions = ["md"]    # file extensions for ref/spec autocomplete (empty = all)
-ref_paths = ["doc"]        # directories for ref/spec autocomplete (empty = whole project)
+ref_paths = ["doc", "spec", "docs", "design", "papers"]  # directories for ref/spec autocomplete (empty = whole project)
 
 [ui.tag_colors]
 bug = "#FF4444"

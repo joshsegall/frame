@@ -72,8 +72,8 @@ my-project/
       effects.md          # Done tasks, auto-archived
 ```
 
-See [`project.toml`](frame/project.toml) for the full configuration
-reference — the generated file is self-documenting.
+See [`project.toml`](src/templates/project.toml) for the full configuration
+reference — the template is self-documenting.
 
 ## TUI
 
