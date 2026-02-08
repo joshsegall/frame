@@ -184,11 +184,23 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    // Help overlay intercepts ? and Esc
+    // Help overlay intercepts ? and Esc, plus scroll keys
     if app.show_help {
         match key.code {
             KeyCode::Char('?') | KeyCode::Esc => {
                 app.show_help = false;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                app.help_scroll = app.help_scroll.saturating_add(1);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                app.help_scroll = app.help_scroll.saturating_sub(1);
+            }
+            KeyCode::Char('g') => {
+                app.help_scroll = 0;
+            }
+            KeyCode::Char('G') => {
+                app.help_scroll = usize::MAX;
             }
             _ => {}
         }
@@ -290,6 +302,7 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
         // Help overlay
         (KeyModifiers::NONE, KeyCode::Char('?')) => {
             app.show_help = true;
+            app.help_scroll = 0;
         }
 
         // Search: /
@@ -867,11 +880,23 @@ fn handle_select(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    // Help overlay intercepts ? and Esc
+    // Help overlay intercepts ? and Esc, plus scroll keys
     if app.show_help {
         match key.code {
             KeyCode::Char('?') | KeyCode::Esc => {
                 app.show_help = false;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                app.help_scroll = app.help_scroll.saturating_add(1);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                app.help_scroll = app.help_scroll.saturating_sub(1);
+            }
+            KeyCode::Char('g') => {
+                app.help_scroll = 0;
+            }
+            KeyCode::Char('G') => {
+                app.help_scroll = usize::MAX;
             }
             _ => {}
         }
@@ -1092,6 +1117,7 @@ fn handle_select(app: &mut App, key: KeyEvent) {
         // Help overlay
         (KeyModifiers::NONE, KeyCode::Char('?')) => {
             app.show_help = true;
+            app.help_scroll = 0;
         }
 
         // Search

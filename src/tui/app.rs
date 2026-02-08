@@ -539,6 +539,8 @@ pub struct App {
     pub recent_scroll: usize,
     /// Help overlay visible
     pub show_help: bool,
+    /// Scroll offset for help overlay
+    pub help_scroll: usize,
     /// Search mode: current query being typed
     pub search_input: String,
     /// Last executed search pattern
@@ -681,6 +683,7 @@ impl App {
             inbox_scroll: 0,
             recent_scroll: 0,
             show_help: false,
+            help_scroll: 0,
             search_input: String::new(),
             last_search: None,
             search_match_idx: 0,

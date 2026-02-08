@@ -14,7 +14,7 @@ enum HelpEntry {
 }
 
 /// Render the help overlay (toggled with ?)
-pub fn render_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
+pub fn render_help_overlay(frame: &mut Frame, app: &mut App, area: Rect) {
     let bg = app.theme.background;
     let text_color = app.theme.text;
     let bright = app.theme.text_bright;
@@ -91,17 +91,36 @@ pub fn render_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
 
     // Dynamic height from content + borders
     let popup_h = ((lines.len() as u16) + 2).min(area.height.saturating_sub(2));
+    let visible_h = popup_h.saturating_sub(2) as usize; // minus top/bottom border
+    let max_scroll = lines.len().saturating_sub(visible_h);
+    app.help_scroll = app.help_scroll.min(max_scroll);
+
     let overlay_area = centered_rect_fixed(popup_w, popup_h, area);
 
     frame.render_widget(Clear, overlay_area);
 
-    let block = Block::default()
+    // Build border with scroll indicators
+    let can_scroll_up = app.help_scroll > 0;
+    let can_scroll_down = app.help_scroll < max_scroll;
+    let border_style = Style::default().fg(dim).bg(bg);
+
+    let mut block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(dim).bg(bg))
+        .border_style(border_style)
         .style(Style::default().bg(bg));
+
+    if can_scroll_up && can_scroll_down {
+        block = block.title_top(Span::styled(" \u{25B2} ", Style::default().fg(dim).bg(bg)))
+            .title_bottom(Span::styled(" \u{25BC} ", Style::default().fg(dim).bg(bg)));
+    } else if can_scroll_up {
+        block = block.title_top(Span::styled(" \u{25B2} ", Style::default().fg(dim).bg(bg)));
+    } else if can_scroll_down {
+        block = block.title_bottom(Span::styled(" \u{25BC} ", Style::default().fg(dim).bg(bg)));
+    }
 
     let paragraph = Paragraph::new(lines)
         .block(block)
+        .scroll((app.help_scroll as u16, 0))
         .style(Style::default().bg(bg));
 
     frame.render_widget(paragraph, overlay_area);
