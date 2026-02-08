@@ -139,6 +139,41 @@ pub fn add_subtask(track: &mut Track, parent_id: &str, title: String) -> Result<
     Ok(sub_id)
 }
 
+/// Add a subtask to an existing task, inserted after a specific sibling.
+/// Returns the assigned subtask ID.
+pub fn add_subtask_after(
+    track: &mut Track,
+    parent_id: &str,
+    after_sibling_id: &str,
+    title: String,
+) -> Result<String, TaskError> {
+    let parent = find_task_mut_in_track(track, parent_id)
+        .ok_or_else(|| TaskError::NotFound(parent_id.to_string()))?;
+
+    if parent.depth >= 2 {
+        return Err(TaskError::MaxDepthReached);
+    }
+
+    let sub_num = parent.subtasks.len() + 1;
+    let sub_id = format!("{}.{}", parent_id, sub_num);
+    let (parsed_title, tags) = parse_title_and_tags(&title);
+    let mut subtask = Task::new(TaskState::Todo, Some(sub_id.clone()), parsed_title);
+    subtask.tags = tags;
+    subtask.depth = parent.depth + 1;
+    subtask.metadata.push(Metadata::Added(today_str()));
+
+    let insert_idx = parent
+        .subtasks
+        .iter()
+        .position(|t| t.id.as_deref() == Some(after_sibling_id))
+        .map(|i| i + 1)
+        .unwrap_or(parent.subtasks.len());
+    parent.subtasks.insert(insert_idx, subtask);
+    parent.mark_dirty();
+
+    Ok(sub_id)
+}
+
 /// Edit a task's title.
 pub fn edit_title(track: &mut Track, task_id: &str, new_title: String) -> Result<(), TaskError> {
     let (parsed_title, new_tags) = parse_title_and_tags(&new_title);

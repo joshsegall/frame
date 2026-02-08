@@ -3115,11 +3115,67 @@ fn add_task_action(app: &mut App, pos: AddPosition) {
     // Save cursor position for restore on cancel
     let saved_cursor = app.track_states.get(&track_id).map(|s| s.cursor);
 
+    // For AfterCursor, check if cursor is on a child task — if so, insert a sibling subtask
+    if matches!(pos, AddPosition::AfterCursor) {
+        let flat_items = app.build_flat_items(&track_id);
+        let cursor = app.track_states.get(&track_id).map_or(0, |s| s.cursor);
+        if let Some(FlatItem::Task { section, path, depth, .. }) = flat_items.get(cursor) {
+            if *depth > 0 && path.len() > 1 {
+                // Cursor is on a child task — find parent and insert sibling after this task
+                let parent_path = &path[..path.len() - 1];
+                let track_ref = match App::find_track_in_project(&app.project, &track_id) {
+                    Some(t) => t,
+                    None => return,
+                };
+                let parent_task = match resolve_task_from_flat(track_ref, *section, parent_path) {
+                    Some(t) => t,
+                    None => return,
+                };
+                let parent_id = match &parent_task.id {
+                    Some(id) => id.clone(),
+                    None => return,
+                };
+                let cursor_task = match resolve_task_from_flat(track_ref, *section, path) {
+                    Some(t) => t,
+                    None => return,
+                };
+                let sibling_id = match &cursor_task.id {
+                    Some(id) => id.clone(),
+                    None => return,
+                };
+
+                let track = match app.find_track_mut(&track_id) {
+                    Some(t) => t,
+                    None => return,
+                };
+                let sub_id = match task_ops::add_subtask_after(track, &parent_id, &sibling_id, String::new()) {
+                    Ok(id) => id,
+                    Err(_) => return,
+                };
+
+                // Enter EDIT mode for the new subtask's title
+                app.edit_buffer.clear();
+                app.edit_cursor = 0;
+                app.edit_target = Some(EditTarget::NewTask {
+                    task_id: sub_id.clone(),
+                    track_id: track_id.clone(),
+                    parent_id: Some(parent_id),
+                });
+                app.pre_edit_cursor = saved_cursor;
+                app.edit_history = Some(EditHistory::new("", 0, 0));
+                app.mode = Mode::Edit;
+
+                move_cursor_to_task(app, &track_id, &sub_id);
+                return;
+            }
+        }
+    }
+
     let insert_pos = match pos {
         AddPosition::Top => InsertPosition::Top,
         AddPosition::Bottom => InsertPosition::Bottom,
         AddPosition::AfterCursor => {
-            // Insert after the cursor's task (top-level only)
+            // Insert after the cursor's top-level task
             match app.cursor_task_id() {
                 Some((_, task_id, _)) => InsertPosition::After(task_id),
                 None => InsertPosition::Bottom,
