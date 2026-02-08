@@ -57,7 +57,15 @@ pub fn render_tracks_view(frame: &mut Frame, app: &mut App, area: Rect) {
         .config
         .tracks
         .iter()
-        .map(|tc| tc.id.chars().count())
+        .map(|tc| {
+            app.project
+                .config
+                .ids
+                .prefixes
+                .get(&tc.id)
+                .map(|p| p.chars().count())
+                .unwrap_or_else(|| tc.id.chars().count())
+        })
         .max()
         .unwrap_or(2);
 
@@ -227,9 +235,9 @@ fn render_col_names<'a>(app: &'a App, name_col: usize, max_id_len: usize) -> Lin
         Style::default().bg(bg),
     ));
 
-    // "id" header aligned to ID column
+    // "pfx" header aligned to prefix column
     spans.push(Span::styled(
-        format!("{:<width$}", "id", width = max_id_len),
+        format!("{:<width$}", "pfx", width = max_id_len),
         dim_style,
     ));
 
@@ -360,10 +368,18 @@ fn render_track_row<'a>(
         ));
     }
 
-    // ID prefix column (gap + uppercase left-aligned ID padded to max_id_len)
+    // ID prefix column (gap + uppercase prefix padded to max_id_len)
     spans.push(Span::styled("  ", Style::default().bg(bg)));
     let id_style = Style::default().fg(app.theme.text).bg(bg);
-    let id_text = format!("{:<width$}", tc.id.to_uppercase(), width = max_id_len);
+    let prefix = app
+        .project
+        .config
+        .ids
+        .prefixes
+        .get(&tc.id)
+        .map(|p| p.to_uppercase())
+        .unwrap_or_else(|| tc.id.to_uppercase());
+    let id_text = format!("{:<width$}", prefix, width = max_id_len);
     push_highlighted_spans(&mut spans, &id_text, id_style, hl_style, search_re);
 
     // Stat columns: todo, active, blocked, done, parked
@@ -482,8 +498,16 @@ fn render_edit_row<'a>(
     // ID prefix column
     spans.push(Span::styled("  ", Style::default().bg(bg)));
     let id_style = Style::default().fg(app.theme.text).bg(bg);
+    let prefix = app
+        .project
+        .config
+        .ids
+        .prefixes
+        .get(&tc.id)
+        .map(|p| p.to_uppercase())
+        .unwrap_or_else(|| tc.id.to_uppercase());
     spans.push(Span::styled(
-        format!("{:<width$}", tc.id.to_uppercase(), width = max_id_len),
+        format!("{:<width$}", prefix, width = max_id_len),
         id_style,
     ));
 

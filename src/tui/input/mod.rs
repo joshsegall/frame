@@ -1747,14 +1747,24 @@ fn begin_bulk_cross_track_move(app: &mut App) {
         return;
     }
 
-    // Build candidate tracks: all non-archived tracks except current
+    // Build candidate tracks: all non-archived tracks except current (show prefix)
     let candidates: Vec<String> = app
         .project
         .config
         .tracks
         .iter()
         .filter(|t| t.state != "archived" && t.id != source_track_id)
-        .map(|t| format!("{} ({})", t.name, t.id.to_uppercase()))
+        .map(|t| {
+            let prefix = app
+                .project
+                .config
+                .ids
+                .prefixes
+                .get(&t.id)
+                .map(|p| p.to_uppercase())
+                .unwrap_or_else(|| t.id.to_uppercase());
+            format!("{} ({})", t.name, prefix)
+        })
         .collect();
 
     if candidates.is_empty() {
@@ -3931,7 +3941,7 @@ fn confirm_edit(app: &mut App) {
             }
             // Check for ID collision
             if app.project.config.tracks.iter().any(|tc| tc.id == track_id) {
-                app.status_message = Some(format!("track \"{}\" already exists", track_id));
+                app.status_message = Some(format!("track \"{}\" already exists", name));
                 return;
             }
 
@@ -3979,7 +3989,7 @@ fn confirm_edit(app: &mut App) {
                 app.tracks_cursor = pos;
             }
 
-            app.status_message = Some(format!("created track \"{}\"", track_id));
+            app.status_message = Some(format!("created track \"{}\"", name));
         }
         EditTarget::ExistingTrackName {
             track_id,
@@ -5436,15 +5446,15 @@ fn tracks_archive_or_delete(app: &mut App) {
             .join(format!("archive/{}.md", track_id))
             .exists();
 
-    let display_id = track_id.to_uppercase();
+    let display_name = app.track_name(&track_id).to_string();
     if is_empty {
         app.confirm_state = Some(super::app::ConfirmState {
-            message: format!("Delete track \"{}\"? [y/n]", display_id),
+            message: format!("Delete track \"{}\"? [y/n]", display_name),
             action: super::app::ConfirmAction::DeleteTrack { track_id },
         });
     } else {
         app.confirm_state = Some(super::app::ConfirmState {
-            message: format!("Archive track \"{}\"? ({} tasks) [y/n]", display_id, count),
+            message: format!("Archive track \"{}\"? ({} tasks) [y/n]", display_name, count),
             action: super::app::ConfirmAction::ArchiveTrack { track_id },
         });
     }
@@ -7329,14 +7339,24 @@ fn inbox_begin_triage(app: &mut App) {
         return;
     }
 
-    // Activate track selection autocomplete
+    // Activate track selection autocomplete (show prefix from config)
     let active_tracks: Vec<String> = app
         .project
         .config
         .tracks
         .iter()
         .filter(|t| t.state == "active")
-        .map(|t| format!("{} ({})", t.name, t.id.to_uppercase()))
+        .map(|t| {
+            let prefix = app
+                .project
+                .config
+                .ids
+                .prefixes
+                .get(&t.id)
+                .map(|p| p.to_uppercase())
+                .unwrap_or_else(|| t.id.to_uppercase());
+            format!("{} ({})", t.name, prefix)
+        })
         .collect();
 
     if active_tracks.is_empty() {
@@ -7416,13 +7436,23 @@ fn handle_triage_select_track(app: &mut App, key: KeyEvent) {
                 .as_ref()
                 .and_then(|ac| ac.selected_entry().map(|s| s.to_string()));
             if let Some(entry) = selected {
-                // Extract track_id from "Track Name (TRACK_ID)" and lowercase it
-                let track_id = entry
+                // Extract prefix from "Track Name (PREFIX)" and find the matching track
+                let prefix_str = entry
                     .rsplit('(')
                     .next()
                     .and_then(|s| s.strip_suffix(')'))
-                    .unwrap_or(&entry)
-                    .to_lowercase();
+                    .unwrap_or(&entry);
+
+                // Find track by prefix match (or fall back to treating it as a track ID)
+                let track_id = app
+                    .project
+                    .config
+                    .ids
+                    .prefixes
+                    .iter()
+                    .find(|(_, p)| p.eq_ignore_ascii_case(prefix_str))
+                    .map(|(tid, _)| tid.clone())
+                    .unwrap_or_else(|| prefix_str.to_lowercase());
 
                 // Verify track exists
                 let valid = app.project.config.tracks.iter().any(|t| t.id == track_id);
@@ -7636,14 +7666,24 @@ fn begin_cross_track_move(app: &mut App) {
         return;
     }
 
-    // Build candidate tracks: all non-archived tracks except current
+    // Build candidate tracks: all non-archived tracks except current (show prefix)
     let candidates: Vec<String> = app
         .project
         .config
         .tracks
         .iter()
         .filter(|t| t.state != "archived" && t.id != source_track_id)
-        .map(|t| format!("{} ({})", t.name, t.id.to_uppercase()))
+        .map(|t| {
+            let prefix = app
+                .project
+                .config
+                .ids
+                .prefixes
+                .get(&t.id)
+                .map(|p| p.to_uppercase())
+                .unwrap_or_else(|| t.id.to_uppercase());
+            format!("{} ({})", t.name, prefix)
+        })
         .collect();
 
     if candidates.is_empty() {
@@ -8072,6 +8112,7 @@ fn confirm_inbox_delete(app: &mut App, index: usize) {
 }
 
 fn confirm_archive_track(app: &mut App, track_id: &str) {
+    let track_name = app.track_name(track_id).to_string();
     let old_state = app
         .project
         .config
@@ -8105,7 +8146,7 @@ fn confirm_archive_track(app: &mut App, track_id: &str) {
         old_state,
     });
 
-    app.status_message = Some(format!("archived \"{}\"", track_id));
+    app.status_message = Some(format!("archived \"{}\"", track_name));
 }
 
 fn confirm_delete_track(app: &mut App, track_id: &str) {
@@ -8140,7 +8181,7 @@ fn confirm_delete_track(app: &mut App, track_id: &str) {
         prefix,
     });
 
-    app.status_message = Some(format!("deleted track \"{}\"", track_id));
+    app.status_message = Some(format!("deleted track \"{}\"", tc.name));
 }
 
 // ---------------------------------------------------------------------------

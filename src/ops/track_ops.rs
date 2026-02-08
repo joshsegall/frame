@@ -508,16 +508,15 @@ pub fn rename_track_prefix(
         }
     }
 
-    // Update dep references across ALL tracks
+    // Update dep references across ALL tracks (including the target track itself)
     let mut affected_tracks = std::collections::HashSet::new();
     for (tid, track) in project_tracks.iter_mut() {
-        if tid == track_id {
-            continue; // Already handled above
-        }
         let count = rename_dep_references(track, old_prefix, new_prefix);
         if count > 0 {
             result.deps_updated += count;
-            affected_tracks.insert(tid.clone());
+            if tid != track_id {
+                affected_tracks.insert(tid.clone());
+            }
         }
     }
     result.tracks_affected = affected_tracks.len();
@@ -677,16 +676,15 @@ pub fn prefix_rename_impact(
         }
     }
 
-    // Count dep references across other tracks
+    // Count dep references across ALL tracks (including the target track itself)
     let mut affected_tracks = std::collections::HashSet::new();
     for (tid, track) in project_tracks {
-        if tid == track_id {
-            continue;
-        }
         let count = count_dep_references(track, old_prefix);
         if count > 0 {
             impact.dep_ref_count += count;
-            affected_tracks.insert(tid.clone());
+            if tid != track_id {
+                affected_tracks.insert(tid.clone());
+            }
         }
     }
     impact.affected_track_count = affected_tracks.len();
@@ -1135,8 +1133,8 @@ file = "tracks/old.md"
 
         let result = rename_track_prefix(&mut config, &mut tracks, "effects", "EFF", "FX").unwrap();
         assert_eq!(result.tasks_renamed, 3); // EFF-001, EFF-001.1, EFF-002
-        assert_eq!(result.deps_updated, 2); // EFF-001 and EFF-002 in other track
-        assert_eq!(result.tracks_affected, 1); // other track
+        assert_eq!(result.deps_updated, 3); // EFF-001 in same track + EFF-001 and EFF-002 in other track
+        assert_eq!(result.tracks_affected, 1); // other track (same track not counted)
         assert_eq!(config.ids.prefixes.get("effects").unwrap(), "FX");
 
         // Verify task IDs were renamed
@@ -1145,6 +1143,12 @@ file = "tracks/old.md"
         assert_eq!(backlog[0].id.as_deref(), Some("FX-001"));
         assert_eq!(backlog[0].subtasks[0].id.as_deref(), Some("FX-001.1"));
         assert_eq!(backlog[1].id.as_deref(), Some("FX-002"));
+
+        // Verify same-track dep was also renamed
+        let has_renamed_dep = backlog[1].metadata.iter().any(|m| {
+            matches!(m, crate::model::task::Metadata::Dep(deps) if deps.contains(&"FX-001".to_string()))
+        });
+        assert!(has_renamed_dep, "same-track dep EFF-001 should be renamed to FX-001");
     }
 
     #[test]
@@ -1190,6 +1194,7 @@ file = "tracks/old.md"
 - [>] `EFF-001` First task
   - [ ] `EFF-001.1` Subtask
 - [ ] `EFF-002` Second task
+  - dep: EFF-001
 
 ## Done
 ";
@@ -1216,8 +1221,8 @@ file = "tracks/old.md"
 
         let impact = prefix_rename_impact(&tracks, "effects", "EFF", None);
         assert_eq!(impact.task_id_count, 3); // EFF-001, EFF-001.1, EFF-002
-        assert_eq!(impact.dep_ref_count, 2); // EFF-001 and EFF-002 in other
-        assert_eq!(impact.affected_track_count, 1); // other track
+        assert_eq!(impact.dep_ref_count, 3); // EFF-001 in same track + EFF-001 and EFF-002 in other
+        assert_eq!(impact.affected_track_count, 1); // other track (same track not counted)
     }
 
     #[test]
