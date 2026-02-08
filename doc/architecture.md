@@ -8,7 +8,7 @@ Developer reference for Frame's internal design. Each section explains a design 
 src/
   model/    Data types: Task, Track, Inbox, ProjectConfig, Project
   parse/    Markdown parser + serializer pairs (task, track, inbox)
-  io/       Project discovery, file locking, config I/O, UI state, file watcher
+  io/       Project discovery, file locking, config I/O, UI state, file watcher, project registry
   ops/      Business logic: task CRUD, track management, inbox, search, clean, check, import
   cli/      CLI interface (clap commands, handlers, JSON/human output)
   tui/      TUI interface: app state, undo, command palette, input handling, rendering
@@ -145,6 +145,18 @@ Selection is a `HashSet<String>` of task IDs on the App. Entering Select mode (`
 **Selection persistence**: The selection set persists across individual operations until explicitly cleared (Esc in Select mode, or switching views). This allows chaining: select tasks, bulk move, then bulk tag.
 
 **Code**: `src/tui/app.rs` (selection: HashSet, range_anchor), `src/tui/input/mod.rs` (select mode handlers)
+
+## Project Registry
+
+Frame maintains a global project registry at `~/.config/frame/projects.toml` (or `$XDG_CONFIG_HOME/frame/projects.toml`). Each entry records a project name, absolute path, and separate `last_accessed_tui`/`last_accessed_cli` timestamps.
+
+**Auto-registration**: Projects are registered automatically on `fr init`, when the CLI loads a project, and when the TUI launches. The corresponding timestamp is touched on each access, keeping the "most recently used" ordering current.
+
+**Path-based internal API**: All registry functions (`read_registry_from`, `write_registry_to`, `register_project_in`, `remove_project_from`) take an explicit file path rather than computing it from env vars internally. Convenience wrappers (`read_registry()`, `register_project()`, etc.) call `registry_path()` and delegate. This allows unit tests to use temp file paths directly, avoiding `set_var` race conditions in parallel test execution (which is unsafe in Rust 2024 edition).
+
+**TUI project switching**: The project picker replaces the entire `App` state (`*app = App::new(project)`) rather than selectively updating fields. This ensures all derived state (flat items, filter state, undo stack) is cleanly reset.
+
+**Code**: `src/io/registry.rs`
 
 ## Track Name & Config Sync
 

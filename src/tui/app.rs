@@ -505,6 +505,98 @@ pub struct PrefixRenameState {
     pub validation_error: String,
 }
 
+/// State for the project picker popup
+#[derive(Debug, Clone)]
+pub struct ProjectPickerState {
+    /// List of project entries
+    pub entries: Vec<crate::io::registry::ProjectEntry>,
+    /// Cursor index
+    pub cursor: usize,
+    /// Scroll offset
+    pub scroll_offset: usize,
+    /// Sort mode: true = alphabetical, false = recent (default)
+    pub sort_alpha: bool,
+    /// Path of the currently open project (if any)
+    pub current_project_path: Option<String>,
+    /// Entry pending removal confirmation
+    pub confirm_remove: Option<usize>,
+}
+
+impl ProjectPickerState {
+    pub fn new(
+        mut entries: Vec<crate::io::registry::ProjectEntry>,
+        current_path: Option<String>,
+    ) -> Self {
+        // Default: sort by last_accessed_tui, most recent first
+        entries.sort_by(|a, b| {
+            let ta = a.last_accessed_tui.unwrap_or_default();
+            let tb = b.last_accessed_tui.unwrap_or_default();
+            tb.cmp(&ta)
+        });
+        Self {
+            entries,
+            cursor: 0,
+            scroll_offset: 0,
+            sort_alpha: false,
+            current_project_path: current_path,
+            confirm_remove: None,
+        }
+    }
+
+    pub fn move_up(&mut self) {
+        if self.cursor > 0 {
+            self.cursor -= 1;
+        }
+        self.confirm_remove = None;
+    }
+
+    pub fn move_down(&mut self) {
+        if self.cursor + 1 < self.entries.len() {
+            self.cursor += 1;
+        }
+        self.confirm_remove = None;
+    }
+
+    pub fn selected_entry(&self) -> Option<&crate::io::registry::ProjectEntry> {
+        self.entries.get(self.cursor)
+    }
+
+    pub fn toggle_sort(&mut self) {
+        self.sort_alpha = !self.sort_alpha;
+        if self.sort_alpha {
+            self.entries
+                .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        } else {
+            self.entries.sort_by(|a, b| {
+                let ta = a.last_accessed_tui.unwrap_or_default();
+                let tb = b.last_accessed_tui.unwrap_or_default();
+                tb.cmp(&ta)
+            });
+        }
+        self.cursor = 0;
+        self.scroll_offset = 0;
+        self.confirm_remove = None;
+    }
+
+    pub fn remove_selected(&mut self) {
+        if self.entries.is_empty() {
+            return;
+        }
+        // If already confirming this index, do the removal
+        if self.confirm_remove == Some(self.cursor) {
+            let entry = &self.entries[self.cursor];
+            crate::io::registry::remove_by_path(&entry.path);
+            self.entries.remove(self.cursor);
+            if self.cursor >= self.entries.len() && self.cursor > 0 {
+                self.cursor -= 1;
+            }
+            self.confirm_remove = None;
+        } else {
+            self.confirm_remove = Some(self.cursor);
+        }
+    }
+}
+
 /// Current interaction mode
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
@@ -761,6 +853,8 @@ pub struct App {
     pub tag_color_popup: Option<TagColorPopupState>,
     /// Prefix rename state (active during prefix rename flow)
     pub prefix_rename: Option<PrefixRenameState>,
+    /// Project picker popup state
+    pub project_picker: Option<ProjectPickerState>,
     /// Debug mode: show raw KeyEvent info in status row
     pub key_debug: bool,
     /// Last raw KeyEvent description (for debug display)
@@ -875,6 +969,7 @@ impl App {
             dep_popup: None,
             tag_color_popup: None,
             prefix_rename: None,
+            project_picker: None,
             key_debug: false,
             last_key_event: None,
             kitty_enabled: false,
@@ -2328,11 +2423,24 @@ pub fn save_ui_state(app: &App) {
     let _ = write_ui_state(&app.project.frame_dir, &ui_state);
 }
 
-/// Run the TUI application
-pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+/// Run the TUI application.
+/// If `project_dir_override` is set, use that as the starting directory.
+pub fn run(project_dir_override: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     // Discover and load project
-    let cwd = std::env::current_dir()?;
-    let root = discover_project(&cwd)?;
+    let start_dir = match project_dir_override {
+        Some(dir) => std::fs::canonicalize(dir)
+            .map_err(|e| format!("cannot resolve -C path '{}': {}", dir, e))?,
+        None => std::env::current_dir()?,
+    };
+
+    // If we can't find a project, check the registry for the picker
+    let root = match discover_project(&start_dir) {
+        Ok(root) => root,
+        Err(_) => {
+            // No project found — launch project picker
+            return run_project_picker();
+        }
+    };
     let mut project = load_project(&root)?;
 
     // Auto-assign IDs and dates so all tasks are interactive from the start
@@ -2353,6 +2461,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+
+    // Auto-register and touch TUI timestamp
+    crate::io::registry::register_project(&project.config.project.name, &project.root);
+    crate::io::registry::touch_tui(&project.root);
 
     let mut app = App::new(project);
 
@@ -2414,6 +2526,90 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     terminal.show_cursor()?;
 
     result
+}
+
+/// Launch the TUI in project-picker-only mode (when no project is found).
+fn run_project_picker() -> Result<(), Box<dyn std::error::Error>> {
+    let reg = crate::io::registry::read_registry();
+    if reg.projects.is_empty() {
+        println!("No projects registered.");
+        println!();
+        println!("Run `fr init` in a project directory to get started,");
+        println!("or `fr projects add <path>` to register an existing project.");
+        return Ok(());
+    }
+
+    // Setup terminal
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
+
+    // Install panic hook to restore terminal on panic
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        original_hook(panic_info);
+    }));
+
+    let mut picker = ProjectPickerState::new(reg.projects, None);
+    let theme = super::theme::Theme::default();
+
+    let selected_path = loop {
+        terminal.draw(|frame| {
+            let area = frame.area();
+            // Dark background
+            frame.render_widget(
+                ratatui::widgets::Block::default()
+                    .style(ratatui::style::Style::default().bg(theme.background)),
+                area,
+            );
+            render::project_picker::render_project_picker_standalone(frame, &picker, &theme, area);
+        })?;
+
+        if crossterm::event::poll(Duration::from_millis(250))?
+            && let crossterm::event::Event::Key(key) = crossterm::event::read()?
+            && key.kind == crossterm::event::KeyEventKind::Press
+        {
+            use crossterm::event::{KeyCode, KeyModifiers};
+            match (key.modifiers, key.code) {
+                (_, KeyCode::Char('q')) | (_, KeyCode::Esc) => break None,
+                (_, KeyCode::Up) | (_, KeyCode::Char('k')) => picker.move_up(),
+                (_, KeyCode::Down) | (_, KeyCode::Char('j')) => picker.move_down(),
+                (_, KeyCode::Enter) => {
+                    if let Some(entry) = picker.selected_entry() {
+                        break Some(entry.path.clone());
+                    }
+                }
+                (KeyModifiers::SHIFT, KeyCode::Char('X'))
+                | (KeyModifiers::NONE, KeyCode::Char('X')) => {
+                    picker.remove_selected();
+                }
+                (_, KeyCode::Char('s')) => picker.toggle_sort(),
+                _ => {}
+            }
+        }
+    };
+
+    // Restore terminal
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
+    // If a project was selected, load and run it
+    if let Some(path) = selected_path {
+        let root_path = std::path::PathBuf::from(&path);
+        if !root_path.join("frame").exists() {
+            return Err(format!("project not found at {}", path).into());
+        }
+        crate::io::registry::touch_tui(&root_path);
+        return run(Some(&path));
+    }
+
+    Ok(())
 }
 
 /// Format a KeyEvent into a compact debug string like "Left mod=CTRL|ALT" or "Char('a') mod=NONE"

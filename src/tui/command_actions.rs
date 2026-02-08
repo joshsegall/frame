@@ -283,6 +283,13 @@ fn static_actions() -> Vec<PaletteAction> {
             category: ActionCategory::Navigate,
         },
         PaletteAction {
+            id: "projects",
+            label: "Switch project".into(),
+            shortcut: Some("P"),
+            contexts: &[ViewContext::Global],
+            category: ActionCategory::Navigate,
+        },
+        PaletteAction {
             id: "toggle_help",
             label: "Toggle help".into(),
             shortcut: Some("?"),

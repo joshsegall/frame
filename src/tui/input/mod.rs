@@ -218,6 +218,12 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    // Project picker intercepts all keys
+    if app.project_picker.is_some() {
+        handle_project_picker_key(app, key);
+        return;
+    }
+
     // Tag color popup intercepts all keys
     if app.tag_color_popup.is_some() {
         handle_tag_color_popup_key(app, key);
@@ -712,6 +718,11 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
         // Tag color editor: T (available from any view)
         (KeyModifiers::SHIFT, KeyCode::Char('T')) => {
             app.open_tag_color_popup();
+        }
+
+        // Project picker: P (Shift+P, available from any view)
+        (KeyModifiers::SHIFT, KeyCode::Char('P')) => {
+            open_project_picker(app);
         }
 
         // Command palette: > (Shift+. reports as NONE or SHIFT depending on terminal)
@@ -8484,6 +8495,9 @@ fn dispatch_palette_action(app: &mut App, action_id: &str, track_index: Option<u
         "tag_colors" => {
             app.open_tag_color_popup();
         }
+        "projects" => {
+            open_project_picker(app);
+        }
         "toggle_help" => {
             app.show_help = !app.show_help;
             app.help_scroll = 0;
@@ -9454,4 +9468,111 @@ fn tag_color_clear(app: &mut App) {
     }
 
     app.last_save_at = Some(std::time::Instant::now());
+}
+
+// ---------------------------------------------------------------------------
+// Project picker
+// ---------------------------------------------------------------------------
+
+fn open_project_picker(app: &mut App) {
+    let reg = crate::io::registry::read_registry();
+    let current_path = Some(app.project.root.to_string_lossy().to_string());
+    app.project_picker = Some(super::app::ProjectPickerState::new(
+        reg.projects,
+        current_path,
+    ));
+}
+
+fn handle_project_picker_key(app: &mut App, key: KeyEvent) {
+    let picker = match &mut app.project_picker {
+        Some(p) => p,
+        None => return,
+    };
+
+    match (key.modifiers, key.code) {
+        (_, KeyCode::Esc) => {
+            app.project_picker = None;
+        }
+        (_, KeyCode::Up) | (_, KeyCode::Char('k')) => {
+            picker.move_up();
+        }
+        (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
+            picker.move_down();
+        }
+        (_, KeyCode::Enter) => {
+            if let Some(entry) = picker.selected_entry() {
+                let path = entry.path.clone();
+                let root = std::path::PathBuf::from(&path);
+                if !root.join("frame").exists() {
+                    app.status_message = Some(format!("project not found at {}", path));
+                    app.project_picker = None;
+                    return;
+                }
+                // Switch project: load the new project
+                match crate::io::project_io::load_project(&root) {
+                    Ok(mut project) => {
+                        // Ensure IDs and dates
+                        let modified =
+                            crate::ops::clean::ensure_ids_and_dates(&mut project);
+                        if !modified.is_empty() {
+                            let _lock = crate::io::lock::FileLock::acquire_default(
+                                &project.frame_dir,
+                            )
+                            .ok();
+                            for track_id in &modified {
+                                if let Some(tc) = project
+                                    .config
+                                    .tracks
+                                    .iter()
+                                    .find(|tc| tc.id == *track_id)
+                                {
+                                    let file = &tc.file;
+                                    if let Some(track) = project
+                                        .tracks
+                                        .iter()
+                                        .find(|(id, _)| id == track_id)
+                                        .map(|(_, t)| t)
+                                    {
+                                        let _ = crate::io::project_io::save_track(
+                                            &project.frame_dir,
+                                            file,
+                                            track,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
+                        // Touch TUI timestamp
+                        crate::io::registry::register_project(
+                            &project.config.project.name,
+                            &project.root,
+                        );
+                        crate::io::registry::touch_tui(&project.root);
+
+                        // Save old UI state before switching
+                        super::app::save_ui_state(app);
+
+                        // Replace app with a fresh App for the new project
+                        *app = App::new(project);
+
+                        // Restore UI state for the new project
+                        super::app::restore_ui_state(app);
+                    }
+                    Err(e) => {
+                        app.status_message = Some(format!("error loading project: {}", e));
+                        app.project_picker = None;
+                    }
+                }
+            }
+        }
+        (KeyModifiers::SHIFT, KeyCode::Char('X'))
+        | (KeyModifiers::NONE, KeyCode::Char('X')) => {
+            picker.remove_selected();
+        }
+        (_, KeyCode::Char('s')) => {
+            picker.toggle_sort();
+        }
+        _ => {}
+    }
 }

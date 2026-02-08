@@ -9,6 +9,10 @@ pub struct Cli {
     /// Output as JSON
     #[arg(long, global = true)]
     pub json: bool,
+
+    /// Run against a different project directory
+    #[arg(short = 'C', long = "project-dir", global = true)]
+    pub project_dir: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -67,6 +71,8 @@ pub enum Commands {
     Clean(CleanArgs),
     /// Import tasks from a markdown file
     Import(ImportArgs),
+    /// Manage project registry
+    Projects(ProjectsCmd),
 }
 
 // ---------------------------------------------------------------------------
@@ -381,4 +387,36 @@ pub struct ImportArgs {
     /// Insert after this task ID
     #[arg(long)]
     pub after: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Project registry
+// ---------------------------------------------------------------------------
+
+#[derive(Args)]
+pub struct ProjectsCmd {
+    #[command(subcommand)]
+    pub action: Option<ProjectsAction>,
+}
+
+#[derive(Subcommand)]
+pub enum ProjectsAction {
+    /// List registered projects (default)
+    List,
+    /// Register a project by path
+    Add(ProjectsAddArgs),
+    /// Remove a project from the registry
+    Remove(ProjectsRemoveArgs),
+}
+
+#[derive(Args)]
+pub struct ProjectsAddArgs {
+    /// Path to the project directory
+    pub path: String,
+}
+
+#[derive(Args)]
+pub struct ProjectsRemoveArgs {
+    /// Project name or path
+    pub name_or_path: String,
 }

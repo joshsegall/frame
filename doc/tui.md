@@ -57,6 +57,7 @@ Full view of a single task showing all fields as navigable regions: Title, Tags,
 | `N` | Previous search match |
 | `>` | Open command palette |
 | `T` | Open tag color editor |
+| `P` | Open project picker |
 | `J` | Jump to task by ID |
 | `z`, `u`, `Ctrl+Z` | Undo |
 | `Z`, `Ctrl+Y`, `Ctrl+Shift+Z` | Redo |
@@ -371,7 +372,19 @@ The popup has two sections: **Blocked by** (tasks this task depends on) and **Bl
 
 Circular dependencies marked with `↻`. Missing deps shown as `[?]`.
 
-### Prefix Rename (`P` in Tracks View)
+### Project Picker (`P`)
+
+Switch between registered Frame projects without leaving the TUI. If `fr` is launched outside any project, the picker opens automatically.
+
+- `j`/`k` — navigate project list
+- `Enter` — switch to selected project
+- `s` — toggle sort (recent vs. alphabetical)
+- `X` — remove project from registry (press twice to confirm)
+- `Esc` — close
+
+Projects are listed with their name and abbreviated path. The current project is highlighted. Missing projects (directory no longer exists) are shown dimmed with "(not found)".
+
+### Prefix Rename (`R` in Tracks View)
 
 3-step flow for renaming a track's ID prefix (e.g., `EFF` to `FX`):
 

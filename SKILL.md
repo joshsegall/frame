@@ -244,6 +244,18 @@ fr check --json
 | `fr track rename <id> --prefix <PREFIX> --dry-run` | Preview prefix rename |
 | `fr track delete <id>` | Delete an empty track |
 
+### Multi-Project
+
+| Command | Description |
+|---------|-------------|
+| `fr projects` | List registered projects (sorted by last access) |
+| `fr projects add <path>` | Register a project by path |
+| `fr projects remove <name_or_path>` | Remove a project from the registry |
+| `fr -C <path> <command>` | Run any command against a different project |
+
+Projects are auto-registered when you run `fr init` or use `fr` in a project
+directory. The registry lives at `~/.config/frame/projects.toml`.
+
 ### Maintenance
 
 | Command | Description |

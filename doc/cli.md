@@ -2,7 +2,9 @@
 
 The Frame CLI binary is `fr`. Run with no arguments to launch the TUI.
 
-**Global flag**: `--json` — output as JSON (on commands that support it).
+**Global flags**:
+- `--json` — output as JSON (on commands that support it)
+- `-C <path>` / `--project-dir <path>` — run against a different project directory without changing the working directory
 
 ## Project Init
 
@@ -357,3 +359,48 @@ fr import tasks.md --track api [--top] [--after ID]
 | `--after ID` | Insert after this task |
 
 Parses checkbox tasks from the file, auto-assigns IDs, preserves existing metadata. Supports up to 3-level nesting.
+
+## Project Registry
+
+Frame maintains a global project registry at `~/.config/frame/projects.toml` (or `$XDG_CONFIG_HOME/frame/projects.toml`). Projects register automatically when you run `fr init`, use `fr` in a project directory, or add them explicitly.
+
+### `fr projects`
+
+List registered projects sorted by most recently accessed via CLI.
+
+```
+fr projects
+```
+
+Output includes project name, path (abbreviated with `~`), and relative time since last access. Missing projects (directory no longer exists) show `(not found)`.
+
+### `fr projects add PATH`
+
+Register a project by path. The path must contain a `frame/project.toml`.
+
+```
+fr projects add ../api-server
+```
+
+Relative paths are resolved to absolute.
+
+### `fr projects remove NAME_OR_PATH`
+
+Remove a project from the registry by name or path. This only removes the registry entry — no files are deleted.
+
+```
+fr projects remove design-system
+```
+
+If the name is ambiguous (multiple projects share the same name), specify by path instead.
+
+### The `-C` Flag
+
+Run any Frame command against a different project directory:
+
+```
+fr -C ~/code/api-server tasks
+fr -C ~/code/api-server add bugs "Fix auth bug"
+```
+
+The `-C` flag also triggers auto-registration if the target project isn't already in the registry.

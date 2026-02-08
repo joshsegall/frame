@@ -6,6 +6,7 @@ pub mod detail_view;
 pub mod help_overlay;
 pub mod inbox_view;
 pub mod prefix_confirm;
+pub mod project_picker;
 pub mod recent_view;
 pub mod status_row;
 pub mod tab_bar;
@@ -75,6 +76,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // Prefix rename confirmation popup
     if app.prefix_rename.as_ref().is_some_and(|pr| pr.confirming) {
         prefix_confirm::render_prefix_confirm(frame, app, chunks[1]);
+    }
+
+    // Project picker overlay
+    if app.project_picker.is_some() {
+        project_picker::render_project_picker(frame, app, chunks[1]);
     }
 
     // Help overlay (rendered on top of everything)

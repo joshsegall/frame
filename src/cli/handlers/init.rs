@@ -157,6 +157,9 @@ pub fn cmd_init(args: InitArgs) -> Result<(), Box<dyn std::error::Error>> {
         fs::write(frame_dir.join(format!("tracks/{}.md", id)), content)?;
     }
 
+    // Register in global project registry
+    crate::io::registry::register_project(&name, &cwd);
+
     // Print summary
     println!("Initialized Frame project: {}", name);
     if !track_pairs.is_empty() {

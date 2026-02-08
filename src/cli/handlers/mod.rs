@@ -2,14 +2,20 @@ mod init;
 pub use init::cmd_init;
 
 use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::Mutex;
 
 use regex::Regex;
+
+/// Global override for project directory (set by -C flag)
+static PROJECT_DIR_OVERRIDE: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 use crate::cli::commands::*;
 use crate::cli::output::*;
 use crate::io::config_io;
 use crate::io::lock::FileLock;
 use crate::io::project_io::{self, ProjectError};
+use crate::io::registry;
 use crate::model::inbox::Inbox;
 use crate::model::project::Project;
 use crate::model::task::{Metadata, Task, TaskState};
@@ -23,6 +29,16 @@ use crate::ops::{check, clean, import, inbox_ops, search, task_ops, track_ops};
 pub fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let json = cli.json;
 
+    // Store -C override for load_project_cwd()
+    if let Some(ref dir) = cli.project_dir {
+        let abs = std::fs::canonicalize(dir)
+            .map_err(|e| format!("cannot resolve -C path '{}': {}", dir, e))?;
+        PROJECT_DIR_OVERRIDE
+            .lock()
+            .unwrap()
+            .replace(abs);
+    }
+
     match cli.command {
         None => {
             eprintln!("TUI not yet implemented. Use a subcommand (try `fr --help`).");
@@ -31,6 +47,9 @@ pub fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Some(cmd) => match cmd {
             // Init is handled in main.rs before project discovery
             Commands::Init(args) => cmd_init(args),
+
+            // Project registry (doesn't require a project context)
+            Commands::Projects(args) => cmd_projects(args, json),
 
             // Read commands
             Commands::List(args) => cmd_list(args, json),
@@ -80,9 +99,18 @@ pub fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 // ---------------------------------------------------------------------------
 
 fn load_project_cwd() -> Result<Project, ProjectError> {
-    let cwd = std::env::current_dir().map_err(ProjectError::IoError)?;
-    let root = project_io::discover_project(&cwd)?;
-    project_io::load_project(&root)
+    let start = match PROJECT_DIR_OVERRIDE.lock().unwrap().as_ref() {
+        Some(dir) => dir.clone(),
+        None => std::env::current_dir().map_err(ProjectError::IoError)?,
+    };
+    let root = project_io::discover_project(&start)?;
+    let project = project_io::load_project(&root)?;
+
+    // Auto-register and touch CLI timestamp
+    registry::register_project(&project.config.project.name, &project.root);
+    registry::touch_cli(&project.root);
+
+    Ok(project)
 }
 
 /// Find the track config and prefix for a given track ID.
@@ -1637,6 +1665,122 @@ fn cmd_clean(args: CleanArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Project registry handlers
+// ---------------------------------------------------------------------------
+
+fn cmd_projects(args: ProjectsCmd, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    match args.action {
+        None | Some(ProjectsAction::List) => cmd_projects_list(json),
+        Some(ProjectsAction::Add(a)) => cmd_projects_add(a),
+        Some(ProjectsAction::Remove(a)) => cmd_projects_remove(a),
+    }
+}
+
+fn cmd_projects_list(json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let reg = registry::read_registry();
+
+    if json {
+        #[derive(serde::Serialize)]
+        struct ProjectJson {
+            name: String,
+            path: String,
+            exists: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            last_accessed: Option<String>,
+        }
+        let items: Vec<ProjectJson> = reg
+            .projects
+            .iter()
+            .map(|e| ProjectJson {
+                name: e.name.clone(),
+                path: e.path.clone(),
+                exists: std::path::Path::new(&e.path).join("frame").exists(),
+                last_accessed: e.last_accessed_cli.map(|dt| dt.to_rfc3339()),
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&items)?);
+        return Ok(());
+    }
+
+    if reg.projects.is_empty() {
+        println!("No projects registered.");
+        println!();
+        println!("Run `fr init` in a project directory to get started,");
+        println!("or `fr projects add <path>` to register an existing project.");
+        return Ok(());
+    }
+
+    // Sort by last_accessed_cli (most recent first)
+    let mut sorted = reg.projects.clone();
+    sorted.sort_by(|a, b| {
+        let ta = a.last_accessed_cli.unwrap_or_default();
+        let tb = b.last_accessed_cli.unwrap_or_default();
+        tb.cmp(&ta)
+    });
+
+    // Compute column widths
+    let max_name = sorted.iter().map(|e| e.name.len()).max().unwrap_or(0);
+    let name_w = max_name.max(4);
+
+    for entry in &sorted {
+        let exists = std::path::Path::new(&entry.path).join("frame").exists();
+        let path_display = if exists {
+            registry::abbreviate_path(&entry.path)
+        } else {
+            "(not found)".to_string()
+        };
+        let time_str = match entry.last_accessed_cli {
+            Some(dt) => registry::relative_time(&dt),
+            None => String::new(),
+        };
+        println!(
+            "  {:<width$}  {:<30}  {}",
+            entry.name,
+            path_display,
+            time_str,
+            width = name_w
+        );
+    }
+    Ok(())
+}
+
+fn cmd_projects_add(args: ProjectsAddArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let abs_path = std::fs::canonicalize(&args.path)
+        .map_err(|e| format!("cannot resolve path '{}': {}", args.path, e))?;
+
+    // Verify it contains a frame project
+    let frame_dir = abs_path.join("frame");
+    let config_path = frame_dir.join("project.toml");
+    if !config_path.exists() {
+        return Err(format!(
+            "no project.toml found at {}",
+            frame_dir.display()
+        )
+        .into());
+    }
+
+    // Read the project name
+    let config_text = std::fs::read_to_string(&config_path)?;
+    let config: crate::model::config::ProjectConfig = toml::from_str(&config_text)?;
+    let name = config.project.name;
+
+    registry::register_project(&name, &abs_path);
+    println!("Added: {} ({})", name, abs_path.display());
+    Ok(())
+}
+
+fn cmd_projects_remove(args: ProjectsRemoveArgs) -> Result<(), Box<dyn std::error::Error>> {
+    match registry::remove_project(&args.name_or_path) {
+        Ok(Some(entry)) => {
+            println!("Removed: {}", entry.name);
+            Ok(())
+        }
+        Ok(None) => Err(format!("not found: {}", args.name_or_path).into()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn cmd_import(args: ImportArgs) -> Result<(), Box<dyn std::error::Error>> {
