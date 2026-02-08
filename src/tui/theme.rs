@@ -52,13 +52,13 @@ impl Default for Theme {
             cyan: Color::Rgb(0x44, 0xDD, 0xFF),
             purple: Color::Rgb(0xCC, 0x66, 0xFF),
             blue: Color::Rgb(0x44, 0x88, 0xFF),
-            selection_bg: Color::Rgb(0x3D, 0x14, 0x38),
+            selection_bg: Color::Rgb(0x43, 0x16, 0x3E),
             selection_border: Color::Rgb(0xFB, 0x41, 0x96),
             selection_id: Color::Rgb(0xDA, 0xB8, 0xF0),
             search_match_bg: Color::Rgb(0x40, 0xE0, 0xD0),
             search_match_fg: Color::Rgb(0x0C, 0x00, 0x1B),
             flash_bg: Color::Rgb(0x3D, 0x2E, 0x10),
-            bulk_selection_bg: Color::Rgb(0x0F, 0x1A, 0x3D),
+            bulk_selection_bg: Color::Rgb(0x13, 0x20, 0x4A),
             tag_colors,
         }
     }
