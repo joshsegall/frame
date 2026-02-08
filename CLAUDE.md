@@ -20,28 +20,14 @@ Frame is a markdown-based task tracker (TUI + CLI) where `.md` files are the sou
 
 ### Module Layout
 
-- **`src/model/`** — Data types: `Task`, `Track`, `Inbox`, `ProjectConfig`, `Project`. Tasks have a `TaskState` enum (`Todo`/`Active`/`Blocked`/`Done`/`Parked` → checkbox chars ` `/`>`/`-`/`x`/`~`). Tracks contain `TrackNode` variants: `Literal` (passthrough text) and `Section` (Backlog/Parked/Done with tasks).
-- **`src/parse/`** — Markdown parser and serializer pairs for tasks, tracks, and inbox. The core design is **selective rewrite with line-span preservation** (see below).
-- **`src/io/`** — Project discovery (`discover_project` walks up looking for `frame/`), file locking (Unix `flock`), config I/O with round-trip-safe TOML editing via `toml_edit::DocumentMut`.
-- **`src/ops/`** — Business logic (not yet implemented).
-- **`src/cli/`** — CLI handlers (not yet implemented).
-- **`src/tui/`** — TUI with input/render split (not yet implemented).
+- **`src/model/`** — Data types: `Task`, `Track`, `Inbox`, `ProjectConfig`, `Project`
+- **`src/parse/`** — Markdown parser and serializer pairs for tasks, tracks, and inbox
+- **`src/io/`** — Project discovery, file locking, config I/O, UI state persistence, file watcher
+- **`src/ops/`** — Business logic: task CRUD, track management, inbox, search, clean, check, import
+- **`src/cli/`** — CLI interface (clap commands, handlers, JSON/human output)
+- **`src/tui/`** — TUI interface: app state, undo, input handling, rendering
 
-### Selective Rewrite Strategy
-
-This is the most important architectural concept. Each parsed task stores:
-- `source_lines: Range<usize>` — original line span in the file
-- `source_text: Vec<String>` — the task's **own** lines only (task line + metadata), **excluding** subtask lines
-- `dirty: bool` — whether the task was modified
-
-On serialization: clean tasks emit `source_text` verbatim; dirty tasks regenerate in canonical format. Subtasks are **always** recursed independently. This means editing one subtask never reformats its parent or siblings.
-
-### Parser Boundaries
-
-- Task parser stops at blank lines — the track parser handles inter-section blank lines as trailing content or section headers.
-- Inbox continuation lines that are tag-only (e.g. `  #design`) are parsed as tags, not body text.
-- Code blocks in notes are tracked to avoid parsing fenced content as tasks.
-- Maximum 3-level nesting (top → sub → sub-sub).
+See `doc/architecture.md` for detailed design decisions and invariants.
 
 ## Project Structure on Disk
 
@@ -51,10 +37,13 @@ A Frame project has a `frame/` directory containing:
 - `inbox.md` — inbox items
 - `.lock` — advisory lock file
 
-## Key Design References
+## Documentation
 
-- `frame-design-v3_3.md` — Full specification (markdown format, TUI, CLI, file structure)
-- `frame-implementation-plan.md` — 8-phase plan; Phase 1 complete, Phases 2-8 not started
+- `doc/architecture.md` — Internal design decisions and invariants
+- `doc/format.md` — Markdown format specification
+- `doc/concepts.md` — Domain concepts (tracks, tasks, inbox, states)
+- `doc/tui.md` — TUI modes, keybindings, and behavior
+- `doc/cli.md` — CLI command reference
 
 ## Test Fixtures
 
