@@ -105,6 +105,8 @@ When a task is marked done:
 - **TUI**: The task stays in Backlog for a 5-second grace period (undo-able), then moves to the Done section automatically.
 - **CLI**: `fr state ID done` moves top-level Backlog tasks to the Done section immediately.
 
+When a top-level task moves between sections (Backlog <-> Done), its entire subtask tree moves with it. Subtasks cannot be moved between sections independently — only top-level tasks trigger section moves.
+
 When the Done section exceeds the configured threshold (default: 250 tasks), `fr clean` archives the oldest tasks to a per-track archive file in `frame/archive/`.
 
 ## Configuration

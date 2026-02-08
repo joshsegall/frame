@@ -333,6 +333,8 @@ With selection active (Select mode):
 | `Backspace` | Delete filter char (or close if empty) |
 | `Esc` | Close palette |
 
+Actions are context-sensitive — the available set depends on the current view (Track, Detail, Tracks, Inbox, Recent). Uses fuzzy matching: type any part of an action name to filter. Each action shows its keyboard shortcut, making the palette useful for discovering keybindings.
+
 ## Overlays
 
 ### Help Overlay (`?`)
@@ -364,6 +366,8 @@ Shows upstream (blocked by) and downstream (blocking) dependencies in an expanda
 - `Enter` — jump to task (cross-track)
 - `Esc` — close
 
+The popup has two sections: **Blocked by** (tasks this task depends on) and **Blocking** (tasks that depend on this task). When a section has 1-2 entries, they are auto-expanded one level. With 3+ entries, they start collapsed. Empty sections show "(nothing)".
+
 Circular dependencies marked with `↻`. Missing deps shown as `[?]`.
 
 ### Conflict Popup
@@ -380,6 +384,12 @@ Activates automatically during editing:
 - **Dep editing** — suggests task IDs from all tracks
 - **Spec/Ref editing** — suggests file paths from the project (up to 3 levels deep, filtered by `ref_extensions` and `ref_paths` config)
 
+The dropdown appears immediately when entering edit mode on an eligible field — no keypress is needed to trigger it. It also activates during inline tag editing (`t` in Track view), filter tag selection (`ft`), and jump-to-task (`J`).
+
+Filtering is case-insensitive substring matching. Word extraction depends on the field: tag autocomplete matches the word after the last space; dep autocomplete matches after the last comma or space; file path autocomplete matches after the last space.
+
+`Tab` accepts the selected suggestion and stays in edit mode. `Enter` accepts and confirms the edit. `Esc` dismisses the dropdown but stays in edit mode.
+
 ### Undo/Redo
 
 Full undo/redo stack for all TUI mutations: state changes, title edits, task creation, moves, field edits, inbox operations, track management, and section moves.
@@ -387,13 +397,17 @@ Full undo/redo stack for all TUI mutations: state changes, title edits, task cre
 - `z`, `u`, or `Ctrl+Z` — undo
 - `Z`, `Ctrl+Y`, or `Ctrl+Shift+Z` — redo
 
-External file changes insert a sync marker that blocks undo across the boundary.
+Undo navigates to the affected item — switching views and tracks if needed — and briefly highlights it.
+
+External file changes insert a sync marker that blocks undo across the boundary. The undo stack starts empty on each launch, so there is nothing to undo from a previous session. When a sync marker is inserted, the redo stack is cleared permanently.
 
 Inline edit undo (`Ctrl+Z`/`Ctrl+Y` in Edit mode) operates within the current editing session separately from the main undo stack.
 
 ### File Watching
 
 The TUI watches `frame/` for `.md` and `.toml` changes. Self-writes are detected and ignored. External changes trigger a reload; if an edit is in progress, the reload is queued until the edit completes.
+
+Reload is deferred during both Edit and Move modes, applied when the mode exits. After reload, if `auto_clean` is enabled (default: true), Frame automatically assigns missing IDs/dates and archives excess done tasks. This can cause visible changes to the file that weren't made by the user. Each reload inserts an undo sync marker, which clears the redo stack.
 
 ### Filtering
 
@@ -403,11 +417,23 @@ Track view filtering via the `f` prefix key:
 - `ft` filter by tag (with autocomplete)
 - `f Space` clear state filter, `ff` clear all
 
-Filtered tasks are shown with ancestor context rows (dimmed, non-selectable). The active filter is displayed in the tab bar.
+State and tag filters are independent — you can have both active simultaneously. Both must match (AND logic). `f Space` clears only the state filter (tag stays). `ff` clears both.
+
+The filter applies globally across all tracks, not per-track. Switching tracks keeps the same filter active. Filters are session-only — not persisted to `.state.json`, cleared on restart.
+
+"Ready" means: state is todo or active, AND all dependency tasks are done.
+
+When a filter removes the task under the cursor, the cursor moves to the nearest matching task. Ancestor context rows appear when a nested task matches but its parent doesn't — the parent is shown dimmed to preserve tree context. Context rows are skipped during cursor navigation. When no tasks match, the track shows "no matching tasks".
+
+The active filter indicator appears right-aligned in the tab separator (e.g., "filter: ready #bug"). Filters have no undo — they are view-only, not mutations.
 
 ### Multi-Select
 
 `v` toggles individual task selection, `V` range-selects, `Ctrl+A` selects all. With tasks selected, bulk operations apply to all selected: state changes, tag/dep edits, move, cross-track move.
+
+First `v` press enters Select mode and toggles the current task. Subsequent `v` presses toggle without mode change. `V` sets an anchor at the current position; moving the cursor and pressing `V` again selects all tasks in the range. Context rows (from filtering) and section separators are excluded from selection.
+
+Selection persists when opening Detail view (`Enter`) and returning (`Esc`). Selection is cleared when switching to a different view (Inbox, Recent, Tracks). Multi-select is only available in Track view. If the last selected task is deselected via `v`, the mode returns to Navigate automatically.
 
 ### Jump to Task (`J`)
 
@@ -420,6 +446,10 @@ Repeats the last repeatable action (state change, tag toggle, etc.) on the curre
 ### Grace Period Moves
 
 When a task is marked done in the TUI, it stays in Backlog for 5 seconds before moving to Done. During this period, undo cancels the move. The Recent view's reopen (`Space`) has a similar grace period in reverse.
+
+The 5-second timer only counts down in Navigate mode. Entering Search, Edit, or Move mode pauses it. Switching views (e.g., Track to Inbox) or quitting immediately flushes all pending moves — tasks move to their target section without waiting.
+
+The entire subtask tree moves as a unit. Subtasks cannot be moved between sections independently — only top-level tasks trigger section moves.
 
 ### Clipboard
 
