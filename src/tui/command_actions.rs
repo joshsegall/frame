@@ -658,7 +658,7 @@ fn static_actions() -> Vec<PaletteAction> {
         PaletteAction {
             id: "archive_delete",
             label: "Archive / delete".into(),
-            shortcut: Some("D"),
+            shortcut: Some("X"),
             contexts: &[ViewContext::TracksView],
             category: ActionCategory::Manage,
         },

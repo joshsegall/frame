@@ -297,7 +297,7 @@ fn build_tracks_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("a".into(), "Add new track".into()),
         HelpEntry::Binding("e".into(), "Edit track name".into()),
         HelpEntry::Binding("s".into(), "Shelve / activate".into()),
-        HelpEntry::Binding("D".into(), "Archive / delete".into()),
+        HelpEntry::Binding("X".into(), "Archive / delete".into()),
         HelpEntry::Binding("m".into(), "Reorder track".into()),
         HelpEntry::Binding("C".into(), "Set cc-focus".into()),
     ];

@@ -161,7 +161,7 @@ With selection active (Select mode):
 | `a` | Add new track |
 | `e` | Edit track name |
 | `s` | Toggle shelve/activate |
-| `D` | Archive or delete track (with confirmation) |
+| `X` | Archive or delete track (with confirmation) |
 | `C` | Set cc-focus |
 | `m` | Reorder track (enter move mode) |
 

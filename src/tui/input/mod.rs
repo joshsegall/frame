@@ -560,11 +560,16 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             }
         }
 
-        // Archive/delete track (tracks view only) or dep popup (track/detail view)
-        (KeyModifiers::SHIFT, KeyCode::Char('D')) => {
+        // Archive/delete track (tracks view only)
+        (KeyModifiers::SHIFT, KeyCode::Char('X')) => {
             if matches!(app.view, View::Tracks) {
                 tracks_archive_or_delete(app);
-            } else if matches!(app.view, View::Track(_)) {
+            }
+        }
+
+        // Dep popup (track/detail view)
+        (KeyModifiers::SHIFT, KeyCode::Char('D')) => {
+            if matches!(app.view, View::Track(_)) {
                 open_dep_popup_from_track_view(app);
             } else if matches!(app.view, View::Detail { .. }) {
                 open_dep_popup_from_detail_view(app);
