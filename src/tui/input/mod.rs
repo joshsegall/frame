@@ -371,6 +371,11 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
                         subtask_cursor: 0,
                         flat_subtask_ids: Vec::new(),
                         multiline_selection_anchor: None,
+                        note_h_scroll: 0,
+                        total_lines: 0,
+                        note_view_line: None,
+                        note_header_line: None,
+                        note_content_end: 0,
                     });
                 } else {
                     // Stack empty — return to track view
@@ -1147,6 +1152,11 @@ fn handle_select(app: &mut App, key: KeyEvent) {
                         subtask_cursor: 0,
                         flat_subtask_ids: Vec::new(),
                         multiline_selection_anchor: None,
+                        note_h_scroll: 0,
+                        total_lines: 0,
+                        note_view_line: None,
+                        note_header_line: None,
+                        note_content_end: 0,
                     });
                 } else {
                     let return_idx = app
@@ -3466,11 +3476,14 @@ fn handle_edit(app: &mut App, key: KeyEvent) {
                 confirm_edit(app);
             }
         }
-        // Cancel edit
+        // Cancel edit (or clear selection first)
         (_, KeyCode::Esc) => {
+            if app.edit_selection_anchor.is_some() {
+                app.edit_selection_anchor = None;
+                return;
+            }
             app.autocomplete = None;
             app.edit_history = None;
-            app.edit_selection_anchor = None;
             if is_detail_edit {
                 cancel_detail_edit(app);
             } else {
@@ -3667,6 +3680,48 @@ fn handle_edit(app: &mut App, key: KeyEvent) {
             update_autocomplete_filter(app);
         }
         _ => {}
+    }
+
+    // Update horizontal scroll for single-line edits in detail view
+    if matches!(app.view, View::Detail { .. })
+        && !app
+            .detail_state
+            .as_ref()
+            .is_some_and(|ds| ds.editing && ds.region == DetailRegion::Note)
+    {
+        update_edit_h_scroll(app);
+    }
+}
+
+/// Keep the cursor visible within the horizontal scroll viewport for single-line edits.
+fn update_edit_h_scroll(app: &mut App) {
+    let width = app.last_edit_available_width as usize;
+    if width == 0 {
+        return;
+    }
+    let cursor_char = app.edit_buffer[..app.edit_cursor.min(app.edit_buffer.len())]
+        .chars()
+        .count();
+    let margin = 10.min(width / 3);
+    let total = app.edit_buffer.chars().count();
+    // When cursor is at end, the cursor block needs one extra column
+    let content_end = if cursor_char >= total {
+        total + 1
+    } else {
+        total
+    };
+
+    // Scroll right: cursor approaching right edge
+    if cursor_char >= app.edit_h_scroll + width.saturating_sub(margin) {
+        app.edit_h_scroll = cursor_char.saturating_sub(width.saturating_sub(margin + 1));
+    }
+    // Clamp: don't scroll past content end
+    app.edit_h_scroll = app
+        .edit_h_scroll
+        .min(content_end.saturating_sub(width.saturating_sub(1)));
+    // Scroll left: cursor approaching left edge
+    if cursor_char < app.edit_h_scroll + margin {
+        app.edit_h_scroll = cursor_char.saturating_sub(margin);
     }
 }
 
@@ -5065,6 +5120,7 @@ fn jump_to_top(app: &mut App) {
             if let Some(ds) = &mut app.detail_state {
                 ds.region = ds.regions.first().copied().unwrap_or(DetailRegion::Title);
                 ds.scroll_offset = 0;
+                ds.note_view_line = None;
             }
         }
         View::Tracks => {
@@ -5101,9 +5157,19 @@ fn jump_to_bottom(app: &mut App) {
         }
         View::Detail { .. } => {
             if let Some(ds) = &mut app.detail_state {
-                ds.region = ds.regions.last().copied().unwrap_or(DetailRegion::Title);
-                if ds.region == DetailRegion::Subtasks {
+                let has_subtasks = ds.regions.contains(&DetailRegion::Subtasks);
+                let has_note = ds.regions.contains(&DetailRegion::Note);
+                if has_subtasks {
+                    // Jump to first subtask (last region on screen)
+                    ds.region = DetailRegion::Subtasks;
+                    ds.note_view_line = None;
                     ds.subtask_cursor = 0;
+                } else if has_note && ds.total_lines > 0 {
+                    // Jump to end of note content
+                    ds.region = DetailRegion::Note;
+                    ds.note_view_line = Some(ds.note_content_end);
+                } else {
+                    ds.region = ds.regions.last().copied().unwrap_or(DetailRegion::Title);
                 }
             }
         }
@@ -5767,6 +5833,7 @@ fn detail_move_region(app: &mut App, delta: i32) {
     let current_idx = ds.regions.iter().position(|r| *r == ds.region).unwrap_or(0);
 
     // Special handling when on Subtasks region with subtasks
+    let has_note_region = ds.regions.contains(&DetailRegion::Note);
     if ds.region == DetailRegion::Subtasks && !ds.flat_subtask_ids.is_empty() {
         if delta > 0 {
             // Moving down within subtasks
@@ -5782,15 +5849,66 @@ fn detail_move_region(app: &mut App, delta: i32) {
                 ds.subtask_cursor -= 1;
                 return;
             }
-            // At first subtask, move to previous region
+            // At first subtask: if Note region exists, go back to Note with
+            // note_view_line at the end of note content (for scroll continuity)
+            if has_note_region {
+                ds.region = DetailRegion::Note;
+                ds.note_view_line = Some(ds.note_content_end);
+                return;
+            }
+            // No note region — move to previous region normally
             let new_idx = current_idx.saturating_sub(1);
             ds.region = ds.regions[new_idx];
             return;
         }
     }
 
+    // Note region: j/k move a virtual cursor by 8 lines through note content.
+    // The renderer places the indicator at note_view_line and scroll follows it.
+    // When scrolling past note content, transition to Subtasks region.
+    let has_subtasks_region = ds.regions.contains(&DetailRegion::Subtasks);
+    if ds.region == DetailRegion::Note && !ds.editing {
+        let note_header = ds.note_header_line.unwrap_or(0);
+        let note_end = ds.note_content_end;
+        let current_vl = ds.note_view_line.unwrap_or(note_header);
+
+        if delta > 0 {
+            let new_vl = current_vl + 8;
+            if new_vl > note_end && has_subtasks_region {
+                // Past note content — transition to Subtasks region
+                ds.note_view_line = None;
+                ds.region = DetailRegion::Subtasks;
+                ds.subtask_cursor = 0;
+                return;
+            }
+            // Clamp to note content end
+            let clamped = new_vl.min(note_end);
+            if clamped > current_vl {
+                ds.note_view_line = Some(clamped);
+                return;
+            }
+            // Already at end and no subtasks — stay put
+            return;
+        } else if delta < 0 {
+            if current_vl > note_header {
+                let new_vl = current_vl.saturating_sub(8).max(note_header);
+                ds.note_view_line = Some(new_vl);
+                return;
+            }
+            // At note header — reset virtual cursor and fall through to prev region
+            ds.note_view_line = None;
+        }
+    }
+
     let new_idx = (current_idx as i32 + delta).clamp(0, ds.regions.len() as i32 - 1) as usize;
-    ds.region = ds.regions[new_idx];
+    let new_region = ds.regions[new_idx];
+
+    // Reset note_view_line when leaving Note region
+    if ds.region == DetailRegion::Note && new_region != DetailRegion::Note {
+        ds.note_view_line = None;
+    }
+
+    ds.region = new_region;
 
     // When entering Subtasks from another region via Down, reset subtask_cursor
     if ds.region == DetailRegion::Subtasks && delta > 0 {
@@ -5931,6 +6049,8 @@ fn detail_enter_edit(app: &mut App) {
         // Multi-line editing (note): use detail_state's edit fields
         if let Some(ds) = &mut app.detail_state {
             ds.editing = true;
+            ds.note_h_scroll = 0;
+            ds.note_view_line = None;
             ds.edit_buffer = initial_value.clone();
             ds.edit_cursor_line = 0;
             ds.edit_cursor_col = 0;
@@ -5942,6 +6062,7 @@ fn detail_enter_edit(app: &mut App) {
         // Single-line editing: use the existing edit_buffer/edit_cursor on App
         app.edit_buffer = initial_value.clone();
         app.edit_cursor = app.edit_buffer.len();
+        app.edit_h_scroll = 0;
         app.edit_target = Some(EditTarget::ExistingTitle {
             task_id: task_id.clone(),
             track_id: track_id.clone(),
@@ -5989,10 +6110,13 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
     }
 
     match (key.modifiers, key.code) {
-        // Esc: finish editing (save)
+        // Esc: clear selection first, or finish editing (save)
         (_, KeyCode::Esc) => {
             if let Some(ds) = &mut app.detail_state {
-                ds.multiline_selection_anchor = None;
+                if ds.multiline_selection_anchor.is_some() {
+                    ds.multiline_selection_anchor = None;
+                    return;
+                }
             }
             app.edit_history = None;
             confirm_detail_multiline(app);
@@ -6601,6 +6725,7 @@ fn confirm_detail_edit(app: &mut App) {
     app.edit_target = None;
     app.edit_buffer.clear();
     app.edit_cursor = 0;
+    app.edit_h_scroll = 0;
     app.autocomplete = None;
     if let Some(ds) = &mut app.detail_state {
         ds.editing = false;
@@ -6613,6 +6738,7 @@ fn cancel_detail_edit(app: &mut App) {
     app.edit_target = None;
     app.edit_buffer.clear();
     app.edit_cursor = 0;
+    app.edit_h_scroll = 0;
     app.autocomplete = None;
     if let Some(ds) = &mut app.detail_state {
         ds.editing = false;

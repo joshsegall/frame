@@ -76,10 +76,15 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
     let dim_style = Style::default().fg(app.theme.dim).bg(bg);
     let region_indicator_style = Style::default().fg(app.theme.highlight).bg(bg);
 
+    let width = area.width as usize;
+
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut active_region_line: Option<usize> = None;
+    let mut active_region_line_end: Option<usize> = None; // end of wrapped region (for flash)
     let mut edit_anchor_col: Option<u16> = None;
     let mut edit_anchor_line: Option<usize> = None;
+    #[allow(unused_assignments)]
+    let mut note_header_idx: usize = 0; // set when Note region is rendered
 
     // Blank line at top for breathing room
     lines.push(Line::from(""));
@@ -134,15 +139,23 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
         // Title
         if is_active && editing && app.mode == Mode::Edit {
             // Render edit buffer with cursor
-            render_edit_inline(&mut spans, app, bright_style);
+            let (aw, hs) = render_edit_inline_scrolled(&mut spans, app, bright_style, width);
+            app.last_edit_available_width = aw;
+            app.edit_h_scroll = hs;
+            lines.push(Line::from(spans));
         } else {
             spans.push(Span::styled(
                 task.title.clone(),
                 bright_style.add_modifier(Modifier::BOLD),
             ));
+            let wrapped = wrap_styled_spans(spans, width, 3, bg);
+            let start = lines.len();
+            lines.extend(wrapped);
+            if is_active {
+                active_region_line_end = Some(lines.len().saturating_sub(1));
+                active_region_line = Some(start);
+            }
         }
-
-        lines.push(Line::from(spans));
     }
 
     // Blank line before metadata fields
@@ -161,9 +174,13 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
         if is_active && editing && app.mode == Mode::Edit {
             edit_anchor_col = Some(spans.iter().map(|s| s.content.chars().count() as u16).sum());
             edit_anchor_line = Some(lines.len());
-            render_edit_inline(&mut spans, app, bright_style);
+            let (aw, hs) = render_edit_inline_scrolled(&mut spans, app, bright_style, width);
+            app.last_edit_available_width = aw;
+            app.edit_h_scroll = hs;
+            lines.push(Line::from(spans));
         } else if task.tags.is_empty() {
             spans.push(Span::styled("(none)", dim_style));
+            lines.push(Line::from(spans));
         } else {
             for (i, tag) in task.tags.iter().enumerate() {
                 let tag_color = app.theme.tag_color(tag);
@@ -173,9 +190,14 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
                 spans.push(Span::styled(format!("#{}", tag), tag_style));
             }
+            let wrapped = wrap_styled_spans(spans, width, 9, bg);
+            let start = lines.len();
+            lines.extend(wrapped);
+            if is_active {
+                active_region_line_end = Some(lines.len().saturating_sub(1));
+                active_region_line = Some(start);
+            }
         }
-
-        lines.push(Line::from(spans));
     }
 
     // --- Added region ---
@@ -208,7 +230,9 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             spans.push(Span::styled("dep: ", dim_style));
             edit_anchor_col = Some(spans.iter().map(|s| s.content.chars().count() as u16).sum());
             edit_anchor_line = Some(lines.len());
-            render_edit_inline(&mut spans, app, bright_style);
+            let (aw, hs) = render_edit_inline_scrolled(&mut spans, app, bright_style, width);
+            app.last_edit_available_width = aw;
+            app.edit_h_scroll = hs;
             lines.push(Line::from(spans));
         } else if !deps.is_empty() {
             let mut spans: Vec<Span> = Vec::new();
@@ -234,7 +258,13 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                     ));
                 }
             }
-            lines.push(Line::from(spans));
+            let wrapped = wrap_styled_spans(spans, width, 8, bg);
+            let start = lines.len();
+            lines.extend(wrapped);
+            if is_active {
+                active_region_line_end = Some(lines.len().saturating_sub(1));
+                active_region_line = Some(start);
+            }
         } else if is_active {
             let mut spans: Vec<Span> = Vec::new();
             spans.push(region_indicator(is_active, region_indicator_style, bg));
@@ -264,7 +294,9 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             spans.push(Span::styled("spec: ", dim_style));
             edit_anchor_col = Some(spans.iter().map(|s| s.content.chars().count() as u16).sum());
             edit_anchor_line = Some(lines.len());
-            render_edit_inline(&mut spans, app, bright_style);
+            let (aw, hs) = render_edit_inline_scrolled(&mut spans, app, bright_style, width);
+            app.last_edit_available_width = aw;
+            app.edit_h_scroll = hs;
             lines.push(Line::from(spans));
         } else if let Some(spec_val) = &spec {
             let mut spans: Vec<Span> = Vec::new();
@@ -274,7 +306,13 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 spec_val.clone(),
                 Style::default().fg(app.theme.cyan).bg(bg),
             ));
-            lines.push(Line::from(spans));
+            let wrapped = wrap_styled_spans(spans, width, 9, bg);
+            let start = lines.len();
+            lines.extend(wrapped);
+            if is_active {
+                active_region_line_end = Some(lines.len().saturating_sub(1));
+                active_region_line = Some(start);
+            }
         } else if is_active {
             let mut spans: Vec<Span> = Vec::new();
             spans.push(region_indicator(is_active, region_indicator_style, bg));
@@ -298,9 +336,12 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             spans.push(Span::styled("ref: ", dim_style));
             edit_anchor_col = Some(spans.iter().map(|s| s.content.chars().count() as u16).sum());
             edit_anchor_line = Some(lines.len());
-            render_edit_inline(&mut spans, app, bright_style);
+            let (aw, hs) = render_edit_inline_scrolled(&mut spans, app, bright_style, width);
+            app.last_edit_available_width = aw;
+            app.edit_h_scroll = hs;
             lines.push(Line::from(spans));
         } else if !refs.is_empty() {
+            let start = lines.len();
             for (i, ref_path) in refs.iter().enumerate() {
                 let mut spans: Vec<Span> = Vec::new();
                 spans.push(region_indicator(
@@ -317,7 +358,12 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                     ref_path.clone(),
                     Style::default().fg(app.theme.cyan).bg(bg),
                 ));
-                lines.push(Line::from(spans));
+                let wrapped = wrap_styled_spans(spans, width, 8, bg);
+                lines.extend(wrapped);
+            }
+            if is_active {
+                active_region_line_end = Some(lines.len().saturating_sub(1));
+                active_region_line = Some(start);
             }
         } else if is_active {
             let mut spans: Vec<Span> = Vec::new();
@@ -334,8 +380,9 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
     // --- Note region ---
     {
         let is_active = current_region == DetailRegion::Note;
+        note_header_idx = lines.len();
         if is_active {
-            active_region_line = Some(lines.len());
+            active_region_line = Some(note_header_idx);
         }
         let note = task.metadata.iter().find_map(|m| {
             if let Metadata::Note(n) = m {
@@ -352,8 +399,10 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             header_spans.push(Span::styled("note:", dim_style));
             lines.push(Line::from(header_spans));
 
-            // Render the multi-line edit buffer
-            let note_indent = "   "; // align with field labels
+            // Render the multi-line edit buffer with horizontal scrolling
+            let note_indent_len: usize = 3; // "   " align with field labels
+            let note_available = width.saturating_sub(note_indent_len);
+            let mut adjusted_h_scroll = 0usize;
             if let Some(ref ds) = app.detail_state {
                 let cursor_style = Style::default()
                     .fg(app.theme.background)
@@ -361,6 +410,35 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 let selection_style = Style::default()
                     .fg(app.theme.text_bright)
                     .bg(app.theme.blue);
+                let dim_arrow_style = Style::default().fg(app.theme.dim).bg(bg);
+
+                // Auto-adjust note_h_scroll to keep cursor column visible
+                let mut h_scroll = ds.note_h_scroll;
+                let cursor_col = ds.edit_cursor_col;
+                if note_available > 0 {
+                    let margin = 10.min(note_available / 3);
+                    // Account for cursor-at-end needing one extra column
+                    let edit_lines_vec: Vec<&str> = ds.edit_buffer.split('\n').collect();
+                    let cursor_line_len = edit_lines_vec
+                        .get(ds.edit_cursor_line)
+                        .map_or(0, |l| l.len());
+                    let content_end = if cursor_col >= cursor_line_len {
+                        cursor_line_len + 1
+                    } else {
+                        cursor_line_len
+                    };
+                    if cursor_col >= h_scroll + note_available.saturating_sub(margin) {
+                        h_scroll =
+                            cursor_col.saturating_sub(note_available.saturating_sub(margin + 1));
+                    }
+                    h_scroll =
+                        h_scroll.min(content_end.saturating_sub(note_available.saturating_sub(1)));
+                    if cursor_col < h_scroll + margin {
+                        h_scroll = cursor_col.saturating_sub(margin);
+                    }
+                }
+                // Persist adjusted h_scroll (written back after this block)
+                adjusted_h_scroll = h_scroll;
 
                 // Compute selection range (absolute offsets) if any
                 let sel_range = multiline_selection_range(ds);
@@ -368,51 +446,100 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
                 for (line_idx, edit_line) in edit_lines.iter().enumerate() {
                     let mut spans: Vec<Span> = Vec::new();
-                    spans.push(Span::styled(
-                        note_indent.to_string(),
-                        Style::default().bg(bg),
-                    ));
 
                     let has_cursor = line_idx == ds.edit_cursor_line;
+                    if has_cursor {
+                        active_region_line = Some(lines.len());
+                    }
+
+                    let line_chars: Vec<char> = edit_line.chars().collect();
+                    let total_line_chars = line_chars.len();
+                    let clipped_left = h_scroll > 0 && total_line_chars > 0;
+                    let left_indicator = if clipped_left { 1 } else { 0 };
+                    let avail_after_left = note_available.saturating_sub(left_indicator);
+                    let clipped_right =
+                        h_scroll + avail_after_left < total_line_chars;
+                    let right_indicator = if clipped_right { 1 } else { 0 };
+                    let view_chars = avail_after_left.saturating_sub(right_indicator);
+                    let view_start = h_scroll.min(total_line_chars);
+                    let view_end = (view_start + view_chars).min(total_line_chars);
+
+                    // Indent (may show left arrow)
+                    if clipped_left {
+                        spans.push(Span::styled("  ", Style::default().bg(bg)));
+                        spans.push(Span::styled("\u{25C2}", dim_arrow_style)); // ◂
+                    } else {
+                        spans.push(Span::styled(
+                            " ".repeat(note_indent_len),
+                            Style::default().bg(bg),
+                        ));
+                    }
+
                     let line_sel = sel_range.and_then(|(s, e)| {
                         selection_cols_for_line(&ds.edit_buffer, s, e, line_idx)
                     });
 
+                    // Render the visible viewport of this line
                     if let Some((sc, ec)) = line_sel {
-                        // Render with selection highlight
-                        if sc > 0 {
-                            spans.push(Span::styled(edit_line[..sc].to_string(), bright_style));
+                        // Selection on this line — render char by char within viewport
+                        for (i, ch) in line_chars
+                            .iter()
+                            .enumerate()
+                            .skip(view_start)
+                            .take(view_end - view_start)
+                        {
+                            let s = if i >= sc && i < ec {
+                                selection_style
+                            } else {
+                                bright_style
+                            };
+                            spans.push(Span::styled(ch.to_string(), s));
                         }
-                        spans.push(Span::styled(edit_line[sc..ec].to_string(), selection_style));
-                        if ec < edit_line.len() {
-                            spans.push(Span::styled(edit_line[ec..].to_string(), bright_style));
-                        }
-                        if has_cursor && ds.edit_cursor_col >= edit_line.len() {
-                            spans.push(Span::styled(" ".to_string(), cursor_style));
+                        if has_cursor && cursor_col >= total_line_chars
+                            && cursor_col >= view_start
+                        {
+                            spans.push(Span::styled(" ", cursor_style));
                         }
                     } else if has_cursor {
-                        // No selection on this line, render with cursor
-                        let col = ds.edit_cursor_col.min(edit_line.len());
-                        let before = &edit_line[..col];
-                        if !before.is_empty() {
-                            spans.push(Span::styled(before.to_string(), bright_style));
-                        }
-                        if col < edit_line.len() {
-                            let cursor_char = &edit_line[col..col + 1];
-                            spans.push(Span::styled(cursor_char.to_string(), cursor_style));
-                            let after = &edit_line[col + 1..];
-                            if !after.is_empty() {
-                                spans.push(Span::styled(after.to_string(), bright_style));
+                        // Cursor on this line, no selection
+                        let col = cursor_col.min(total_line_chars);
+                        for (i, ch) in line_chars
+                            .iter()
+                            .enumerate()
+                            .skip(view_start)
+                            .take(view_end - view_start)
+                        {
+                            if i == col {
+                                spans.push(Span::styled(ch.to_string(), cursor_style));
+                            } else {
+                                spans.push(Span::styled(ch.to_string(), bright_style));
                             }
-                        } else {
-                            spans.push(Span::styled(" ".to_string(), cursor_style));
+                        }
+                        if col >= total_line_chars && col >= view_start {
+                            spans.push(Span::styled(" ", cursor_style));
                         }
                     } else {
-                        // No selection, no cursor
-                        spans.push(Span::styled(edit_line.to_string(), bright_style));
+                        // No selection, no cursor — render slice
+                        if view_start < view_end {
+                            let slice: String = line_chars[view_start..view_end]
+                                .iter()
+                                .collect();
+                            spans.push(Span::styled(slice, bright_style));
+                        }
                     }
+
+                    // Right clip indicator
+                    if clipped_right {
+                        spans.push(Span::styled("\u{25B8}", dim_arrow_style)); // ▸
+                    }
+
                     lines.push(Line::from(spans));
                 }
+
+            }
+            // Write back adjusted h_scroll (after immutable borrow of detail_state is released)
+            if let Some(ds_mut) = app.detail_state.as_mut() {
+                ds_mut.note_h_scroll = adjusted_h_scroll;
             }
         } else if let Some(note_text) = &note {
             let mut header_spans: Vec<Span> = Vec::new();
@@ -438,10 +565,12 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                         note_line.to_string(),
                         Style::default().fg(app.theme.dim).bg(bg),
                     ));
+                    lines.push(Line::from(spans));
                 } else {
                     spans.push(Span::styled(note_line.to_string(), text_style));
+                    let wrapped = wrap_styled_spans(spans, width, 3, bg);
+                    lines.extend(wrapped);
                 }
-                lines.push(Line::from(spans));
             }
         } else if is_active {
             let mut spans: Vec<Span> = Vec::new();
@@ -451,6 +580,7 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             lines.push(Line::from(spans));
         }
     }
+    let note_content_end_idx = lines.len().saturating_sub(1);
 
     // --- Subtasks region ---
     if !task.subtasks.is_empty() {
@@ -462,7 +592,8 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
         }
 
         let mut header_spans: Vec<Span> = Vec::new();
-        header_spans.push(region_indicator(is_active, region_indicator_style, bg));
+        let header_indicator = is_active && selected_subtask_id.is_none();
+        header_spans.push(region_indicator(header_indicator, region_indicator_style, bg));
         header_spans.push(Span::styled(
             "Subtasks",
             bright_style.add_modifier(Modifier::BOLD),
@@ -474,6 +605,7 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             app,
             &task.subtasks,
             1,
+            width,
             bg,
             selected_subtask_id.as_deref(),
         );
@@ -485,17 +617,16 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
-    // Apply flash highlight to the active region line
-    if is_flashing {
-        if let Some(line_idx) = active_region_line {
+    // Apply flash highlight to the active region lines (may span multiple wrapped lines)
+    if let (true, Some(start_idx)) = (is_flashing, active_region_line) {
+        let end_idx = active_region_line_end.unwrap_or(start_idx);
+        let flash_bg = app.theme.flash_bg;
+        let flash_border = app.theme.yellow;
+        for line_idx in start_idx..=end_idx {
             if let Some(line) = lines.get_mut(line_idx) {
-                let flash_bg = app.theme.flash_bg;
-                let flash_border = app.theme.yellow;
-                // Restyle all spans with flash_bg, and recolor the region indicator
                 let mut new_spans: Vec<Span<'static>> = Vec::new();
                 for (i, span) in line.spans.drain(..).enumerate() {
-                    if i == 0 && span.content.contains('\u{258E}') {
-                        // Region indicator — change to yellow border + flash_bg
+                    if i == 0 && line_idx == start_idx && span.content.contains('\u{258E}') {
                         new_spans.push(Span::styled(
                             span.content.into_owned(),
                             Style::default().fg(flash_border).bg(flash_bg),
@@ -507,10 +638,8 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                         ));
                     }
                 }
-                // Fill to width
                 let content_width: usize =
                     new_spans.iter().map(|s| s.content.chars().count()).sum();
-                let width = area.width as usize;
                 if content_width < width {
                     new_spans.push(Span::styled(
                         " ".repeat(width - content_width),
@@ -522,14 +651,153 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
-    // Handle scrolling using tracked region line index
+    // Store total lines, note header, and note content end for input handler use
+    if let Some(ds) = app.detail_state.as_mut() {
+        ds.total_lines = lines.len();
+        ds.note_header_line = Some(note_header_idx);
+        ds.note_content_end = note_content_end_idx;
+    }
+
+    // If note_view_line is set, override active_region_line with the virtual cursor
+    // and move the region indicator to that line (only within note content bounds)
+    if let Some(ds) = app.detail_state.as_ref() {
+        if let Some(vl) = ds.note_view_line {
+            let clamped = vl.min(note_content_end_idx);
+            active_region_line = Some(clamped);
+            // Replace the leading 3-char space with the indicator on the target line
+            if let Some(line) = lines.get_mut(clamped) {
+                let mut new_spans: Vec<Span<'static>> = Vec::new();
+                new_spans.push(Span::styled(
+                    " \u{258E} ".to_string(),
+                    region_indicator_style,
+                ));
+                // Skip the first span if it's the 3-char indent/blank indicator
+                let mut skipped_prefix = false;
+                for span in line.spans.iter() {
+                    if !skipped_prefix {
+                        let content = span.content.as_ref();
+                        if content == "   " || content == " \u{258E} " {
+                            skipped_prefix = true;
+                            continue;
+                        }
+                    }
+                    new_spans.push(span.clone());
+                }
+                *line = Line::from(new_spans);
+            }
+            // Remove indicator from the note header line (if different)
+            if clamped != note_header_idx {
+                if let Some(line) = lines.get_mut(note_header_idx) {
+                    let mut new_spans: Vec<Span<'static>> = Vec::new();
+                    for span in line.spans.iter() {
+                        if span.content.as_ref() == " \u{258E} " {
+                            new_spans.push(Span::styled(
+                                "   ".to_string(),
+                                Style::default().bg(bg),
+                            ));
+                        } else {
+                            new_spans.push(span.clone());
+                        }
+                    }
+                    *line = Line::from(new_spans);
+                }
+            }
+        }
+    }
+
+    // Apply active-region highlight: selection_bg on the cursor line, pad to full width
+    let is_editing = app.detail_state.as_ref().is_some_and(|ds| ds.editing);
+    let on_subtask_region = current_region == DetailRegion::Subtasks
+        && selected_subtask_id.is_some();
+    if !is_flashing && !is_editing && !on_subtask_region {
+        if let Some(rl) = active_region_line {
+            let sel_bg = app.theme.selection_bg;
+            if let Some(line) = lines.get_mut(rl) {
+                let mut new_spans: Vec<Span<'static>> = Vec::new();
+                for span in line.spans.drain(..) {
+                    let content = span.content.into_owned();
+                    let is_indicator = content.contains('\u{258E}');
+                    let new_style = if is_indicator {
+                        Style::default().fg(app.theme.selection_border).bg(sel_bg)
+                    } else {
+                        // Brighten text on the selection line
+                        let fg = if span.style.fg == Some(app.theme.dim)
+                            || span.style.fg == Some(app.theme.text)
+                        {
+                            app.theme.text_bright
+                        } else {
+                            span.style.fg.unwrap_or(app.theme.text_bright)
+                        };
+                        let mut s = Style::default().fg(fg).bg(sel_bg);
+                        if span.style.add_modifier.contains(Modifier::BOLD) {
+                            s = s.add_modifier(Modifier::BOLD);
+                        }
+                        s
+                    };
+                    new_spans.push(Span::styled(content, new_style));
+                }
+                let content_width: usize =
+                    new_spans.iter().map(|s| s.content.chars().count()).sum();
+                if content_width < width {
+                    new_spans.push(Span::styled(
+                        " ".repeat(width - content_width),
+                        Style::default().bg(sel_bg),
+                    ));
+                }
+                *line = Line::from(new_spans);
+            }
+        }
+    }
+
+    // When Note region is active (not editing), brighten note body text
+    let is_note_active = current_region == DetailRegion::Note && !is_editing;
+    if is_note_active {
+        // Brighten all note body lines (from header+1 to note_content_end)
+        let body_start = note_header_idx + 1;
+        for line_idx in body_start..=note_content_end_idx {
+            // Skip the cursor line (already highlighted above)
+            if active_region_line == Some(line_idx) {
+                continue;
+            }
+            if let Some(line) = lines.get_mut(line_idx) {
+                let mut new_spans: Vec<Span<'static>> = Vec::new();
+                for span in line.spans.drain(..) {
+                    let content = span.content.into_owned();
+                    let fg = if span.style.fg == Some(app.theme.text)
+                        || span.style.fg == Some(app.theme.dim)
+                    {
+                        app.theme.text_bright
+                    } else {
+                        span.style.fg.unwrap_or(app.theme.text_bright)
+                    };
+                    new_spans.push(Span::styled(
+                        content,
+                        span.style.fg(fg),
+                    ));
+                }
+                *line = Line::from(new_spans);
+            }
+        }
+    }
+
+    // Handle scrolling using tracked region line index with margin-aware logic
     let visible_height = area.height as usize;
+    let total_lines = lines.len();
+
+    let is_note_editing = app.detail_state.as_ref().is_some_and(|ds| {
+        ds.editing && ds.region == DetailRegion::Note
+    });
+    let scroll_margin = if is_note_editing { 4 } else { 2 };
 
     if let (Some(ds), Some(rl)) = (&mut app.detail_state, active_region_line) {
-        if rl < ds.scroll_offset {
-            ds.scroll_offset = rl;
-        } else if rl >= ds.scroll_offset + visible_height {
-            ds.scroll_offset = rl.saturating_sub(visible_height - 1);
+        let top_bound = ds.scroll_offset + scroll_margin;
+        let bottom_bound = ds
+            .scroll_offset
+            .saturating_add(visible_height.saturating_sub(scroll_margin + 1));
+        if rl < top_bound {
+            ds.scroll_offset = rl.saturating_sub(scroll_margin);
+        } else if rl > bottom_bound {
+            ds.scroll_offset = (rl + scroll_margin + 1).saturating_sub(visible_height);
         }
     }
 
@@ -543,6 +811,28 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
         .style(Style::default().bg(bg))
         .scroll((scroll as u16, 0));
     frame.render_widget(paragraph, area);
+
+    // Vertical scroll indicators
+    let dim_indicator_style = Style::default().fg(app.theme.dim).bg(bg);
+    if scroll > 0 && area.height > 0 {
+        let arrow = Paragraph::new("\u{25B2}").style(dim_indicator_style); // ▲
+        frame.render_widget(
+            arrow,
+            Rect::new(area.right().saturating_sub(2), area.y, 1, 1),
+        );
+    }
+    if scroll + visible_height < total_lines && area.height > 0 {
+        let arrow = Paragraph::new("\u{25BC}").style(dim_indicator_style); // ▼
+        frame.render_widget(
+            arrow,
+            Rect::new(
+                area.right().saturating_sub(2),
+                area.bottom().saturating_sub(1),
+                1,
+                1,
+            ),
+        );
+    }
 
     // Set autocomplete anchor for detail view edits
     if let (Some(prefix_w), Some(line_idx)) = (edit_anchor_col, edit_anchor_line) {
@@ -562,10 +852,178 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-/// Render the edit buffer inline with a cursor that highlights the current character
-fn render_edit_inline(spans: &mut Vec<Span<'static>>, app: &App, style: Style) {
+/// Wrap styled spans across multiple lines, respecting word boundaries.
+/// `continuation_indent` is the number of spaces to prepend on wrapped continuation lines.
+fn wrap_styled_spans(
+    spans: Vec<Span<'static>>,
+    max_width: usize,
+    continuation_indent: usize,
+    bg: ratatui::style::Color,
+) -> Vec<Line<'static>> {
+    if max_width == 0 {
+        return vec![Line::from(spans)];
+    }
+
+    let mut result_lines: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut current_line: Vec<Span<'static>> = Vec::new();
+    let mut col: usize = 0; // current column position on this line
+
+    for span in spans {
+        let style = span.style;
+        let text: &str = &span.content;
+
+        if text.is_empty() {
+            current_line.push(span);
+            continue;
+        }
+
+        // Process this span's text character by character, splitting at word boundaries
+        let mut remaining = text;
+        while !remaining.is_empty() {
+            // Find the next word boundary (whitespace vs non-whitespace transition)
+            let chunk_end = if remaining.starts_with(char::is_whitespace) {
+                // Whitespace chunk
+                remaining
+                    .find(|c: char| !c.is_whitespace())
+                    .unwrap_or(remaining.len())
+            } else {
+                // Word chunk
+                remaining
+                    .find(char::is_whitespace)
+                    .unwrap_or(remaining.len())
+            };
+            let chunk = &remaining[..chunk_end];
+            let chunk_chars = chunk.chars().count();
+
+            if col + chunk_chars <= max_width || col == 0 || (col == continuation_indent && result_lines.is_empty()) {
+                // Fits on current line, or we're at the start (must place something)
+                current_line.push(Span::styled(chunk.to_string(), style));
+                col += chunk_chars;
+            } else if chunk.starts_with(char::is_whitespace) {
+                // Whitespace at wrap point — skip it and start new line
+                result_lines.push(std::mem::take(&mut current_line));
+                let indent_str = " ".repeat(continuation_indent);
+                current_line.push(Span::styled(indent_str, Style::default().bg(bg)));
+                col = continuation_indent;
+                // Don't push the whitespace chunk
+            } else {
+                // Word doesn't fit — check if breaking mid-word is better
+                let remaining_space = max_width.saturating_sub(col);
+                let blank_fraction = if max_width > 0 {
+                    remaining_space as f64 / max_width as f64
+                } else {
+                    0.0
+                };
+
+                if blank_fraction > 0.2 && remaining_space > 0 {
+                    // Break mid-word: fill remaining space, continue on next line
+                    let mut byte_pos = 0;
+                    let mut chars_placed = 0;
+                    for c in chunk.chars() {
+                        if chars_placed >= remaining_space {
+                            break;
+                        }
+                        byte_pos += c.len_utf8();
+                        chars_placed += 1;
+                    }
+                    if byte_pos > 0 {
+                        current_line.push(Span::styled(chunk[..byte_pos].to_string(), style));
+                    }
+                    // Start new line with remainder
+                    result_lines.push(std::mem::take(&mut current_line));
+                    let indent_str = " ".repeat(continuation_indent);
+                    current_line.push(Span::styled(indent_str, Style::default().bg(bg)));
+                    col = continuation_indent;
+                    let rest = &chunk[byte_pos..];
+                    if !rest.is_empty() {
+                        current_line.push(Span::styled(rest.to_string(), style));
+                        col += chunk_chars - chars_placed;
+                    }
+                } else {
+                    // Word-wrap: start new line with this word
+                    result_lines.push(std::mem::take(&mut current_line));
+                    let indent_str = " ".repeat(continuation_indent);
+                    current_line.push(Span::styled(indent_str, Style::default().bg(bg)));
+                    col = continuation_indent;
+                    current_line.push(Span::styled(chunk.to_string(), style));
+                    col += chunk_chars;
+                }
+            }
+            remaining = &remaining[chunk_end..];
+        }
+    }
+
+    // Push the last line
+    if !current_line.is_empty() {
+        result_lines.push(current_line);
+    }
+
+    if result_lines.is_empty() {
+        vec![Line::from("")]
+    } else {
+        result_lines.into_iter().map(Line::from).collect()
+    }
+}
+
+/// Render the edit buffer inline with horizontal scrolling for the detail view.
+/// Auto-adjusts h_scroll to keep the cursor visible.
+/// Returns `(available_width, adjusted_h_scroll)` for the caller to persist on App.
+fn render_edit_inline_scrolled(
+    spans: &mut Vec<Span<'static>>,
+    app: &App,
+    style: Style,
+    total_width: usize,
+) -> (u16, usize) {
+    let prefix_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let available = total_width.saturating_sub(prefix_width);
+
+    if available == 0 {
+        return (available as u16, app.edit_h_scroll);
+    }
+
     let buf = &app.edit_buffer;
-    let cursor_pos = app.edit_cursor.min(buf.len());
+    let buf_chars: Vec<char> = buf.chars().collect();
+    let total_chars = buf_chars.len();
+    let cursor_char_pos = buf[..app.edit_cursor.min(buf.len())].chars().count();
+
+    // Auto-adjust h_scroll to keep cursor visible.
+    // When cursor is at the end, the cursor block needs one extra column.
+    let content_end = if cursor_char_pos >= total_chars {
+        total_chars + 1
+    } else {
+        total_chars
+    };
+    let mut h_scroll = app.edit_h_scroll;
+    let margin = 10.min(available / 3);
+    if cursor_char_pos >= h_scroll + available.saturating_sub(margin) {
+        h_scroll = cursor_char_pos.saturating_sub(available.saturating_sub(margin + 1));
+    }
+    h_scroll = h_scroll.min(content_end.saturating_sub(available.saturating_sub(1)));
+    if cursor_char_pos < h_scroll + margin {
+        h_scroll = cursor_char_pos.saturating_sub(margin);
+    }
+
+    let clipped_left = h_scroll > 0;
+    // Account for indicator characters in available space
+    let view_start = h_scroll;
+    let indicator_overhead = if clipped_left { 1 } else { 0 };
+    let effective_available = available.saturating_sub(indicator_overhead);
+    let clipped_right = view_start + effective_available < total_chars;
+    let effective_available = if clipped_right {
+        effective_available.saturating_sub(1)
+    } else {
+        effective_available
+    };
+    let view_end = (view_start + effective_available).min(total_chars);
+
+    let dim_arrow_style = Style::default().fg(app.theme.dim).bg(app.theme.background);
+
+    // Left clip indicator
+    if clipped_left {
+        spans.push(Span::styled("\u{25C2}", dim_arrow_style)); // ◂
+    }
+
+    // Build the visible portion with cursor/selection
     let cursor_style = Style::default()
         .fg(app.theme.background)
         .bg(app.theme.text_bright);
@@ -573,45 +1031,51 @@ fn render_edit_inline(spans: &mut Vec<Span<'static>>, app: &App, style: Style) {
         .fg(app.theme.text_bright)
         .bg(app.theme.blue);
 
-    if let Some((sel_start, sel_end)) = app.edit_selection_range() {
-        if sel_start != sel_end {
-            // Render with selection highlight
-            // Before selection
-            if sel_start > 0 {
-                spans.push(Span::styled(buf[..sel_start].to_string(), style));
+    // Convert selection range from byte to char positions
+    let sel_char_range = app.edit_selection_range().and_then(|(sb, se)| {
+        if sb == se {
+            return None;
+        }
+        let sc = app.edit_buffer[..sb].chars().count();
+        let ec = app.edit_buffer[..se].chars().count();
+        Some((sc, ec))
+    });
+
+    if let Some((sel_start, sel_end)) = sel_char_range {
+        // Render with selection in the visible window
+        for (i, ch) in buf_chars.iter().enumerate().skip(view_start).take(view_end - view_start) {
+            let s = if i >= sel_start && i < sel_end {
+                selection_style
+            } else {
+                style
+            };
+            spans.push(Span::styled(ch.to_string(), s));
+        }
+        // Cursor block at end if cursor is past content
+        if cursor_char_pos >= total_chars && cursor_char_pos >= view_start && cursor_char_pos < view_start + effective_available + 1 {
+            spans.push(Span::styled(" ", cursor_style));
+        }
+    } else {
+        // No selection: render with cursor highlight
+        for (i, ch) in buf_chars.iter().enumerate().skip(view_start).take(view_end - view_start) {
+            if i == cursor_char_pos {
+                spans.push(Span::styled(ch.to_string(), cursor_style));
+            } else {
+                spans.push(Span::styled(ch.to_string(), style));
             }
-            // Selection
-            spans.push(Span::styled(
-                buf[sel_start..sel_end].to_string(),
-                selection_style,
-            ));
-            // After selection
-            if sel_end < buf.len() {
-                spans.push(Span::styled(buf[sel_end..].to_string(), style));
-            }
-            // Cursor at end if needed
-            if cursor_pos >= buf.len() {
-                spans.push(Span::styled(" ".to_string(), cursor_style));
-            }
-            return;
+        }
+        // Cursor block at end if cursor is at/past end of visible content
+        if cursor_char_pos >= total_chars && cursor_char_pos >= view_start {
+            spans.push(Span::styled(" ", cursor_style));
         }
     }
 
-    // No selection: render with cursor highlight
-    let before = &buf[..cursor_pos];
-    if !before.is_empty() {
-        spans.push(Span::styled(before.to_string(), style));
+    // Right clip indicator
+    if clipped_right {
+        spans.push(Span::styled("\u{25B8}", dim_arrow_style)); // ▸
     }
-    if cursor_pos < buf.len() {
-        let cursor_char = &buf[cursor_pos..cursor_pos + 1];
-        spans.push(Span::styled(cursor_char.to_string(), cursor_style));
-        let after = &buf[cursor_pos + 1..];
-        if !after.is_empty() {
-            spans.push(Span::styled(after.to_string(), style));
-        }
-    } else {
-        spans.push(Span::styled(" ".to_string(), cursor_style));
-    }
+
+    (available as u16, h_scroll)
 }
 
 /// Render subtask tree for the detail view.
@@ -621,6 +1085,7 @@ fn render_subtask_tree(
     app: &App,
     tasks: &[Task],
     depth: usize,
+    width: usize,
     bg: ratatui::style::Color,
     selected_subtask_id: Option<&str>,
 ) -> Option<usize> {
@@ -639,8 +1104,17 @@ fn render_subtask_tree(
 
         let mut spans: Vec<Span> = Vec::new();
 
+        // Selection indicator (▎) or space
+        if is_selected {
+            spans.push(Span::styled(
+                "\u{258E}",
+                Style::default().fg(app.theme.selection_border).bg(row_bg),
+            ));
+        } else {
+            spans.push(Span::styled(" ", Style::default().bg(row_bg)));
+        }
+
         // Indent
-        spans.push(Span::styled(" ", Style::default().bg(row_bg)));
         for _ in 0..depth {
             spans.push(Span::styled("  ", row_dim_style));
         }
@@ -651,24 +1125,36 @@ fn render_subtask_tree(
         spans.push(Span::styled(" ", row_dim_style));
 
         // State symbol
-        spans.push(Span::styled(
-            state_symbol(task.state),
-            Style::default().fg(state_color).bg(row_bg),
-        ));
+        let state_style = if is_selected {
+            Style::default()
+                .fg(state_color)
+                .bg(row_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(state_color).bg(row_bg)
+        };
+        spans.push(Span::styled(state_symbol(task.state), state_style));
         spans.push(Span::styled(" ", Style::default().bg(row_bg)));
 
         // Abbreviated ID
         if let Some(ref id) = task.id {
             let abbrev = abbreviated_id(id);
-            spans.push(Span::styled(
-                format!("{} ", abbrev),
-                Style::default().fg(app.theme.text).bg(row_bg),
-            ));
+            let id_style = if is_selected {
+                Style::default().fg(app.theme.selection_id).bg(row_bg)
+            } else {
+                Style::default().fg(app.theme.text).bg(row_bg)
+            };
+            spans.push(Span::styled(format!("{} ", abbrev), id_style));
         }
 
         // Title
         let title_style = if task.state == TaskState::Done {
             Style::default().fg(app.theme.dim).bg(row_bg)
+        } else if is_selected {
+            Style::default()
+                .fg(app.theme.text_bright)
+                .bg(row_bg)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(app.theme.text_bright).bg(row_bg)
         };
@@ -691,6 +1177,15 @@ fn render_subtask_tree(
             }
         }
 
+        // Pad to full width
+        let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        if content_width < width {
+            spans.push(Span::styled(
+                " ".repeat(width - content_width),
+                Style::default().bg(row_bg),
+            ));
+        }
+
         if is_selected {
             selected_line = Some(lines.len());
         }
@@ -704,6 +1199,7 @@ fn render_subtask_tree(
                 app,
                 &task.subtasks,
                 depth + 1,
+                width,
                 bg,
                 selected_subtask_id,
             );

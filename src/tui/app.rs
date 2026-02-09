@@ -255,6 +255,16 @@ pub struct DetailState {
     pub flat_subtask_ids: Vec<String>,
     /// Selection anchor for multi-line editing (line, col). None = no selection.
     pub multiline_selection_anchor: Option<(usize, usize)>,
+    /// Horizontal scroll offset for multi-line note editing
+    pub note_h_scroll: usize,
+    /// Total rendered lines (set during render, used for scroll clamping)
+    pub total_lines: usize,
+    /// Virtual cursor line for note view-mode scrolling (None = not scrolling)
+    pub note_view_line: Option<usize>,
+    /// Line index of the note header in rendered content (set during render)
+    pub note_header_line: Option<usize>,
+    /// Last line index belonging to note content, before subtasks (set during render)
+    pub note_content_end: usize,
 }
 
 /// State for the triage flow (inbox item → track task)
@@ -863,6 +873,10 @@ pub struct App {
     pub last_key_event: Option<String>,
     /// Whether Kitty keyboard protocol is active
     pub kitty_enabled: bool,
+    /// Horizontal scroll offset for single-line edit (character-based)
+    pub edit_h_scroll: usize,
+    /// Available width for edit field (set during render, read during input)
+    pub last_edit_available_width: u16,
 }
 
 impl App {
@@ -976,6 +990,8 @@ impl App {
             key_debug: false,
             last_key_event: None,
             kitty_enabled: false,
+            edit_h_scroll: 0,
+            last_edit_available_width: 0,
         }
     }
 
@@ -2046,6 +2062,11 @@ impl App {
             subtask_cursor: 0,
             flat_subtask_ids: Vec::new(),
             multiline_selection_anchor: None,
+            note_h_scroll: 0,
+            total_lines: 0,
+            note_view_line: None,
+            note_header_line: None,
+            note_content_end: 0,
         });
         self.view = View::Detail { track_id, task_id };
     }
