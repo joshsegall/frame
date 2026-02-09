@@ -2,6 +2,12 @@
 name = "frame"
 version = "0.1.0"
 edition = "2024"
+description = "A markdown task tracker with a terminal UI for humans and a CLI for agents"
+license = "Apache-2.0"
+repository = "https://github.com/joshsegall/frame"
+readme = "README.md"
+keywords = ["cli", "tui", "task-tracker", "markdown", "terminal"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "fr"
