@@ -4,7 +4,7 @@ Frame is a markdown-based task tracker. `.md` files are the source of truth — 
 
 ## Projects
 
-A Frame project is any directory tree containing a `frame/` subdirectory. Running `fr init` creates one:
+A frame project is any directory tree containing a `frame/` subdirectory. Running `fr init` creates one:
 
 ```
 myproject/

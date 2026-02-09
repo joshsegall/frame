@@ -1,4 +1,4 @@
-# Contributing to Frame
+# Contributing to frame
 
 ## Getting started
 
@@ -44,5 +44,5 @@ for the CLI reference and
 
 Bug reports and feature requests are welcome. For bugs, include the
 output of `fr --version` and steps to reproduce. For features, describe
-the problem you're solving — Frame is opinionated about scope, so
+the problem you're solving — frame is opinionated about scope, so
 understanding the "why" helps.

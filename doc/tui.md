@@ -404,7 +404,7 @@ Circular dependencies marked with `↻`. Missing deps shown as `[?]`.
 
 ### Project Picker (`P`)
 
-Switch between registered Frame projects without leaving the TUI. If `fr` is launched outside any project, the picker opens automatically.
+Switch between registered frame projects without leaving the TUI. If `fr` is launched outside any project, the picker opens automatically.
 
 - `j`/`k` — navigate project list
 - `Enter` — switch to selected project
@@ -459,7 +459,7 @@ Inline edit undo (`Ctrl+Z`/`Ctrl+Y` in Edit mode) operates within the current ed
 
 The TUI watches `frame/` for `.md` and `.toml` changes. Self-writes are detected and ignored. External changes trigger a reload; if an edit is in progress, the reload is queued until the edit completes.
 
-Reload is deferred during both Edit and Move modes, applied when the mode exits. After reload, if `auto_clean` is enabled (default: true), Frame automatically assigns missing IDs/dates and archives excess done tasks. This can cause visible changes to the file that weren't made by the user. Each reload inserts an undo sync marker, which clears the redo stack.
+Reload is deferred during both Edit and Move modes, applied when the mode exits. After reload, if `auto_clean` is enabled (default: true), frame automatically assigns missing IDs/dates and archives excess done tasks. This can cause visible changes to the file that weren't made by the user. Each reload inserts an undo sync marker, which clears the redo stack.
 
 ### Filtering
 
@@ -509,7 +509,7 @@ In Edit mode: `Ctrl+C`/`Super+C` copies, `Ctrl+X`/`Super+X` cuts, `Ctrl+V`/`Supe
 
 ## Keyboard Protocol
 
-Frame uses the Kitty keyboard protocol by default for unambiguous key event reporting. This matters most for modified keys like `Ctrl+Shift+Z` (redo) and distinguishing `Tab` from `Ctrl+I`. If your terminal doesn't support it, Frame falls back gracefully — most keybindings still work, but a few modified-key combos may not register. Set `kitty_keyboard = false` in `project.toml` if you see input issues.
+Frame uses the Kitty keyboard protocol by default for unambiguous key event reporting. This matters most for modified keys like `Ctrl+Shift+Z` (redo) and distinguishing `Tab` from `Ctrl+I`. If your terminal doesn't support it, frame falls back gracefully — most keybindings still work, but a few modified-key combos may not register. Set `kitty_keyboard = false` in `project.toml` if you see input issues.
 
 ## Configuration
 

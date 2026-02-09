@@ -17,7 +17,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Initialize a new Frame project in the current directory
+    /// Initialize a new frame project in the current directory
     Init(InitArgs),
     /// List tasks in a track
     List(ListArgs),

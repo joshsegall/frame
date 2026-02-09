@@ -1,6 +1,6 @@
 # Architecture
 
-Developer reference for Frame's internal design. Each section explains a design decision, why it was made, and what would break without it.
+Developer reference for frame's internal design. Each section explains a design decision, why it was made, and what would break without it.
 
 ## Module Overview
 

@@ -2,7 +2,7 @@
 
 ## Identity
 
-**Name:** Frame
+**Name:** frame
 **Command:** `fr`
 **Tagline:** your backlog is plain text
 **One-liner:** A markdown task tracker for the terminal.
@@ -15,9 +15,9 @@ agents. Git is your history.
 
 ## Logo
 
-The Frame logo is two open rounded brackets framing a right-pointing
+The frame logo is two open rounded brackets framing a right-pointing
 play triangle. It directly references the `[>]` active-state checkbox
-that users see throughout the TUI — Frame's visual signature.
+that users see throughout the TUI — frame's visual signature.
 
 The brackets are the structure. The triangle is the momentum.
 

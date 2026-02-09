@@ -10,7 +10,7 @@ use crate::parse::{parse_inbox, parse_track};
 /// Error type for project I/O operations
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectError {
-    #[error("not a Frame project: no frame/ directory found")]
+    #[error("not a frame project: no frame/ directory found")]
     NotAProject,
     #[error("could not read {path}: {source}")]
     ReadError {

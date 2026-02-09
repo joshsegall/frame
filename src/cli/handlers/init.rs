@@ -119,7 +119,7 @@ fn update_gitignore(cwd: &std::path::Path) -> bool {
     if !content.is_empty() && !content.ends_with('\n') {
         content.push('\n');
     }
-    content.push_str("\n# Frame (added by fr init)\n");
+    content.push_str("\n# frame (added by fr init)\n");
     for entry in &to_add {
         content.push_str(entry);
         content.push('\n');
@@ -356,7 +356,7 @@ mod tests {
         let content = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
         assert!(content.contains("frame/.state.json"));
         assert!(content.contains("frame/.lock"));
-        assert!(content.contains("# Frame (added by fr init)"));
+        assert!(content.contains("# frame (added by fr init)"));
     }
 
     #[test]

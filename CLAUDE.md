@@ -31,7 +31,7 @@ See `doc/architecture.md` for detailed design decisions and invariants.
 
 ## Project Structure on Disk
 
-A Frame project has a `frame/` directory containing:
+A frame project has a `frame/` directory containing:
 - `project.toml` — project config
 - `inbox.md` — inbox items
 - `tracks/*.md` — track files (one per track)

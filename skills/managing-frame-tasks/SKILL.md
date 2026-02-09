@@ -1,7 +1,7 @@
 ---
 name: managing-frame-tasks
 description: >
-  Manages tasks using the Frame (`fr`) CLI, a markdown-based task tracker
+  Manages tasks using the frame (`fr`) CLI, a markdown-based task tracker
   where `.md` files in a `frame/` directory are the source of truth. Use when
   the project contains a `frame/` directory, or when asked to create, modify,
   triage, query, or prioritize tasks, tracks, inbox items, or backlog order.
@@ -11,7 +11,7 @@ description: >
 
 # Frame CLI for Agents
 
-The `fr` CLI is the agent interface to Frame. Humans use the TUI.
+The `fr` CLI is the agent interface to frame. Humans use the TUI.
 Tasks are markdown files inside a `frame/` directory in the repo.
 
 ---
@@ -145,7 +145,7 @@ fr sub EFF-014 "Test with nested closures"
 
 | Command | Description |
 |---------|-------------|
-| `fr init` | Initialize a new Frame project in the current directory |
+| `fr init` | Initialize a new frame project in the current directory |
 | `fr init --name "name"` | Set project name (default: directory name) |
 | `fr init --track <id> "name"` | Create an initial track (repeatable) |
 

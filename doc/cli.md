@@ -1,6 +1,6 @@
 # CLI Reference
 
-The Frame CLI binary is `fr`. Run with no arguments to launch the TUI.
+The frame CLI binary is `fr`. Run with no arguments to launch the TUI.
 
 **Global flags**:
 - `--json` — output as JSON (on commands that support it)
@@ -10,7 +10,7 @@ The Frame CLI binary is `fr`. Run with no arguments to launch the TUI.
 
 ### `fr init`
 
-Initialize a new Frame project in the current directory.
+Initialize a new frame project in the current directory.
 
 ```
 fr init [--name NAME] [--track ID NAME]... [--force]
@@ -405,7 +405,7 @@ If the name is ambiguous (multiple projects share the same name), specify by pat
 
 ### The `-C` Flag
 
-Run any Frame command against a different project directory:
+Run any frame command against a different project directory:
 
 ```
 fr -C ~/code/api-server tasks
