@@ -13,15 +13,16 @@ The Frame CLI binary is `fr`. Run with no arguments to launch the TUI.
 Initialize a new Frame project in the current directory.
 
 ```
-fr init [--name NAME] [--track ID NAME]...
+fr init [--name NAME] [--track ID NAME]... [--force]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--name NAME` | Project name (default: directory name) |
 | `--track ID NAME` | Create an initial track (repeatable) |
+| `--force` | Reinitialize even if `frame/` already exists |
 
-Creates `frame/` with `project.toml` and any specified tracks.
+Creates `frame/` with `project.toml`, `inbox.md`, and any specified track files. If the directory is a git repository, adds `frame/.state.json` and `frame/.lock` to `.gitignore`.
 
 ## Reading Commands
 

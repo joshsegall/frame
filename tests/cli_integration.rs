@@ -1009,8 +1009,10 @@ fn test_init_with_tracks() {
             "API Layer",
         ],
     );
-    assert!(out.contains("Initialized"));
-    assert!(out.contains("Test Project"));
+    assert!(out.contains("[>] frame initialized"));
+    assert!(out.contains("project.toml"));
+    assert!(out.contains("inbox.md"));
+    assert!(out.contains("tracks/api.md"));
 
     // project.toml exists and is valid TOML
     let toml_content = fs::read_to_string(tmp.path().join("frame/project.toml")).unwrap();
@@ -1029,4 +1031,86 @@ fn test_init_with_tracks() {
     assert!(tmp.path().join("frame/tracks/api.md").exists());
     // Inbox exists
     assert!(tmp.path().join("frame/inbox.md").exists());
+}
+
+#[test]
+fn test_init_already_exists() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    run_fr_ok(tmp.path(), &["init", "--name", "First"]);
+
+    // Second init without --force should fail
+    let (stdout, stderr, success) = run_fr(tmp.path(), &["init", "--name", "Second"]);
+    assert!(!success);
+    let combined = format!("{}{}", stdout, stderr);
+    assert!(combined.contains("frame/ already exists"));
+    assert!(combined.contains("--force"));
+}
+
+#[test]
+fn test_init_force_reinitialize() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    run_fr_ok(tmp.path(), &["init", "--name", "First"]);
+
+    // --force should succeed
+    let out = run_fr_ok(tmp.path(), &["init", "--name", "Second", "--force"]);
+    assert!(out.contains("[>] frame initialized"));
+
+    // Verify the config was overwritten
+    let toml_content = fs::read_to_string(tmp.path().join("frame/project.toml")).unwrap();
+    assert!(toml_content.contains("\"Second\""));
+}
+
+#[test]
+fn test_init_gitignore_added() {
+    let tmp = tempfile::TempDir::new().unwrap();
+
+    // Create a git repo so .gitignore logic triggers
+    fs::create_dir(tmp.path().join(".git")).unwrap();
+
+    let out = run_fr_ok(tmp.path(), &["init", "--name", "Git Project"]);
+    assert!(out.contains("added frame/.state.json, frame/.lock to .gitignore"));
+
+    let gitignore = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+    assert!(gitignore.contains("frame/.state.json"));
+    assert!(gitignore.contains("frame/.lock"));
+}
+
+#[test]
+fn test_init_gitignore_no_git() {
+    let tmp = tempfile::TempDir::new().unwrap();
+
+    // No .git dir — should not mention .gitignore
+    let out = run_fr_ok(tmp.path(), &["init", "--name", "No Git"]);
+    assert!(!out.contains(".gitignore"));
+}
+
+#[test]
+fn test_init_gitignore_already_present() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    fs::create_dir(tmp.path().join(".git")).unwrap();
+    fs::write(
+        tmp.path().join(".gitignore"),
+        "frame/.state.json\nframe/.lock\n",
+    )
+    .unwrap();
+
+    let out = run_fr_ok(tmp.path(), &["init", "--name", "Already"]);
+    // Should NOT say it added entries
+    assert!(!out.contains("added frame/.state.json"));
+}
+
+#[test]
+fn test_init_gitignore_partial() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    fs::create_dir(tmp.path().join(".git")).unwrap();
+    fs::write(tmp.path().join(".gitignore"), "frame/.lock\n").unwrap();
+
+    let out = run_fr_ok(tmp.path(), &["init", "--name", "Partial"]);
+    // Should still add the missing entry
+    assert!(out.contains("added frame/.state.json, frame/.lock to .gitignore"));
+
+    let gitignore = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+    assert!(gitignore.contains("frame/.state.json"));
+    // Original entry should still be there
+    assert!(gitignore.contains("frame/.lock"));
 }

@@ -91,13 +91,50 @@ fn render_project_toml(
     output
 }
 
+/// Add Frame-specific entries to .gitignore if a git repo exists.
+/// Returns true if entries were actually added.
+fn update_gitignore(cwd: &std::path::Path) -> bool {
+    // Only act if this is a git repo (has .git dir or file)
+    if !cwd.join(".git").exists() {
+        return false;
+    }
+
+    let gitignore_path = cwd.join(".gitignore");
+    let existing = fs::read_to_string(&gitignore_path).unwrap_or_default();
+
+    let entries = ["frame/.state.json", "frame/.lock"];
+    let mut to_add = Vec::new();
+    for entry in &entries {
+        if !existing.lines().any(|line| line.trim() == *entry) {
+            to_add.push(*entry);
+        }
+    }
+
+    if to_add.is_empty() {
+        return false;
+    }
+
+    let mut content = existing;
+    // Ensure we start on a fresh line
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str("\n# Frame (added by fr init)\n");
+    for entry in &to_add {
+        content.push_str(entry);
+        content.push('\n');
+    }
+
+    fs::write(&gitignore_path, content).is_ok()
+}
+
 pub fn cmd_init(args: InitArgs) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
     let frame_dir = cwd.join("frame");
 
     // Check if already initialized
-    if frame_dir.is_dir() {
-        return Err("Frame project already exists in ./frame/".into());
+    if frame_dir.is_dir() && !args.force {
+        return Err("frame/ already exists (use --force to reinitialize)".into());
     }
 
     // Check for parent project and warn
@@ -160,13 +197,21 @@ pub fn cmd_init(args: InitArgs) -> Result<(), Box<dyn std::error::Error>> {
     // Register in global project registry
     crate::io::registry::register_project(&name, &cwd);
 
+    // Update .gitignore
+    let gitignore_updated = update_gitignore(&cwd);
+
     // Print summary
-    println!("Initialized Frame project: {}", name);
-    if !track_pairs.is_empty() {
-        for (id, tname) in &track_pairs {
-            let pfx = prefixes.iter().find(|(pid, _)| pid == id).unwrap();
-            println!("  track: {} ({}) [{}]", tname, id, pfx.1);
-        }
+    println!("[>] frame initialized");
+    println!();
+    println!("  project.toml");
+    println!("  inbox.md");
+    for (id, _) in &track_pairs {
+        println!("  tracks/{}.md", id);
+    }
+
+    if gitignore_updated {
+        println!();
+        println!("  added frame/.state.json, frame/.lock to .gitignore");
     }
 
     Ok(())
@@ -291,5 +336,53 @@ mod tests {
         assert_eq!(parsed.tracks[1].id, "ui");
         assert_eq!(parsed.ids.prefixes.get("api").unwrap(), "API");
         assert_eq!(parsed.ids.prefixes.get("ui").unwrap(), "UI");
+    }
+
+    #[test]
+    fn test_update_gitignore_no_git() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // No .git dir — should return false
+        assert!(!update_gitignore(tmp.path()));
+        assert!(!tmp.path().join(".gitignore").exists());
+    }
+
+    #[test]
+    fn test_update_gitignore_creates_entries() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        fs::create_dir(tmp.path().join(".git")).unwrap();
+
+        assert!(update_gitignore(tmp.path()));
+
+        let content = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        assert!(content.contains("frame/.state.json"));
+        assert!(content.contains("frame/.lock"));
+        assert!(content.contains("# Frame (added by fr init)"));
+    }
+
+    #[test]
+    fn test_update_gitignore_skips_existing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        fs::create_dir(tmp.path().join(".git")).unwrap();
+        fs::write(
+            tmp.path().join(".gitignore"),
+            "frame/.state.json\nframe/.lock\n",
+        )
+        .unwrap();
+
+        assert!(!update_gitignore(tmp.path()));
+    }
+
+    #[test]
+    fn test_update_gitignore_appends_to_existing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        fs::create_dir(tmp.path().join(".git")).unwrap();
+        fs::write(tmp.path().join(".gitignore"), "*.log\n").unwrap();
+
+        assert!(update_gitignore(tmp.path()));
+
+        let content = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        assert!(content.starts_with("*.log\n"));
+        assert!(content.contains("frame/.state.json"));
+        assert!(content.contains("frame/.lock"));
     }
 }

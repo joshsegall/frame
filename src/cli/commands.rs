@@ -87,6 +87,9 @@ pub struct InitArgs {
     /// Create an initial track: --track <id> "name" (repeatable)
     #[arg(long, num_args = 2, value_names = ["ID", "NAME"], action = clap::ArgAction::Append)]
     pub track: Vec<String>,
+    /// Reinitialize even if frame/ already exists
+    #[arg(long)]
+    pub force: bool,
 }
 
 // ---------------------------------------------------------------------------
