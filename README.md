@@ -48,13 +48,13 @@ fr                                       # Open TUI
 
 ## Task states
 
-| Char | State   | Symbol | Meaning              |
-|------|---------|--------|----------------------|
-| ` `  | todo    | ○      | Not started          |
-| `>`  | active  | ●      | In progress          |
-| `-`  | blocked | ⊘      | Waiting on something |
-| `x`  | done    | ✓      | Complete             |
-| `~`  | parked  | ◇      | Deferred             |
+| Char  | State   | Meaning              |
+|-------|---------|----------------------|
+| `[ ]` | todo    | Not started          |
+| `[>]` | active  | In progress          |
+| `[-]` | blocked | Waiting on something |
+| `[x]` | done    | Complete             |
+| `[~]` | parked  | Deferred             |
 
 `Space` cycles todo → active → done. `b` sets blocked. `~` sets parked.
 
