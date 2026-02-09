@@ -553,7 +553,7 @@ fn static_actions() -> Vec<PaletteAction> {
             id: "open_detail",
             label: "Open detail".into(),
             shortcut: Some("Enter"),
-            contexts: &[ViewContext::TrackView],
+            contexts: &[ViewContext::TrackView, ViewContext::RecentView],
             category: ActionCategory::Navigate,
         },
         PaletteAction {
@@ -651,9 +651,16 @@ fn static_actions() -> Vec<PaletteAction> {
             category: ActionCategory::State,
         },
         PaletteAction {
-            id: "toggle_expand",
-            label: "Toggle expand".into(),
-            shortcut: Some("Enter"),
+            id: "expand_subtasks",
+            label: "Expand subtasks".into(),
+            shortcut: Some("l"),
+            contexts: &[ViewContext::RecentView],
+            category: ActionCategory::Navigate,
+        },
+        PaletteAction {
+            id: "collapse_subtasks",
+            label: "Collapse subtasks".into(),
+            shortcut: Some("h"),
             contexts: &[ViewContext::RecentView],
             category: ActionCategory::Navigate,
         },

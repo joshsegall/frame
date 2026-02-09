@@ -22,7 +22,7 @@ Done tasks grouped by resolved date, with a tree structure for subtasks. Switch 
 
 ### Detail View
 
-Full view of a single task showing all fields as navigable regions: Title, Tags, Added, Deps, Spec, Refs, Note, Subtasks. Open with `Enter` on a task in Track view.
+Full view of a single task showing all fields as navigable regions: Title, Tags, Added, Deps, Spec, Refs, Note, Subtasks. Open with `Enter` on a task in Track view or Recent view. A breadcrumb trail always shows the origin (track prefix or "Recent") and any parent tasks when drilling into subtasks.
 
 ## Modes
 
@@ -210,7 +210,8 @@ With selection active (Select mode):
 | `k`, `Up` | Move cursor up |
 | `g`, `Home` | Jump to top |
 | `G`, `End` | Jump to bottom |
-| `l`, `Right`, `Enter` | Expand subtask tree |
+| `Enter` | Open detail view |
+| `l`, `Right` | Expand subtask tree |
 | `h`, `Left` | Collapse subtask tree |
 | `Space` | Reopen task (5s grace period, press again to cancel) |
 
@@ -254,7 +255,7 @@ With selection active (Select mode):
 |-----|--------|
 | `D` | Open dependency popup |
 | `.` | Repeat last action |
-| `Esc`, `Backspace` | Return to Track view |
+| `Esc`, `Backspace` | Return to origin view (Track or Recent) |
 
 ### Edit Mode
 

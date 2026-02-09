@@ -9343,21 +9343,6 @@ fn open_recent_detail(app: &mut App) {
     }
 }
 
-/// Toggle expand/collapse of a task's subtree in the Recent view
-fn toggle_recent_expand(app: &mut App) {
-    let entries = build_recent_entries(app);
-    let cursor = app.recent_cursor;
-    if let Some(entry) = entries.get(cursor)
-        && !entry.task.subtasks.is_empty()
-    {
-        if app.recent_expanded.contains(&entry.id) {
-            app.recent_expanded.remove(&entry.id);
-        } else {
-            app.recent_expanded.insert(entry.id.clone());
-        }
-    }
-}
-
 /// Expand a task's subtree in the Recent view
 fn expand_recent(app: &mut App) {
     let entries = build_recent_entries(app);
@@ -9758,8 +9743,11 @@ fn dispatch_palette_action(app: &mut App, action_id: &str, track_index: Option<u
         "reopen_todo" => {
             reopen_recent_task(app);
         }
-        "toggle_expand" => {
-            toggle_recent_expand(app);
+        "expand_subtasks" => {
+            expand_recent(app);
+        }
+        "collapse_subtasks" => {
+            collapse_recent(app);
         }
 
         // Tracks view
