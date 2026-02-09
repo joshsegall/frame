@@ -145,6 +145,7 @@ pub fn render_help_overlay(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(paragraph, overlay_area);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_entry(
     entry: &HelpEntry,
     spans: &mut Vec<Span<'_>>,

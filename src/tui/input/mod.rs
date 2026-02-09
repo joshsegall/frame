@@ -92,7 +92,7 @@ fn offset_to_multiline_pos(text: &str, offset: usize) -> (usize, usize) {
         remaining -= line.len() + 1;
     }
     let line_count = text.split('\n').count();
-    let last_len = text.split('\n').last().map_or(0, |l| l.len());
+    let last_len = text.split('\n').next_back().map_or(0, |l| l.len());
     (line_count.saturating_sub(1), last_len)
 }
 
@@ -252,11 +252,8 @@ pub fn handle_paste(app: &mut App, text: &str) {
         // Multi-line: insert text as-is (preserving newlines)
         if let Some(ds) = &mut app.detail_state {
             delete_multiline_selection(ds);
-            let offset = multiline_pos_to_offset(
-                &ds.edit_buffer,
-                ds.edit_cursor_line,
-                ds.edit_cursor_col,
-            );
+            let offset =
+                multiline_pos_to_offset(&ds.edit_buffer, ds.edit_cursor_line, ds.edit_cursor_col);
             ds.edit_buffer.insert_str(offset, text);
             let new_offset = offset + text.len();
             let (new_line, new_col) = offset_to_multiline_pos(&ds.edit_buffer, new_offset);
@@ -972,25 +969,25 @@ fn reset_cursor_for_filter(app: &mut App, prev_task_id: Option<&str>) {
         }
 
         // First: try to find the same task ID in the filtered results
-        if let Some(target_id) = prev_task_id {
-            if let Some(track) = App::find_track_in_project(&app.project, &track_id) {
-                for (i, item) in items.iter().enumerate() {
-                    if let FlatItem::Task {
-                        section,
-                        path,
-                        is_context,
-                        ..
-                    } = item
+        if let Some(target_id) = prev_task_id
+            && let Some(track) = App::find_track_in_project(&app.project, &track_id)
+        {
+            for (i, item) in items.iter().enumerate() {
+                if let FlatItem::Task {
+                    section,
+                    path,
+                    is_context,
+                    ..
+                } = item
+                {
+                    if *is_context {
+                        continue;
+                    }
+                    if let Some(task) = resolve_task_from_flat(track, *section, path)
+                        && task.id.as_deref() == Some(target_id)
                     {
-                        if *is_context {
-                            continue;
-                        }
-                        if let Some(task) = resolve_task_from_flat(track, *section, path) {
-                            if task.id.as_deref() == Some(target_id) {
-                                app.get_track_state(&track_id).cursor = i;
-                                return;
-                            }
-                        }
+                        app.get_track_state(&track_id).cursor = i;
+                        return;
                     }
                 }
             }
@@ -1124,10 +1121,10 @@ fn finalize_range_select(app: &mut App) {
             if *is_context {
                 continue;
             }
-            if let Some(task) = resolve_task_from_flat(track, *section, path) {
-                if let Some(id) = &task.id {
-                    app.selection.insert(id.clone());
-                }
+            if let Some(task) = resolve_task_from_flat(track, *section, path)
+                && let Some(id) = &task.id
+            {
+                app.selection.insert(id.clone());
             }
         }
     }
@@ -1159,10 +1156,10 @@ fn select_all(app: &mut App) {
             if *is_context {
                 continue;
             }
-            if let Some(task) = resolve_task_from_flat(track, *section, path) {
-                if let Some(id) = &task.id {
-                    app.selection.insert(id.clone());
-                }
+            if let Some(task) = resolve_task_from_flat(track, *section, path)
+                && let Some(id) = &task.id
+            {
+                app.selection.insert(id.clone());
             }
         }
     }
@@ -1614,17 +1611,16 @@ fn bulk_state_change(app: &mut App, target_state: crate::model::TaskState) {
             });
 
             // Schedule pending move if transitioning to Done
-            if new_state == crate::model::TaskState::Done {
-                if let Some(track) = App::find_track_in_project(&app.project, &track_id) {
-                    if task_ops::is_top_level_in_section(track, task_id, SectionKind::Backlog) {
-                        app.pending_moves.push(PendingMove {
-                            kind: PendingMoveKind::ToDone,
-                            track_id: track_id.clone(),
-                            task_id: task_id.clone(),
-                            deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
-                        });
-                    }
-                }
+            if new_state == crate::model::TaskState::Done
+                && let Some(track) = App::find_track_in_project(&app.project, &track_id)
+                && task_ops::is_top_level_in_section(track, task_id, SectionKind::Backlog)
+            {
+                app.pending_moves.push(PendingMove {
+                    kind: PendingMoveKind::ToDone,
+                    track_id: track_id.clone(),
+                    task_id: task_id.clone(),
+                    deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+                });
             }
 
             any_changed = true;
@@ -1906,10 +1902,10 @@ fn begin_bulk_move(app: &mut App) {
     // Collect indices of selected top-level tasks
     let mut to_remove_indices: Vec<usize> = Vec::new();
     for (i, task) in backlog.iter().enumerate() {
-        if let Some(id) = &task.id {
-            if selected_ids.contains(id) {
-                to_remove_indices.push(i);
-            }
+        if let Some(id) = &task.id
+            && selected_ids.contains(id)
+        {
+            to_remove_indices.push(i);
         }
     }
 
@@ -1993,7 +1989,7 @@ fn move_bulk_standin(app: &mut App, direction: i32) {
         Some(MoveState::BulkTask { track_id, .. }) => {
             let tid = track_id.clone();
             let backlog_len = App::find_track_in_project(&app.project, &tid)
-                .and_then(|t| Some(t.backlog().len()))
+                .map(|t| t.backlog().len())
                 .unwrap_or(0);
             (tid, backlog_len)
         }
@@ -2018,7 +2014,7 @@ fn move_bulk_standin_to_boundary(app: &mut App, to_top: bool) {
         Some(MoveState::BulkTask { track_id, .. }) => {
             let tid = track_id.clone();
             let backlog_len = App::find_track_in_project(&app.project, &tid)
-                .and_then(|t| Some(t.backlog().len()))
+                .map(|t| t.backlog().len())
                 .unwrap_or(0);
             (tid, backlog_len)
         }
@@ -2333,8 +2329,10 @@ fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo: bool) {
                     // Undo: restore original state; Redo: re-apply toggle
                     let new_state = if is_undo {
                         if was_active { "active" } else { "shelved" }
+                    } else if was_active {
+                        "shelved"
                     } else {
-                        if was_active { "shelved" } else { "active" }
+                        "active"
                     };
                     if let Some(tc) = app.project.config.tracks.iter_mut().find(|t| t.id == tid) {
                         tc.state = new_state.to_string();
@@ -3037,17 +3035,16 @@ fn repeat_bulk_cycle(app: &mut App) {
                 new_resolved,
             });
 
-            if new_state == crate::model::TaskState::Done {
-                if let Some(track) = App::find_track_in_project(&app.project, &track_id) {
-                    if task_ops::is_top_level_in_section(track, task_id, SectionKind::Backlog) {
-                        app.pending_moves.push(PendingMove {
-                            kind: PendingMoveKind::ToDone,
-                            track_id: track_id.clone(),
-                            task_id: task_id.clone(),
-                            deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
-                        });
-                    }
-                }
+            if new_state == crate::model::TaskState::Done
+                && let Some(track) = App::find_track_in_project(&app.project, &track_id)
+                && task_ops::is_top_level_in_section(track, task_id, SectionKind::Backlog)
+            {
+                app.pending_moves.push(PendingMove {
+                    kind: PendingMoveKind::ToDone,
+                    track_id: track_id.clone(),
+                    task_id: task_id.clone(),
+                    deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+                });
             }
 
             any_changed = true;
@@ -3293,56 +3290,63 @@ fn add_task_action(app: &mut App, pos: AddPosition) {
     if matches!(pos, AddPosition::AfterCursor) {
         let flat_items = app.build_flat_items(&track_id);
         let cursor = app.track_states.get(&track_id).map_or(0, |s| s.cursor);
-        if let Some(FlatItem::Task { section, path, depth, .. }) = flat_items.get(cursor) {
-            if *depth > 0 && path.len() > 1 {
-                // Cursor is on a child task — find parent and insert sibling after this task
-                let parent_path = &path[..path.len() - 1];
-                let track_ref = match App::find_track_in_project(&app.project, &track_id) {
-                    Some(t) => t,
-                    None => return,
-                };
-                let parent_task = match resolve_task_from_flat(track_ref, *section, parent_path) {
-                    Some(t) => t,
-                    None => return,
-                };
-                let parent_id = match &parent_task.id {
-                    Some(id) => id.clone(),
-                    None => return,
-                };
-                let cursor_task = match resolve_task_from_flat(track_ref, *section, path) {
-                    Some(t) => t,
-                    None => return,
-                };
-                let sibling_id = match &cursor_task.id {
-                    Some(id) => id.clone(),
-                    None => return,
-                };
+        if let Some(FlatItem::Task {
+            section,
+            path,
+            depth,
+            ..
+        }) = flat_items.get(cursor)
+            && *depth > 0
+            && path.len() > 1
+        {
+            // Cursor is on a child task — find parent and insert sibling after this task
+            let parent_path = &path[..path.len() - 1];
+            let track_ref = match App::find_track_in_project(&app.project, &track_id) {
+                Some(t) => t,
+                None => return,
+            };
+            let parent_task = match resolve_task_from_flat(track_ref, *section, parent_path) {
+                Some(t) => t,
+                None => return,
+            };
+            let parent_id = match &parent_task.id {
+                Some(id) => id.clone(),
+                None => return,
+            };
+            let cursor_task = match resolve_task_from_flat(track_ref, *section, path) {
+                Some(t) => t,
+                None => return,
+            };
+            let sibling_id = match &cursor_task.id {
+                Some(id) => id.clone(),
+                None => return,
+            };
 
-                let track = match app.find_track_mut(&track_id) {
-                    Some(t) => t,
-                    None => return,
-                };
-                let sub_id = match task_ops::add_subtask_after(track, &parent_id, &sibling_id, String::new()) {
+            let track = match app.find_track_mut(&track_id) {
+                Some(t) => t,
+                None => return,
+            };
+            let sub_id =
+                match task_ops::add_subtask_after(track, &parent_id, &sibling_id, String::new()) {
                     Ok(id) => id,
                     Err(_) => return,
                 };
 
-                // Enter EDIT mode for the new subtask's title
-                app.edit_buffer.clear();
-                app.edit_cursor = 0;
-                app.edit_target = Some(EditTarget::NewTask {
-                    task_id: sub_id.clone(),
-                    track_id: track_id.clone(),
-                    parent_id: Some(parent_id),
-                });
-                app.pre_edit_cursor = saved_cursor;
-                app.edit_history = Some(EditHistory::new("", 0, 0));
-                app.edit_is_fresh = true;
-                app.mode = Mode::Edit;
+            // Enter EDIT mode for the new subtask's title
+            app.edit_buffer.clear();
+            app.edit_cursor = 0;
+            app.edit_target = Some(EditTarget::NewTask {
+                task_id: sub_id.clone(),
+                track_id: track_id.clone(),
+                parent_id: Some(parent_id),
+            });
+            app.pre_edit_cursor = saved_cursor;
+            app.edit_history = Some(EditHistory::new("", 0, 0));
+            app.edit_is_fresh = true;
+            app.mode = Mode::Edit;
 
-                move_cursor_to_task(app, &track_id, &sub_id);
-                return;
-            }
+            move_cursor_to_task(app, &track_id, &sub_id);
+            return;
         }
     }
 
@@ -3410,15 +3414,14 @@ fn add_subtask_action(app: &mut App) {
         let track = App::find_track_in_project(&app.project, &track_id);
         if let Some(track) = track {
             for item in &flat_items {
-                if let FlatItem::Task { section, path, .. } = item {
-                    if let Some(task) = resolve_task_from_flat(track, *section, path) {
-                        if task.id.as_deref() == Some(&parent_id) {
-                            let key = crate::tui::app::task_expand_key(task, *section, path);
-                            let state = app.get_track_state(&track_id);
-                            state.expanded.insert(key);
-                            break;
-                        }
-                    }
+                if let FlatItem::Task { section, path, .. } = item
+                    && let Some(task) = resolve_task_from_flat(track, *section, path)
+                    && task.id.as_deref() == Some(&parent_id)
+                {
+                    let key = crate::tui::app::task_expand_key(task, *section, path);
+                    let state = app.get_track_state(&track_id);
+                    state.expanded.insert(key);
+                    break;
                 }
             }
         }
@@ -3501,15 +3504,14 @@ fn append_sibling_action(app: &mut App) {
         let track = App::find_track_in_project(&app.project, &track_id);
         if let Some(track) = track {
             for item in &flat_items {
-                if let FlatItem::Task { section, path, .. } = item {
-                    if let Some(task) = resolve_task_from_flat(track, *section, path) {
-                        if task.id.as_deref() == Some(&parent_id) {
-                            let key = crate::tui::app::task_expand_key(task, *section, path);
-                            let state = app.get_track_state(&track_id);
-                            state.expanded.insert(key);
-                            break;
-                        }
-                    }
+                if let FlatItem::Task { section, path, .. } = item
+                    && let Some(task) = resolve_task_from_flat(track, *section, path)
+                    && task.id.as_deref() == Some(&parent_id)
+                {
+                    let key = crate::tui::app::task_expand_key(task, *section, path);
+                    let state = app.get_track_state(&track_id);
+                    state.expanded.insert(key);
+                    break;
                 }
             }
         }
@@ -3580,15 +3582,13 @@ fn outdent_new_subtask(app: &mut App) {
             depth,
             ..
         } = item
+            && let Some(task) = resolve_task_from_flat(track_ref, *section, path)
+            && task.id.as_deref() == Some(&parent_id)
         {
-            if let Some(task) = resolve_task_from_flat(track_ref, *section, path) {
-                if task.id.as_deref() == Some(&parent_id) {
-                    parent_depth = *depth;
-                    parent_path = Some(path.clone());
-                    parent_section = *section;
-                    break;
-                }
-            }
+            parent_depth = *depth;
+            parent_path = Some(path.clone());
+            parent_section = *section;
+            break;
         }
     }
 
@@ -3823,12 +3823,12 @@ fn handle_edit(app: &mut App, key: KeyEvent) {
             (_, KeyCode::Enter) => {
                 // Accept autocomplete if a candidate is selected AND the user is
                 // actually completing a partial word (not just confirming an already-typed entry)
-                if let Some(ac) = &app.autocomplete {
-                    if let Some(entry) = ac.selected_entry() {
-                        let filter = autocomplete_filter_text(&app.edit_buffer, ac.kind);
-                        if filter != entry {
-                            autocomplete_accept(app);
-                        }
+                if let Some(ac) = &app.autocomplete
+                    && let Some(entry) = ac.selected_entry()
+                {
+                    let filter = autocomplete_filter_text(&app.edit_buffer, ac.kind);
+                    if filter != entry {
+                        autocomplete_accept(app);
                     }
                 }
                 app.autocomplete = None;
@@ -3956,22 +3956,22 @@ fn handle_edit(app: &mut App, key: KeyEvent) {
             if m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::SUPER) =>
         {
             app.edit_selection_anchor = None;
-            if let Some(eh) = &mut app.edit_history {
-                if let Some((buf, pos, _)) = eh.undo() {
-                    app.edit_buffer = buf.to_string();
-                    app.edit_cursor = pos;
-                }
+            if let Some(eh) = &mut app.edit_history
+                && let Some((buf, pos, _)) = eh.undo()
+            {
+                app.edit_buffer = buf.to_string();
+                app.edit_cursor = pos;
             }
             update_autocomplete_filter(app);
         }
         // Inline redo (Ctrl+Y, Ctrl+Shift+Z, or Super+Shift+Z)
         (m, KeyCode::Char('y')) if m.contains(KeyModifiers::CONTROL) => {
             app.edit_selection_anchor = None;
-            if let Some(eh) = &mut app.edit_history {
-                if let Some((buf, pos, _)) = eh.redo() {
-                    app.edit_buffer = buf.to_string();
-                    app.edit_cursor = pos;
-                }
+            if let Some(eh) = &mut app.edit_history
+                && let Some((buf, pos, _)) = eh.redo()
+            {
+                app.edit_buffer = buf.to_string();
+                app.edit_cursor = pos;
             }
             update_autocomplete_filter(app);
         }
@@ -3980,11 +3980,11 @@ fn handle_edit(app: &mut App, key: KeyEvent) {
                 && m.contains(KeyModifiers::SHIFT) =>
         {
             app.edit_selection_anchor = None;
-            if let Some(eh) = &mut app.edit_history {
-                if let Some((buf, pos, _)) = eh.redo() {
-                    app.edit_buffer = buf.to_string();
-                    app.edit_cursor = pos;
-                }
+            if let Some(eh) = &mut app.edit_history
+                && let Some((buf, pos, _)) = eh.redo()
+            {
+                app.edit_buffer = buf.to_string();
+                app.edit_cursor = pos;
             }
             update_autocomplete_filter(app);
         }
@@ -4053,11 +4053,9 @@ fn handle_edit(app: &mut App, key: KeyEvent) {
         }
         // Backspace: delete selection or single char
         (KeyModifiers::NONE, KeyCode::Backspace) => {
-            if !app.delete_selection() {
-                if app.edit_cursor > 0 {
-                    app.edit_buffer.remove(app.edit_cursor - 1);
-                    app.edit_cursor -= 1;
-                }
+            if !app.delete_selection() && app.edit_cursor > 0 {
+                app.edit_buffer.remove(app.edit_cursor - 1);
+                app.edit_cursor -= 1;
             }
             if let Some(eh) = &mut app.edit_history {
                 eh.snapshot(&app.edit_buffer, app.edit_cursor, 0);
@@ -4441,10 +4439,10 @@ fn confirm_edit(app: &mut App) {
             let title = app.edit_buffer.clone();
             if title.trim().is_empty() {
                 // Empty title: discard the placeholder
-                if let Some(inbox) = &mut app.project.inbox {
-                    if index < inbox.items.len() {
-                        inbox.items.remove(index);
-                    }
+                if let Some(inbox) = &mut app.project.inbox
+                    && index < inbox.items.len()
+                {
+                    inbox.items.remove(index);
                 }
             } else {
                 // Apply title to the inbox item
@@ -4464,11 +4462,11 @@ fn confirm_edit(app: &mut App) {
         } => {
             let new_title = app.edit_buffer.clone();
             if !new_title.trim().is_empty() && new_title != original_title {
-                if let Some(inbox) = &mut app.project.inbox {
-                    if let Some(item) = inbox.items.get_mut(index) {
-                        item.title = new_title.clone();
-                        item.dirty = true;
-                    }
+                if let Some(inbox) = &mut app.project.inbox
+                    && let Some(item) = inbox.items.get_mut(index)
+                {
+                    item.title = new_title.clone();
+                    item.dirty = true;
                 }
                 app.undo_stack.push(Operation::InboxTitleEdit {
                     index,
@@ -4495,11 +4493,11 @@ fn confirm_edit(app: &mut App) {
                 .filter(|s| !s.is_empty())
                 .collect();
 
-            if let Some(inbox) = &mut app.project.inbox {
-                if let Some(item) = inbox.items.get_mut(index) {
-                    item.tags = new_tags.clone();
-                    item.dirty = true;
-                }
+            if let Some(inbox) = &mut app.project.inbox
+                && let Some(item) = inbox.items.get_mut(index)
+            {
+                item.tags = new_tags.clone();
+                item.dirty = true;
             }
 
             if new_tags != old_tags_vec {
@@ -4789,10 +4787,10 @@ fn cancel_edit(app: &mut App) {
         }
         // If we were creating a new inbox item, remove the placeholder
         Some(EditTarget::NewInboxItem { index }) => {
-            if let Some(inbox) = &mut app.project.inbox {
-                if index < inbox.items.len() {
-                    inbox.items.remove(index);
-                }
+            if let Some(inbox) = &mut app.project.inbox
+                && index < inbox.items.len()
+            {
+                inbox.items.remove(index);
             }
             // Restore cursor
             if let Some(cursor) = saved_cursor {
@@ -4833,14 +4831,13 @@ fn move_cursor_to_task(app: &mut App, track_id: &str, target_task_id: &str) {
     let track = App::find_track_in_project(&app.project, track_id);
     if let Some(track) = track {
         for (i, item) in flat_items.iter().enumerate() {
-            if let FlatItem::Task { section, path, .. } = item {
-                if let Some(task) = resolve_task_from_flat(track, *section, path) {
-                    if task.id.as_deref() == Some(target_task_id) {
-                        let state = app.get_track_state(track_id);
-                        state.cursor = i;
-                        return;
-                    }
-                }
+            if let FlatItem::Task { section, path, .. } = item
+                && let Some(task) = resolve_task_from_flat(track, *section, path)
+                && task.id.as_deref() == Some(target_task_id)
+            {
+                let state = app.get_track_state(track_id);
+                state.cursor = i;
+                return;
             }
         }
     }
@@ -5993,10 +5990,10 @@ fn handle_enter(app: &mut App) {
         View::Tracks => {
             // Switch to Track view for the track under cursor
             let track_id = tracks_cursor_track_id(app);
-            if let Some(id) = track_id {
-                if let Some(idx) = app.active_track_ids.iter().position(|tid| tid == &id) {
-                    app.view = View::Track(idx);
-                }
+            if let Some(id) = track_id
+                && let Some(idx) = app.active_track_ids.iter().position(|tid| tid == &id)
+            {
+                app.view = View::Track(idx);
             }
         }
         _ => {}
@@ -6208,7 +6205,10 @@ fn tracks_archive_or_delete(app: &mut App) {
         });
     } else {
         app.confirm_state = Some(super::app::ConfirmState {
-            message: format!("Archive track \"{}\"? ({} tasks) [y/n]", display_name, count),
+            message: format!(
+                "Archive track \"{}\"? ({} tasks) [y/n]",
+                display_name, count
+            ),
             action: super::app::ConfirmAction::ArchiveTrack { track_id },
         });
     }
@@ -6698,26 +6698,24 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
         key.code,
         KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
     );
-    if is_movement {
-        if let Some(ds) = &mut app.detail_state {
-            if has_shift {
-                if ds.multiline_selection_anchor.is_none() {
-                    ds.multiline_selection_anchor = Some((ds.edit_cursor_line, ds.edit_cursor_col));
-                }
-            } else {
-                ds.multiline_selection_anchor = None;
+    if is_movement && let Some(ds) = &mut app.detail_state {
+        if has_shift {
+            if ds.multiline_selection_anchor.is_none() {
+                ds.multiline_selection_anchor = Some((ds.edit_cursor_line, ds.edit_cursor_col));
             }
+        } else {
+            ds.multiline_selection_anchor = None;
         }
     }
 
     match (key.modifiers, key.code) {
         // Esc: clear selection first, or finish editing (save)
         (_, KeyCode::Esc) => {
-            if let Some(ds) = &mut app.detail_state {
-                if ds.multiline_selection_anchor.is_some() {
-                    ds.multiline_selection_anchor = None;
-                    return;
-                }
+            if let Some(ds) = &mut app.detail_state
+                && ds.multiline_selection_anchor.is_some()
+            {
+                ds.multiline_selection_anchor = None;
+                return;
             }
             app.edit_history = None;
             confirm_detail_multiline(app);
@@ -6760,20 +6758,20 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
         (m, KeyCode::Char('c'))
             if m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::SUPER) =>
         {
-            if let Some(ds) = &app.detail_state {
-                if let Some(text) = get_multiline_selection_text(ds) {
-                    clipboard_set(&text);
-                }
+            if let Some(ds) = &app.detail_state
+                && let Some(text) = get_multiline_selection_text(ds)
+            {
+                clipboard_set(&text);
             }
         }
         // Cut (Ctrl+X or Super+X)
         (m, KeyCode::Char('x'))
             if m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::SUPER) =>
         {
-            if let Some(ds) = &mut app.detail_state {
-                if let Some(text) = delete_multiline_selection(ds) {
-                    clipboard_set(&text);
-                }
+            if let Some(ds) = &mut app.detail_state
+                && let Some(text) = delete_multiline_selection(ds)
+            {
+                clipboard_set(&text);
             }
             snapshot_multiline(app);
         }
@@ -6807,14 +6805,14 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
             if let Some(ds) = &mut app.detail_state {
                 ds.multiline_selection_anchor = None;
             }
-            if let Some(eh) = &mut app.edit_history {
-                if let Some((buf, col, line)) = eh.undo() {
-                    let buf = buf.to_string();
-                    if let Some(ds) = &mut app.detail_state {
-                        ds.edit_buffer = buf;
-                        ds.edit_cursor_col = col;
-                        ds.edit_cursor_line = line;
-                    }
+            if let Some(eh) = &mut app.edit_history
+                && let Some((buf, col, line)) = eh.undo()
+            {
+                let buf = buf.to_string();
+                if let Some(ds) = &mut app.detail_state {
+                    ds.edit_buffer = buf;
+                    ds.edit_cursor_col = col;
+                    ds.edit_cursor_line = line;
                 }
             }
         }
@@ -6823,14 +6821,14 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
             if let Some(ds) = &mut app.detail_state {
                 ds.multiline_selection_anchor = None;
             }
-            if let Some(eh) = &mut app.edit_history {
-                if let Some((buf, col, line)) = eh.redo() {
-                    let buf = buf.to_string();
-                    if let Some(ds) = &mut app.detail_state {
-                        ds.edit_buffer = buf;
-                        ds.edit_cursor_col = col;
-                        ds.edit_cursor_line = line;
-                    }
+            if let Some(eh) = &mut app.edit_history
+                && let Some((buf, col, line)) = eh.redo()
+            {
+                let buf = buf.to_string();
+                if let Some(ds) = &mut app.detail_state {
+                    ds.edit_buffer = buf;
+                    ds.edit_cursor_col = col;
+                    ds.edit_cursor_line = line;
                 }
             }
         }
@@ -6841,14 +6839,14 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
             if let Some(ds) = &mut app.detail_state {
                 ds.multiline_selection_anchor = None;
             }
-            if let Some(eh) = &mut app.edit_history {
-                if let Some((buf, col, line)) = eh.redo() {
-                    let buf = buf.to_string();
-                    if let Some(ds) = &mut app.detail_state {
-                        ds.edit_buffer = buf;
-                        ds.edit_cursor_col = col;
-                        ds.edit_cursor_line = line;
-                    }
+            if let Some(eh) = &mut app.edit_history
+                && let Some((buf, col, line)) = eh.redo()
+            {
+                let buf = buf.to_string();
+                if let Some(ds) = &mut app.detail_state {
+                    ds.edit_buffer = buf;
+                    ds.edit_cursor_col = col;
+                    ds.edit_cursor_line = line;
                 }
             }
         }
@@ -6925,13 +6923,13 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                 && !key.modifiers.contains(KeyModifiers::CONTROL)
                 && !key.modifiers.contains(KeyModifiers::SUPER) =>
         {
-            if let Some(ds) = &mut app.detail_state {
-                if ds.edit_cursor_line > 0 {
-                    ds.edit_cursor_line -= 1;
-                    let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
-                    let line_len = edit_lines.get(ds.edit_cursor_line).map_or(0, |l| l.len());
-                    ds.edit_cursor_col = ds.edit_cursor_col.min(line_len);
-                }
+            if let Some(ds) = &mut app.detail_state
+                && ds.edit_cursor_line > 0
+            {
+                ds.edit_cursor_line -= 1;
+                let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
+                let line_len = edit_lines.get(ds.edit_cursor_line).map_or(0, |l| l.len());
+                ds.edit_cursor_col = ds.edit_cursor_col.min(line_len);
             }
         }
         // Cursor movement: Down (plain or Shift for selection)
@@ -7051,42 +7049,42 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
         (m, KeyCode::Backspace)
             if m.contains(KeyModifiers::ALT) || m.contains(KeyModifiers::CONTROL) =>
         {
-            if let Some(ds) = &mut app.detail_state {
-                if delete_multiline_selection(ds).is_none() {
-                    let mut edit_lines: Vec<String> =
-                        ds.edit_buffer.split('\n').map(String::from).collect();
-                    let line_idx = ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1));
-                    let col = ds.edit_cursor_col.min(edit_lines[line_idx].len());
-                    let new_pos = word_boundary_left(&edit_lines[line_idx], col);
-                    edit_lines[line_idx].drain(new_pos..col);
-                    ds.edit_cursor_col = new_pos;
-                    ds.edit_buffer = edit_lines.join("\n");
-                }
+            if let Some(ds) = &mut app.detail_state
+                && delete_multiline_selection(ds).is_none()
+            {
+                let mut edit_lines: Vec<String> =
+                    ds.edit_buffer.split('\n').map(String::from).collect();
+                let line_idx = ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1));
+                let col = ds.edit_cursor_col.min(edit_lines[line_idx].len());
+                let new_pos = word_boundary_left(&edit_lines[line_idx], col);
+                edit_lines[line_idx].drain(new_pos..col);
+                ds.edit_cursor_col = new_pos;
+                ds.edit_buffer = edit_lines.join("\n");
             }
             snapshot_multiline(app);
         }
         // Backspace: delete selection or single char
         (KeyModifiers::NONE, KeyCode::Backspace) => {
-            if let Some(ds) = &mut app.detail_state {
-                if delete_multiline_selection(ds).is_none() {
-                    let mut edit_lines: Vec<String> =
-                        ds.edit_buffer.split('\n').map(String::from).collect();
-                    let line = ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1));
-                    let col = ds.edit_cursor_col.min(edit_lines[line].len());
+            if let Some(ds) = &mut app.detail_state
+                && delete_multiline_selection(ds).is_none()
+            {
+                let mut edit_lines: Vec<String> =
+                    ds.edit_buffer.split('\n').map(String::from).collect();
+                let line = ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1));
+                let col = ds.edit_cursor_col.min(edit_lines[line].len());
 
-                    if col > 0 {
-                        edit_lines[line].remove(col - 1);
-                        ds.edit_cursor_col = col - 1;
-                    } else if line > 0 {
-                        // Merge with previous line
-                        let current_line = edit_lines.remove(line);
-                        let prev_len = edit_lines[line - 1].len();
-                        edit_lines[line - 1].push_str(&current_line);
-                        ds.edit_cursor_line = line - 1;
-                        ds.edit_cursor_col = prev_len;
-                    }
-                    ds.edit_buffer = edit_lines.join("\n");
+                if col > 0 {
+                    edit_lines[line].remove(col - 1);
+                    ds.edit_cursor_col = col - 1;
+                } else if line > 0 {
+                    // Merge with previous line
+                    let current_line = edit_lines.remove(line);
+                    let prev_len = edit_lines[line - 1].len();
+                    edit_lines[line - 1].push_str(&current_line);
+                    ds.edit_cursor_line = line - 1;
+                    ds.edit_cursor_col = prev_len;
                 }
+                ds.edit_buffer = edit_lines.join("\n");
             }
             snapshot_multiline(app);
         }
@@ -7110,10 +7108,10 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
 
 /// Snapshot the current multiline edit state for inline undo/redo
 fn snapshot_multiline(app: &mut App) {
-    if let Some(ds) = &app.detail_state {
-        if let Some(eh) = &mut app.edit_history {
-            eh.snapshot(&ds.edit_buffer, ds.edit_cursor_col, ds.edit_cursor_line);
-        }
+    if let Some(ds) = &app.detail_state
+        && let Some(eh) = &mut app.edit_history
+    {
+        eh.snapshot(&ds.edit_buffer, ds.edit_cursor_col, ds.edit_cursor_line);
     }
 }
 
@@ -7506,15 +7504,13 @@ fn search_in_track(app: &mut App, view_idx: usize, re: &Regex, direction: i32) {
 
     let mut match_positions: Vec<usize> = Vec::new();
     for (fi, item) in flat_items.iter().enumerate() {
-        if let FlatItem::Task { section, path, .. } = item {
-            if let Some(task) = resolve_task_from_track(track, *section, path) {
-                if matched_task_ids
-                    .iter()
-                    .any(|id| task.id.as_deref() == Some(id.as_str()))
-                {
-                    match_positions.push(fi);
-                }
-            }
+        if let FlatItem::Task { section, path, .. } = item
+            && let Some(task) = resolve_task_from_track(track, *section, path)
+            && matched_task_ids
+                .iter()
+                .any(|id| task.id.as_deref() == Some(id.as_str()))
+        {
+            match_positions.push(fi);
         }
     }
 
@@ -7948,7 +7944,7 @@ fn autocomplete_accept(app: &mut App) {
                 .collect();
             let buf = &app.edit_buffer;
             let last_space = buf.rfind(' ');
-            if existing.iter().any(|e| *e == selected) {
+            if existing.contains(&selected) {
                 // Already present — clear the current word being typed
                 if let Some(pos) = last_space {
                     app.edit_buffer.truncate(pos + 1);
@@ -7983,16 +7979,14 @@ fn autocomplete_accept(app: &mut App) {
                         app.edit_buffer.push(' ');
                     }
                 }
-            } else {
-                if let Some(pos) = last_sep {
-                    app.edit_buffer.truncate(pos + 1);
-                    if !app.edit_buffer.ends_with(' ') {
-                        app.edit_buffer.push(' ');
-                    }
-                    app.edit_buffer.push_str(&selected);
-                } else {
-                    app.edit_buffer = selected;
+            } else if let Some(pos) = last_sep {
+                app.edit_buffer.truncate(pos + 1);
+                if !app.edit_buffer.ends_with(' ') {
+                    app.edit_buffer.push(' ');
                 }
+                app.edit_buffer.push_str(&selected);
+            } else {
+                app.edit_buffer = selected;
             }
             app.edit_cursor = app.edit_buffer.len();
         }
@@ -9124,10 +9118,10 @@ fn reopen_recent_task(app: &mut App) {
 
     // Find the done_index for undo before mutating
     let done_index = {
-        let done = match track.section_tasks(SectionKind::Done) {
-            d if d.is_empty() => return,
-            d => d,
-        };
+        let done = track.section_tasks(SectionKind::Done);
+        if done.is_empty() {
+            return;
+        }
         match done
             .iter()
             .position(|t| t.id.as_deref() == Some(task_id.as_str()))
@@ -9185,13 +9179,13 @@ fn reopen_recent_task(app: &mut App) {
 fn toggle_recent_expand(app: &mut App) {
     let entries = build_recent_entries(app);
     let cursor = app.recent_cursor;
-    if let Some(entry) = entries.get(cursor) {
-        if !entry.task.subtasks.is_empty() {
-            if app.recent_expanded.contains(&entry.id) {
-                app.recent_expanded.remove(&entry.id);
-            } else {
-                app.recent_expanded.insert(entry.id.clone());
-            }
+    if let Some(entry) = entries.get(cursor)
+        && !entry.task.subtasks.is_empty()
+    {
+        if app.recent_expanded.contains(&entry.id) {
+            app.recent_expanded.remove(&entry.id);
+        } else {
+            app.recent_expanded.insert(entry.id.clone());
         }
     }
 }
@@ -9200,10 +9194,10 @@ fn toggle_recent_expand(app: &mut App) {
 fn expand_recent(app: &mut App) {
     let entries = build_recent_entries(app);
     let cursor = app.recent_cursor;
-    if let Some(entry) = entries.get(cursor) {
-        if !entry.task.subtasks.is_empty() {
-            app.recent_expanded.insert(entry.id.clone());
-        }
+    if let Some(entry) = entries.get(cursor)
+        && !entry.task.subtasks.is_empty()
+    {
+        app.recent_expanded.insert(entry.id.clone());
     }
 }
 
@@ -9299,11 +9293,11 @@ fn dispatch_palette_action(app: &mut App, action_id: &str, track_index: Option<u
     match action_id {
         // Global
         "switch_track" => {
-            if let Some(idx) = track_index {
-                if idx < app.active_track_ids.len() {
-                    app.close_detail_fully();
-                    app.view = View::Track(idx);
-                }
+            if let Some(idx) = track_index
+                && idx < app.active_track_ids.len()
+            {
+                app.close_detail_fully();
+                app.view = View::Track(idx);
             }
         }
         "next_track" => {
@@ -10057,14 +10051,13 @@ fn dep_popup_collapse(app: &mut App) {
         };
         app.rebuild_dep_popup_entries(&mut dp);
         // Restore cursor position to the same task
-        if let Some(tid) = cursor_task_id {
-            if let Some(idx) = dp
+        if let Some(tid) = cursor_task_id
+            && let Some(idx) = dp
                 .entries
                 .iter()
                 .position(|e| matches!(e, DepPopupEntry::Task { task_id, .. } if task_id == &tid))
-            {
-                dp.cursor = idx;
-            }
+        {
+            dp.cursor = idx;
         }
         dep_popup_adjust_scroll(&mut dp);
         app.dep_popup = Some(dp);
@@ -10374,19 +10367,13 @@ fn handle_project_picker_key(app: &mut App, key: KeyEvent) {
                 match crate::io::project_io::load_project(&root) {
                     Ok(mut project) => {
                         // Ensure IDs and dates
-                        let modified =
-                            crate::ops::clean::ensure_ids_and_dates(&mut project);
+                        let modified = crate::ops::clean::ensure_ids_and_dates(&mut project);
                         if !modified.is_empty() {
-                            let _lock = crate::io::lock::FileLock::acquire_default(
-                                &project.frame_dir,
-                            )
-                            .ok();
+                            let _lock =
+                                crate::io::lock::FileLock::acquire_default(&project.frame_dir).ok();
                             for track_id in &modified {
-                                if let Some(tc) = project
-                                    .config
-                                    .tracks
-                                    .iter()
-                                    .find(|tc| tc.id == *track_id)
+                                if let Some(tc) =
+                                    project.config.tracks.iter().find(|tc| tc.id == *track_id)
                                 {
                                     let file = &tc.file;
                                     if let Some(track) = project
@@ -10432,8 +10419,7 @@ fn handle_project_picker_key(app: &mut App, key: KeyEvent) {
                 }
             }
         }
-        (KeyModifiers::SHIFT, KeyCode::Char('X'))
-        | (KeyModifiers::NONE, KeyCode::Char('X')) => {
+        (KeyModifiers::SHIFT, KeyCode::Char('X')) | (KeyModifiers::NONE, KeyCode::Char('X')) => {
             picker.remove_selected();
         }
         (_, KeyCode::Char('s')) => {

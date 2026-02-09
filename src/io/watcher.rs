@@ -45,10 +45,10 @@ impl FrameWatcher {
                             return false;
                         }
                         // Skip .lock and .state.json
-                        if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-                            if name == ".lock" || name == ".state.json" {
-                                return false;
-                            }
+                        if let Some(name) = p.file_name().and_then(|n| n.to_str())
+                            && (name == ".lock" || name == ".state.json")
+                        {
+                            return false;
                         }
                         // Only care about .md and .toml files
                         matches!(

@@ -16,18 +16,10 @@ pub struct ProjectEntry {
 }
 
 /// The global project registry
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProjectRegistry {
     #[serde(default)]
     pub projects: Vec<ProjectEntry>,
-}
-
-impl Default for ProjectRegistry {
-    fn default() -> Self {
-        Self {
-            projects: Vec::new(),
-        }
-    }
 }
 
 /// Get the registry file path, respecting XDG_CONFIG_HOME
@@ -83,8 +75,7 @@ pub fn write_registry_to(path: &Path, reg: &ProjectRegistry) -> Result<(), std::
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let content =
-        toml::to_string_pretty(reg).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let content = toml::to_string_pretty(reg).map_err(|e| std::io::Error::other(e.to_string()))?;
     fs::write(path, content)
 }
 
@@ -215,10 +206,10 @@ pub fn remove_by_path(path_str: &str) -> Option<ProjectEntry> {
 
 /// Abbreviate a path by replacing $HOME with ~
 pub fn abbreviate_path(path: &str) -> String {
-    if let Ok(home) = std::env::var("HOME") {
-        if let Some(rest) = path.strip_prefix(&home) {
-            return format!("~{}", rest);
-        }
+    if let Ok(home) = std::env::var("HOME")
+        && let Some(rest) = path.strip_prefix(&home)
+    {
+        return format!("~{}", rest);
     }
     path.to_string()
 }

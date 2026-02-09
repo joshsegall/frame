@@ -130,10 +130,7 @@ fn render_tabs(frame: &mut Frame, app: &App, area: Rect) -> Vec<usize> {
         // Truncated: " trunc\u{2026} " fills all available space
         let max_chars = available - 3; // 1 leading space + ellipsis + 1 trailing space
         let truncated: String = name_chars[..max_chars].iter().collect();
-        spans.push(Span::styled(
-            format!(" {}\u{2026} ", truncated),
-            name_style,
-        ));
+        spans.push(Span::styled(format!(" {}\u{2026} ", truncated), name_style));
     }
     // else: no space, project name hidden
 

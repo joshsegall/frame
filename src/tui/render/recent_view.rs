@@ -220,6 +220,7 @@ pub fn render_recent_view(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /// Render subtask tree lines recursively
+#[allow(clippy::too_many_arguments)]
 fn render_subtask_tree<'a>(
     tasks: &[Task],
     lines: &mut Vec<Line<'a>>,

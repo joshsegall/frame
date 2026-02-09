@@ -451,14 +451,14 @@ pub fn next_id_number(track: &Track, prefix: &str) -> usize {
 /// Updates `max` if a higher number is found.
 pub fn find_max_id_in_track(track: &Track, prefix_dash: &str, max: &mut usize) {
     for_each_task_in_track(track, &mut |task: &Task| {
-        if let Some(ref id) = task.id {
-            if let Some(num_str) = id.strip_prefix(prefix_dash) {
-                let num_part = num_str.split('.').next().unwrap_or("");
-                if let Ok(n) = num_part.parse::<usize>() {
-                    if n > *max {
-                        *max = n;
-                    }
-                }
+        if let Some(ref id) = task.id
+            && let Some(num_str) = id.strip_prefix(prefix_dash)
+        {
+            let num_part = num_str.split('.').next().unwrap_or("");
+            if let Ok(n) = num_part.parse::<usize>()
+                && n > *max
+            {
+                *max = n;
             }
         }
     });
@@ -487,10 +487,10 @@ fn insert_at(
 /// Find a task by ID anywhere in a track (including subtasks), return mutable ref.
 pub fn find_task_mut_in_track<'a>(track: &'a mut Track, task_id: &str) -> Option<&'a mut Task> {
     for node in &mut track.nodes {
-        if let TrackNode::Section { tasks, .. } = node {
-            if let Some(t) = find_task_mut_in_list(tasks, task_id) {
-                return Some(t);
-            }
+        if let TrackNode::Section { tasks, .. } = node
+            && let Some(t) = find_task_mut_in_list(tasks, task_id)
+        {
+            return Some(t);
         }
     }
     None
@@ -511,10 +511,10 @@ fn find_task_mut_in_list<'a>(tasks: &'a mut [Task], task_id: &str) -> Option<&'a
 /// Find a task by ID anywhere in a track (immutable).
 pub fn find_task_in_track<'a>(track: &'a Track, task_id: &str) -> Option<&'a Task> {
     for node in &track.nodes {
-        if let TrackNode::Section { tasks, .. } = node {
-            if let Some(t) = find_task_in_list(tasks, task_id) {
-                return Some(t);
-            }
+        if let TrackNode::Section { tasks, .. } = node
+            && let Some(t) = find_task_in_list(tasks, task_id)
+        {
+            return Some(t);
         }
     }
     None

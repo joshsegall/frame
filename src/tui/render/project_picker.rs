@@ -147,8 +147,10 @@ fn render_project_picker_inner(
                 abbreviate_path(&entry.path)
             };
             let path_display = if path_full.chars().count() > path_budget {
-                let truncated: String =
-                    path_full.chars().take(path_budget.saturating_sub(1)).collect();
+                let truncated: String = path_full
+                    .chars()
+                    .take(path_budget.saturating_sub(1))
+                    .collect();
                 format!("{}\u{2026}", truncated)
             } else {
                 path_full

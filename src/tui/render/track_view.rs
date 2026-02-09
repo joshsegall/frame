@@ -44,12 +44,11 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
         ref removed_tasks,
         ..
     }) = app.move_state
+        && ms_tid == &track_id
     {
-        if ms_tid == &track_id {
-            let count = removed_tasks.len();
-            let idx = insert_pos.min(flat_items.len());
-            flat_items.insert(idx, FlatItem::BulkMoveStandin { count });
-        }
+        let count = removed_tasks.len();
+        let idx = insert_pos.min(flat_items.len());
+        flat_items.insert(idx, FlatItem::BulkMoveStandin { count });
     }
 
     let visible_height = area.height as usize;
@@ -169,21 +168,22 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
                     lines.push(line);
 
                     // Insert bulk inline editor below cursor row
-                    if is_cursor && lines.len() < visible_height {
-                        if let Some(ref et) = app.edit_target {
-                            let label = match et {
-                                EditTarget::BulkTags => Some("tags:"),
-                                EditTarget::BulkDeps => Some("deps:"),
-                                _ => None,
-                            };
-                            if let Some(label) = label {
-                                let (editor_line, ec) =
-                                    render_bulk_editor_line(app, label, area.width as usize);
-                                let screen_y = area.y + lines.len() as u16;
-                                let screen_x = area.x + ec;
-                                edit_anchor = Some((screen_x, screen_y));
-                                lines.push(editor_line);
-                            }
+                    if is_cursor
+                        && lines.len() < visible_height
+                        && let Some(ref et) = app.edit_target
+                    {
+                        let label = match et {
+                            EditTarget::BulkTags => Some("tags:"),
+                            EditTarget::BulkDeps => Some("deps:"),
+                            _ => None,
+                        };
+                        if let Some(label) = label {
+                            let (editor_line, ec) =
+                                render_bulk_editor_line(app, label, area.width as usize);
+                            let screen_y = area.y + lines.len() as u16;
+                            let screen_x = area.x + ec;
+                            edit_anchor = Some((screen_x, screen_y));
+                            lines.push(editor_line);
                         }
                     }
                 }
@@ -246,6 +246,7 @@ struct TaskLineInfo<'a> {
 /// Render a single task line with all decorations.
 /// Returns the line and optionally the column offset where an edit buffer starts
 /// (used for autocomplete anchor positioning).
+#[allow(clippy::too_many_arguments)]
 fn render_task_line<'a>(
     app: &'a App,
     task: &Task,

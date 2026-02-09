@@ -17,16 +17,16 @@ pub fn serialize_tasks(tasks: &[Task], indent: usize) -> Vec<String> {
 /// independently — this enables selective rewrite where editing a subtask
 /// doesn't reformat the parent or siblings.
 fn serialize_task(task: &Task, indent: usize, lines: &mut Vec<String>) {
-    if !task.dirty {
-        if let Some(ref source) = task.source_text {
-            // Emit this task's own lines (task line + metadata) verbatim
-            lines.extend(source.iter().cloned());
-            // Still recurse into subtasks — they have their own dirty flags
-            for subtask in &task.subtasks {
-                serialize_task(subtask, indent + 2, lines);
-            }
-            return;
+    if !task.dirty
+        && let Some(ref source) = task.source_text
+    {
+        // Emit this task's own lines (task line + metadata) verbatim
+        lines.extend(source.iter().cloned());
+        // Still recurse into subtasks — they have their own dirty flags
+        for subtask in &task.subtasks {
+            serialize_task(subtask, indent + 2, lines);
         }
+        return;
     }
 
     // Canonical format for this task's own content

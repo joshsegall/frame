@@ -10,11 +10,11 @@ pub fn serialize_inbox(inbox: &Inbox) -> String {
 
     // Emit items
     for (i, item) in inbox.items.iter().enumerate() {
-        if !item.dirty {
-            if let Some(ref source) = item.source_text {
-                lines.extend(source.iter().cloned());
-                continue;
-            }
+        if !item.dirty
+            && let Some(ref source) = item.source_text
+        {
+            lines.extend(source.iter().cloned());
+            continue;
         }
 
         // Canonical format

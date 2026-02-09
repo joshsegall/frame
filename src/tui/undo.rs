@@ -619,10 +619,10 @@ fn apply_inverse(
         | Operation::TrackCcFocus { .. } => None,
         Operation::InboxAdd { index } => {
             // Undo add = remove the item
-            if let Some(inbox) = inbox {
-                if *index < inbox.items.len() {
-                    inbox.items.remove(*index);
-                }
+            if let Some(inbox) = inbox
+                && *index < inbox.items.len()
+            {
+                inbox.items.remove(*index);
             }
             None
         }
@@ -637,22 +637,22 @@ fn apply_inverse(
         Operation::InboxTitleEdit {
             index, old_title, ..
         } => {
-            if let Some(inbox) = inbox {
-                if let Some(item) = inbox.items.get_mut(*index) {
-                    item.title = old_title.clone();
-                    item.dirty = true;
-                }
+            if let Some(inbox) = inbox
+                && let Some(item) = inbox.items.get_mut(*index)
+            {
+                item.title = old_title.clone();
+                item.dirty = true;
             }
             None
         }
         Operation::InboxTagsEdit {
             index, old_tags, ..
         } => {
-            if let Some(inbox) = inbox {
-                if let Some(item) = inbox.items.get_mut(*index) {
-                    item.tags = old_tags.clone();
-                    item.dirty = true;
-                }
+            if let Some(inbox) = inbox
+                && let Some(item) = inbox.items.get_mut(*index)
+            {
+                item.tags = old_tags.clone();
+                item.dirty = true;
             }
             None
         }
@@ -661,12 +661,12 @@ fn apply_inverse(
             new_index,
         } => {
             // Undo move = move back from new_index to old_index
-            if let Some(inbox) = inbox {
-                if *new_index < inbox.items.len() {
-                    let item = inbox.items.remove(*new_index);
-                    let idx = (*old_index).min(inbox.items.len());
-                    inbox.items.insert(idx, item);
-                }
+            if let Some(inbox) = inbox
+                && *new_index < inbox.items.len()
+            {
+                let item = inbox.items.remove(*new_index);
+                let idx = (*old_index).min(inbox.items.len());
+                inbox.items.insert(idx, item);
             }
             None
         }
@@ -678,10 +678,10 @@ fn apply_inverse(
         } => {
             // Undo triage = remove task from track, re-insert item into inbox
             let track = find_track_mut(tracks, track_id);
-            if let Some(track) = track {
-                if let Some(tasks) = track.section_tasks_mut(SectionKind::Backlog) {
-                    tasks.retain(|t| t.id.as_deref() != Some(task_id));
-                }
+            if let Some(track) = track
+                && let Some(tasks) = track.section_tasks_mut(SectionKind::Backlog)
+            {
+                tasks.retain(|t| t.id.as_deref() != Some(task_id));
             }
             if let Some(inbox) = inbox {
                 let idx = (*inbox_index).min(inbox.items.len());
@@ -724,14 +724,10 @@ fn apply_inverse(
             // Try to find and remove from Backlog (post-flush case)
             let from_backlog = {
                 if let Some(backlog) = track.section_tasks_mut(SectionKind::Backlog) {
-                    if let Some(idx) = backlog
+                    backlog
                         .iter()
                         .position(|t| t.id.as_deref() == Some(task_id))
-                    {
-                        Some(backlog.remove(idx))
-                    } else {
-                        None
-                    }
+                        .map(|idx| backlog.remove(idx))
                 } else {
                     None
                 }
@@ -944,32 +940,32 @@ fn apply_forward(
         }
         Operation::InboxDelete { index, .. } => {
             // Redo delete = remove the item again
-            if let Some(inbox) = inbox {
-                if *index < inbox.items.len() {
-                    inbox.items.remove(*index);
-                }
+            if let Some(inbox) = inbox
+                && *index < inbox.items.len()
+            {
+                inbox.items.remove(*index);
             }
             None
         }
         Operation::InboxTitleEdit {
             index, new_title, ..
         } => {
-            if let Some(inbox) = inbox {
-                if let Some(item) = inbox.items.get_mut(*index) {
-                    item.title = new_title.clone();
-                    item.dirty = true;
-                }
+            if let Some(inbox) = inbox
+                && let Some(item) = inbox.items.get_mut(*index)
+            {
+                item.title = new_title.clone();
+                item.dirty = true;
             }
             None
         }
         Operation::InboxTagsEdit {
             index, new_tags, ..
         } => {
-            if let Some(inbox) = inbox {
-                if let Some(item) = inbox.items.get_mut(*index) {
-                    item.tags = new_tags.clone();
-                    item.dirty = true;
-                }
+            if let Some(inbox) = inbox
+                && let Some(item) = inbox.items.get_mut(*index)
+            {
+                item.tags = new_tags.clone();
+                item.dirty = true;
             }
             None
         }
@@ -977,12 +973,12 @@ fn apply_forward(
             old_index,
             new_index,
         } => {
-            if let Some(inbox) = inbox {
-                if *old_index < inbox.items.len() {
-                    let item = inbox.items.remove(*old_index);
-                    let idx = (*new_index).min(inbox.items.len());
-                    inbox.items.insert(idx, item);
-                }
+            if let Some(inbox) = inbox
+                && *old_index < inbox.items.len()
+            {
+                let item = inbox.items.remove(*old_index);
+                let idx = (*new_index).min(inbox.items.len());
+                inbox.items.insert(idx, item);
             }
             None
         }
@@ -994,29 +990,29 @@ fn apply_forward(
             ..
         } => {
             // Redo triage = remove from inbox, add task to track
-            if let Some(inbox) = inbox {
-                if *inbox_index < inbox.items.len() {
-                    inbox.items.remove(*inbox_index);
-                }
+            if let Some(inbox) = inbox
+                && *inbox_index < inbox.items.len()
+            {
+                inbox.items.remove(*inbox_index);
             }
             // Re-create task in track
             let track = find_track_mut(tracks, track_id);
-            if let Some(track) = track {
-                if let Some(tasks) = track.section_tasks_mut(SectionKind::Backlog) {
-                    let mut task =
-                        Task::new(TaskState::Todo, Some(task_id.clone()), item.title.clone());
-                    task.tags = item.tags.clone();
-                    task.metadata.push(crate::model::task::Metadata::Added(
-                        chrono::Local::now().format("%Y-%m-%d").to_string(),
-                    ));
-                    if let Some(body) = &item.body {
-                        if !body.is_empty() {
-                            task.metadata
-                                .push(crate::model::task::Metadata::Note(body.clone()));
-                        }
-                    }
-                    tasks.push(task);
+            if let Some(track) = track
+                && let Some(tasks) = track.section_tasks_mut(SectionKind::Backlog)
+            {
+                let mut task =
+                    Task::new(TaskState::Todo, Some(task_id.clone()), item.title.clone());
+                task.tags = item.tags.clone();
+                task.metadata.push(crate::model::task::Metadata::Added(
+                    chrono::Local::now().format("%Y-%m-%d").to_string(),
+                ));
+                if let Some(body) = &item.body
+                    && !body.is_empty()
+                {
+                    task.metadata
+                        .push(crate::model::task::Metadata::Note(body.clone()));
                 }
+                tasks.push(task);
             }
             Some(track_id.clone())
         }
@@ -1050,11 +1046,9 @@ fn apply_forward(
             // Try to find in Done section first (normal case)
             let from_done = {
                 if let Some(done) = track.section_tasks_mut(SectionKind::Done) {
-                    if let Some(idx) = done.iter().position(|t| t.id.as_deref() == Some(task_id)) {
-                        Some(done.remove(idx))
-                    } else {
-                        None
-                    }
+                    done.iter()
+                        .position(|t| t.id.as_deref() == Some(task_id))
+                        .map(|idx| done.remove(idx))
                 } else {
                     None
                 }

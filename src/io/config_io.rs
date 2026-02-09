@@ -122,22 +122,21 @@ pub fn update_track_id(doc: &mut toml_edit::DocumentMut, old_id: &str, new_id: &
 
 /// Remove an entry from [ids.prefixes]
 pub fn remove_prefix(doc: &mut toml_edit::DocumentMut, track_id: &str) {
-    if let Some(ids) = doc.get_mut("ids").and_then(|i| i.as_table_mut()) {
-        if let Some(prefixes) = ids.get_mut("prefixes").and_then(|p| p.as_table_mut()) {
-            prefixes.remove(track_id);
-        }
+    if let Some(ids) = doc.get_mut("ids").and_then(|i| i.as_table_mut())
+        && let Some(prefixes) = ids.get_mut("prefixes").and_then(|p| p.as_table_mut())
+    {
+        prefixes.remove(track_id);
     }
 }
 
 /// Move a prefix entry from old_key to new_key in [ids.prefixes]
 pub fn rename_prefix_key(doc: &mut toml_edit::DocumentMut, old_key: &str, new_key: &str) {
-    if let Some(ids) = doc.get_mut("ids").and_then(|i| i.as_table_mut()) {
-        if let Some(prefixes) = ids.get_mut("prefixes").and_then(|p| p.as_table_mut()) {
-            if let Some(value) = prefixes.get(old_key).cloned() {
-                prefixes.remove(old_key);
-                prefixes.insert(new_key, value);
-            }
-        }
+    if let Some(ids) = doc.get_mut("ids").and_then(|i| i.as_table_mut())
+        && let Some(prefixes) = ids.get_mut("prefixes").and_then(|p| p.as_table_mut())
+        && let Some(value) = prefixes.get(old_key).cloned()
+    {
+        prefixes.remove(old_key);
+        prefixes.insert(new_key, value);
     }
 }
 

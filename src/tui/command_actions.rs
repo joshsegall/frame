@@ -392,14 +392,22 @@ fn static_actions() -> Vec<PaletteAction> {
             id: "insert_after",
             label: "Insert after cursor".into(),
             shortcut: Some("-"),
-            contexts: &[ViewContext::TrackView, ViewContext::InboxView, ViewContext::TracksView],
+            contexts: &[
+                ViewContext::TrackView,
+                ViewContext::InboxView,
+                ViewContext::TracksView,
+            ],
             category: ActionCategory::Create,
         },
         PaletteAction {
             id: "push_to_top",
             label: "Push to top".into(),
             shortcut: Some("p"),
-            contexts: &[ViewContext::TrackView, ViewContext::InboxView, ViewContext::TracksView],
+            contexts: &[
+                ViewContext::TrackView,
+                ViewContext::InboxView,
+                ViewContext::TracksView,
+            ],
             category: ActionCategory::Create,
         },
         PaletteAction {

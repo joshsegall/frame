@@ -75,7 +75,7 @@ pub struct IdConfig {
     pub prefixes: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UiConfig {
     #[serde(default)]
     pub show_key_hints: bool,
@@ -98,18 +98,4 @@ pub struct UiConfig {
     /// Disable if your terminal has issues with enhanced key reporting.
     #[serde(default)]
     pub kitty_keyboard: Option<bool>,
-}
-
-impl Default for UiConfig {
-    fn default() -> Self {
-        UiConfig {
-            show_key_hints: false,
-            colors: HashMap::new(),
-            tag_colors: HashMap::new(),
-            ref_extensions: Vec::new(),
-            ref_paths: Vec::new(),
-            default_tags: Vec::new(),
-            kitty_keyboard: None,
-        }
-    }
 }

@@ -84,12 +84,12 @@ impl EditHistory {
     pub fn snapshot(&mut self, buffer: &str, cursor_pos: usize, cursor_line: usize) {
         // If buffer hasn't changed, just update the cursor position in place
         // so that undo restores the most recent cursor location
-        if let Some(last) = self.entries.get_mut(self.position) {
-            if last.0 == buffer {
-                last.1 = cursor_pos;
-                last.2 = cursor_line;
-                return;
-            }
+        if let Some(last) = self.entries.get_mut(self.position)
+            && last.0 == buffer
+        {
+            last.1 = cursor_pos;
+            last.2 = cursor_line;
+            return;
         }
         // Truncate any redo entries
         self.entries.truncate(self.position + 1);
@@ -919,10 +919,10 @@ impl App {
         let mut track_mtimes = HashMap::new();
         for tc in &project.config.tracks {
             let path = project.frame_dir.join(&tc.file);
-            if let Ok(meta) = std::fs::metadata(&path) {
-                if let Ok(mtime) = meta.modified() {
-                    track_mtimes.insert(tc.id.clone(), mtime);
-                }
+            if let Ok(meta) = std::fs::metadata(&path)
+                && let Ok(mtime) = meta.modified()
+            {
+                track_mtimes.insert(tc.id.clone(), mtime);
             }
         }
 
@@ -1055,13 +1055,13 @@ impl App {
     /// Delete the selected text and return the cursor to the start of selection.
     /// Returns true if there was a selection to delete.
     pub fn delete_selection(&mut self) -> bool {
-        if let Some((start, end)) = self.edit_selection_range() {
-            if start != end {
-                self.edit_buffer.drain(start..end);
-                self.edit_cursor = start;
-                self.edit_selection_anchor = None;
-                return true;
-            }
+        if let Some((start, end)) = self.edit_selection_range()
+            && start != end
+        {
+            self.edit_buffer.drain(start..end);
+            self.edit_cursor = start;
+            self.edit_selection_anchor = None;
+            return true;
         }
         self.edit_selection_anchor = None;
         false
@@ -1128,15 +1128,15 @@ impl App {
 
     /// Clear flash if the timeout has expired
     pub fn clear_expired_flash(&mut self) {
-        if let Some(started) = self.flash_started {
-            if started.elapsed() >= Duration::from_millis(300) {
-                self.flash_state = None;
-                self.flash_task_id = None;
-                self.flash_task_ids.clear();
-                self.flash_track_id = None;
-                self.flash_detail_region = None;
-                self.flash_started = None;
-            }
+        if let Some(started) = self.flash_started
+            && started.elapsed() >= Duration::from_millis(300)
+        {
+            self.flash_state = None;
+            self.flash_task_id = None;
+            self.flash_task_ids.clear();
+            self.flash_track_id = None;
+            self.flash_detail_region = None;
+            self.flash_started = None;
         }
     }
 
@@ -1210,10 +1210,10 @@ impl App {
 
         let mut modified = Vec::new();
         for pm in &expired {
-            if let Some(tid) = self.execute_pending_move(pm) {
-                if !modified.contains(&tid) {
-                    modified.push(tid);
-                }
+            if let Some(tid) = self.execute_pending_move(pm)
+                && !modified.contains(&tid)
+            {
+                modified.push(tid);
             }
         }
         modified
@@ -1224,10 +1224,10 @@ impl App {
         let all: Vec<PendingMove> = std::mem::take(&mut self.pending_moves);
         let mut modified = Vec::new();
         for pm in &all {
-            if let Some(tid) = self.execute_pending_move(pm) {
-                if !modified.contains(&tid) {
-                    modified.push(tid);
-                }
+            if let Some(tid) = self.execute_pending_move(pm)
+                && !modified.contains(&tid)
+            {
+                modified.push(tid);
             }
         }
         modified
@@ -1289,9 +1289,9 @@ impl App {
 
         // Tags from all tasks across all tracks
         for (_, track) in &self.project.tracks {
-            Self::collect_tags_from_tasks(&track.backlog(), &mut tags);
-            Self::collect_tags_from_tasks(&track.parked(), &mut tags);
-            Self::collect_tags_from_tasks(&track.done(), &mut tags);
+            Self::collect_tags_from_tasks(track.backlog(), &mut tags);
+            Self::collect_tags_from_tasks(track.parked(), &mut tags);
+            Self::collect_tags_from_tasks(track.done(), &mut tags);
         }
 
         // Tags from inbox items
@@ -1321,9 +1321,9 @@ impl App {
     pub fn collect_all_task_ids(&self) -> Vec<String> {
         let mut ids: Vec<String> = Vec::new();
         for (_, track) in &self.project.tracks {
-            Self::collect_ids_from_tasks(&track.backlog(), &mut ids);
-            Self::collect_ids_from_tasks(&track.parked(), &mut ids);
-            Self::collect_ids_from_tasks(&track.done(), &mut ids);
+            Self::collect_ids_from_tasks(track.backlog(), &mut ids);
+            Self::collect_ids_from_tasks(track.parked(), &mut ids);
+            Self::collect_ids_from_tasks(track.done(), &mut ids);
         }
         ids.sort();
         ids
@@ -1344,9 +1344,9 @@ impl App {
         let mut entries: Vec<String> = Vec::new();
         for track_id in &self.active_track_ids {
             if let Some(track) = Self::find_track_in_project(&self.project, track_id) {
-                Self::collect_id_title_from_tasks(&track.backlog(), &mut entries);
-                Self::collect_id_title_from_tasks(&track.parked(), &mut entries);
-                Self::collect_id_title_from_tasks(&track.done(), &mut entries);
+                Self::collect_id_title_from_tasks(track.backlog(), &mut entries);
+                Self::collect_id_title_from_tasks(track.parked(), &mut entries);
+                Self::collect_id_title_from_tasks(track.done(), &mut entries);
             }
         }
         entries.sort();
@@ -1466,10 +1466,10 @@ impl App {
     /// Returns the track_id if found.
     pub fn find_task_track_id(&self, task_id: &str) -> Option<String> {
         for track_id in &self.active_track_ids {
-            if let Some(track) = Self::find_track_in_project(&self.project, track_id) {
-                if crate::ops::task_ops::find_task_in_track(track, task_id).is_some() {
-                    return Some(track_id.clone());
-                }
+            if let Some(track) = Self::find_track_in_project(&self.project, track_id)
+                && crate::ops::task_ops::find_task_in_track(track, task_id).is_some()
+            {
+                return Some(track_id.clone());
             }
         }
         None
@@ -1505,14 +1505,13 @@ impl App {
             None => return false,
         };
         for (i, item) in flat_items.iter().enumerate() {
-            if let FlatItem::Task { section, path, .. } = item {
-                if let Some(task) = resolve_task_from_flat(track, *section, path) {
-                    if task.id.as_deref() == Some(task_id) {
-                        let state = self.get_track_state(&target_track_id);
-                        state.cursor = i;
-                        return true;
-                    }
-                }
+            if let FlatItem::Task { section, path, .. } = item
+                && let Some(task) = resolve_task_from_flat(track, *section, path)
+                && task.id.as_deref() == Some(task_id)
+            {
+                let state = self.get_track_state(&target_track_id);
+                state.cursor = i;
+                return true;
             }
         }
         false
@@ -1933,53 +1932,46 @@ impl App {
                 .iter()
                 .find(|tc| tc.file == file_name || tc.file.ends_with(&format!("/{}", file_name)))
                 .map(|tc| (tc.id.clone(), tc.file.clone()))
+                && let Ok(text) = std::fs::read_to_string(path)
             {
-                if let Ok(text) = std::fs::read_to_string(path) {
-                    let new_track = parse_track(&text);
+                let new_track = parse_track(&text);
 
-                    // Check if the edited task was modified externally
-                    if editing_track_id.as_deref() == Some(&track_id) {
-                        if let Some(ref edit_task_id) = editing_task_id {
-                            // Check if the task exists in the new track and has different content
-                            if let Some(old_track) =
-                                Self::find_track_in_project(&self.project, &track_id)
-                            {
-                                let old_task = crate::ops::task_ops::find_task_in_track(
-                                    old_track,
-                                    edit_task_id,
-                                );
-                                let new_task = crate::ops::task_ops::find_task_in_track(
-                                    &new_track,
-                                    edit_task_id,
-                                );
+                // Check if the edited task was modified externally
+                if editing_track_id.as_deref() == Some(&track_id)
+                    && let Some(ref edit_task_id) = editing_task_id
+                {
+                    // Check if the task exists in the new track and has different content
+                    if let Some(old_track) = Self::find_track_in_project(&self.project, &track_id) {
+                        let old_task =
+                            crate::ops::task_ops::find_task_in_track(old_track, edit_task_id);
+                        let new_task =
+                            crate::ops::task_ops::find_task_in_track(&new_track, edit_task_id);
 
-                                match (old_task, new_task) {
-                                    (Some(old), Some(new)) if old.title != new.title => {
-                                        // Task was modified externally — conflict
-                                        edited_task_conflict = Some(edit_task_id.clone());
-                                    }
-                                    (Some(_), None) => {
-                                        // Task was removed externally — conflict
-                                        edited_task_conflict = Some(edit_task_id.clone());
-                                    }
-                                    _ => {}
-                                }
+                        match (old_task, new_task) {
+                            (Some(old), Some(new)) if old.title != new.title => {
+                                // Task was modified externally — conflict
+                                edited_task_conflict = Some(edit_task_id.clone());
                             }
+                            (Some(_), None) => {
+                                // Task was removed externally — conflict
+                                edited_task_conflict = Some(edit_task_id.clone());
+                            }
+                            _ => {}
                         }
                     }
+                }
 
-                    // Replace the track data and update mtime
-                    if let Some(entry) = self
-                        .project
-                        .tracks
-                        .iter_mut()
-                        .find(|(id, _)| id == &track_id)
-                    {
-                        entry.1 = new_track;
-                    }
-                    if let Ok(mtime) = std::fs::metadata(path).and_then(|m| m.modified()) {
-                        self.track_mtimes.insert(track_id, mtime);
-                    }
+                // Replace the track data and update mtime
+                if let Some(entry) = self
+                    .project
+                    .tracks
+                    .iter_mut()
+                    .find(|(id, _)| id == &track_id)
+                {
+                    entry.1 = new_track;
+                }
+                if let Ok(mtime) = std::fs::metadata(path).and_then(|m| m.modified()) {
+                    self.track_mtimes.insert(track_id, mtime);
                 }
             }
         }
@@ -2262,10 +2254,10 @@ fn task_matches_filter(task: &Task, filter: &FilterState, project: &Project) -> 
     }
 
     // Check tag filter
-    if let Some(ref tag) = filter.tag_filter {
-        if !task.tags.iter().any(|t| t == tag) {
-            return false;
-        }
+    if let Some(ref tag) = filter.tag_filter
+        && !task.tags.iter().any(|t| t == tag)
+    {
+        return false;
     }
 
     true
@@ -2278,10 +2270,10 @@ fn has_unresolved_deps(task: &Task, project: &Project) -> bool {
         if let Metadata::Dep(deps) = m {
             for dep_id in deps {
                 for (_, track) in &project.tracks {
-                    if let Some(dep_task) = task_ops::find_task_in_track(track, dep_id) {
-                        if dep_task.state != TaskState::Done {
-                            return true;
-                        }
+                    if let Some(dep_task) = task_ops::find_task_in_track(track, dep_id)
+                        && dep_task.state != TaskState::Done
+                    {
+                        return true;
                     }
                 }
             }
@@ -2647,8 +2639,13 @@ fn run_project_picker() -> Result<(), Box<dyn std::error::Error>> {
             && let crossterm::event::Event::Key(key) = crossterm::event::read()?
             && (key.kind == crossterm::event::KeyEventKind::Press
                 || (key.kind == crossterm::event::KeyEventKind::Repeat
-                    && matches!(key.code, crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Down
-                        | crossterm::event::KeyCode::Char('j') | crossterm::event::KeyCode::Char('k'))))
+                    && matches!(
+                        key.code,
+                        crossterm::event::KeyCode::Up
+                            | crossterm::event::KeyCode::Down
+                            | crossterm::event::KeyCode::Char('j')
+                            | crossterm::event::KeyCode::Char('k')
+                    )))
         {
             use crossterm::event::{KeyCode, KeyModifiers};
             match (key.modifiers, key.code) {

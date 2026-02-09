@@ -74,12 +74,10 @@ fn parse_single_task(
         let line = &lines[idx];
 
         // If we hit a subtask line at the expected indent, stop collecting metadata
-        if let Some(ti) = task_indent(line) {
-            if ti == meta_indent {
-                break;
-            } else if ti <= indent {
-                break;
-            }
+        if let Some(ti) = task_indent(line)
+            && ti <= meta_indent
+        {
+            break;
         }
 
         // Check for metadata line at meta_indent
@@ -108,14 +106,14 @@ fn parse_single_task(
     task.source_text = Some(lines[start_idx..own_end_idx].to_vec());
 
     // Now parse subtasks (they get their own independent source_text)
-    if idx < lines.len() {
-        if let Some(ti) = task_indent(&lines[idx]) {
-            if ti == meta_indent && depth + 1 < MAX_DEPTH {
-                let (subtasks, next_idx) = parse_tasks(lines, idx, meta_indent, depth + 1);
-                task.subtasks = subtasks;
-                idx = next_idx;
-            }
-        }
+    if idx < lines.len()
+        && let Some(ti) = task_indent(&lines[idx])
+        && ti == meta_indent
+        && depth + 1 < MAX_DEPTH
+    {
+        let (subtasks, next_idx) = parse_tasks(lines, idx, meta_indent, depth + 1);
+        task.subtasks = subtasks;
+        idx = next_idx;
     }
 
     task.source_lines = Some(start_idx..idx);
@@ -139,10 +137,10 @@ fn parse_task_line(line: &str, indent: usize) -> (TaskState, Option<String>, Str
     let after_checkbox = after_checkbox.strip_prefix(' ').unwrap_or(after_checkbox);
 
     // Parse optional ID: `\`PREFIX-NNN\``
-    let (id, after_id) = if after_checkbox.starts_with('`') {
-        if let Some(end_tick) = after_checkbox[1..].find('`') {
-            let id_text = &after_checkbox[1..1 + end_tick];
-            let rest = &after_checkbox[2 + end_tick..];
+    let (id, after_id) = if let Some(after_tick) = after_checkbox.strip_prefix('`') {
+        if let Some(end_tick) = after_tick.find('`') {
+            let id_text = &after_tick[..end_tick];
+            let rest = &after_tick[end_tick + 1..];
             let rest = rest.strip_prefix(' ').unwrap_or(rest);
             (Some(id_text.to_string()), rest)
         } else {
@@ -178,21 +176,23 @@ pub fn parse_title_and_tags(s: &str) -> (String, Vec<String>) {
         // Find the last word
         if let Some(last_space) = trimmed.rfind(' ') {
             let last_word = &trimmed[last_space + 1..];
-            if let Some(tag) = last_word.strip_prefix('#') {
-                if !tag.is_empty() && !tag.contains('#') {
-                    tags.push(tag.to_string());
-                    remaining = &trimmed[..last_space];
-                    continue;
-                }
+            if let Some(tag) = last_word.strip_prefix('#')
+                && !tag.is_empty()
+                && !tag.contains('#')
+            {
+                tags.push(tag.to_string());
+                remaining = &trimmed[..last_space];
+                continue;
             }
         } else {
             // Single word — check if it's a tag
-            if let Some(tag) = trimmed.strip_prefix('#') {
-                if !tag.is_empty() && !tag.contains('#') {
-                    tags.push(tag.to_string());
-                    remaining = "";
-                    continue;
-                }
+            if let Some(tag) = trimmed.strip_prefix('#')
+                && !tag.is_empty()
+                && !tag.contains('#')
+            {
+                tags.push(tag.to_string());
+                remaining = "";
+                continue;
             }
         }
         break;
@@ -357,8 +357,7 @@ fn parse_note_block(lines: &[String], start_idx: usize, block_indent: usize) -> 
 
 /// Check if a blank line is followed by more note content at the expected indent
 fn is_note_continuation(lines: &[String], blank_idx: usize, block_indent: usize) -> bool {
-    for i in (blank_idx + 1)..lines.len() {
-        let line = &lines[i];
+    for line in &lines[(blank_idx + 1)..] {
         if line.trim().is_empty() {
             continue;
         }

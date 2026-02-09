@@ -315,6 +315,7 @@ fn render_section_row<'a>(
 }
 
 /// Render a single track data row with stat counts in columns
+#[allow(clippy::too_many_arguments)]
 fn render_track_row<'a>(
     app: &'a App,
     tc: &crate::model::TrackConfig,
@@ -450,6 +451,7 @@ fn render_track_row<'a>(
 }
 
 /// Render an inline edit row for existing track name editing (preserves column layout)
+#[allow(clippy::too_many_arguments)]
 fn render_edit_row<'a>(
     app: &'a App,
     tc: &crate::model::TrackConfig,

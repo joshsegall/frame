@@ -293,15 +293,15 @@ pub fn format_track_listing(
     let parked = track.parked();
 
     let filter = |task: &&Task| -> bool {
-        if let Some(sf) = state_filter {
-            if task.state != sf {
-                return false;
-            }
+        if let Some(sf) = state_filter
+            && task.state != sf
+        {
+            return false;
         }
-        if let Some(tf) = tag_filter {
-            if !task.tags.iter().any(|t| t == tf) {
-                return false;
-            }
+        if let Some(tf) = tag_filter
+            && !task.tags.iter().any(|t| t == tf)
+        {
+            return false;
         }
         true
     };

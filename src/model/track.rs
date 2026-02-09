@@ -53,10 +53,10 @@ impl Track {
     /// Get tasks from a specific section
     pub fn section_tasks(&self, kind: SectionKind) -> &[Task] {
         for node in &self.nodes {
-            if let TrackNode::Section { kind: k, tasks, .. } = node {
-                if *k == kind {
-                    return tasks;
-                }
+            if let TrackNode::Section { kind: k, tasks, .. } = node
+                && *k == kind
+            {
+                return tasks;
             }
         }
         &[]
@@ -65,10 +65,10 @@ impl Track {
     /// Get mutable tasks from a specific section
     pub fn section_tasks_mut(&mut self, kind: SectionKind) -> Option<&mut Vec<Task>> {
         for node in &mut self.nodes {
-            if let TrackNode::Section { kind: k, tasks, .. } = node {
-                if *k == kind {
-                    return Some(tasks);
-                }
+            if let TrackNode::Section { kind: k, tasks, .. } = node
+                && *k == kind
+            {
+                return Some(tasks);
             }
         }
         None

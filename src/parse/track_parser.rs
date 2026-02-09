@@ -26,19 +26,19 @@ pub fn parse_track(source: &str) -> Track {
         }
 
         // Check for description: `> text`
-        if trimmed.starts_with("> ") {
+        if let Some(desc) = trimmed.strip_prefix("> ") {
             flush_literal(&mut literal_buf, &mut nodes);
-            description = Some(trimmed[2..].to_string());
+            description = Some(desc.to_string());
             literal_buf.push(lines[idx].clone());
             idx += 1;
             continue;
         }
 
         // Check for section header: `## Backlog`, `## Parked`, `## Done`
-        if trimmed.starts_with("## ") {
+        if let Some(after_hashes) = trimmed.strip_prefix("## ") {
             flush_literal(&mut literal_buf, &mut nodes);
 
-            let section_name = trimmed[3..].trim();
+            let section_name = after_hashes.trim();
             let kind = match section_name.to_lowercase().as_str() {
                 "backlog" => Some(SectionKind::Backlog),
                 "parked" => Some(SectionKind::Parked),

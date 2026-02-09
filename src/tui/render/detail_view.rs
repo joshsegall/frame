@@ -230,10 +230,11 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             if is_active {
                 body_active_line = Some(body_lines.len());
             }
-            let mut spans: Vec<Span> = Vec::new();
-            spans.push(region_indicator(is_active, region_indicator_style, bg));
-            spans.push(Span::styled("added: ", dim_style));
-            spans.push(Span::styled(date.clone(), text_style));
+            let spans: Vec<Span> = vec![
+                region_indicator(is_active, region_indicator_style, bg),
+                Span::styled("added: ", dim_style),
+                Span::styled(date.clone(), text_style),
+            ];
             body_lines.push(Line::from(spans));
             break;
         }
@@ -289,10 +290,11 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 body_active_line = Some(start);
             }
         } else if is_active {
-            let mut spans: Vec<Span> = Vec::new();
-            spans.push(region_indicator(is_active, region_indicator_style, bg));
-            spans.push(Span::styled("dep: ", dim_style));
-            spans.push(Span::styled("(none)", dim_style));
+            let spans: Vec<Span> = vec![
+                region_indicator(is_active, region_indicator_style, bg),
+                Span::styled("dep: ", dim_style),
+                Span::styled("(none)", dim_style),
+            ];
             body_lines.push(Line::from(spans));
         }
         if body_lines.len() > region_start {
@@ -326,13 +328,11 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             app.edit_h_scroll = hs;
             body_lines.push(Line::from(spans));
         } else if let Some(spec_val) = &spec {
-            let mut spans: Vec<Span> = Vec::new();
-            spans.push(region_indicator(is_active, region_indicator_style, bg));
-            spans.push(Span::styled("spec: ", dim_style));
-            spans.push(Span::styled(
-                spec_val.clone(),
-                Style::default().fg(app.theme.cyan).bg(bg),
-            ));
+            let spans: Vec<Span> = vec![
+                region_indicator(is_active, region_indicator_style, bg),
+                Span::styled("spec: ", dim_style),
+                Span::styled(spec_val.clone(), Style::default().fg(app.theme.cyan).bg(bg)),
+            ];
             let wrapped = wrap_styled_spans(spans, width, 9, bg);
             let start = body_lines.len();
             body_lines.extend(wrapped);
@@ -340,10 +340,11 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 body_active_line = Some(start);
             }
         } else if is_active {
-            let mut spans: Vec<Span> = Vec::new();
-            spans.push(region_indicator(is_active, region_indicator_style, bg));
-            spans.push(Span::styled("spec: ", dim_style));
-            spans.push(Span::styled("(none)", dim_style));
+            let spans: Vec<Span> = vec![
+                region_indicator(is_active, region_indicator_style, bg),
+                Span::styled("spec: ", dim_style),
+                Span::styled("(none)", dim_style),
+            ];
             body_lines.push(Line::from(spans));
         }
         if body_lines.len() > region_start {
@@ -395,10 +396,11 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 body_active_line = Some(start);
             }
         } else if is_active {
-            let mut spans: Vec<Span> = Vec::new();
-            spans.push(region_indicator(is_active, region_indicator_style, bg));
-            spans.push(Span::styled("ref: ", dim_style));
-            spans.push(Span::styled("(none)", dim_style));
+            let spans: Vec<Span> = vec![
+                region_indicator(is_active, region_indicator_style, bg),
+                Span::styled("ref: ", dim_style),
+                Span::styled("(none)", dim_style),
+            ];
             body_lines.push(Line::from(spans));
         }
         if body_lines.len() > region_start {
@@ -426,9 +428,10 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
         if is_active && editing && app.mode == Mode::Edit {
             // Multi-line editing mode
-            let mut header_spans: Vec<Span> = Vec::new();
-            header_spans.push(region_indicator(true, region_indicator_style, bg));
-            header_spans.push(Span::styled("note:", dim_style));
+            let header_spans: Vec<Span> = vec![
+                region_indicator(true, region_indicator_style, bg),
+                Span::styled("note:", dim_style),
+            ];
             body_lines.push(Line::from(header_spans));
 
             // Render the multi-line edit buffer with horizontal scrolling
@@ -489,8 +492,7 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                     let clipped_left = h_scroll > 0 && total_line_chars > 0;
                     let left_indicator = if clipped_left { 1 } else { 0 };
                     let avail_after_left = note_available.saturating_sub(left_indicator);
-                    let clipped_right =
-                        h_scroll + avail_after_left < total_line_chars;
+                    let clipped_right = h_scroll + avail_after_left < total_line_chars;
                     let right_indicator = if clipped_right { 1 } else { 0 };
                     let view_chars = avail_after_left.saturating_sub(right_indicator);
                     let view_start = h_scroll.min(total_line_chars);
@@ -531,8 +533,7 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                         if sc == ec && total_line_chars == 0 && !has_cursor {
                             spans.push(Span::styled(" ", selection_style));
                         }
-                        if has_cursor && cursor_col >= total_line_chars
-                            && cursor_col >= view_start
+                        if has_cursor && cursor_col >= total_line_chars && cursor_col >= view_start
                         {
                             spans.push(Span::styled(" ", cursor_style));
                         }
@@ -557,9 +558,7 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                     } else {
                         // No selection, no cursor — render slice
                         if view_start < view_end {
-                            let slice: String = line_chars[view_start..view_end]
-                                .iter()
-                                .collect();
+                            let slice: String = line_chars[view_start..view_end].iter().collect();
                             spans.push(Span::styled(slice, bright_style));
                         }
                     }
@@ -571,16 +570,16 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
                     body_lines.push(Line::from(spans));
                 }
-
             }
             // Write back adjusted h_scroll (after immutable borrow of detail_state is released)
             if let Some(ds_mut) = app.detail_state.as_mut() {
                 ds_mut.note_h_scroll = adjusted_h_scroll;
             }
         } else if let Some(note_text) = &note {
-            let mut header_spans: Vec<Span> = Vec::new();
-            header_spans.push(region_indicator(is_active, region_indicator_style, bg));
-            header_spans.push(Span::styled("note:", dim_style));
+            let header_spans: Vec<Span> = vec![
+                region_indicator(is_active, region_indicator_style, bg),
+                Span::styled("note:", dim_style),
+            ];
             body_lines.push(Line::from(header_spans));
 
             let note_indent = "   "; // align with field labels
@@ -609,10 +608,11 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
             }
         } else if is_active {
-            let mut spans: Vec<Span> = Vec::new();
-            spans.push(region_indicator(is_active, region_indicator_style, bg));
-            spans.push(Span::styled("note: ", dim_style));
-            spans.push(Span::styled("(empty)", dim_style));
+            let spans: Vec<Span> = vec![
+                region_indicator(is_active, region_indicator_style, bg),
+                Span::styled("note: ", dim_style),
+                Span::styled("(empty)", dim_style),
+            ];
             body_lines.push(Line::from(spans));
         }
     }
@@ -632,7 +632,11 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
         let mut header_spans: Vec<Span> = Vec::new();
         let header_indicator = is_active && selected_subtask_id.is_none();
-        header_spans.push(region_indicator(header_indicator, region_indicator_style, bg));
+        header_spans.push(region_indicator(
+            header_indicator,
+            region_indicator_style,
+            bg,
+        ));
         header_spans.push(Span::styled(
             "Subtasks",
             bright_style.add_modifier(Modifier::BOLD),
@@ -649,10 +653,8 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             selected_subtask_id.as_deref(),
         );
         // When a subtask is selected, use its line for scroll tracking
-        if is_active {
-            if let Some(sl) = subtask_selected_line {
-                body_active_line = Some(sl);
-            }
+        if is_active && let Some(sl) = subtask_selected_line {
+            body_active_line = Some(sl);
         }
     }
 
@@ -672,10 +674,24 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 apply_flash_to_lines(&mut body_lines, start, end, flash_bg, flash_border, width);
             } else {
                 // Region not visible — fall back to header
-                apply_flash_to_lines(&mut header_lines, title_line_start, title_line_end, flash_bg, flash_border, width);
+                apply_flash_to_lines(
+                    &mut header_lines,
+                    title_line_start,
+                    title_line_end,
+                    flash_bg,
+                    flash_border,
+                    width,
+                );
             }
         } else {
-            apply_flash_to_lines(&mut header_lines, title_line_start, title_line_end, flash_bg, flash_border, width);
+            apply_flash_to_lines(
+                &mut header_lines,
+                title_line_start,
+                title_line_end,
+                flash_bg,
+                flash_border,
+                width,
+            );
         }
     }
 
@@ -689,59 +705,59 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // If note_view_line is set, override body_active_line with the virtual cursor
     // and move the region indicator to that line (only within note content bounds)
-    if let Some(ds) = app.detail_state.as_ref() {
-        if let Some(vl) = ds.note_view_line {
-            let clamped = vl.min(note_content_end_idx);
-            body_active_line = Some(clamped);
-            // Replace the leading 3-char space with the indicator on the target line
-            if let Some(line) = body_lines.get_mut(clamped) {
-                let mut new_spans: Vec<Span<'static>> = Vec::new();
-                new_spans.push(Span::styled(
-                    " \u{258E} ".to_string(),
-                    region_indicator_style,
-                ));
-                // Skip the first span if it's the 3-char indent/blank indicator
-                let mut skipped_prefix = false;
-                for span in line.spans.iter() {
-                    if !skipped_prefix {
-                        let content = span.content.as_ref();
-                        if content == "   " || content == " \u{258E} " {
-                            skipped_prefix = true;
-                            continue;
-                        }
+    if let Some(ds) = app.detail_state.as_ref()
+        && let Some(vl) = ds.note_view_line
+    {
+        let clamped = vl.min(note_content_end_idx);
+        body_active_line = Some(clamped);
+        // Replace the leading 3-char space with the indicator on the target line
+        if let Some(line) = body_lines.get_mut(clamped) {
+            let mut new_spans: Vec<Span<'static>> = Vec::new();
+            new_spans.push(Span::styled(
+                " \u{258E} ".to_string(),
+                region_indicator_style,
+            ));
+            // Skip the first span if it's the 3-char indent/blank indicator
+            let mut skipped_prefix = false;
+            for span in line.spans.iter() {
+                if !skipped_prefix {
+                    let content = span.content.as_ref();
+                    if content == "   " || content == " \u{258E} " {
+                        skipped_prefix = true;
+                        continue;
                     }
+                }
+                new_spans.push(span.clone());
+            }
+            *line = Line::from(new_spans);
+        }
+        // Remove indicator from the note header line (if different)
+        if clamped != note_header_idx
+            && let Some(line) = body_lines.get_mut(note_header_idx)
+        {
+            let mut new_spans: Vec<Span<'static>> = Vec::new();
+            for span in line.spans.iter() {
+                if span.content.as_ref() == " \u{258E} " {
+                    new_spans.push(Span::styled("   ".to_string(), Style::default().bg(bg)));
+                } else {
                     new_spans.push(span.clone());
                 }
-                *line = Line::from(new_spans);
             }
-            // Remove indicator from the note header line (if different)
-            if clamped != note_header_idx {
-                if let Some(line) = body_lines.get_mut(note_header_idx) {
-                    let mut new_spans: Vec<Span<'static>> = Vec::new();
-                    for span in line.spans.iter() {
-                        if span.content.as_ref() == " \u{258E} " {
-                            new_spans.push(Span::styled(
-                                "   ".to_string(),
-                                Style::default().bg(bg),
-                            ));
-                        } else {
-                            new_spans.push(span.clone());
-                        }
-                    }
-                    *line = Line::from(new_spans);
-                }
-            }
+            *line = Line::from(new_spans);
         }
     }
 
     // Apply active-region highlight: selection_bg on the cursor line, pad to full width
     let is_editing = app.detail_state.as_ref().is_some_and(|ds| ds.editing);
-    let on_subtask_region = current_region == DetailRegion::Subtasks
-        && selected_subtask_id.is_some();
+    let on_subtask_region =
+        current_region == DetailRegion::Subtasks && selected_subtask_id.is_some();
     if !is_flashing && !is_editing && !on_subtask_region {
         // Apply to header (Title region) or body (all other regions)
         let (target_lines, target_line) = if current_region == DetailRegion::Title {
-            (&mut header_lines as &mut Vec<Line<'static>>, header_active_line)
+            (
+                &mut header_lines as &mut Vec<Line<'static>>,
+                header_active_line,
+            )
         } else {
             (&mut body_lines as &mut Vec<Line<'static>>, body_active_line)
         };
@@ -805,10 +821,7 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                     } else {
                         span.style.fg.unwrap_or(app.theme.text_bright)
                     };
-                    new_spans.push(Span::styled(
-                        content,
-                        span.style.fg(fg),
-                    ));
+                    new_spans.push(Span::styled(content, span.style.fg(fg)));
                 }
                 *line = Line::from(new_spans);
             }
@@ -828,17 +841,17 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 
     // Render header (no scroll)
-    let header_paragraph = Paragraph::new(header_lines)
-        .style(Style::default().bg(bg));
+    let header_paragraph = Paragraph::new(header_lines).style(Style::default().bg(bg));
     frame.render_widget(header_paragraph, header_area);
 
     // Handle body scrolling using tracked body region line index with margin-aware logic
     let body_visible_height = body_area.height as usize;
     let body_total_lines = body_lines.len();
 
-    let is_note_editing = app.detail_state.as_ref().is_some_and(|ds| {
-        ds.editing && ds.region == DetailRegion::Note
-    });
+    let is_note_editing = app
+        .detail_state
+        .as_ref()
+        .is_some_and(|ds| ds.editing && ds.region == DetailRegion::Note);
     let scroll_margin = if is_note_editing { 4 } else { 2 };
 
     if let (Some(ds), Some(rl)) = (&mut app.detail_state, body_active_line) {
@@ -947,7 +960,10 @@ fn wrap_styled_spans(
             let chunk = &remaining[..chunk_end];
             let chunk_chars = chunk.chars().count();
 
-            if col + chunk_chars <= max_width || col == 0 || (col == continuation_indent && result_lines.is_empty()) {
+            if col + chunk_chars <= max_width
+                || col == 0
+                || (col == continuation_indent && result_lines.is_empty())
+            {
                 // Fits on current line, or we're at the start (must place something)
                 current_line.push(Span::styled(chunk.to_string(), style));
                 col += chunk_chars;
@@ -1095,7 +1111,12 @@ fn render_edit_inline_scrolled(
 
     if let Some((sel_start, sel_end)) = sel_char_range {
         // Render with selection in the visible window
-        for (i, ch) in buf_chars.iter().enumerate().skip(view_start).take(view_end - view_start) {
+        for (i, ch) in buf_chars
+            .iter()
+            .enumerate()
+            .skip(view_start)
+            .take(view_end - view_start)
+        {
             let s = if i >= sel_start && i < sel_end {
                 selection_style
             } else {
@@ -1104,12 +1125,20 @@ fn render_edit_inline_scrolled(
             spans.push(Span::styled(ch.to_string(), s));
         }
         // Cursor block at end if cursor is past content
-        if cursor_char_pos >= total_chars && cursor_char_pos >= view_start && cursor_char_pos < view_start + effective_available + 1 {
+        if cursor_char_pos >= total_chars
+            && cursor_char_pos >= view_start
+            && cursor_char_pos < view_start + effective_available + 1
+        {
             spans.push(Span::styled(" ", cursor_style));
         }
     } else {
         // No selection: render with cursor highlight
-        for (i, ch) in buf_chars.iter().enumerate().skip(view_start).take(view_end - view_start) {
+        for (i, ch) in buf_chars
+            .iter()
+            .enumerate()
+            .skip(view_start)
+            .take(view_end - view_start)
+        {
             if i == cursor_char_pos {
                 spans.push(Span::styled(ch.to_string(), cursor_style));
             } else {
@@ -1363,8 +1392,7 @@ fn apply_flash_to_lines(
                     ));
                 }
             }
-            let content_width: usize =
-                new_spans.iter().map(|s| s.content.chars().count()).sum();
+            let content_width: usize = new_spans.iter().map(|s| s.content.chars().count()).sum();
             if content_width < width {
                 new_spans.push(Span::styled(
                     " ".repeat(width - content_width),
@@ -1377,14 +1405,17 @@ fn apply_flash_to_lines(
 }
 
 /// Get state-specific flash colors (background, border) for a task state.
-pub fn state_flash_colors(state: TaskState, theme: &Theme) -> (ratatui::style::Color, ratatui::style::Color) {
+pub fn state_flash_colors(
+    state: TaskState,
+    theme: &Theme,
+) -> (ratatui::style::Color, ratatui::style::Color) {
     use ratatui::style::Color;
     match state {
-        TaskState::Active => (Color::Rgb(0x5A, 0x1A, 0x48), theme.highlight),   // pink bg, pink border
-        TaskState::Blocked => (Color::Rgb(0x55, 0x1A, 0x1A), theme.red),        // red bg, red border
-        TaskState::Parked => (Color::Rgb(0x4A, 0x3A, 0x15), theme.yellow),      // amber bg, yellow border
-        TaskState::Todo => (Color::Rgb(0x3A, 0x1A, 0x58), theme.purple),        // purple bg, purple border
-        TaskState::Done => (Color::Rgb(0x1A, 0x2A, 0x55), theme.blue),          // blue bg, blue border
+        TaskState::Active => (Color::Rgb(0x5A, 0x1A, 0x48), theme.highlight), // pink bg, pink border
+        TaskState::Blocked => (Color::Rgb(0x55, 0x1A, 0x1A), theme.red),      // red bg, red border
+        TaskState::Parked => (Color::Rgb(0x4A, 0x3A, 0x15), theme.yellow), // amber bg, yellow border
+        TaskState::Todo => (Color::Rgb(0x3A, 0x1A, 0x58), theme.purple), // purple bg, purple border
+        TaskState::Done => (Color::Rgb(0x1A, 0x2A, 0x55), theme.blue),   // blue bg, blue border
     }
 }
 

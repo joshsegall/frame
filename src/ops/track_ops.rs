@@ -300,10 +300,10 @@ fn count_tasks(tasks: &[crate::model::Task], stats: &mut TrackStats, _section: S
 pub fn is_track_empty(frame_dir: &Path, track: &Track) -> bool {
     // Check all sections for any tasks
     for node in &track.nodes {
-        if let TrackNode::Section { tasks, .. } = node {
-            if !tasks.is_empty() {
-                return false;
-            }
+        if let TrackNode::Section { tasks, .. } = node
+            && !tasks.is_empty()
+        {
+            return false;
         }
     }
     // Check for archive file
@@ -316,10 +316,10 @@ pub fn is_track_empty(frame_dir: &Path, track: &Track) -> bool {
 pub fn is_track_empty_by_id(frame_dir: &Path, track: &Track, track_id: &str) -> bool {
     // Check all sections for any tasks
     for node in &track.nodes {
-        if let TrackNode::Section { tasks, .. } = node {
-            if !tasks.is_empty() {
-                return false;
-            }
+        if let TrackNode::Section { tasks, .. } = node
+            && !tasks.is_empty()
+        {
+            return false;
         }
     }
     // Check for archive file
@@ -565,14 +565,13 @@ pub fn rename_task_ids(
 ) -> usize {
     let mut count = 0;
     for task in tasks.iter_mut() {
-        if let Some(ref mut id) = task.id {
-            if let Some(rest) = id.strip_prefix(old_prefix) {
-                if rest.starts_with('-') {
-                    *id = format!("{}{}", new_prefix, rest);
-                    task.mark_dirty();
-                    count += 1;
-                }
-            }
+        if let Some(ref mut id) = task.id
+            && let Some(rest) = id.strip_prefix(old_prefix)
+            && rest.starts_with('-')
+        {
+            *id = format!("{}{}", new_prefix, rest);
+            task.mark_dirty();
+            count += 1;
         }
         count += rename_task_ids(&mut task.subtasks, old_prefix, new_prefix);
     }
@@ -601,12 +600,12 @@ fn rename_deps_in_tasks(
         for m in &mut task.metadata {
             if let crate::model::task::Metadata::Dep(deps) = m {
                 for dep in deps.iter_mut() {
-                    if let Some(rest) = dep.strip_prefix(old_prefix) {
-                        if rest.starts_with('-') {
-                            *dep = format!("{}{}", new_prefix, rest);
-                            task.dirty = true;
-                            count += 1;
-                        }
+                    if let Some(rest) = dep.strip_prefix(old_prefix)
+                        && rest.starts_with('-')
+                    {
+                        *dep = format!("{}{}", new_prefix, rest);
+                        task.dirty = true;
+                        count += 1;
                     }
                 }
             }
@@ -664,13 +663,13 @@ pub fn prefix_rename_impact(
     // Count archived tasks if archive file exists
     if let Some(archive_dir) = archive_dir {
         let archive_path = archive_dir.join(format!("{}.md", track_id));
-        if archive_path.exists() {
-            if let Ok(content) = fs::read_to_string(&archive_path) {
-                let archive_track = crate::parse::parse_track(&content);
-                for node in &archive_track.nodes {
-                    if let TrackNode::Section { tasks, .. } = node {
-                        impact.task_id_count += count_prefix_ids(tasks, old_prefix);
-                    }
+        if archive_path.exists()
+            && let Ok(content) = fs::read_to_string(&archive_path)
+        {
+            let archive_track = crate::parse::parse_track(&content);
+            for node in &archive_track.nodes {
+                if let TrackNode::Section { tasks, .. } = node {
+                    impact.task_id_count += count_prefix_ids(tasks, old_prefix);
                 }
             }
         }
@@ -696,12 +695,11 @@ pub fn prefix_rename_impact(
 fn count_prefix_ids(tasks: &[crate::model::Task], prefix: &str) -> usize {
     let mut count = 0;
     for task in tasks {
-        if let Some(ref id) = task.id {
-            if let Some(rest) = id.strip_prefix(prefix) {
-                if rest.starts_with('-') {
-                    count += 1;
-                }
-            }
+        if let Some(ref id) = task.id
+            && let Some(rest) = id.strip_prefix(prefix)
+            && rest.starts_with('-')
+        {
+            count += 1;
         }
         count += count_prefix_ids(&task.subtasks, prefix);
     }
@@ -726,10 +724,10 @@ fn count_deps_in_tasks(tasks: &[crate::model::Task], prefix: &str) -> usize {
         for m in &task.metadata {
             if let crate::model::task::Metadata::Dep(deps) = m {
                 for dep in deps {
-                    if let Some(rest) = dep.strip_prefix(prefix) {
-                        if rest.starts_with('-') {
-                            count += 1;
-                        }
+                    if let Some(rest) = dep.strip_prefix(prefix)
+                        && rest.starts_with('-')
+                    {
+                        count += 1;
                     }
                 }
             }
@@ -1148,7 +1146,10 @@ file = "tracks/old.md"
         let has_renamed_dep = backlog[1].metadata.iter().any(|m| {
             matches!(m, crate::model::task::Metadata::Dep(deps) if deps.contains(&"FX-001".to_string()))
         });
-        assert!(has_renamed_dep, "same-track dep EFF-001 should be renamed to FX-001");
+        assert!(
+            has_renamed_dep,
+            "same-track dep EFF-001 should be renamed to FX-001"
+        );
     }
 
     #[test]

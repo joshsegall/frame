@@ -28,9 +28,9 @@ pub fn parse_inbox(source: &str) -> Inbox {
         let line = &lines[idx];
         let trimmed = line.trim();
 
-        if trimmed.starts_with("- ") {
+        if let Some(title_content) = trimmed.strip_prefix("- ") {
             let item_start = idx;
-            let title_content = &trimmed[2..]; // Skip "- "
+            // Skip "- "
             let (title, mut tags) = parse_inbox_title_and_tags(title_content);
 
             idx += 1;
@@ -48,10 +48,10 @@ pub fn parse_inbox(source: &str) -> Inbox {
                 if is_tag_only_line(cont_trimmed) {
                     // Parse tags from this line
                     for word in cont_trimmed.split_whitespace() {
-                        if let Some(tag) = word.strip_prefix('#') {
-                            if !tag.is_empty() {
-                                tags.push(tag.to_string());
-                            }
+                        if let Some(tag) = word.strip_prefix('#')
+                            && !tag.is_empty()
+                        {
+                            tags.push(tag.to_string());
                         }
                     }
                     idx += 1;
@@ -144,21 +144,21 @@ fn parse_inbox_title_and_tags(s: &str) -> (String, Vec<String>) {
 
         if let Some(last_space) = trimmed.rfind(' ') {
             let last_word = &trimmed[last_space + 1..];
-            if let Some(tag) = last_word.strip_prefix('#') {
-                if !tag.is_empty() && !tag.contains('#') {
-                    tags.push(tag.to_string());
-                    remaining = &trimmed[..last_space];
-                    continue;
-                }
+            if let Some(tag) = last_word.strip_prefix('#')
+                && !tag.is_empty()
+                && !tag.contains('#')
+            {
+                tags.push(tag.to_string());
+                remaining = &trimmed[..last_space];
+                continue;
             }
-        } else {
-            if let Some(tag) = trimmed.strip_prefix('#') {
-                if !tag.is_empty() && !tag.contains('#') {
-                    tags.push(tag.to_string());
-                    remaining = "";
-                    continue;
-                }
-            }
+        } else if let Some(tag) = trimmed.strip_prefix('#')
+            && !tag.is_empty()
+            && !tag.contains('#')
+        {
+            tags.push(tag.to_string());
+            remaining = "";
+            continue;
         }
         break;
     }
@@ -179,8 +179,8 @@ fn is_tag_only_line(trimmed: &str) -> bool {
 
 /// Strip 2 spaces of indent from a body line
 fn strip_body_indent(line: &str) -> String {
-    if line.starts_with("  ") {
-        line[2..].to_string()
+    if let Some(stripped) = line.strip_prefix("  ") {
+        stripped.to_string()
     } else {
         line.to_string()
     }

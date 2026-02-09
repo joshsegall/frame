@@ -48,10 +48,10 @@ pub fn triage(
     task.metadata.push(Metadata::Added(today_str()));
 
     // Carry over body as a note
-    if let Some(body) = item.body {
-        if !body.is_empty() {
-            task.metadata.push(Metadata::Note(body));
-        }
+    if let Some(body) = item.body
+        && !body.is_empty()
+    {
+        task.metadata.push(Metadata::Note(body));
     }
 
     let tasks = track

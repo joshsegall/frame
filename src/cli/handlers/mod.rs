@@ -33,10 +33,7 @@ pub fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(ref dir) = cli.project_dir {
         let abs = std::fs::canonicalize(dir)
             .map_err(|e| format!("cannot resolve -C path '{}': {}", dir, e))?;
-        PROJECT_DIR_OVERRIDE
-            .lock()
-            .unwrap()
-            .replace(abs);
+        PROJECT_DIR_OVERRIDE.lock().unwrap().replace(abs);
     }
 
     match cli.command {
@@ -153,8 +150,8 @@ fn track_file<'a>(project: &'a Project, track_id: &str) -> Option<&'a str> {
 
 /// Save a track back to disk.
 fn save_track(project: &Project, track_id: &str) -> Result<(), ProjectError> {
-    let file = track_file(project, track_id).ok_or_else(|| ProjectError::NotAProject)?;
-    let track = find_track(project, track_id).ok_or_else(|| ProjectError::NotAProject)?;
+    let file = track_file(project, track_id).ok_or(ProjectError::NotAProject)?;
+    let track = find_track(project, track_id).ok_or(ProjectError::NotAProject)?;
     project_io::save_track(&project.frame_dir, file, track)
 }
 
@@ -165,10 +162,10 @@ fn has_unresolved_deps(task: &Task, project: &Project) -> bool {
             for dep_id in deps {
                 // Find the dep task and check if it's done
                 for (_, track) in &project.tracks {
-                    if let Some(dep_task) = task_ops::find_task_in_track(track, dep_id) {
-                        if dep_task.state != TaskState::Done {
-                            return true;
-                        }
+                    if let Some(dep_task) = task_ops::find_task_in_track(track, dep_id)
+                        && dep_task.state != TaskState::Done
+                    {
+                        return true;
                     }
                 }
             }
@@ -239,7 +236,7 @@ fn cmd_list(args: ListArgs, json: bool) -> Result<(), Box<dyn std::error::Error>
         .as_deref()
         .map(parse_task_state)
         .transpose()
-        .map_err(|e| Box::<dyn std::error::Error>::from(e))?;
+        .map_err(Box::<dyn std::error::Error>::from)?;
     let tag_filter = args.tag.as_deref();
 
     if json {
@@ -307,15 +304,15 @@ fn collect_filtered_tasks<'a>(
     let done = track.done();
 
     let filter = |task: &&Task| -> bool {
-        if let Some(sf) = state_filter {
-            if task.state != sf {
-                return false;
-            }
+        if let Some(sf) = state_filter
+            && task.state != sf
+        {
+            return false;
         }
-        if let Some(tf) = tag_filter {
-            if !task.tags.iter().any(|t| t == tf) {
-                return false;
-            }
+        if let Some(tf) = tag_filter
+            && !task.tags.iter().any(|t| t == tf)
+        {
+            return false;
         }
         true
     };
@@ -419,10 +416,10 @@ fn collect_ready_tasks<'a>(
         if args.cc && !task.tags.iter().any(|t| t == "cc") {
             include = false;
         }
-        if let Some(ref tag) = args.tag {
-            if !task.tags.iter().any(|t| t == tag) {
-                include = false;
-            }
+        if let Some(ref tag) = args.tag
+            && !task.tags.iter().any(|t| t == tag)
+        {
+            include = false;
         }
         if include {
             result.push((track_id.to_string(), task));
@@ -525,28 +522,28 @@ fn cmd_search(args: SearchArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Search inbox too if no track filter
-    if args.track.is_none() {
-        if let Some(ref inbox) = project.inbox {
-            let inbox_hits = search::search_inbox(inbox, &re);
-            let mut seen_items = HashSet::new();
-            for hit in &inbox_hits {
-                if seen_items.insert(hit.item_index) {
-                    if let Some(item) = inbox.items.get(hit.item_index) {
-                        let tags = if item.tags.is_empty() {
-                            String::new()
-                        } else {
-                            format!(
-                                " {}",
-                                item.tags
-                                    .iter()
-                                    .map(|t| format!("#{}", t))
-                                    .collect::<Vec<_>>()
-                                    .join(" ")
-                            )
-                        };
-                        println!("[inbox:{}] {}{}", hit.item_index + 1, item.title, tags);
-                    }
-                }
+    if args.track.is_none()
+        && let Some(ref inbox) = project.inbox
+    {
+        let inbox_hits = search::search_inbox(inbox, &re);
+        let mut seen_items = HashSet::new();
+        for hit in &inbox_hits {
+            if seen_items.insert(hit.item_index)
+                && let Some(item) = inbox.items.get(hit.item_index)
+            {
+                let tags = if item.tags.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " {}",
+                        item.tags
+                            .iter()
+                            .map(|t| format!("#{}", t))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    )
+                };
+                println!("[inbox:{}] {}{}", hit.item_index + 1, item.title, tags);
             }
         }
     }
@@ -626,7 +623,7 @@ fn cmd_tracks(json: bool) -> Result<(), Box<dyn std::error::Error>> {
         let mut infos = Vec::new();
         for tc in &project.config.tracks {
             let stats = find_track(&project, &tc.id)
-                .map(|t| track_ops::task_counts(t))
+                .map(track_ops::task_counts)
                 .unwrap_or_default();
             let is_cc = project.config.agent.cc_focus.as_deref() == Some(&tc.id);
             infos.push(TrackInfoJson {
@@ -655,7 +652,7 @@ fn cmd_tracks(json: bool) -> Result<(), Box<dyn std::error::Error>> {
                 current_state = tc.state.clone();
             }
             let stats = find_track(&project, &tc.id)
-                .map(|t| track_ops::task_counts(t))
+                .map(track_ops::task_counts)
                 .unwrap_or_default();
             let is_cc = project.config.agent.cc_focus.as_deref() == Some(&tc.id);
             println!(
@@ -677,7 +674,7 @@ fn cmd_stats(json: bool) -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
         let stats = find_track(&project, &tc.id)
-            .map(|t| track_ops::task_counts(t))
+            .map(track_ops::task_counts)
             .unwrap_or_default();
         totals.active += stats.active;
         totals.blocked += stats.blocked;
@@ -986,8 +983,7 @@ fn cmd_state(args: StateArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut project = load_project_cwd()?;
     let _lock = FileLock::acquire_default(&project.frame_dir)?;
 
-    let new_state =
-        parse_task_state(&args.state).map_err(|e| Box::<dyn std::error::Error>::from(e))?;
+    let new_state = parse_task_state(&args.state).map_err(Box::<dyn std::error::Error>::from)?;
 
     let track_id = find_task_track(&project, &args.id)
         .ok_or_else(|| format!("task not found: {}", args.id))?
@@ -1228,12 +1224,11 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(self_pos) = backlog
                     .iter()
                     .position(|t| t.id.as_deref() == Some(&args.id))
+                    && self_pos < pos
                 {
-                    if self_pos < pos {
-                        // Moving down: the task at the target position shifts up after removal
-                        // So we actually want to be after the task currently at `pos`
-                        target_idx = pos;
-                    }
+                    // Moving down: the task at the target position shifts up after removal
+                    // So we actually want to be after the task currently at `pos`
+                    target_idx = pos;
                 }
                 if target_idx < backlog.len() {
                     if let Some(ref after_task_id) = backlog[target_idx].id {
@@ -1367,10 +1362,10 @@ fn cmd_track_state_change(
     config_io::write_config(&project.frame_dir, &doc)?;
 
     // Move the track file to archive/_tracks/ after archiving
-    if action == "archive" {
-        if let Some(file) = track_file {
-            track_ops::archive_track_file(&project.frame_dir, &track_id, &file)?;
-        }
+    if action == "archive"
+        && let Some(file) = track_file
+    {
+        track_ops::archive_track_file(&project.frame_dir, &track_id, &file)?;
     }
 
     println!("{} → {}d", track_id, action);
@@ -1755,11 +1750,7 @@ fn cmd_projects_add(args: ProjectsAddArgs) -> Result<(), Box<dyn std::error::Err
     let frame_dir = abs_path.join("frame");
     let config_path = frame_dir.join("project.toml");
     if !config_path.exists() {
-        return Err(format!(
-            "no project.toml found at {}",
-            frame_dir.display()
-        )
-        .into());
+        return Err(format!("no project.toml found at {}", frame_dir.display()).into());
     }
 
     // Read the project name

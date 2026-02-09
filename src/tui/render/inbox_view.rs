@@ -205,10 +205,8 @@ pub fn render_inbox_view(frame: &mut Frame, app: &mut App, area: Rect) {
     // Find the display line index of the cursor item (for autocomplete anchor + scroll)
     let mut cursor_display_line: Option<usize> = None;
     for (dl_idx, (item_idx, _)) in display_lines.iter().enumerate() {
-        if *item_idx == Some(cursor) {
-            if cursor_display_line.is_none() {
-                cursor_display_line = Some(dl_idx);
-            }
+        if *item_idx == Some(cursor) && cursor_display_line.is_none() {
+            cursor_display_line = Some(dl_idx);
         }
     }
 
@@ -227,14 +225,12 @@ pub fn render_inbox_view(frame: &mut Frame, app: &mut App, area: Rect) {
     let needs_anchor = (app.mode == Mode::Edit
         && matches!(&app.edit_target, Some(EditTarget::ExistingInboxTags { .. })))
         || app.mode == Mode::Triage;
-    if needs_anchor {
-        if let Some(dl) = cursor_display_line {
-            let screen_line = dl.saturating_sub(scroll);
-            let screen_y = area.y + screen_line as u16;
-            // Anchor x: after the number prefix (col 5 roughly)
-            let screen_x = area.x + 5;
-            app.autocomplete_anchor = Some((screen_x, screen_y));
-        }
+    if needs_anchor && let Some(dl) = cursor_display_line {
+        let screen_line = dl.saturating_sub(scroll);
+        let screen_y = area.y + screen_line as u16;
+        // Anchor x: after the number prefix (col 5 roughly)
+        let screen_x = area.x + 5;
+        app.autocomplete_anchor = Some((screen_x, screen_y));
     }
 
     // Apply scroll and collect visible lines

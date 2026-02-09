@@ -218,7 +218,7 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
             let count_text = format!("{} selected", count);
             let is_bulk_edit = matches!(
                 &app.edit_target,
-                Some(EditTarget::BulkTags { .. }) | Some(EditTarget::BulkDeps { .. })
+                Some(EditTarget::BulkTags) | Some(EditTarget::BulkDeps)
             );
             let hint = if is_bulk_edit {
                 "Enter confirm  Esc cancel"
