@@ -232,6 +232,13 @@ impl AutocompleteState {
     }
 }
 
+/// Which view to return to when leaving the detail view
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReturnView {
+    Track(usize),
+    Recent,
+}
+
 /// State for the detail view
 #[derive(Debug, Clone)]
 pub struct DetailState {
@@ -241,8 +248,8 @@ pub struct DetailState {
     pub scroll_offset: usize,
     /// The list of regions present for the current task (computed on render)
     pub regions: Vec<DetailRegion>,
-    /// Track view index to return to on Esc
-    pub return_view_idx: usize,
+    /// View to return to on Esc
+    pub return_view: ReturnView,
     /// Whether we're editing in the detail view
     pub editing: bool,
     /// For multi-line note editing: the buffer
@@ -2040,22 +2047,23 @@ impl App {
     /// Open the detail view for a task
     pub fn open_detail(&mut self, track_id: String, task_id: String) {
         // If already in detail view, push current onto stack for back-navigation
-        let return_idx = if let View::Detail {
+        let return_view = if let View::Detail {
             track_id: ref cur_track,
             task_id: ref cur_task,
         } = self.view
         {
             self.detail_stack
                 .push((cur_track.clone(), cur_task.clone()));
-            // Preserve the return_view_idx from current detail state
+            // Preserve the return_view from current detail state
             self.detail_state
                 .as_ref()
-                .map(|ds| ds.return_view_idx)
-                .unwrap_or(0)
+                .map(|ds| ds.return_view.clone())
+                .unwrap_or(ReturnView::Track(0))
         } else {
             match &self.view {
-                View::Track(idx) => *idx,
-                _ => 0,
+                View::Track(idx) => ReturnView::Track(*idx),
+                View::Recent => ReturnView::Recent,
+                _ => ReturnView::Track(0),
             }
         };
 
@@ -2076,7 +2084,7 @@ impl App {
             region: initial_region,
             scroll_offset: 0,
             regions,
-            return_view_idx: return_idx,
+            return_view,
             editing: false,
             edit_buffer: String::new(),
             edit_cursor_line: 0,

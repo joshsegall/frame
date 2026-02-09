@@ -6,7 +6,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::model::{Metadata, Task, TaskState};
 use crate::ops::task_ops;
-use crate::tui::app::{App, DetailRegion, Mode, View, flatten_subtask_ids};
+use crate::tui::app::{App, DetailRegion, Mode, ReturnView, View, flatten_subtask_ids};
 use crate::tui::input::{multiline_selection_range, selection_cols_for_line};
 use crate::tui::theme::Theme;
 
@@ -93,21 +93,45 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
     // Blank line at top for breathing room
     header_lines.push(Line::from(""));
 
-    // Breadcrumb trail when drilled into subtask details
-    if !app.detail_stack.is_empty() {
+    // Breadcrumb trail: always visible, showing origin > [stack...] > current
+    {
         let mut crumb_spans: Vec<Span> = Vec::new();
         crumb_spans.push(Span::styled("   ", Style::default().bg(bg)));
-        for (i, (_stack_track, stack_task)) in app.detail_stack.iter().enumerate() {
-            if i > 0 {
-                crumb_spans.push(Span::styled(" > ", dim_style));
+
+        // First crumb: origin view label
+        let origin_label = match app
+            .detail_state
+            .as_ref()
+            .map(|ds| &ds.return_view)
+            .unwrap_or(&ReturnView::Track(0))
+        {
+            ReturnView::Recent => "Recent".to_string(),
+            ReturnView::Track(idx) => {
+                let tid = app
+                    .active_track_ids
+                    .get(*idx)
+                    .cloned()
+                    .unwrap_or_default();
+                app.track_prefix(&tid)
+                    .unwrap_or(&tid)
+                    .to_string()
             }
+        };
+        crumb_spans.push(Span::styled(origin_label, dim_style));
+
+        // Middle crumbs: from detail_stack
+        for (_stack_track, stack_task) in app.detail_stack.iter() {
+            crumb_spans.push(Span::styled(" > ", dim_style));
             crumb_spans.push(Span::styled(stack_task.clone(), dim_style));
         }
+
+        // Last crumb: current task ID (bright)
         crumb_spans.push(Span::styled(" > ", dim_style));
         crumb_spans.push(Span::styled(
             task_id.clone(),
             Style::default().fg(app.theme.text).bg(bg),
         ));
+
         header_lines.push(Line::from(crumb_spans));
         header_lines.push(Line::from(""));
     }

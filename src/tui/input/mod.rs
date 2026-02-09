@@ -447,11 +447,11 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             if let View::Detail { .. } = &app.view {
                 if let Some((parent_track, parent_task)) = app.detail_stack.pop() {
                     // Return to parent detail view, focusing on Subtasks region
-                    let return_idx = app
+                    let return_view = app
                         .detail_state
                         .as_ref()
-                        .map(|ds| ds.return_view_idx)
-                        .unwrap_or(0);
+                        .map(|ds| ds.return_view.clone())
+                        .unwrap_or(super::app::ReturnView::Track(0));
                     app.detail_state = None;
                     app.view = View::Detail {
                         track_id: parent_track.clone(),
@@ -480,7 +480,7 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
                         region,
                         scroll_offset: 0,
                         regions,
-                        return_view_idx: return_idx,
+                        return_view,
                         editing: false,
                         edit_buffer: String::new(),
                         edit_cursor_line: 0,
@@ -496,13 +496,16 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
                         note_content_end: 0,
                     });
                 } else {
-                    // Stack empty — return to track view
-                    let return_idx = app
+                    // Stack empty — return to origin view
+                    let return_view = app
                         .detail_state
                         .as_ref()
-                        .map(|ds| ds.return_view_idx)
-                        .unwrap_or(0);
-                    app.view = View::Track(return_idx);
+                        .map(|ds| ds.return_view.clone())
+                        .unwrap_or(super::app::ReturnView::Track(0));
+                    match return_view {
+                        super::app::ReturnView::Track(idx) => app.view = View::Track(idx),
+                        super::app::ReturnView::Recent => app.view = View::Recent,
+                    }
                     app.close_detail_fully();
                 }
             } else if app.last_search.is_some() {
@@ -625,12 +628,12 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             jump_to_bottom(app);
         }
 
-        // Enter: open detail view (track view), triage (inbox), expand/collapse (recent), or edit region (detail view)
+        // Enter: open detail view (track/recent view), triage (inbox), or edit region (detail view)
         (KeyModifiers::NONE, KeyCode::Enter) => {
             if matches!(app.view, View::Inbox) {
                 inbox_begin_triage(app);
             } else if matches!(app.view, View::Recent) {
-                toggle_recent_expand(app);
+                open_recent_detail(app);
             } else {
                 handle_enter(app);
             }
@@ -1264,11 +1267,11 @@ fn handle_select(app: &mut App, key: KeyEvent) {
             if let View::Detail { .. } = &app.view {
                 // Return from detail view but keep selection
                 if let Some((parent_track, parent_task)) = app.detail_stack.pop() {
-                    let return_idx = app
+                    let return_view = app
                         .detail_state
                         .as_ref()
-                        .map(|ds| ds.return_view_idx)
-                        .unwrap_or(0);
+                        .map(|ds| ds.return_view.clone())
+                        .unwrap_or(super::app::ReturnView::Track(0));
                     app.detail_state = None;
                     app.view = View::Detail {
                         track_id: parent_track.clone(),
@@ -1296,7 +1299,7 @@ fn handle_select(app: &mut App, key: KeyEvent) {
                         region,
                         scroll_offset: 0,
                         regions,
-                        return_view_idx: return_idx,
+                        return_view,
                         editing: false,
                         edit_buffer: String::new(),
                         edit_cursor_line: 0,
@@ -1312,12 +1315,15 @@ fn handle_select(app: &mut App, key: KeyEvent) {
                         note_content_end: 0,
                     });
                 } else {
-                    let return_idx = app
+                    let return_view = app
                         .detail_state
                         .as_ref()
-                        .map(|ds| ds.return_view_idx)
-                        .unwrap_or(0);
-                    app.view = View::Track(return_idx);
+                        .map(|ds| ds.return_view.clone())
+                        .unwrap_or(super::app::ReturnView::Track(0));
+                    match return_view {
+                        super::app::ReturnView::Track(idx) => app.view = View::Track(idx),
+                        super::app::ReturnView::Recent => app.view = View::Recent,
+                    }
                     app.close_detail_fully();
                 }
             } else {
@@ -8284,7 +8290,7 @@ fn inbox_edit_note(app: &mut App) {
         region: DetailRegion::Note,
         scroll_offset: 0,
         regions: vec![DetailRegion::Note],
-        return_view_idx: 0,
+        return_view: super::app::ReturnView::Track(0),
         editing: true,
         edit_buffer: body_text.clone(),
         edit_cursor_line: line_count.saturating_sub(1),
@@ -9320,6 +9326,23 @@ fn reopen_recent_task(app: &mut App) {
     app.status_message = Some(format!("Reopening in {}...", track_name));
 }
 
+/// Open detail view for the task under cursor in Recent view
+fn open_recent_detail(app: &mut App) {
+    let entries = build_recent_entries(app);
+    let cursor = app.recent_cursor;
+    if let Some(entry) = entries.get(cursor) {
+        if entry.id.is_empty() {
+            app.status_message = Some("No task to view".to_string());
+            return;
+        }
+        if entry.is_archived {
+            app.status_message = Some("Cannot view archived task".to_string());
+            return;
+        }
+        app.open_detail(entry.track_id.clone(), entry.id.clone());
+    }
+}
+
 /// Toggle expand/collapse of a task's subtree in the Recent view
 fn toggle_recent_expand(app: &mut App) {
     let entries = build_recent_entries(app);
@@ -9662,7 +9685,7 @@ fn dispatch_palette_action(app: &mut App, action_id: &str, track_index: Option<u
             if matches!(app.view, View::Inbox) {
                 inbox_begin_triage(app);
             } else if matches!(app.view, View::Recent) {
-                toggle_recent_expand(app);
+                open_recent_detail(app);
             } else {
                 handle_enter(app);
             }
@@ -9709,12 +9732,15 @@ fn dispatch_palette_action(app: &mut App, action_id: &str, track_index: Option<u
                         task_id: parent_task,
                     };
                 } else {
-                    let return_idx = app
+                    let return_view = app
                         .detail_state
                         .as_ref()
-                        .map(|ds| ds.return_view_idx)
-                        .unwrap_or(0);
-                    app.view = View::Track(return_idx);
+                        .map(|ds| ds.return_view.clone())
+                        .unwrap_or(super::app::ReturnView::Track(0));
+                    match return_view {
+                        super::app::ReturnView::Track(idx) => app.view = View::Track(idx),
+                        super::app::ReturnView::Recent => app.view = View::Recent,
+                    }
                     app.close_detail_fully();
                 }
             }
