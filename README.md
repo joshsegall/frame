@@ -1,5 +1,7 @@
 # [>] frame
 
+[![CI](https://github.com/joshsegall/frame/actions/workflows/ci.yml/badge.svg)](https://github.com/joshsegall/frame/actions/workflows/ci.yml)
+
 **your backlog is plain text**
 
 A markdown task tracker with a terminal UI for humans and a CLI for agents.
