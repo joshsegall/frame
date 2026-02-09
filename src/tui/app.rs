@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{
-    self, Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -82,9 +82,12 @@ impl EditHistory {
 
     /// Save a snapshot (call after each text-modifying action)
     pub fn snapshot(&mut self, buffer: &str, cursor_pos: usize, cursor_line: usize) {
-        // Don't save duplicate consecutive states
-        if let Some(last) = self.entries.get(self.position) {
+        // If buffer hasn't changed, just update the cursor position in place
+        // so that undo restores the most recent cursor location
+        if let Some(last) = self.entries.get_mut(self.position) {
             if last.0 == buffer {
+                last.1 = cursor_pos;
+                last.2 = cursor_line;
                 return;
             }
         }
@@ -2538,6 +2541,10 @@ pub fn run(project_dir_override: Option<&str>) -> Result<(), Box<dyn std::error:
         false
     };
 
+    // Bracketed paste: terminal signals paste start/end so we get a single
+    // Event::Paste(String) instead of individual key events for each character.
+    let _ = execute!(stdout, EnableBracketedPaste);
+
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
@@ -2546,6 +2553,7 @@ pub fn run(project_dir_override: Option<&str>) -> Result<(), Box<dyn std::error:
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), DisableBracketedPaste);
         let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
         original_hook(panic_info);
@@ -2562,6 +2570,7 @@ pub fn run(project_dir_override: Option<&str>) -> Result<(), Box<dyn std::error:
 
     // Restore terminal
     disable_raw_mode()?;
+    let _ = execute!(terminal.backend_mut(), DisableBracketedPaste);
     let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
@@ -2743,37 +2752,46 @@ fn run_event_loop(
             }
         }
 
-        if event::poll(Duration::from_millis(250))?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            // Capture raw key event for debug display
-            if app.key_debug {
-                app.last_key_event = Some(format_key_debug(&key));
-            }
-
+        if event::poll(Duration::from_millis(250))? {
             let old_view = app.view.clone();
-            input::handle_key(app, key);
-
-            // Flush all pending moves on view change
-            if app.view != old_view && !app.pending_moves.is_empty() {
-                let modified = app.flush_all_pending_moves();
-                for tid in &modified {
-                    let _ = app.save_track(tid);
+            let evt = event::read()?;
+            let handled = match evt {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    // Capture raw key event for debug display
+                    if app.key_debug {
+                        app.last_key_event = Some(format_key_debug(&key));
+                    }
+                    input::handle_key(app, key);
+                    true
                 }
-            }
+                Event::Paste(text) => {
+                    input::handle_paste(app, &text);
+                    true
+                }
+                _ => false,
+            };
 
-            // Process pending reload when returning to Navigate mode
-            if !app.pending_reload_paths.is_empty() && app.mode == Mode::Navigate {
-                let paths = std::mem::take(&mut app.pending_reload_paths);
-                handle_pending_reload(app, &paths);
-            }
+            if handled {
+                // Flush all pending moves on view change
+                if app.view != old_view && !app.pending_moves.is_empty() {
+                    let modified = app.flush_all_pending_moves();
+                    for tid in &modified {
+                        let _ = app.save_track(tid);
+                    }
+                }
 
-            // Debounced state save: every ~5 key presses
-            save_counter += 1;
-            if save_counter >= 5 {
-                save_ui_state(app);
-                save_counter = 0;
+                // Process pending reload when returning to Navigate mode
+                if !app.pending_reload_paths.is_empty() && app.mode == Mode::Navigate {
+                    let paths = std::mem::take(&mut app.pending_reload_paths);
+                    handle_pending_reload(app, &paths);
+                }
+
+                // Debounced state save: every ~5 key presses
+                save_counter += 1;
+                if save_counter >= 5 {
+                    save_ui_state(app);
+                    save_counter = 0;
+                }
             }
         }
 

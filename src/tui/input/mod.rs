@@ -153,8 +153,66 @@ pub fn selection_cols_for_line(
     None
 }
 
+// ---------------------------------------------------------------------------
+// Kitty keyboard protocol normalizer
+// ---------------------------------------------------------------------------
+
+/// Map a base key to its US-layout shifted symbol.
+/// Returns None if the key is not a shiftable symbol (or is already shifted).
+fn shift_symbol(c: char) -> Option<char> {
+    match c {
+        '`' => Some('~'),
+        '1' => Some('!'),
+        '2' => Some('@'),
+        '3' => Some('#'),
+        '4' => Some('$'),
+        '5' => Some('%'),
+        '6' => Some('^'),
+        '7' => Some('&'),
+        '8' => Some('*'),
+        '9' => Some('('),
+        '0' => Some(')'),
+        '-' => Some('_'),
+        '=' => Some('+'),
+        '[' => Some('{'),
+        ']' => Some('}'),
+        '\\' => Some('|'),
+        ';' => Some(':'),
+        '\'' => Some('"'),
+        ',' => Some('<'),
+        '.' => Some('>'),
+        '/' => Some('?'),
+        _ => None,
+    }
+}
+
+/// Normalize key events from terminals using the kitty keyboard protocol.
+///
+/// Kitty protocol sends `Char(lowercase) + SHIFT` instead of `Char(UPPERCASE) + SHIFT`,
+/// and `Char(base_symbol) + SHIFT` instead of `Char(shifted_symbol)`.
+///
+/// For traditional terminals (e.g. Warp) this is a no-op:
+/// - Already-uppercase letters: `'P'.is_ascii_lowercase()` = false → skip
+/// - Already-shifted symbols: `shift_symbol('>')` = None → skip
+fn normalize_key(mut key: KeyEvent) -> KeyEvent {
+    if let KeyCode::Char(c) = key.code
+        && key.modifiers.contains(KeyModifiers::SHIFT)
+    {
+        if c.is_ascii_lowercase() {
+            // Shift+p → Char('P') with SHIFT preserved
+            key.code = KeyCode::Char(c.to_ascii_uppercase());
+        } else if let Some(shifted) = shift_symbol(c) {
+            // Shift+. → Char('>') with SHIFT removed
+            key.code = KeyCode::Char(shifted);
+            key.modifiers.remove(KeyModifiers::SHIFT);
+        }
+    }
+    key
+}
+
 /// Handle a key event in the current mode
 pub fn handle_key(app: &mut App, key: KeyEvent) {
+    let key = normalize_key(key);
     match &app.mode {
         Mode::Navigate => handle_navigate(app, key),
         Mode::Search => handle_search(app, key),
@@ -164,6 +222,60 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::Confirm => handle_confirm(app, key),
         Mode::Select => handle_select(app, key),
         Mode::Command => handle_command(app, key),
+    }
+}
+
+/// Handle a bracketed paste event (terminal sends pasted text as a single string).
+/// Only active in Edit mode — inserts at cursor with a single undo snapshot.
+pub fn handle_paste(app: &mut App, text: &str) {
+    if app.mode != Mode::Edit || text.is_empty() {
+        return;
+    }
+
+    // Check if we're in multi-line note editing
+    let is_detail_multiline = app
+        .detail_state
+        .as_ref()
+        .is_some_and(|ds| ds.editing && ds.region == DetailRegion::Note)
+        && app.edit_target.is_none();
+
+    if is_detail_multiline {
+        // Capture current cursor into the undo stack before mutating.
+        // Cursor movements don't create snapshots, so the last entry may
+        // have a stale position. snapshot()'s dedup updates it in place.
+        snapshot_multiline(app);
+        // Multi-line: insert text as-is (preserving newlines)
+        if let Some(ds) = &mut app.detail_state {
+            delete_multiline_selection(ds);
+            let offset = multiline_pos_to_offset(
+                &ds.edit_buffer,
+                ds.edit_cursor_line,
+                ds.edit_cursor_col,
+            );
+            ds.edit_buffer.insert_str(offset, text);
+            let new_offset = offset + text.len();
+            let (new_line, new_col) = offset_to_multiline_pos(&ds.edit_buffer, new_offset);
+            ds.edit_cursor_line = new_line;
+            ds.edit_cursor_col = new_col;
+        }
+        snapshot_multiline(app);
+    } else {
+        // Capture current cursor into the undo stack before mutating.
+        // Cursor movements don't create snapshots, so the last entry may
+        // have a stale position. snapshot()'s dedup updates it in place.
+        if let Some(eh) = &mut app.edit_history {
+            eh.snapshot(&app.edit_buffer, app.edit_cursor, 0);
+        }
+        // Single-line: replace newlines with spaces, insert at cursor
+        let clean = text.replace('\n', " ").replace('\r', "");
+        app.delete_selection();
+        app.edit_buffer.insert_str(app.edit_cursor, &clean);
+        app.edit_cursor += clean.len();
+        app.edit_selection_anchor = None;
+        if let Some(eh) = &mut app.edit_history {
+            eh.snapshot(&app.edit_buffer, app.edit_cursor, 0);
+        }
+        update_autocomplete_filter(app);
     }
 }
 
@@ -678,7 +790,7 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             begin_cross_track_move(app);
         }
 
-        // Redo: Z, Ctrl+Y, or Ctrl+Shift+Z (must be checked BEFORE Ctrl+Z/z undo)
+        // Redo: Z, Ctrl+Y, Ctrl+Shift+Z, or Super+Shift+Z (must be checked BEFORE undo)
         (m, KeyCode::Char('y')) if m.contains(KeyModifiers::CONTROL) => {
             perform_redo(app);
         }
@@ -687,15 +799,23 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
         {
             perform_redo(app);
         }
+        (m, KeyCode::Char('z') | KeyCode::Char('Z'))
+            if m.contains(KeyModifiers::SUPER) && m.contains(KeyModifiers::SHIFT) =>
+        {
+            perform_redo(app);
+        }
         (KeyModifiers::SHIFT, KeyCode::Char('Z')) => {
             perform_redo(app);
         }
 
-        // Undo: u, z, or Ctrl+Z
+        // Undo: u, z, Ctrl+Z, or Super+Z
         (KeyModifiers::NONE, KeyCode::Char('u') | KeyCode::Char('z')) => {
             perform_undo(app);
         }
         (m, KeyCode::Char('z')) if m.contains(KeyModifiers::CONTROL) => {
+            perform_undo(app);
+        }
+        (m, KeyCode::Char('z')) if m.contains(KeyModifiers::SUPER) => {
             perform_undo(app);
         }
 
@@ -1346,7 +1466,15 @@ fn handle_select(app: &mut App, key: KeyEvent) {
         (m, KeyCode::Char('z')) if m.contains(KeyModifiers::CONTROL) => {
             perform_undo(app);
         }
+        (m, KeyCode::Char('z')) if m.contains(KeyModifiers::SUPER) => {
+            perform_undo(app);
+        }
         (m, KeyCode::Char('y')) if m.contains(KeyModifiers::CONTROL) => {
+            perform_redo(app);
+        }
+        (m, KeyCode::Char('z') | KeyCode::Char('Z'))
+            if m.contains(KeyModifiers::SUPER) && m.contains(KeyModifiers::SHIFT) =>
+        {
             perform_redo(app);
         }
         (KeyModifiers::SHIFT, KeyCode::Char('Z')) => {
@@ -3745,24 +3873,42 @@ fn handle_edit(app: &mut App, key: KeyEvent) {
                 cancel_edit(app);
             }
         }
-        // Select all: Ctrl+A
+        // Home / Ctrl+A (macOS Cmd+Left sends ^A): jump to start of line
         (m, KeyCode::Char('a')) if m.contains(KeyModifiers::CONTROL) => {
-            app.edit_selection_anchor = Some(0);
-            app.edit_cursor = app.edit_buffer.len();
+            app.edit_selection_anchor = None;
+            app.edit_cursor = 0;
         }
         // End / Ctrl+E (macOS Cmd+Right sends ^E): jump to end of line
         (m, KeyCode::Char('e')) if m.contains(KeyModifiers::CONTROL) => {
             app.edit_selection_anchor = None;
             app.edit_cursor = app.edit_buffer.len();
         }
-        // Copy (Ctrl+C)
-        (m, KeyCode::Char('c')) if m.contains(KeyModifiers::CONTROL) => {
+        // Kill to start of line: Ctrl+U (macOS Cmd+Backspace sends ^U)
+        (m, KeyCode::Char('u')) if m.contains(KeyModifiers::CONTROL) => {
+            if app.edit_selection_anchor.is_some() {
+                app.delete_selection();
+            } else if app.edit_cursor > 0 {
+                app.edit_buffer.drain(..app.edit_cursor);
+                app.edit_cursor = 0;
+            }
+            app.edit_selection_anchor = None;
+            if let Some(eh) = &mut app.edit_history {
+                eh.snapshot(&app.edit_buffer, app.edit_cursor, 0);
+            }
+            update_autocomplete_filter(app);
+        }
+        // Copy (Ctrl+C or Super+C)
+        (m, KeyCode::Char('c'))
+            if m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::SUPER) =>
+        {
             if let Some(text) = app.get_selection_text() {
                 clipboard_set(&text);
             }
         }
-        // Cut (Ctrl+X)
-        (m, KeyCode::Char('x')) if m.contains(KeyModifiers::CONTROL) => {
+        // Cut (Ctrl+X or Super+X)
+        (m, KeyCode::Char('x'))
+            if m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::SUPER) =>
+        {
             if let Some(text) = app.get_selection_text() {
                 clipboard_set(&text);
                 app.delete_selection();
@@ -3772,9 +3918,15 @@ fn handle_edit(app: &mut App, key: KeyEvent) {
                 update_autocomplete_filter(app);
             }
         }
-        // Paste (Ctrl+V)
-        (m, KeyCode::Char('v')) if m.contains(KeyModifiers::CONTROL) => {
+        // Paste (Ctrl+V or Super+V)
+        (m, KeyCode::Char('v'))
+            if m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::SUPER) =>
+        {
             if let Some(text) = clipboard_get() {
+                // Capture current cursor before mutating (may be stale from arrow keys)
+                if let Some(eh) = &mut app.edit_history {
+                    eh.snapshot(&app.edit_buffer, app.edit_cursor, 0);
+                }
                 app.delete_selection();
                 app.edit_buffer.insert_str(app.edit_cursor, &text);
                 app.edit_cursor += text.len();
@@ -3784,8 +3936,10 @@ fn handle_edit(app: &mut App, key: KeyEvent) {
                 update_autocomplete_filter(app);
             }
         }
-        // Inline undo (Ctrl+Z)
-        (m, KeyCode::Char('z')) if m.contains(KeyModifiers::CONTROL) => {
+        // Inline undo (Ctrl+Z or Super+Z)
+        (m, KeyCode::Char('z'))
+            if m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::SUPER) =>
+        {
             app.edit_selection_anchor = None;
             if let Some(eh) = &mut app.edit_history {
                 if let Some((buf, pos, _)) = eh.undo() {
@@ -3795,7 +3949,7 @@ fn handle_edit(app: &mut App, key: KeyEvent) {
             }
             update_autocomplete_filter(app);
         }
-        // Inline redo (Ctrl+Y or Ctrl+Shift+Z)
+        // Inline redo (Ctrl+Y, Ctrl+Shift+Z, or Super+Shift+Z)
         (m, KeyCode::Char('y')) if m.contains(KeyModifiers::CONTROL) => {
             app.edit_selection_anchor = None;
             if let Some(eh) = &mut app.edit_history {
@@ -3807,7 +3961,8 @@ fn handle_edit(app: &mut App, key: KeyEvent) {
             update_autocomplete_filter(app);
         }
         (m, KeyCode::Char('Z'))
-            if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) =>
+            if (m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::SUPER))
+                && m.contains(KeyModifiers::SHIFT) =>
         {
             app.edit_selection_anchor = None;
             if let Some(eh) = &mut app.edit_history {
@@ -6451,15 +6606,11 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
             app.edit_history = None;
             confirm_detail_multiline(app);
         }
-        // Select all: Ctrl+A
+        // Home / Ctrl+A (macOS Cmd+Left sends ^A): jump to start of current line
         (m, KeyCode::Char('a')) if m.contains(KeyModifiers::CONTROL) => {
             if let Some(ds) = &mut app.detail_state {
-                ds.multiline_selection_anchor = Some((0, 0));
-                let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
-                let last_line = edit_lines.len().saturating_sub(1);
-                let last_col = edit_lines.last().map_or(0, |l| l.len());
-                ds.edit_cursor_line = last_line;
-                ds.edit_cursor_col = last_col;
+                ds.multiline_selection_anchor = None;
+                ds.edit_cursor_col = 0;
             }
         }
         // End / Ctrl+E (macOS Cmd+Right sends ^E): jump to end of line
@@ -6471,16 +6622,38 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                 ds.edit_cursor_col = line_len;
             }
         }
-        // Copy (Ctrl+C)
-        (m, KeyCode::Char('c')) if m.contains(KeyModifiers::CONTROL) => {
+        // Kill to start of line: Ctrl+U (macOS Cmd+Backspace sends ^U)
+        (m, KeyCode::Char('u')) if m.contains(KeyModifiers::CONTROL) => {
+            if let Some(ds) = &mut app.detail_state {
+                if ds.multiline_selection_anchor.is_some() {
+                    delete_multiline_selection(ds);
+                } else if ds.edit_cursor_col > 0 {
+                    let mut edit_lines: Vec<String> =
+                        ds.edit_buffer.split('\n').map(String::from).collect();
+                    if let Some(line) = edit_lines.get_mut(ds.edit_cursor_line) {
+                        line.drain(..ds.edit_cursor_col);
+                    }
+                    ds.edit_cursor_col = 0;
+                    ds.edit_buffer = edit_lines.join("\n");
+                }
+                ds.multiline_selection_anchor = None;
+            }
+            snapshot_multiline(app);
+        }
+        // Copy (Ctrl+C or Super+C)
+        (m, KeyCode::Char('c'))
+            if m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::SUPER) =>
+        {
             if let Some(ds) = &app.detail_state {
                 if let Some(text) = get_multiline_selection_text(ds) {
                     clipboard_set(&text);
                 }
             }
         }
-        // Cut (Ctrl+X)
-        (m, KeyCode::Char('x')) if m.contains(KeyModifiers::CONTROL) => {
+        // Cut (Ctrl+X or Super+X)
+        (m, KeyCode::Char('x'))
+            if m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::SUPER) =>
+        {
             if let Some(ds) = &mut app.detail_state {
                 if let Some(text) = delete_multiline_selection(ds) {
                     clipboard_set(&text);
@@ -6488,9 +6661,13 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
             }
             snapshot_multiline(app);
         }
-        // Paste (Ctrl+V)
-        (m, KeyCode::Char('v')) if m.contains(KeyModifiers::CONTROL) => {
+        // Paste (Ctrl+V or Super+V)
+        (m, KeyCode::Char('v'))
+            if m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::SUPER) =>
+        {
             if let Some(paste_text) = clipboard_get() {
+                // Capture current cursor before mutating (may be stale from arrow keys)
+                snapshot_multiline(app);
                 if let Some(ds) = &mut app.detail_state {
                     delete_multiline_selection(ds);
                     let offset = multiline_pos_to_offset(
@@ -6507,8 +6684,10 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                 snapshot_multiline(app);
             }
         }
-        // Inline undo (Ctrl+Z)
-        (m, KeyCode::Char('z')) if m.contains(KeyModifiers::CONTROL) => {
+        // Inline undo (Ctrl+Z or Super+Z)
+        (m, KeyCode::Char('z'))
+            if m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::SUPER) =>
+        {
             if let Some(ds) = &mut app.detail_state {
                 ds.multiline_selection_anchor = None;
             }
@@ -6523,7 +6702,7 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                 }
             }
         }
-        // Inline redo (Ctrl+Y or Ctrl+Shift+Z)
+        // Inline redo (Ctrl+Y, Ctrl+Shift+Z, or Super+Shift+Z)
         (m, KeyCode::Char('y')) if m.contains(KeyModifiers::CONTROL) => {
             if let Some(ds) = &mut app.detail_state {
                 ds.multiline_selection_anchor = None;
@@ -6540,7 +6719,8 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
             }
         }
         (m, KeyCode::Char('Z'))
-            if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) =>
+            if (m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::SUPER))
+                && m.contains(KeyModifiers::SHIFT) =>
         {
             if let Some(ds) = &mut app.detail_state {
                 ds.multiline_selection_anchor = None;
