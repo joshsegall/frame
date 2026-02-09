@@ -97,7 +97,7 @@ fr inbox
 
 ### `fr tracks`
 
-List all tracks grouped by state (active, shelved, archived) with task counts.
+List all tracks grouped by state (active, shelved, archived) with metadata (id, prefix, file, cc-focus).
 
 ### `fr stats`
 

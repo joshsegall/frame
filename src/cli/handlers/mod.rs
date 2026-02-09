@@ -636,29 +636,108 @@ fn cmd_tracks(json: bool) -> Result<(), Box<dyn std::error::Error>> {
         }
         println!("{}", serde_json::to_string_pretty(&infos)?);
     } else {
-        let mut current_state = String::new();
+        // Gather entries grouped by state
+        let mut active_entries = Vec::new();
+        let mut shelved_entries = Vec::new();
+        let mut archived_entries = Vec::new();
+
         for tc in &project.config.tracks {
-            if tc.state != current_state {
-                if !current_state.is_empty() {
-                    println!();
-                }
-                let label = match tc.state.as_str() {
-                    "active" => "Active",
-                    "shelved" => "Shelved",
-                    "archived" => "Archived",
-                    other => other,
-                };
-                println!("{}", label);
-                current_state = tc.state.clone();
-            }
-            let stats = find_track(&project, &tc.id)
-                .map(track_ops::task_counts)
+            let prefix = project
+                .config
+                .ids
+                .prefixes
+                .get(&tc.id)
+                .cloned()
                 .unwrap_or_default();
             let is_cc = project.config.agent.cc_focus.as_deref() == Some(&tc.id);
+            let entry = (tc.id.clone(), tc.name.clone(), prefix, tc.file.clone(), is_cc);
+            match tc.state.as_str() {
+                "active" => active_entries.push(entry),
+                "shelved" => shelved_entries.push(entry),
+                _ => archived_entries.push(entry),
+            }
+        }
+
+        // Compute column widths across all entries
+        let all_entries: Vec<_> = active_entries
+            .iter()
+            .chain(shelved_entries.iter())
+            .chain(archived_entries.iter())
+            .collect();
+        let name_w = all_entries
+            .iter()
+            .map(|(_, name, _, _, _)| name.len())
+            .max()
+            .unwrap_or(0)
+            .max(4); // "name"
+        let id_w = all_entries
+            .iter()
+            .map(|(id, _, _, _, _)| id.len())
+            .max()
+            .unwrap_or(0)
+            .max(2); // "id"
+        let pfx_w = all_entries
+            .iter()
+            .map(|(_, _, pfx, _, _)| pfx.len())
+            .max()
+            .unwrap_or(0)
+            .max(3); // "pfx"
+        let file_w = all_entries
+            .iter()
+            .map(|(_, _, _, file, _)| file.len())
+            .max()
+            .unwrap_or(0)
+            .max(4); // "file"
+
+        let print_header = |label: &str| {
             println!(
-                "{}",
-                format_track_info(&tc.id, &tc.name, &tc.state, is_cc, &stats)
+                " {:<name_w$}  {:<id_w$}  {:<pfx_w$}  {:<file_w$}",
+                label, "id", "pfx", "file",
+                name_w = name_w,
+                id_w = id_w,
+                pfx_w = pfx_w,
+                file_w = file_w,
             );
+        };
+
+        let print_row =
+            |name: &str, id: &str, pfx: &str, file: &str, is_cc: bool| {
+                let cc_str = if is_cc { "  cc" } else { "" };
+                println!(
+                    " {:<name_w$}  {:<id_w$}  {:<pfx_w$}  {:<file_w$}{}",
+                    name, id, pfx, file, cc_str,
+                    name_w = name_w,
+                    id_w = id_w,
+                    pfx_w = pfx_w,
+                    file_w = file_w,
+                );
+            };
+
+        if !active_entries.is_empty() {
+            print_header("Active");
+            for (id, name, pfx, file, is_cc) in &active_entries {
+                print_row(name, id, pfx, file, *is_cc);
+            }
+        }
+
+        if !shelved_entries.is_empty() {
+            if !active_entries.is_empty() {
+                println!();
+            }
+            print_header("Shelved");
+            for (id, name, pfx, file, is_cc) in &shelved_entries {
+                print_row(name, id, pfx, file, *is_cc);
+            }
+        }
+
+        if !archived_entries.is_empty() {
+            if !active_entries.is_empty() || !shelved_entries.is_empty() {
+                println!();
+            }
+            print_header("Archived");
+            for (id, name, pfx, file, is_cc) in &archived_entries {
+                print_row(name, id, pfx, file, *is_cc);
+            }
         }
     }
     Ok(())

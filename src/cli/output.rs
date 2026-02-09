@@ -255,28 +255,6 @@ pub fn format_track_header(track_id: &str, track: &Track) -> String {
     format!("== {} ({}) ==", track.title, track_id)
 }
 
-/// Format track info for the tracks listing
-pub fn format_track_info(
-    track_id: &str,
-    name: &str,
-    state: &str,
-    cc_focus: bool,
-    stats: &TrackStats,
-) -> String {
-    let cc_str = if cc_focus { " ★cc" } else { "" };
-    format!(
-        "  {} ({}) [{}]  {}▸ {}⊘ {}○ {}◇ {}✓{}",
-        name,
-        track_id,
-        state,
-        stats.active,
-        stats.blocked,
-        stats.todo,
-        stats.parked,
-        stats.done,
-        cc_str
-    )
-}
 
 /// Format a track's task listing
 pub fn format_track_listing(
