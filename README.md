@@ -137,3 +137,6 @@ you're ready.
 **`fr clean`** normalizes formatting, assigns IDs, archives completed
 tasks, and validates references. Runs automatically when external
 changes are detected.
+
+**Multiple projects** are supported via a global registry — use
+`fr projects` to list, add, or remove projects.
