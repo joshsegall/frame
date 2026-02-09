@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::io;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -2472,6 +2472,18 @@ pub fn save_ui_state(app: &App) {
     let _ = write_ui_state(&app.project.frame_dir, &ui_state);
 }
 
+/// Set the terminal window/tab title via OSC 0.
+pub fn set_window_title(name: &str) {
+    let _ = write!(io::stdout(), "\x1b]0;frame · {}\x07", name);
+    let _ = io::stdout().flush();
+}
+
+/// Clear the terminal window/tab title (restore default).
+pub fn clear_window_title() {
+    let _ = write!(io::stdout(), "\x1b]0;\x07");
+    let _ = io::stdout().flush();
+}
+
 /// Run the TUI application.
 /// If `project_dir_override` is set, use that as the starting directory.
 pub fn run(project_dir_override: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
@@ -2557,6 +2569,8 @@ pub fn run(project_dir_override: Option<&str>) -> Result<(), Box<dyn std::error:
     // Install panic hook to restore terminal on panic
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
+        let _ = write!(io::stdout(), "\x1b]0;\x07");
+        let _ = io::stdout().flush();
         let _ = disable_raw_mode();
         let _ = execute!(io::stdout(), DisableBracketedPaste);
         let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
@@ -2567,6 +2581,9 @@ pub fn run(project_dir_override: Option<&str>) -> Result<(), Box<dyn std::error:
     // Record kitty protocol status on app for debug display
     app.kitty_enabled = kitty_enabled;
 
+    // Set terminal window title
+    set_window_title(&app.project.config.project.name);
+
     // Run event loop
     let result = run_event_loop(&mut terminal, &mut app, watcher);
 
@@ -2574,6 +2591,7 @@ pub fn run(project_dir_override: Option<&str>) -> Result<(), Box<dyn std::error:
     save_ui_state(&app);
 
     // Restore terminal
+    clear_window_title();
     disable_raw_mode()?;
     let _ = execute!(terminal.backend_mut(), DisableBracketedPaste);
     let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);

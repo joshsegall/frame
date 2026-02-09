@@ -10285,6 +10285,9 @@ fn handle_project_picker_key(app: &mut App, key: KeyEvent) {
                         *app = App::new(project);
                         app.watcher_needs_restart = true;
 
+                        // Update terminal window title
+                        super::app::set_window_title(&app.project.config.project.name);
+
                         // Restore UI state for the new project
                         super::app::restore_ui_state(app);
                     }
