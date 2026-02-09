@@ -217,6 +217,10 @@ fn normalize_key(mut key: KeyEvent) -> KeyEvent {
 
 /// Handle a key event in the current mode
 pub fn handle_key(app: &mut App, key: KeyEvent) {
+    // Ignore bare modifier key presses (Shift, Ctrl, Alt, etc.)
+    if matches!(key.code, KeyCode::Modifier(_)) {
+        return;
+    }
     let key = normalize_key(key);
     match &app.mode {
         Mode::Navigate => handle_navigate(app, key),
