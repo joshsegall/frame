@@ -554,15 +554,19 @@ impl ProjectPickerState {
     }
 
     pub fn move_up(&mut self) {
-        if self.cursor > 0 {
-            self.cursor -= 1;
+        if !self.entries.is_empty() {
+            if self.cursor == 0 {
+                self.cursor = self.entries.len() - 1;
+            } else {
+                self.cursor -= 1;
+            }
         }
         self.confirm_remove = None;
     }
 
     pub fn move_down(&mut self) {
-        if self.cursor + 1 < self.entries.len() {
-            self.cursor += 1;
+        if !self.entries.is_empty() {
+            self.cursor = (self.cursor + 1) % self.entries.len();
         }
         self.confirm_remove = None;
     }
