@@ -1215,6 +1215,15 @@ impl App {
         }
     }
 
+    /// Reset the deadline on all pending moves (called on every keypress to keep
+    /// tasks visible while the user is interacting).
+    pub fn reset_pending_move_deadlines(&mut self) {
+        let new_deadline = Instant::now() + std::time::Duration::from_secs(5);
+        for pm in &mut self.pending_moves {
+            pm.deadline = new_deadline;
+        }
+    }
+
     /// Flush all pending moves whose deadline has expired. Returns modified track IDs.
     pub fn flush_expired_pending_moves(&mut self) -> Vec<String> {
         let now = Instant::now();
@@ -2843,6 +2852,12 @@ fn run_event_loop(
             };
 
             if handled {
+                // Reset grace period on any keypress so tasks don't move
+                // out from under the user while they're interacting
+                if !app.pending_moves.is_empty() {
+                    app.reset_pending_move_deadlines();
+                }
+
                 // Flush all pending moves on view change
                 if app.view != old_view && !app.pending_moves.is_empty() {
                     let modified = app.flush_all_pending_moves();
