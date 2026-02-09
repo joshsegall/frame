@@ -835,6 +835,8 @@ pub struct App {
     pub triage_state: Option<TriageState>,
     /// Confirmation prompt state (active during Mode::Confirm)
     pub confirm_state: Option<ConfirmState>,
+    /// State color for current flash (None = undo yellow-orange default)
+    pub flash_state: Option<TaskState>,
     /// Task ID to flash-highlight after undo/redo navigation
     pub flash_task_id: Option<String>,
     /// Multiple task IDs to flash (for bulk undo)
@@ -971,6 +973,7 @@ impl App {
             edit_selection_anchor: None,
             triage_state: None,
             confirm_state: None,
+            flash_state: None,
             flash_task_id: None,
             flash_task_ids: HashSet::new(),
             flash_track_id: None,
@@ -1107,6 +1110,7 @@ impl App {
     pub fn clear_expired_flash(&mut self) {
         if let Some(started) = self.flash_started {
             if started.elapsed() >= Duration::from_millis(300) {
+                self.flash_state = None;
                 self.flash_task_id = None;
                 self.flash_task_ids.clear();
                 self.flash_track_id = None;

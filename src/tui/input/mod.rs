@@ -2961,6 +2961,10 @@ fn task_state_action(app: &mut App, action: StateAction) {
 
     // Only push undo if state actually changed
     if old_state != new_state {
+        // Flash the task with state-specific color
+        app.flash_state = Some(new_state);
+        app.flash_task(&task_id);
+
         // If transitioning away from Done, cancel any pending ToDone move
         if old_state == crate::model::task::TaskState::Done {
             app.cancel_pending_move(&track_id, &task_id);

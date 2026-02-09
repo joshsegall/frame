@@ -8,6 +8,7 @@ use regex::Regex;
 use crate::model::{Metadata, SectionKind, Task, TaskState};
 use crate::tui::app::{App, EditTarget, FlatItem, Mode, MoveState};
 
+use super::detail_view::{UNDO_FLASH_COLORS, state_flash_colors};
 use super::push_highlighted_spans;
 
 /// State symbols for each task state (markdown checkbox style)
@@ -267,8 +268,12 @@ fn render_task_line<'a>(
     };
 
     // Row background: flash > cursor > selected > normal
+    let (flash_bg_color, flash_border_color) = match app.flash_state {
+        Some(state) => state_flash_colors(state, &app.theme),
+        None => UNDO_FLASH_COLORS,
+    };
     let row_bg = if is_flash {
-        app.theme.flash_bg
+        flash_bg_color
     } else if is_cursor {
         app.theme.selection_bg
     } else if is_selected {
@@ -282,7 +287,7 @@ fn render_task_line<'a>(
     if is_flash {
         spans.push(Span::styled(
             "\u{258E}",
-            Style::default().fg(app.theme.yellow).bg(row_bg),
+            Style::default().fg(flash_border_color).bg(row_bg),
         ));
     } else if is_cursor && (!has_selection || is_selected) {
         // Cursor bar only shows if no selection active, or cursor row is itself selected
