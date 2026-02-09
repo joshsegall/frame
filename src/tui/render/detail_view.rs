@@ -1254,14 +1254,35 @@ fn render_subtask_tree(
 
         let is_selected =
             selected_subtask_id.is_some() && task.id.as_deref() == selected_subtask_id;
+        let is_subtask_flashing = task.id.as_deref().is_some_and(|id| app.is_flashing(id));
 
-        let row_bg = if is_selected { selection_bg } else { bg };
+        let (flash_bg, flash_border) = if is_subtask_flashing {
+            match app.flash_state {
+                Some(state) => state_flash_colors(state, &app.theme),
+                None => UNDO_FLASH_COLORS,
+            }
+        } else {
+            (bg, bg) // unused, but avoids Option
+        };
+
+        let row_bg = if is_subtask_flashing {
+            flash_bg
+        } else if is_selected {
+            selection_bg
+        } else {
+            bg
+        };
         let row_dim_style = Style::default().fg(app.theme.dim).bg(row_bg);
 
         let mut spans: Vec<Span> = Vec::new();
 
         // Selection indicator (▎) or space
-        if is_selected {
+        if is_subtask_flashing {
+            spans.push(Span::styled(
+                "\u{258E}",
+                Style::default().fg(flash_border).bg(row_bg),
+            ));
+        } else if is_selected {
             spans.push(Span::styled(
                 "\u{258E}",
                 Style::default().fg(app.theme.selection_border).bg(row_bg),
