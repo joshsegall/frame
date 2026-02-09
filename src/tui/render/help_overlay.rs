@@ -186,6 +186,7 @@ fn build_track_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
     let left = vec![
         HelpEntry::Header("Navigation".into()),
         HelpEntry::Binding("\u{25B2}\u{25BC}/jk".into(), "Move up/down".into()),
+        HelpEntry::Binding("Alt+\u{25B2}\u{25BC}".into(), "Prev/next top-level".into()),
         HelpEntry::Binding("\u{25C0}/h".into(), "Collapse / parent".into()),
         HelpEntry::Binding("\u{25B6}/l".into(), "Expand / child".into()),
         HelpEntry::Binding("g/G".into(), "Top / bottom".into()),

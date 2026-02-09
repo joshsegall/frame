@@ -587,6 +587,14 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             move_cursor(app, 1);
         }
 
+        // Paragraph movement: Alt+Up/Down — jump between top-level tasks
+        (m, KeyCode::Up) if m.contains(KeyModifiers::ALT) => {
+            move_paragraph(app, -1);
+        }
+        (m, KeyCode::Down) if m.contains(KeyModifiers::ALT) => {
+            move_paragraph(app, 1);
+        }
+
         // Jump to top: g, Cmd+Up, or Home
         (KeyModifiers::NONE, KeyCode::Char('g')) => {
             jump_to_top(app);
@@ -4883,6 +4891,48 @@ fn word_boundary_right(s: &str, pos: usize) -> usize {
     i
 }
 
+/// Find the line index of the previous paragraph boundary (blank line or start of buffer).
+/// Lands on the blank line above the preceding paragraph, mirroring next_paragraph_line.
+fn prev_paragraph_line(lines: &[&str], current: usize) -> usize {
+    if current == 0 {
+        return 0;
+    }
+    let mut i = current;
+    // If on a blank line, skip consecutive blank lines upward
+    while i > 0 && lines[i].trim().is_empty() {
+        i -= 1;
+    }
+    // Move up through non-blank lines (the paragraph body)
+    while i > 0 && !lines[i].trim().is_empty() {
+        i -= 1;
+    }
+    // i is now on the blank line above the paragraph, or 0
+    i
+}
+
+/// Find the line index of the next paragraph boundary (blank line or end of buffer).
+/// Moves down past the current paragraph, then to the start of the next one.
+fn next_paragraph_line(lines: &[&str], current: usize) -> usize {
+    let last = lines.len().saturating_sub(1);
+    if current >= last {
+        return last;
+    }
+    let mut i = current;
+    // If we're on a blank line, skip over consecutive blank lines first
+    while i < last && lines[i].trim().is_empty() {
+        i += 1;
+    }
+    // Move down through non-blank lines until we hit a blank line or end
+    while i < last && !lines[i + 1].trim().is_empty() {
+        i += 1;
+    }
+    // Move to the blank line / next paragraph start
+    if i < last {
+        i += 1;
+    }
+    i
+}
+
 // ---------------------------------------------------------------------------
 // MOVE mode
 // ---------------------------------------------------------------------------
@@ -5502,6 +5552,65 @@ fn move_cursor(app: &mut App, delta: i32) {
             new_cursor = new_cursor.clamp(0, count as i32 - 1);
             app.recent_cursor = new_cursor as usize;
         }
+    }
+}
+
+/// Move cursor to the next/previous top-level task (depth 0) in the current view.
+/// In track view, this skips over subtasks to jump between top-level items.
+/// In other views, falls back to regular single-step movement.
+fn move_paragraph(app: &mut App, direction: i32) {
+    match &app.view {
+        View::Track(idx) => {
+            let track_id = match app.active_track_ids.get(*idx) {
+                Some(id) => id.clone(),
+                None => return,
+            };
+            let flat_items = app.build_flat_items(&track_id);
+            if flat_items.is_empty() {
+                return;
+            }
+
+            let state = app.get_track_state(&track_id);
+            let cursor = state.cursor;
+
+            let target = if direction > 0 {
+                // Search forward for next top-level task after current position
+                flat_items
+                    .iter()
+                    .enumerate()
+                    .skip(cursor + 1)
+                    .find(|(_, item)| is_paragraph_boundary(item))
+                    .map(|(i, _)| i)
+            } else {
+                // Search backward for previous top-level task before current position
+                flat_items[..cursor]
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find(|(_, item)| is_paragraph_boundary(item))
+                    .map(|(i, _)| i)
+            };
+
+            if let Some(target) = target {
+                let state = app.get_track_state(&track_id);
+                state.cursor = target;
+            }
+        }
+        _ => {
+            // Other views have no nesting — fall back to regular movement
+            move_cursor(app, direction);
+        }
+    }
+}
+
+/// A "paragraph boundary" is a selectable top-level task (depth 0) or a section separator.
+fn is_paragraph_boundary(item: &FlatItem) -> bool {
+    match item {
+        FlatItem::Task {
+            depth, is_context, ..
+        } => *depth == 0 && !*is_context,
+        FlatItem::ParkedSeparator => false,
+        FlatItem::BulkMoveStandin { .. } => false,
     }
 }
 
@@ -6833,6 +6942,26 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                     let line_len = edit_lines.get(ds.edit_cursor_line).map_or(0, |l| l.len());
                     ds.edit_cursor_col = ds.edit_cursor_col.min(line_len);
                 }
+            }
+        }
+        // Paragraph movement: Alt+Up — jump to previous blank line boundary
+        (m, KeyCode::Up) if m.contains(KeyModifiers::ALT) => {
+            if let Some(ds) = &mut app.detail_state {
+                let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
+                let target = prev_paragraph_line(&edit_lines, ds.edit_cursor_line);
+                ds.edit_cursor_line = target;
+                let line_len = edit_lines.get(target).map_or(0, |l| l.len());
+                ds.edit_cursor_col = ds.edit_cursor_col.min(line_len);
+            }
+        }
+        // Paragraph movement: Alt+Down — jump to next blank line boundary
+        (m, KeyCode::Down) if m.contains(KeyModifiers::ALT) => {
+            if let Some(ds) = &mut app.detail_state {
+                let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
+                let target = next_paragraph_line(&edit_lines, ds.edit_cursor_line);
+                ds.edit_cursor_line = target;
+                let line_len = edit_lines.get(target).map_or(0, |l| l.len());
+                ds.edit_cursor_col = ds.edit_cursor_col.min(line_len);
             }
         }
         // Home / Cmd+Left: start of line (with or without Shift)
