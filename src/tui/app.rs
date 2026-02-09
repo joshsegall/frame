@@ -906,6 +906,8 @@ pub struct App {
     pub edit_h_scroll: usize,
     /// Available width for edit field (set during render, read during input)
     pub last_edit_available_width: u16,
+    /// Tab bar scroll offset: index of first visible track tab when in scroll mode
+    pub tab_scroll: usize,
 }
 
 impl App {
@@ -1027,6 +1029,7 @@ impl App {
             kitty_enabled: false,
             edit_h_scroll: 0,
             last_edit_available_width: 0,
+            tab_scroll: 0,
         }
     }
 
