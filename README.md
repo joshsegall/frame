@@ -137,7 +137,3 @@ you're ready.
 **`fr clean`** normalizes formatting, assigns IDs, archives completed
 tasks, and validates references. Runs automatically when external
 changes are detected.
-
-## License
-
-Apache 2.0 — see [LICENSE](LICENSE).
