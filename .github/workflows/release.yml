@@ -38,3 +38,8 @@ jobs:
           bin: fr
           target: ${{ matrix.target }}
           token: ${{ secrets.GITHUB_TOKEN }}
+
+- uses: taiki-e/create-gh-release-action@v1
+        with:
+          changelog: CHANGELOG.md
+          token: ${{ secrets.GITHUB_TOKEN }}
