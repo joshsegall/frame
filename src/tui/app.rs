@@ -2645,7 +2645,10 @@ fn run_project_picker() -> Result<(), Box<dyn std::error::Error>> {
 
         if crossterm::event::poll(Duration::from_millis(250))?
             && let crossterm::event::Event::Key(key) = crossterm::event::read()?
-            && key.kind == crossterm::event::KeyEventKind::Press
+            && (key.kind == crossterm::event::KeyEventKind::Press
+                || (key.kind == crossterm::event::KeyEventKind::Repeat
+                    && matches!(key.code, crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Down
+                        | crossterm::event::KeyCode::Char('j') | crossterm::event::KeyCode::Char('k'))))
         {
             use crossterm::event::{KeyCode, KeyModifiers};
             match (key.modifiers, key.code) {
@@ -2779,7 +2782,11 @@ fn run_event_loop(
             let old_view = app.view.clone();
             let evt = event::read()?;
             let handled = match evt {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                Event::Key(key)
+                    if key.kind == KeyEventKind::Press
+                        || (key.kind == KeyEventKind::Repeat
+                            && is_repeatable_key(&app.mode, &key)) =>
+                {
                     // Capture raw key event for debug display
                     if app.key_debug {
                         app.last_key_event = Some(format_key_debug(&key));
@@ -2828,6 +2835,32 @@ fn run_event_loop(
         }
     }
     Ok(())
+}
+
+/// Whether a key repeat event should be processed. In typing modes all keys
+/// repeat; in navigation modes only movement keys repeat.
+fn is_repeatable_key(mode: &Mode, key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::KeyCode;
+    match mode {
+        Mode::Edit | Mode::Search | Mode::Triage | Mode::Command => true,
+        _ => matches!(
+            key.code,
+            KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End
+                | KeyCode::Tab
+                | KeyCode::BackTab
+                | KeyCode::Char('j')
+                | KeyCode::Char('k')
+                | KeyCode::Char('h')
+                | KeyCode::Char('l')
+        ),
+    }
 }
 
 /// Handle an external file reload (when specific changed paths are known)
