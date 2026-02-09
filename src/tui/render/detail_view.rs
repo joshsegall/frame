@@ -43,6 +43,10 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
     let flat_subtask_ids = flatten_subtask_ids(task);
     if let Some(ref mut ds) = app.detail_state {
         ds.regions = regions.clone();
+        ds.regions_populated = regions
+            .iter()
+            .map(|r| App::is_detail_region_populated(task, *r))
+            .collect();
         // Clamp region to valid range
         if !regions.contains(&ds.region) {
             ds.region = regions.first().copied().unwrap_or(DetailRegion::Title);

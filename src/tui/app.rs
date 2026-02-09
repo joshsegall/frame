@@ -275,6 +275,8 @@ pub struct DetailState {
     pub note_header_line: Option<usize>,
     /// Last line index belonging to note content, before subtasks (set during render)
     pub note_content_end: usize,
+    /// Which regions have non-empty content (parallel to `regions`, set during render)
+    pub regions_populated: Vec<bool>,
 }
 
 /// State for the triage flow (inbox item → track task)
@@ -2041,6 +2043,30 @@ impl App {
         regions
     }
 
+    /// Check if a detail region has non-empty content for the given task
+    pub fn is_detail_region_populated(task: &Task, region: DetailRegion) -> bool {
+        use crate::model::Metadata;
+        match region {
+            DetailRegion::Title => true,
+            DetailRegion::Tags => !task.tags.is_empty(),
+            DetailRegion::Added => true,    // only in regions list if present
+            DetailRegion::Subtasks => true, // only in regions list if present
+            DetailRegion::Deps => task
+                .metadata
+                .iter()
+                .any(|m| matches!(m, Metadata::Dep(v) if !v.is_empty())),
+            DetailRegion::Spec => task.metadata.iter().any(|m| matches!(m, Metadata::Spec(_))),
+            DetailRegion::Refs => task
+                .metadata
+                .iter()
+                .any(|m| matches!(m, Metadata::Ref(v) if !v.is_empty())),
+            DetailRegion::Note => task
+                .metadata
+                .iter()
+                .any(|m| matches!(m, Metadata::Note(s) if !s.is_empty())),
+        }
+    }
+
     /// Close detail view fully: clear state and stack
     pub fn close_detail_fully(&mut self) {
         self.detail_state = None;
@@ -2101,6 +2127,7 @@ impl App {
             note_view_line: None,
             note_header_line: None,
             note_content_end: 0,
+            regions_populated: Vec::new(),
         });
         self.view = View::Detail { track_id, task_id };
     }

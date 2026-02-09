@@ -494,6 +494,7 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
                         note_view_line: None,
                         note_header_line: None,
                         note_content_end: 0,
+                        regions_populated: Vec::new(),
                     });
                 } else {
                     // Stack empty — return to origin view
@@ -1313,6 +1314,7 @@ fn handle_select(app: &mut App, key: KeyEvent) {
                         note_view_line: None,
                         note_header_line: None,
                         note_content_end: 0,
+                        regions_populated: Vec::new(),
                     });
                 } else {
                     let return_view = app
@@ -5610,6 +5612,42 @@ fn move_paragraph(app: &mut App, direction: i32) {
                 state.cursor = target;
             }
         }
+        View::Detail { .. } => {
+            // Alt+Up/Down in detail view: skip empty regions
+            let ds = match &app.detail_state {
+                Some(ds) => ds,
+                None => return,
+            };
+            if ds.regions.is_empty() {
+                return;
+            }
+            let current_idx =
+                ds.regions.iter().position(|r| *r == ds.region).unwrap_or(0);
+            let populated = &ds.regions_populated;
+
+            let target_idx = if direction > 0 {
+                (current_idx + 1..ds.regions.len())
+                    .find(|&i| populated.get(i).copied().unwrap_or(false))
+            } else {
+                (0..current_idx)
+                    .rev()
+                    .find(|&i| populated.get(i).copied().unwrap_or(false))
+            };
+
+            if let Some(idx) = target_idx {
+                let region = ds.regions[idx];
+                let ds = app.detail_state.as_mut().unwrap();
+                // Reset note view line when leaving Note region
+                if ds.region == DetailRegion::Note {
+                    ds.note_view_line = None;
+                }
+                ds.region = region;
+                // Reset subtask cursor when entering Subtasks from above
+                if ds.region == DetailRegion::Subtasks && direction > 0 {
+                    ds.subtask_cursor = 0;
+                }
+            }
+        }
         _ => {
             // Other views have no nesting — fall back to regular movement
             move_cursor(app, direction);
@@ -8304,6 +8342,7 @@ fn inbox_edit_note(app: &mut App) {
         note_view_line: None,
         note_header_line: None,
         note_content_end: 0,
+        regions_populated: vec![true],
     };
 
     app.detail_state = Some(ds);
