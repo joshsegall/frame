@@ -1,0 +1,698 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>frame — your backlog is plain text</title>
+<meta name="description" content="A markdown task tracker with a terminal UI for humans and a CLI for agents.">
+<meta property="og:title" content="frame — your backlog is plain text">
+<meta property="og:description" content="A markdown task tracker with a terminal UI for humans and a CLI for agents.">
+<meta property="og:type" content="website">
+<link rel="icon" type="image/svg+xml" href="frame-icon.svg">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,600;1,400&family=DM+Sans:wght@300;400;500&display=swap');
+
+  :root {
+    --bg: #0C001B;
+    --bg-raised: #110425;
+    --text: #A09BFE;
+    --text-bright: #FFFFFF;
+    --text-white: #CCCCCC;
+    --text-light: #C0BBFF;
+    --highlight: #FB4196;
+    --dim: #7A75A0;
+    --dim-faint: #352F55;
+    --red: #FF4444;
+    --yellow: #FFD700;
+    --green: #44FF88;
+    --cyan: #44DDFF;
+    --purple: #CC66FF;
+    --blue: #4488FF;
+    --mono: 'JetBrains Mono', monospace;
+    --sans: 'DM Sans', sans-serif;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  a {
+    color: var(--text);
+    text-decoration: none;
+    border-bottom: 1px solid;
+    transition: border-color 0.2s ease;
+  }
+
+  a:hover {
+    border-color: var(--text);
+  }
+
+  /* Subtle noise texture */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    opacity: 0.015;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+    background-size: 256px 256px;
+    pointer-events: none;
+    z-index: 100;
+  }
+
+  /* ── Layout ── */
+
+  .page {
+    max-width: 680px;
+    margin: 0 auto;
+    padding: 0 24px;
+  }
+
+  /* ── Hero ── */
+
+  .hero {
+    padding: 80px 0 24px;
+  }
+
+  .hero-logo {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 20px;
+    animation: fadeUp 0.6s ease both;
+  }
+
+  .hero-logo svg {
+    flex-shrink: 0;
+  }
+
+  .hero-logo h1 {
+    font-size: 48px;
+    font-weight: 500;
+    color: var(--text-light);
+    letter-spacing: -0.02em;
+    line-height: 1;
+  }
+
+  .hero-tagline {
+    font-size: 18px;
+    font-weight: 400;
+    color: var(--dim);
+    margin-bottom: 32px;
+    animation: fadeUp 0.6s ease 0.1s both;
+  }
+
+  .hero-desc {
+    font-family: var(--sans);
+    font-size: 17px;
+    font-weight: 400;
+    color: var(--text);
+    line-height: 1.7;
+    max-width: 540px;
+    animation: fadeUp 0.6s ease 0.2s both;
+  }
+
+  .hero-desc strong {
+    color: var(--text-bright);
+    font-weight: 500;
+  }
+
+  /* ── Install ── */
+
+  .install {
+    margin: 48px 0;
+    animation: fadeUp 0.6s ease 0.3s both;
+  }
+
+  .install-box {
+    background: var(--bg-raised);
+    border: 1px solid var(--dim-faint);
+    border-radius: 8px;
+    padding: 16px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    cursor: pointer;
+    transition: border-color 0.2s ease;
+    position: relative;
+  }
+
+  .install-box:hover {
+    border-color: var(--dim);
+  }
+
+  .install-box code {
+    font-size: 15px;
+    color: var(--text-bright);
+  }
+
+  .install-box code .prompt {
+    color: var(--dim);
+    user-select: none;
+  }
+
+  .install-copy {
+    font-size: 14px;
+    color: var(--dim);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    flex-shrink: 0;
+    transition: color 0.2s ease;
+  }
+
+  .install-box:hover .install-copy {
+    color: var(--text);
+  }
+
+  .install-note {
+    font-size: 14px;
+    color: var(--dim);
+    margin-top: 10px;
+  }
+
+  .install-note a {
+    color: var(--text);
+    text-decoration: none;
+    border-bottom: 1px solid var(--dim-faint);
+    transition: border-color 0.2s ease;
+  }
+
+  .install-note a:hover {
+    border-color: var(--text);
+  }
+
+  /* ── Terminal demo ── */
+
+  .terminal {
+    margin: 56px 0;
+    animation: fadeUp 0.6s ease 0.4s both;
+  }
+
+  .terminal-window {
+    background: var(--bg-raised);
+    border: 1px solid var(--dim-faint);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+
+  .terminal-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--dim-faint);
+  }
+
+  .terminal-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--dim-faint);
+  }
+
+  .terminal-title {
+    font-size: 14px;
+    color: var(--dim);
+    margin-left: 8px;
+  }
+
+  .terminal-body {
+    padding: 16px 18px;
+    font-size: 14px;
+    line-height: 1.3;
+    overflow-x: auto;
+    white-space: pre;
+  }
+
+  .terminal-body .hl { color: var(--highlight); }
+  .terminal-body .wh { color: var(--text-bright); }
+  .terminal-body .ti { color: var(--text-white); }
+  .terminal-body .dm { color: var(--dim); }
+  .terminal-body .gr { color: var(--green); }
+  .terminal-body .rd { color: var(--red); }
+  .terminal-body .yl { color: var(--yellow); }
+  .terminal-body .cy { color: var(--cyan); }
+  .terminal-body .bl { color: var(--blue); }
+  .terminal-body .pr { color: var(--purple); }
+  .terminal-body .tx { color: var(--text); }
+
+  /* ── Sections ── */
+
+  .section {
+    margin: 64px 0;
+  }
+
+  .section-label {
+    font-size: 16px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--dim);
+    margin-bottom: 20px;
+  }
+
+  /* ── Features ── */
+
+  .features {
+    display: grid;
+    gap: 2px;
+  }
+
+  .feature {
+    display: grid;
+    grid-template-columns: 120px 1fr;
+    gap: 0;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--dim-faint);
+    align-items: baseline;
+  }
+
+  .feature:last-child {
+    border-bottom: none;
+  }
+
+  .feature-key {
+    font-size: 16px;
+    color: var(--text-light);
+    font-weight: 500;
+  }
+
+  .feature-val {
+    font-family: var(--sans);
+    font-size: 14px;
+    color: var(--text);
+    line-height: 1.6;
+  }
+
+  /* ── How it works ── */
+
+  .how-grid {
+    display: grid;
+    gap: 24px;
+  }
+
+  .how-item {
+    display: grid;
+    grid-template-columns: 32px 1fr;
+    gap: 16px;
+    align-items: start;
+  }
+
+  .how-num {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--dim);
+    text-align: right;
+    padding-top: 1px;
+  }
+
+  .how-content h3 {
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--text-bright);
+    margin-bottom: 6px;
+  }
+
+  .how-content p {
+    font-family: var(--sans);
+    font-size: 14px;
+    color: var(--text);
+    line-height: 1.6;
+  }
+
+  .how-content code {
+    font-family: var(--mono);
+    font-size: 14px;
+    color: var(--text-light);
+    background: var(--bg-raised);
+    padding: 1px 6px;
+    border-radius: 3px;
+  }
+
+  /* ── File format ── */
+
+  .format-example {
+    background: var(--bg-raised);
+    border: 1px solid var(--dim-faint);
+    border-radius: 8px;
+    padding: 18px 20px;
+    font-size: 13px;
+    line-height: 1.7;
+    overflow-x: auto;
+    white-space: pre;
+  }
+
+  .format-note {
+    font-family: var(--sans);
+    font-size: 14px;
+    color: var(--dim);
+    margin-top: 14px;
+    line-height: 1.6;
+  }
+
+  /* ── Footer ── */
+
+  .footer {
+    padding: 48px 0 64px;
+    border-top: 1px solid var(--dim-faint);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 16px;
+  }
+
+  .footer-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 14px;
+    color: var(--dim);
+  }
+
+  .footer-links {
+    display: flex;
+    gap: 24px;
+  }
+
+  .footer-links a {
+    font-size: 14px;
+    color: var(--dim);
+    text-decoration: none;
+    transition: color 0.2s ease;
+  }
+
+  .footer-links a:hover {
+    color: var(--text-light);
+  }
+
+  /* ── Animations ── */
+
+  @keyframes fadeUp {
+    from {
+      opacity: 0;
+      transform: translateY(12px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  /* ── Responsive ── */
+
+  @media (max-width: 600px) {
+    .hero { padding: 48px 0 40px; }
+    .hero-logo h1 { font-size: 36px; }
+    .hero-tagline { font-size: 15px; }
+    .hero-desc { font-size: 15px; }
+    .feature { grid-template-columns: 1fr; gap: 4px; }
+    .terminal-body { font-size: 12px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="page">
+
+  <!-- ════════════ Hero ════════════ -->
+
+  <section class="hero">
+    <div class="hero-logo">
+      <svg width="56" height="56" viewBox="0 0 200 200" fill="none">
+        <path d="M 68 16 L 46 16 Q 16 16, 16 46 L 16 154 Q 16 184, 46 184 L 68 184" stroke="#A09BFE" stroke-width="12" stroke-linecap="round" fill="none"/>
+        <path d="M 132 16 L 154 16 Q 184 16, 184 46 L 184 154 Q 184 184, 154 184 L 132 184" stroke="#A09BFE" stroke-width="12" stroke-linecap="round" fill="none"/>
+        <path d="M76 56L132 100L76 144V56Z" fill="#FB4196"/>
+      </svg>
+      <h1>frame</h1>
+    </div>
+    <p class="hero-tagline">your backlog is plain text</p>
+    <p class="hero-desc">
+      A markdown task tracker with a <strong>terminal UI</strong> for humans
+      and a <strong>CLI</strong> for agents. Tasks live in your repo as
+      readable files. Position is priority. Git is your history.
+    </p>
+  </section>
+
+  <!-- ════════════ Install ════════════ -->
+
+  <div class="install">
+    <div class="install-box" onclick="navigator.clipboard.writeText('cargo install frame').then(() => { this.querySelector('.install-copy').textContent = 'copied'; setTimeout(() => this.querySelector('.install-copy').textContent = 'copy', 1500); })">
+      <code><span class="prompt">$ </span>cargo install frame</code>
+      <span class="install-copy">copy</span>
+    </div>
+    <p class="install-note">Requires Rust. <a href="https://github.com/joshsegall/frame">View on GitHub →</a></p>
+  </div>
+
+  <!-- ════════════ Quick start ════════════ -->
+
+  <section class="section" style="margin-top: 0;">
+    <div class="section-label">Quick start</div>
+    <div class="terminal-window">
+      <div class="terminal-bar">
+        <div class="terminal-dot"></div>
+        <div class="terminal-dot"></div>
+        <div class="terminal-dot"></div>
+        <span class="terminal-title">zsh</span>
+      </div>
+      <div class="terminal-body"><span class="dm">$ </span><span class="wh">cd my-project</span>
+<span class="dm">$ </span><span class="wh">fr init --track effects "Effect System"</span>
+<span class="dm">$ </span><span class="wh">fr add effects "Parse effect syntax"</span>
+<span class="dm">$ </span><span class="wh">fr push effects "Fix parser crash"</span>       <span class="dm"># top = highest priority</span>
+<span class="dm">$ </span><span class="wh">fr</span>                                       <span class="dm"># open TUI</span></div>
+    </div>
+  </section>
+
+  <!-- ════════════ Terminal demo ════════════ -->
+
+  <div class="terminal">
+    <div class="terminal-window">
+      <div class="terminal-bar">
+        <div class="terminal-dot"></div>
+        <div class="terminal-dot"></div>
+        <div class="terminal-dot"></div>
+        <span class="terminal-title">frame - Example Project</span>
+      </div>
+<div class="terminal-body"> <span class="pr">▶</span>  <span class="wh" style="background:rgba(251,65,150,0.25);padding:1px 4px;border-radius:2px;">Effects <span class="pr">★</span></span> │ Unique │ Infra │ ▶ │ <span class="pr">*</span>5 │ ✓ │
+<span class="dm">───────────────┴────────┴───────┴───┴────┴───┴───────────</span>
+  [ ] EFF-015 <span class="ti">Effect handler opt pass</span>
+ <span style="background:rgba(251,65,150,0.18);display:inline;">▼[ ] EFF-014 <span class="wh">Implement effect inference</span>  <span class="pr">#cc</span>            </span>
+    <span class="dm">├</span> [ ] .1 <span class="ti">Add effect variables</span>
+    <span class="dm">├</span> [<span class="hl">&gt;</span>] .2 <span class="ti">Unify effect rows</span></span>  <span class="pr">#cc</span>
+    <span class="dm">└</span> [ ] .3 <span class="ti">Test with nested closures</span>
+  <span class="dm">[x] EFF-003 <span class="ti">Implement effect handler desugaring</span></span>
+  <span class="rd">[-]</span> EFF-012 <span class="ti">Effect-aware DCE</span>  <span class="rd">#bug</span>
+  [ ] EFF-016 <span class="ti">Error msgs for mismatches</span>  <span class="yl">#needs-input</span>
+  [ ] EFF-017 <span class="ti">Research: effect composition</span>  <span class="bl">#research</span>
+  [ ] EFF-018 <span class="ti">Design doc: effect aliases</span>  <span class="cy">#design</span>
+ <span class="dm">── Parked ──────────────────────────────────────────────</span>
+  <span class="yl">[~]</span> EFF-020 <span class="ti">Higher-order handlers</span>  <span class="bl">#research</span></div>
+    </div>
+  </div>
+
+  <!-- ════════════ How it works ════════════ -->
+
+  <section class="section">
+    <div class="section-label">How it works</div>
+    <div class="how-grid">
+      <div class="how-item">
+        <div class="how-num">1</div>
+        <div class="how-content">
+          <h3>Tasks are markdown</h3>
+          <p>Each track is a <code>.md</code> file with checkboxes, metadata, notes, and code blocks. Edit them in Frame or any text editor.</p>
+        </div>
+      </div>
+      <div class="how-item">
+        <div class="how-num">2</div>
+        <div class="how-content">
+          <h3>Position is priority</h3>
+          <p>No priority fields or labels. The task at the top of the list is the most important. Use <code>m</code> in the TUI or <code>fr mv</code> to reprioritize.</p>
+        </div>
+      </div>
+      <div class="how-item">
+        <div class="how-num">3</div>
+        <div class="how-content">
+          <h3>TUI for humans, CLI for agents</h3>
+          <p>The terminal UI is for navigating and editing. The <code>fr</code> CLI is for coding agents — <code>fr ready --cc</code> to pick up work, <code>fr state EFF-014 done</code> to report progress.</p>
+        </div>
+      </div>
+      <div class="how-item">
+        <div class="how-num">4</div>
+        <div class="how-content">
+          <h3>Git is your history</h3>
+          <p>No database. No sync service. Your tasks are files in your repo. <code>git log</code> is your audit trail. <code>git diff</code> shows what changed.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ════════════ File format ════════════ -->
+
+  <section class="section">
+    <div class="section-label">File format</div>
+    <div class="format-example"><span class="dm"># Effect System</span>
+
+<span class="dm">&gt; Design and implement the algebraic effect system.</span>
+
+<span class="dm">## Backlog</span>
+
+<span class="tx">- [</span><span class="hl">&gt;</span><span class="tx">] `EFF-014` </span><span class="wh">Implement effect inference for closures</span> <span class="pr">#cc</span>
+<span class="tx">  - added: 2025-05-10</span>
+<span class="tx">  - dep: EFF-003</span>
+<span class="tx">  - spec: doc/spec/effects.md#closure-effects</span>
+<span class="tx">  - note:</span>
+<span class="tx">    The desugaring needs to handle three cases:</span>
+<span class="tx">    1. Simple perform with no resumption</span>
+<span class="tx">    2. Perform with single-shot resumption</span>
+<span class="tx">    3. Perform with multi-shot resumption</span>
+<span class="tx">  - [ ] `EFF-014.1` Add effect variables to closure types</span>
+<span class="tx">  - [</span><span class="hl">&gt;</span><span class="tx">] `EFF-014.2` Unify effect rows</span> <span class="pr">#cc</span>
+<span class="tx">  - [ ] `EFF-014.3` Test with nested closures</span>
+<span class="tx">- [ ] `EFF-015` </span><span class="wh">Effect handler optimization pass</span>
+<span class="tx">  - dep: EFF-014</span>
+<span class="tx">- [-] `EFF-012` </span><span class="wh">Effect-aware dead code elimination</span> <span class="rd">#bug</span>
+<span class="tx">  - dep: EFF-014, INFRA-003</span></div>
+    <p class="format-note">
+      That's it. Checkboxes for state, backtick IDs, hash tags, indented
+      metadata. Subtasks are just nested tasks. Notes can include code
+      blocks. The file is readable without Frame and editable in any editor.
+    </p>
+  </section>
+
+  <!-- ════════════ Project structure ════════════ -->
+
+  <section class="section">
+    <div class="section-label">Project structure</div>
+    <div class="format-example"><span class="tx">my-project/</span>
+  <span class="tx">frame/</span>
+    <span class="wh">project.toml</span>          <span class="dm"># Config: tracks, tags, colors</span>
+    <span class="wh">inbox.md</span>              <span class="dm"># Quick capture</span>
+    <span class="tx">tracks/</span>
+      <span class="wh">effects.md</span>          <span class="dm"># One file per work stream</span>
+      <span class="wh">compiler-infra.md</span>
+    <span class="tx">archive/</span>
+      <span class="wh">effects.md</span>          <span class="dm"># Done tasks, auto-archived</span></div>
+    <p class="format-note">
+      The <code>project.toml</code> is self-documenting — see the
+      <a href="https://github.com/joshsegall/frame/blob/main/src/templates/project.toml">template</a>
+      for the full configuration reference.
+    </p>
+  </section>
+
+  <!-- ════════════ Features ════════════ -->
+
+  <section class="section">
+    <div class="section-label">Features</div>
+    <div class="features">
+      <div class="feature">
+        <span class="feature-key">tracks</span>
+        <span class="feature-val">Parallel work streams, each a markdown file. Active, shelved, or archived.</span>
+      </div>
+      <div class="feature">
+        <span class="feature-key">states</span>
+        <span class="feature-val">Todo, active, blocked, done, parked. <code>Space</code> to cycle, <code>b</code> to block, <code>~</code> to park.</span>
+      </div>
+      <div class="feature">
+        <span class="feature-key">subtasks</span>
+        <span class="feature-val">Three levels deep. Collapsible in the TUI. Dotted IDs: EFF-014.2.1</span>
+      </div>
+      <div class="feature">
+        <span class="feature-key">deps</span>
+        <span class="feature-val">Cross-track dependencies with cycle detection. <code>fr ready</code> shows only unblocked tasks. <code>D</code> opens the dep graph.</span>
+      </div>
+      <div class="feature">
+        <span class="feature-key">search</span>
+        <span class="feature-val">Regex search across titles, notes, tags, IDs. Vim-style <code>/pattern</code> with <code>n</code>/<code>N</code> navigation.</span>
+      </div>
+      <div class="feature">
+        <span class="feature-key">inbox</span>
+        <span class="feature-val">Quick capture queue. Triage into tracks when ready. <code>Enter</code> to pick a track and position.</span>
+      </div>
+      <div class="feature">
+        <span class="feature-key">multi-select</span>
+        <span class="feature-val"><code>v</code> to select, <code>V</code> for range. Bulk state changes, tag edits, moves, and cross-track moves.</span>
+      </div>
+      <div class="feature">
+        <span class="feature-key">undo</span>
+        <span class="feature-val">Full undo/redo stack for all mutations. External file changes insert sync markers to prevent cross-boundary undo.</span>
+      </div>
+      <div class="feature">
+        <span class="feature-key">agents</span>
+        <span class="feature-val"><code>fr ready --cc</code> for agent work. <code>--json</code> on every command. See the <a href="https://github.com/joshsegall/frame/blob/main/skills/managing-frame-tasks/SKILL.md">agent skill reference</a>.</span>
+      </div>
+      <div class="feature">
+        <span class="feature-key">vim-modal</span>
+        <span class="feature-val">Navigate, Edit, Move, Search, Select modes. <code>hjkl</code>, <code>/</code>, <code>u</code> for undo, <code>?</code> for contextual help.</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ════════════ CLI preview ════════════ -->
+
+  <section class="section">
+    <div class="section-label">CLI</div>
+    <div class="terminal-window">
+      <div class="terminal-bar">
+        <div class="terminal-dot"></div>
+        <div class="terminal-dot"></div>
+        <div class="terminal-dot"></div>
+        <span class="terminal-title">zsh</span>
+      </div>
+      <div class="terminal-body"><span class="dm"># What should I work on?</span>
+<span class="dm">$ </span><span class="wh">fr ready --cc --json</span>
+<span class="tx">{</span>
+  <span class="cy">"focus_track"</span><span class="tx">: </span><span class="gr">"infra"</span><span class="tx">,</span>
+  <span class="cy">"tasks"</span><span class="tx">: [{</span>
+    <span class="cy">"id"</span><span class="tx">: </span><span class="gr">"INFRA-015"</span><span class="tx">,</span>
+    <span class="cy">"title"</span><span class="tx">: </span><span class="gr">"Add span tracking to HIR nodes"</span><span class="tx">,</span>
+    <span class="cy">"tags"</span><span class="tx">: [</span><span class="gr">"cc"</span><span class="tx">],</span>
+    <span class="cy">"spec"</span><span class="tx">: </span><span class="gr">"doc/spec/hir.md#spans"</span>
+  <span class="tx">}]</span>
+<span class="tx">}</span>
+
+<span class="dm"># Task lifecycle</span>
+<span class="dm">$ </span><span class="wh">fr state INFRA-015 active</span>
+<span class="dm">$ </span><span class="wh">fr sub INFRA-015 "Handle multi-file spans"</span>
+<span class="dm">$ </span><span class="wh">fr add infra "Implement span merging" --found-from INFRA-015</span>
+<span class="dm">$ </span><span class="wh">fr state INFRA-015 done</span>
+<span class="tx">INFRA-015: active → done (resolved 2025-06-01)</span>
+
+<span class="dm"># Move and organize</span>
+<span class="dm">$ </span><span class="wh">fr mv INFRA-022 --top</span>
+<span class="dm">$ </span><span class="wh">fr mv INFRA-022 --track effects</span>
+
+<span class="dm"># Maintenance</span>
+<span class="dm">$ </span><span class="wh">fr clean</span>             <span class="dm"># Normalize, assign IDs, archive done tasks</span>
+<span class="dm">$ </span><span class="wh">fr check</span>             <span class="dm"># Validate deps and file refs</span></div>
+    </div>
+  </section>
+
+  <!-- ════════════ Footer ════════════ -->
+
+  <footer class="footer">
+    <div class="footer-left">
+      <svg width="16" height="16" viewBox="0 0 200 200" fill="none">
+        <path d="M 68 16 L 46 16 Q 16 16, 16 46 L 16 154 Q 16 184, 46 184 L 68 184" stroke="#5A5580" stroke-width="14" stroke-linecap="round" fill="none"/>
+        <path d="M 132 16 L 154 16 Q 184 16, 184 46 L 184 154 Q 184 184, 154 184 L 132 184" stroke="#5A5580" stroke-width="14" stroke-linecap="round" fill="none"/>
+        <path d="M76 56L132 100L76 144V56Z" fill="#5A5580"/>
+      </svg>
+      <span>[>] frame</span>
+    </div>
+    <div class="footer-links">
+      <a href="https://github.com/joshsegall/frame">GitHub</a>
+      <a href="https://github.com/joshsegall/frame/blob/main/skills/managing-frame-tasks/SKILL.md">Agent Skill</a>
+      <a href="https://github.com/joshsegall/frame/blob/main/LICENSE">Apache 2.0</a>
+    </div>
+  </footer>
+
+</div>
+
+</body>
+</html>
