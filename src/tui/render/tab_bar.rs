@@ -41,7 +41,9 @@ fn fixed_width(inbox_count: usize) -> usize {
 }
 
 fn digit_count(n: usize) -> usize {
-    if n == 0 { return 1; }
+    if n == 0 {
+        return 1;
+    }
     let mut count = 0;
     let mut val = n;
     while val > 0 {
@@ -95,7 +97,12 @@ pub(crate) fn compute_tab_layout(
     let full_names: Vec<String> = names.to_vec();
 
     // Phase 0: Try with project name
-    if fits(&full_names, cc_focus_idx, fixed + project_name_width, available_width) {
+    if fits(
+        &full_names,
+        cc_focus_idx,
+        fixed + project_name_width,
+        available_width,
+    ) {
         return TabLayout {
             labels: full_names,
             show_project_name: true,
@@ -122,7 +129,10 @@ pub(crate) fn compute_tab_layout(
     let default_floor = 3usize;
     let label_floors: Vec<usize> = prefixes
         .iter()
-        .map(|p| p.as_ref().map_or(default_floor, |s| s.chars().count().min(default_floor)))
+        .map(|p| {
+            p.as_ref()
+                .map_or(default_floor, |s| s.chars().count().min(default_floor))
+        })
         .collect();
 
     loop {
@@ -204,18 +214,9 @@ fn render_tabs(frame: &mut Frame, app: &mut App, area: Rect) -> Vec<usize> {
     let prefixes: Vec<Option<String>> = app
         .active_track_ids
         .iter()
-        .map(|id| {
-            app.project
-                .config
-                .ids
-                .prefixes
-                .get(id.as_str())
-                .cloned()
-        })
+        .map(|id| app.project.config.ids.prefixes.get(id.as_str()).cloned())
         .collect();
-    let cc_focus_idx = cc_focus.and_then(|cf| {
-        app.active_track_ids.iter().position(|id| id == cf)
-    });
+    let cc_focus_idx = cc_focus.and_then(|cf| app.active_track_ids.iter().position(|id| id == cf));
     let inbox_count = app.inbox_count();
     let project_name = app.project.config.project.name.clone();
     let project_name_len = project_name.chars().count();
@@ -274,12 +275,8 @@ fn render_tabs(frame: &mut Frame, app: &mut App, area: Rect) -> Vec<usize> {
             }
             // Scroll right until active tab fits fully
             loop {
-                let (vis_end, _) = visible_range(
-                    &layout.labels,
-                    cc_focus_idx,
-                    app.tab_scroll,
-                    budget,
-                );
+                let (vis_end, _) =
+                    visible_range(&layout.labels, cc_focus_idx, app.tab_scroll, budget);
                 if aidx < vis_end {
                     break;
                 }
@@ -298,12 +295,8 @@ fn render_tabs(frame: &mut Frame, app: &mut App, area: Rect) -> Vec<usize> {
         let track_budget = budget.saturating_sub(left_cost);
 
         // Calculate how many tabs fit fully from tab_scroll
-        let (full_end, full_used) = visible_range(
-            &layout.labels,
-            cc_focus_idx,
-            app.tab_scroll,
-            track_budget,
-        );
+        let (full_end, full_used) =
+            visible_range(&layout.labels, cc_focus_idx, app.tab_scroll, track_budget);
         let has_right = full_end < n;
 
         // Try to fill remaining space on the left with a partial tab
@@ -324,15 +317,18 @@ fn render_tabs(frame: &mut Frame, app: &mut App, area: Rect) -> Vec<usize> {
                 let is_cc = Some(prev) == cc_focus_idx;
                 // For partial cc-focus tabs, show ★ only if 6+ chars available
                 let (overhead, show_cc) = if is_cc {
-                    if partial_space >= 6 { (5, true) } else { (3, false) }
+                    if partial_space >= 6 {
+                        (5, true)
+                    } else {
+                        (3, false)
+                    }
                 } else {
                     (3, false)
                 };
                 let max_chars = partial_space.saturating_sub(overhead);
                 if max_chars > 0 {
                     app.tab_scroll = prev;
-                    first_partial =
-                        Some(truncate_chars(&layout.labels[prev], max_chars));
+                    first_partial = Some(truncate_chars(&layout.labels[prev], max_chars));
                     first_partial_show_cc = show_cc;
                 }
             }
@@ -372,15 +368,7 @@ fn render_tabs(frame: &mut Frame, app: &mut App, area: Rect) -> Vec<usize> {
         for i in full_start..full_end {
             let label = &layout.labels[i];
             let is_cc = Some(i) == cc_focus_idx;
-            render_track_tab(
-                &mut spans,
-                app,
-                i,
-                label,
-                is_cc,
-                &sep,
-                &mut sep_cols,
-            );
+            render_track_tab(&mut spans, app, i, label, is_cc, &sep, &mut sep_cols);
         }
 
         // Compute remaining space on the right (for partial tab + ▸ + padding)
@@ -394,7 +382,11 @@ fn render_tabs(frame: &mut Frame, app: &mut App, area: Rect) -> Vec<usize> {
             let is_cc = Some(full_end) == cc_focus_idx;
             let partial_budget = right_avail - 1; // reserve 1 for ▸
             let (overhead, show_cc) = if is_cc {
-                if partial_budget >= 6 { (5, true) } else { (3, false) }
+                if partial_budget >= 6 {
+                    (5, true)
+                } else {
+                    (3, false)
+                }
             } else {
                 (3, false)
             };
@@ -437,15 +429,7 @@ fn render_tabs(frame: &mut Frame, app: &mut App, area: Rect) -> Vec<usize> {
         app.tab_scroll = 0;
         for (i, label) in layout.labels.iter().enumerate() {
             let is_cc = Some(i) == cc_focus_idx;
-            render_track_tab(
-                &mut spans,
-                app,
-                i,
-                label,
-                is_cc,
-                &sep,
-                &mut sep_cols,
-            );
+            render_track_tab(&mut spans, app, i, label, is_cc, &sep, &mut sep_cols);
         }
     }
 
@@ -699,8 +683,8 @@ mod tests {
     fn test_shrink_longest_first() {
         let names = vec![
             "Infrastructure".to_string(), // 14
-            "Backend".to_string(),         // 7
-            "Frontend".to_string(),        // 8
+            "Backend".to_string(),        // 7
+            "Frontend".to_string(),       // 8
         ];
         let prefixes = vec![None, None, None];
         // Full: 17+10+11 = 38, + fixed 15 = 53
@@ -709,11 +693,24 @@ mod tests {
         assert!(!layout.scroll_mode);
         // Longest (Infrastructure) should absorb most shrinking; shorter labels preserved
         let lens: Vec<usize> = layout.labels.iter().map(|l| l.chars().count()).collect();
-        assert!(lens[0] >= lens[1], "longest name should still be >= shorter: {:?}", lens);
-        assert!(lens[0] >= lens[2], "longest name should still be >= shorter: {:?}", lens);
+        assert!(
+            lens[0] >= lens[1],
+            "longest name should still be >= shorter: {:?}",
+            lens
+        );
+        assert!(
+            lens[0] >= lens[2],
+            "longest name should still be >= shorter: {:?}",
+            lens
+        );
         // Backend (7) and Frontend (8) should be mostly intact
         assert_eq!(layout.labels[1], "Backend"); // 7 chars, not touched since Infra absorbs
-        let total: usize = layout.labels.iter().map(|l| l.chars().count() + 2 + 1).sum::<usize>() + 15;
+        let total: usize = layout
+            .labels
+            .iter()
+            .map(|l| l.chars().count() + 2 + 1)
+            .sum::<usize>()
+            + 15;
         assert!(total <= 45);
     }
 
@@ -726,9 +723,9 @@ mod tests {
             "Frontend".to_string(),
         ];
         let prefixes = vec![
-            Some("INF".to_string()),  // 3 chars
-            Some("BE".to_string()),   // 2 chars
-            Some("FE".to_string()),   // 2 chars
+            Some("INF".to_string()), // 3 chars
+            Some("BE".to_string()),  // 2 chars
+            Some("FE".to_string()),  // 2 chars
         ];
         // Width 32: shrinks all to 3, then FE swaps at 2 → fits at 32.
         // INF swaps at 3 (same-size swap), but Bac(3) stays since BE is 2 chars.
@@ -755,7 +752,7 @@ mod tests {
         let layout = compute_tab_layout(&names, &prefixes, None, 28, 0, 0);
         assert!(!layout.scroll_mode);
         assert_eq!(layout.labels[0], "Alph"); // not shrunk past 4
-        assert_eq!(layout.labels[1], "BRV");  // prefix at 3
+        assert_eq!(layout.labels[1], "BRV"); // prefix at 3
     }
 
     #[test]
@@ -794,19 +791,24 @@ mod tests {
         // Verify that tabs aren't shrunk more than necessary
         let names = vec![
             "TUI Dev".to_string(),  // 7
-            "CLI".to_string(),       // 3
-            "Another".to_string(),   // 7
-            "One More".to_string(),  // 8
-            "Booyah".to_string(),    // 6
-            "Delete".to_string(),    // 6
-            "Echo".to_string(),      // 4
-            "Further".to_string(),   // 7
+            "CLI".to_string(),      // 3
+            "Another".to_string(),  // 7
+            "One More".to_string(), // 8
+            "Booyah".to_string(),   // 6
+            "Delete".to_string(),   // 6
+            "Echo".to_string(),     // 4
+            "Further".to_string(),  // 7
         ];
         let prefixes: Vec<Option<String>> = vec![None; 8];
         // Full tab widths: 10+6+10+11+9+9+7+10 = 72, + fixed 15 = 87
         let layout = compute_tab_layout(&names, &prefixes, None, 75, 0, 0);
         assert!(!layout.scroll_mode);
-        let total: usize = layout.labels.iter().map(|l| l.chars().count() + 2 + 1).sum::<usize>() + 15;
+        let total: usize = layout
+            .labels
+            .iter()
+            .map(|l| l.chars().count() + 2 + 1)
+            .sum::<usize>()
+            + 15;
         assert!(total <= 75, "total {} should be <= 75", total);
         // Should be tight: at most 1 char of slack
         assert!(total >= 74, "total {} shouldn't leave much slack", total);
@@ -867,7 +869,7 @@ mod tests {
     #[test]
     fn test_inbox_count_affects_fixed_width() {
         assert!(fixed_width(99) > fixed_width(0));
-        assert_eq!(fixed_width(0), 15);  // 3+4+4+4
+        assert_eq!(fixed_width(0), 15); // 3+4+4+4
         assert_eq!(fixed_width(99), 17); // 3+4+6+4
 
         let names = vec!["A".to_string()];

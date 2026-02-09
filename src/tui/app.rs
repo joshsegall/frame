@@ -2058,7 +2058,7 @@ impl App {
         match region {
             DetailRegion::Title => true,
             DetailRegion::Tags => !task.tags.is_empty(),
-            DetailRegion::Added => true,    // only in regions list if present
+            DetailRegion::Added => true, // only in regions list if present
             DetailRegion::Subtasks => true, // only in regions list if present
             DetailRegion::Deps => task
                 .metadata

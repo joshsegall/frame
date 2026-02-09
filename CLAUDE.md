@@ -48,6 +48,18 @@ A Frame project has a `frame/` directory containing:
 - `doc/tui.md` — TUI modes, keybindings, and behavior
 - `doc/cli.md` — CLI command reference
 
+## Pre-completion Checks
+
+After any plan or task that modifies Rust code, always run these checks before considering the work done:
+
+```bash
+cargo fmt --check        # Fix any issues with: cargo fmt
+cargo clippy             # Fix any warnings before committing
+cargo test               # Ensure all tests pass
+```
+
+Do not skip these steps. Fix all formatting and clippy issues before finishing.
+
 ## Test Fixtures
 
 Integration tests live in `tests/round_trip.rs`. Fixture files in `tests/fixtures/` cover: simple/complex tracks, metadata variants, 3-level nesting, empty sections, code blocks in notes, inbox items, and project config.

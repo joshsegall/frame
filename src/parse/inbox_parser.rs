@@ -317,7 +317,10 @@ mod tests {
         let body = inbox.items[0].body.as_ref().unwrap();
         assert!(body.contains("First paragraph"));
         assert!(body.contains("Second paragraph"));
-        assert!(body.contains("\n\n"), "blank line within body should be preserved");
+        assert!(
+            body.contains("\n\n"),
+            "blank line within body should be preserved"
+        );
 
         assert_eq!(inbox.items[1].title, "Next item");
         assert_eq!(inbox.items[1].tags, vec!["bug"]);

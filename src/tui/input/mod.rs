@@ -5621,8 +5621,7 @@ fn move_paragraph(app: &mut App, direction: i32) {
             if ds.regions.is_empty() {
                 return;
             }
-            let current_idx =
-                ds.regions.iter().position(|r| *r == ds.region).unwrap_or(0);
+            let current_idx = ds.regions.iter().position(|r| *r == ds.region).unwrap_or(0);
             let populated = &ds.regions_populated;
 
             let target_idx = if direction > 0 {
@@ -7086,7 +7085,10 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                 let line_idx = ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1));
                 let line_len = edit_lines[line_idx].len();
                 let new_col = word_boundary_right(edit_lines[line_idx], ds.edit_cursor_col);
-                if new_col == ds.edit_cursor_col && ds.edit_cursor_col == line_len && line_idx + 1 < edit_lines.len() {
+                if new_col == ds.edit_cursor_col
+                    && ds.edit_cursor_col == line_len
+                    && line_idx + 1 < edit_lines.len()
+                {
                     // At end of line: jump to start of next line
                     ds.edit_cursor_line = line_idx + 1;
                     ds.edit_cursor_col = 0;
@@ -7115,7 +7117,10 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                 let line_idx = ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1));
                 let line_len = edit_lines[line_idx].len();
                 let new_col = word_boundary_right(edit_lines[line_idx], ds.edit_cursor_col);
-                if new_col == ds.edit_cursor_col && ds.edit_cursor_col == line_len && line_idx + 1 < edit_lines.len() {
+                if new_col == ds.edit_cursor_col
+                    && ds.edit_cursor_col == line_len
+                    && line_idx + 1 < edit_lines.len()
+                {
                     ds.edit_cursor_line = line_idx + 1;
                     ds.edit_cursor_col = 0;
                 } else {

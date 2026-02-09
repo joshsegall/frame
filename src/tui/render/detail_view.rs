@@ -111,14 +111,8 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
         {
             ReturnView::Recent => "Recent".to_string(),
             ReturnView::Track(idx) => {
-                let tid = app
-                    .active_track_ids
-                    .get(*idx)
-                    .cloned()
-                    .unwrap_or_default();
-                app.track_prefix(&tid)
-                    .unwrap_or(&tid)
-                    .to_string()
+                let tid = app.active_track_ids.get(*idx).cloned().unwrap_or_default();
+                app.track_prefix(&tid).unwrap_or(&tid).to_string()
             }
         };
         crumb_spans.push(Span::styled(origin_label, dim_style));

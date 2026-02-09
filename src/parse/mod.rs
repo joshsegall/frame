@@ -9,7 +9,11 @@ pub mod track_serializer;
 /// Check if content continues at or beyond `min_indent` after blank lines.
 /// Used by both the task note parser and inbox body parser to decide whether
 /// a blank line is internal (separating paragraphs) or terminal (ending the block).
-pub(crate) fn has_continuation_at_indent(lines: &[String], after_blank: usize, min_indent: usize) -> bool {
+pub(crate) fn has_continuation_at_indent(
+    lines: &[String],
+    after_blank: usize,
+    min_indent: usize,
+) -> bool {
     for line in lines.iter().skip(after_blank) {
         if line.trim().is_empty() {
             continue;
