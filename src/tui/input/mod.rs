@@ -562,15 +562,32 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
         (KeyModifiers::NONE, KeyCode::Char('-')) => {
             if matches!(app.view, View::Inbox) {
                 inbox_insert_after(app);
+            } else if matches!(app.view, View::Tracks) {
+                tracks_insert_after(app);
             } else {
                 add_task_action(app, AddPosition::AfterCursor);
             }
         }
         (KeyModifiers::NONE, KeyCode::Char('p')) => {
-            add_task_action(app, AddPosition::Top);
+            if matches!(app.view, View::Inbox) {
+                inbox_prepend_item(app);
+            } else if matches!(app.view, View::Tracks) {
+                tracks_prepend(app);
+            } else {
+                add_task_action(app, AddPosition::Top);
+            }
         }
         (KeyModifiers::SHIFT, KeyCode::Char('A')) => {
             add_subtask_action(app);
+        }
+        (KeyModifiers::NONE, KeyCode::Char('=')) => {
+            if matches!(app.view, View::Inbox) {
+                inbox_add_item(app);
+            } else if matches!(app.view, View::Tracks) {
+                tracks_add_track(app);
+            } else {
+                append_sibling_action(app);
+            }
         }
 
         // Inline title edit (track view), edit (inbox view), edit track name (tracks view), or enter edit mode (detail view)
@@ -3177,6 +3194,7 @@ fn add_task_action(app: &mut App, pos: AddPosition) {
                 });
                 app.pre_edit_cursor = saved_cursor;
                 app.edit_history = Some(EditHistory::new("", 0, 0));
+                app.edit_is_fresh = true;
                 app.mode = Mode::Edit;
 
                 move_cursor_to_task(app, &track_id, &sub_id);
@@ -3272,10 +3290,243 @@ fn add_subtask_action(app: &mut App) {
         parent_id: Some(parent_id),
     });
     app.edit_history = Some(EditHistory::new("", 0, 0));
+    app.edit_is_fresh = true;
     app.mode = Mode::Edit;
 
     // Move cursor to the new subtask
     move_cursor_to_task(app, &track_id, &sub_id);
+}
+
+/// Append a new task at the end of the current sibling group.
+/// Top-level → same as `a` (bottom of backlog). Subtask → new sibling at
+/// the end of the parent's subtask list.
+fn append_sibling_action(app: &mut App) {
+    let track_id = match app.current_track_id() {
+        Some(id) => id.to_string(),
+        None => return,
+    };
+
+    // Determine depth of cursor task
+    let flat_items = app.build_flat_items(&track_id);
+    let cursor = app.track_states.get(&track_id).map_or(0, |s| s.cursor);
+    let (depth, section, path) = match flat_items.get(cursor) {
+        Some(FlatItem::Task {
+            depth,
+            section,
+            path,
+            ..
+        }) => (*depth, *section, path.clone()),
+        _ => return,
+    };
+
+    if depth == 0 {
+        // Top-level: same as `a`
+        add_task_action(app, AddPosition::Bottom);
+        return;
+    }
+
+    // Subtask: find the parent and append a new child at the end
+    let parent_path = &path[..path.len() - 1];
+    let track_ref = match App::find_track_in_project(&app.project, &track_id) {
+        Some(t) => t,
+        None => return,
+    };
+    let parent_task = match resolve_task_from_flat(track_ref, section, parent_path) {
+        Some(t) => t,
+        None => return,
+    };
+    let parent_id = match &parent_task.id {
+        Some(id) => id.clone(),
+        None => return,
+    };
+
+    // Save cursor position for restore on cancel
+    let saved_cursor = app.track_states.get(&track_id).map(|s| s.cursor);
+
+    let track = match app.find_track_mut(&track_id) {
+        Some(t) => t,
+        None => return,
+    };
+    let sub_id = match task_ops::add_subtask(track, &parent_id, String::new()) {
+        Ok(id) => id,
+        Err(_) => return,
+    };
+
+    // Expand the parent so the new subtask is visible
+    {
+        let flat_items = app.build_flat_items(&track_id);
+        let track = App::find_track_in_project(&app.project, &track_id);
+        if let Some(track) = track {
+            for item in &flat_items {
+                if let FlatItem::Task { section, path, .. } = item {
+                    if let Some(task) = resolve_task_from_flat(track, *section, path) {
+                        if task.id.as_deref() == Some(&parent_id) {
+                            let key = crate::tui::app::task_expand_key(task, *section, path);
+                            let state = app.get_track_state(&track_id);
+                            state.expanded.insert(key);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Enter EDIT mode
+    app.edit_buffer.clear();
+    app.edit_cursor = 0;
+    app.edit_target = Some(EditTarget::NewTask {
+        task_id: sub_id.clone(),
+        track_id: track_id.clone(),
+        parent_id: Some(parent_id),
+    });
+    app.pre_edit_cursor = saved_cursor;
+    app.edit_history = Some(EditHistory::new("", 0, 0));
+    app.edit_is_fresh = true;
+    app.mode = Mode::Edit;
+
+    move_cursor_to_task(app, &track_id, &sub_id);
+}
+
+/// Outdent a fresh new subtask edit: cancel the current placeholder and insert
+/// a new task one level up (as a sibling of the current parent). If the parent
+/// is top-level, the new task becomes top-level. Called when `-` is the first
+/// character typed in a new subtask edit.
+fn outdent_new_subtask(app: &mut App) {
+    // Extract current edit target info
+    let (task_id, track_id, parent_id) = match &app.edit_target {
+        Some(EditTarget::NewTask {
+            task_id,
+            track_id,
+            parent_id: Some(pid),
+        }) => (task_id.clone(), track_id.clone(), pid.clone()),
+        _ => return,
+    };
+
+    // Preserve the original pre_edit_cursor across outdent operations
+    let saved_cursor = app.pre_edit_cursor;
+
+    // Remove the current placeholder subtask from the parent
+    if !app.track_changed_on_disk(&track_id) {
+        let track = match app.find_track_mut(&track_id) {
+            Some(t) => t,
+            None => return,
+        };
+        if let Some(parent) = task_ops::find_task_mut_in_track(track, &parent_id) {
+            parent
+                .subtasks
+                .retain(|t| t.id.as_deref() != Some(&task_id));
+            parent.mark_dirty();
+        }
+    }
+
+    // Find the parent task's position in the flat tree to determine its depth
+    let flat_items = app.build_flat_items(&track_id);
+    let track_ref = match App::find_track_in_project(&app.project, &track_id) {
+        Some(t) => t,
+        None => return,
+    };
+
+    let mut parent_depth = 0usize;
+    let mut parent_path: Option<Vec<usize>> = None;
+    let mut parent_section = SectionKind::Backlog;
+    for item in &flat_items {
+        if let FlatItem::Task {
+            section,
+            path,
+            depth,
+            ..
+        } = item
+        {
+            if let Some(task) = resolve_task_from_flat(track_ref, *section, path) {
+                if task.id.as_deref() == Some(&parent_id) {
+                    parent_depth = *depth;
+                    parent_path = Some(path.clone());
+                    parent_section = *section;
+                    break;
+                }
+            }
+        }
+    }
+
+    let parent_path = match parent_path {
+        Some(p) => p,
+        None => return,
+    };
+
+    let prefix = match app.track_prefix(&track_id) {
+        Some(p) => p.to_string(),
+        None => return,
+    };
+
+    if parent_depth > 0 && parent_path.len() > 1 {
+        // Parent is itself a subtask — insert as sibling of parent (under grandparent)
+        let grandparent_path = &parent_path[..parent_path.len() - 1];
+        let grandparent_task =
+            match resolve_task_from_flat(track_ref, parent_section, grandparent_path) {
+                Some(t) => t,
+                None => return,
+            };
+        let grandparent_id = match &grandparent_task.id {
+            Some(id) => id.clone(),
+            None => return,
+        };
+
+        let track = match app.find_track_mut(&track_id) {
+            Some(t) => t,
+            None => return,
+        };
+        let new_id =
+            match task_ops::add_subtask_after(track, &grandparent_id, &parent_id, String::new()) {
+                Ok(id) => id,
+                Err(_) => return,
+            };
+
+        // Enter EDIT mode for the new subtask (still has a parent, so edit_is_fresh stays true)
+        app.edit_buffer.clear();
+        app.edit_cursor = 0;
+        app.edit_target = Some(EditTarget::NewTask {
+            task_id: new_id.clone(),
+            track_id: track_id.clone(),
+            parent_id: Some(grandparent_id),
+        });
+        app.pre_edit_cursor = saved_cursor;
+        app.edit_history = Some(EditHistory::new("", 0, 0));
+        app.edit_is_fresh = true;
+        app.mode = Mode::Edit;
+
+        move_cursor_to_task(app, &track_id, &new_id);
+    } else {
+        // Parent is top-level — insert a new top-level task after the parent
+        let track = match app.find_track_mut(&track_id) {
+            Some(t) => t,
+            None => return,
+        };
+        let new_id = match task_ops::add_task(
+            track,
+            String::new(),
+            InsertPosition::After(parent_id),
+            &prefix,
+        ) {
+            Ok(id) => id,
+            Err(_) => return,
+        };
+
+        // Enter EDIT mode for the new top-level task (no parent, so `-` will be a normal char)
+        app.edit_buffer.clear();
+        app.edit_cursor = 0;
+        app.edit_target = Some(EditTarget::NewTask {
+            task_id: new_id.clone(),
+            track_id: track_id.clone(),
+            parent_id: None,
+        });
+        app.pre_edit_cursor = saved_cursor;
+        app.edit_history = Some(EditHistory::new("", 0, 0));
+        app.edit_is_fresh = false;
+        app.mode = Mode::Edit;
+
+        move_cursor_to_task(app, &track_id, &new_id);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3661,6 +3912,21 @@ fn handle_edit(app: &mut App, key: KeyEvent) {
         }
         // Type character: replace selection if any
         (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+            // Outdent: `-` as first keystroke on a fresh new subtask edit
+            if c == '-'
+                && app.edit_is_fresh
+                && matches!(
+                    &app.edit_target,
+                    Some(EditTarget::NewTask {
+                        parent_id: Some(_),
+                        ..
+                    })
+                )
+            {
+                outdent_new_subtask(app);
+                return;
+            }
+            app.edit_is_fresh = false;
             app.delete_selection();
             // Auto-uppercase for prefix editing
             let c = if matches!(app.edit_target, Some(EditTarget::ExistingPrefix { .. })) {
@@ -3749,6 +4015,7 @@ fn confirm_edit(app: &mut App) {
         Mode::Select
     };
     app.pre_edit_cursor = None;
+    app.edit_is_fresh = false;
 
     match target {
         EditTarget::NewTask {
@@ -4078,6 +4345,7 @@ fn confirm_edit(app: &mut App) {
             let name = app.edit_buffer.clone();
             if name.trim().is_empty() {
                 // Empty name: cancelled
+                app.new_track_insert_pos = None;
                 return;
             }
             let track_id = crate::ops::track_ops::generate_track_id(&name);
@@ -4109,8 +4377,25 @@ fn confirm_edit(app: &mut App) {
             let track_path = app.project.frame_dir.join(&tc.file);
             let _ = std::fs::write(&track_path, &track_content);
 
-            // Add to config
-            app.project.config.tracks.push(tc);
+            // Add to config — insert among active tracks at the stored position
+            // so that p/- placement is respected (a/= use active_count = end).
+            let insert_pos = app.new_track_insert_pos.take().unwrap_or(usize::MAX);
+            let active_indices: Vec<usize> = app
+                .project
+                .config
+                .tracks
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| t.state == "active")
+                .map(|(i, _)| i)
+                .collect();
+            let insert_config_idx = if insert_pos < active_indices.len() {
+                active_indices[insert_pos]
+            } else {
+                // After last active track (or end if no active tracks)
+                active_indices.last().map_or(0, |&last| last + 1)
+            };
+            app.project.config.tracks.insert(insert_config_idx, tc);
             app.project
                 .config
                 .ids
@@ -4291,6 +4576,7 @@ fn cancel_edit(app: &mut App) {
         Mode::Select
     };
     app.autocomplete = None;
+    app.edit_is_fresh = false;
 
     match target {
         // If we were creating a new task, remove the placeholder
@@ -4345,6 +4631,7 @@ fn cancel_edit(app: &mut App) {
         }
         // New track add — just restore cursor (no placeholder to remove)
         Some(EditTarget::NewTrackName) => {
+            app.new_track_insert_pos = None;
             if let Some(cursor) = saved_cursor {
                 app.tracks_cursor = cursor;
             }
@@ -5484,6 +5771,45 @@ fn tracks_add_track(app: &mut App) {
         .filter(|t| t.state == "active")
         .count();
     app.tracks_cursor = active_count;
+    app.new_track_insert_pos = Some(active_count);
+    app.edit_buffer.clear();
+    app.edit_cursor = 0;
+    app.edit_target = Some(EditTarget::NewTrackName);
+    app.edit_history = Some(EditHistory::new("", 0, 0));
+    app.edit_selection_anchor = None;
+    app.mode = Mode::Edit;
+}
+
+/// Insert a new track after the cursor position and enter EDIT mode.
+fn tracks_insert_after(app: &mut App) {
+    let active_count = app
+        .project
+        .config
+        .tracks
+        .iter()
+        .filter(|t| t.state == "active")
+        .count();
+    // Only insert among active tracks
+    if app.tracks_cursor >= active_count {
+        return;
+    }
+    let insert_pos = (app.tracks_cursor + 1).min(active_count);
+    app.pre_edit_cursor = Some(app.tracks_cursor);
+    app.tracks_cursor = insert_pos;
+    app.new_track_insert_pos = Some(insert_pos);
+    app.edit_buffer.clear();
+    app.edit_cursor = 0;
+    app.edit_target = Some(EditTarget::NewTrackName);
+    app.edit_history = Some(EditHistory::new("", 0, 0));
+    app.edit_selection_anchor = None;
+    app.mode = Mode::Edit;
+}
+
+/// Add a new track at the top of the active list and enter EDIT mode.
+fn tracks_prepend(app: &mut App) {
+    app.pre_edit_cursor = Some(app.tracks_cursor);
+    app.tracks_cursor = 0;
+    app.new_track_insert_pos = Some(0);
     app.edit_buffer.clear();
     app.edit_cursor = 0;
     app.edit_target = Some(EditTarget::NewTrackName);
@@ -7451,6 +7777,27 @@ fn inbox_insert_after(app: &mut App) {
     app.mode = Mode::Edit;
 }
 
+/// Insert a new inbox item at the top and enter EDIT mode.
+fn inbox_prepend_item(app: &mut App) {
+    let inbox = match &mut app.project.inbox {
+        Some(inbox) => inbox,
+        None => return,
+    };
+
+    let item = crate::model::inbox::InboxItem::new(String::new());
+    inbox.items.insert(0, item);
+
+    // Move cursor to new item at top
+    app.inbox_cursor = 0;
+
+    // Enter EDIT mode for the title
+    app.edit_buffer.clear();
+    app.edit_cursor = 0;
+    app.edit_target = Some(EditTarget::NewInboxItem { index: 0 });
+    app.edit_history = Some(EditHistory::new("", 0, 0));
+    app.mode = Mode::Edit;
+}
+
 /// Edit the title of the selected inbox item.
 fn inbox_edit_title(app: &mut App) {
     let inbox = match &app.project.inbox {
@@ -8736,19 +9083,32 @@ fn dispatch_palette_action(app: &mut App, action_id: &str, track_index: Option<u
         "add_task_bottom" | "add_inbox_item" => {
             if matches!(app.view, View::Inbox) {
                 inbox_add_item(app);
+            } else if matches!(app.view, View::Tracks) {
+                tracks_add_track(app);
             } else {
                 add_task_action(app, AddPosition::Bottom);
             }
         }
+        "append_to_group" => {
+            append_sibling_action(app);
+        }
         "insert_after" => {
             if matches!(app.view, View::Inbox) {
                 inbox_insert_after(app);
+            } else if matches!(app.view, View::Tracks) {
+                tracks_insert_after(app);
             } else {
                 add_task_action(app, AddPosition::AfterCursor);
             }
         }
         "push_to_top" => {
-            add_task_action(app, AddPosition::Top);
+            if matches!(app.view, View::Inbox) {
+                inbox_prepend_item(app);
+            } else if matches!(app.view, View::Tracks) {
+                tracks_prepend(app);
+            } else {
+                add_task_action(app, AddPosition::Top);
+            }
         }
         "add_subtask" => {
             add_subtask_action(app);

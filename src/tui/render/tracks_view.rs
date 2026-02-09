@@ -106,7 +106,17 @@ pub fn render_tracks_view(frame: &mut Frame, app: &mut App, area: Rect) {
     // Active section
     if !active_tracks.is_empty() || is_new_track_edit {
         lines.push(render_section_row(app, "Active", name_col, false));
-        for tc in &active_tracks {
+        for (track_i, tc) in active_tracks.iter().enumerate() {
+            // Insert new-track edit row before this track when cursor == track_i
+            if is_new_track_edit && flat_idx == cursor && track_i == cursor {
+                lines.push(render_new_track_edit_row(
+                    app,
+                    flat_idx + 1,
+                    num_width,
+                    area.width,
+                ));
+                flat_idx += 1;
+            }
             let is_cursor = flat_idx == cursor;
             let is_flash = app.is_track_flashing(&tc.id);
             if editing_track_id.as_deref() == Some(&tc.id) && is_cursor {
@@ -141,8 +151,8 @@ pub fn render_tracks_view(frame: &mut Frame, app: &mut App, area: Rect) {
             }
             flat_idx += 1;
         }
-        // New track edit row at the bottom of active section
-        if is_new_track_edit {
+        // New track edit row at end of active section (cursor == active_count)
+        if is_new_track_edit && flat_idx == cursor {
             lines.push(render_new_track_edit_row(
                 app,
                 flat_idx + 1,

@@ -831,6 +831,13 @@ pub struct App {
     /// Selection anchor for text selection in edit mode (None = no selection)
     /// Selection range is from min(anchor, edit_cursor) to max(anchor, edit_cursor)
     pub edit_selection_anchor: Option<usize>,
+    /// True when in edit mode for a new subtask and no character has been typed yet.
+    /// Used to detect `-` as first keystroke for outdent behavior.
+    pub edit_is_fresh: bool,
+    /// Desired position (among active tracks) for new track insertion.
+    /// Set by tracks_add_track / tracks_prepend / tracks_insert_after;
+    /// consumed by the NewTrackName confirm handler.
+    pub new_track_insert_pos: Option<usize>,
     /// Triage flow state (active during Mode::Triage)
     pub triage_state: Option<TriageState>,
     /// Confirmation prompt state (active during Mode::Confirm)
@@ -971,6 +978,8 @@ impl App {
             autocomplete_anchor: None,
             edit_history: None,
             edit_selection_anchor: None,
+            edit_is_fresh: false,
+            new_track_insert_pos: None,
             triage_state: None,
             confirm_state: None,
             flash_state: None,

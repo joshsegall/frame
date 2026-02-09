@@ -382,17 +382,24 @@ fn static_actions() -> Vec<PaletteAction> {
             category: ActionCategory::Create,
         },
         PaletteAction {
+            id: "append_to_group",
+            label: "Append task to end of group".into(),
+            shortcut: Some("="),
+            contexts: &[ViewContext::TrackView],
+            category: ActionCategory::Create,
+        },
+        PaletteAction {
             id: "insert_after",
             label: "Insert after cursor".into(),
             shortcut: Some("-"),
-            contexts: &[ViewContext::TrackView, ViewContext::InboxView],
+            contexts: &[ViewContext::TrackView, ViewContext::InboxView, ViewContext::TracksView],
             category: ActionCategory::Create,
         },
         PaletteAction {
             id: "push_to_top",
             label: "Push to top".into(),
             shortcut: Some("p"),
-            contexts: &[ViewContext::TrackView],
+            contexts: &[ViewContext::TrackView, ViewContext::InboxView, ViewContext::TracksView],
             category: ActionCategory::Create,
         },
         PaletteAction {
@@ -600,7 +607,7 @@ fn static_actions() -> Vec<PaletteAction> {
         PaletteAction {
             id: "add_inbox_item",
             label: "Add item (bottom)".into(),
-            shortcut: Some("a"),
+            shortcut: Some("a/="),
             contexts: &[ViewContext::InboxView],
             category: ActionCategory::Create,
         },
@@ -644,7 +651,7 @@ fn static_actions() -> Vec<PaletteAction> {
         PaletteAction {
             id: "add_track",
             label: "Add new track".into(),
-            shortcut: Some("a"),
+            shortcut: Some("a/="),
             contexts: &[ViewContext::TracksView],
             category: ActionCategory::Create,
         },

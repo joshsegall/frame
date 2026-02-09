@@ -96,9 +96,22 @@ Full view of a single task showing all fields as navigable regions: Title, Tags,
 | Key | Action |
 |-----|--------|
 | `a` | Add task at bottom of backlog |
-| `-` | Insert task after cursor |
+| `=` | Append to end of group (top-level = bottom; subtask = end of siblings) |
+| `-` | Insert after cursor (sibling at same level; type `-` again to outdent) |
 | `p` | Add task at top of backlog |
 | `A` | Add subtask under cursor |
+
+**Insert behavior by cursor position:**
+
+| Key | On top-level | On child | On sub-child |
+|---|---|---|---|
+| `a` | Append to end of backlog | ← same | ← same |
+| `p` | Prepend to top of backlog | ← same | ← same |
+| `-` | Insert top-level after current | Insert sibling after current | Insert sibling after current |
+| `- -` | *(already top)* | Promote to top-level | Promote to child level |
+| `- - -` | | *(already top)* | Promote to top-level |
+| `=` | Same as `a` | Append to end of parent's children | Append to end of parent's children |
+| `A` | Add child | Add sub-child | *(max depth)* |
 
 **Editing & actions:**
 
@@ -159,7 +172,9 @@ With selection active (Select mode):
 | `g`, `Home` | Jump to top |
 | `G`, `End` | Jump to bottom |
 | `Enter`, `l` | Open track in Track view |
-| `a` | Add new track |
+| `a`, `=` | Add new track (bottom of active list) |
+| `-` | Insert new track after cursor |
+| `p` | Add new track (top of active list) |
 | `e` | Edit track name |
 | `s` | Toggle shelve/activate |
 | `X` | Archive or delete track (with confirmation) |
@@ -175,8 +190,9 @@ With selection active (Select mode):
 | `k`, `Up` | Move cursor up |
 | `g`, `Home` | Jump to top |
 | `G`, `End` | Jump to bottom |
-| `a` | Add new inbox item (bottom) |
+| `a`, `=` | Add new inbox item (bottom) |
 | `-` | Insert item after cursor |
+| `p` | Add new inbox item (top) |
 | `e` | Edit item title |
 | `t` | Edit item tags |
 | `x` | Delete item (with confirmation) |
