@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to Frame will be documented in this file.
+All notable changes to frame will be documented in this file.
 
 <!--
 ## v0.2.0 - 2025-XX-XX
