@@ -411,6 +411,8 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
     // Blank line before note
     body_lines.push(Line::from(""));
 
+    let mut note_gutter_width: usize = 3;
+
     // --- Note region ---
     {
         let is_active = current_region == DetailRegion::Note;
@@ -427,16 +429,28 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
         });
 
         if is_active && editing && app.mode == Mode::Edit {
+            // Compute gutter width from edit buffer line count
+            let edit_line_count = app
+                .detail_state
+                .as_ref()
+                .map(|ds| ds.edit_buffer.split('\n').count())
+                .unwrap_or(1);
+            let num_width = edit_line_count.max(1).to_string().len();
+            let gutter_width = (num_width + 1).max(3);
+            let num_display_width = gutter_width - 1;
+            note_gutter_width = gutter_width;
+
             // Multi-line editing mode
+            let header_prefix =
+                format!("{}\u{258E} ", " ".repeat(gutter_width.saturating_sub(2)));
             let header_spans: Vec<Span> = vec![
-                region_indicator(true, region_indicator_style, bg),
+                Span::styled(header_prefix, region_indicator_style),
                 Span::styled("note:", dim_style),
             ];
             body_lines.push(Line::from(header_spans));
 
             // Render the multi-line edit buffer with horizontal scrolling
-            let note_indent_len: usize = 3; // "   " align with field labels
-            let note_available = width.saturating_sub(note_indent_len);
+            let note_available = width.saturating_sub(gutter_width);
             let mut adjusted_h_scroll = 0usize;
             if let Some(ref ds) = app.detail_state {
                 let cursor_style = Style::default()
@@ -498,14 +512,16 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                     let view_start = h_scroll.min(total_line_chars);
                     let view_end = (view_start + view_chars).min(total_line_chars);
 
-                    // Indent (may show left arrow)
+                    // Line number + indent (may show left arrow)
+                    let line_num_str =
+                        format!("{:>width$}", line_idx + 1, width = num_display_width);
                     if clipped_left {
-                        spans.push(Span::styled("  ", Style::default().bg(bg)));
+                        spans.push(Span::styled(line_num_str, text_style));
                         spans.push(Span::styled("\u{25C2}", dim_arrow_style)); // ◂
                     } else {
                         spans.push(Span::styled(
-                            " ".repeat(note_indent_len),
-                            Style::default().bg(bg),
+                            format!("{} ", line_num_str),
+                            text_style,
                         ));
                     }
 
@@ -576,35 +592,73 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 ds_mut.note_h_scroll = adjusted_h_scroll;
             }
         } else if let Some(note_text) = &note {
+            // Compute gutter width from note line count
+            let line_count = note_text.lines().count();
+            let num_width = line_count.max(1).to_string().len();
+            let gutter_width = (num_width + 1).max(3);
+            let num_display_width = gutter_width - 1;
+            note_gutter_width = gutter_width;
+
+            let header_prefix = if is_active {
+                format!(
+                    "{}\u{258E} ",
+                    " ".repeat(gutter_width.saturating_sub(2))
+                )
+            } else {
+                " ".repeat(gutter_width)
+            };
             let header_spans: Vec<Span> = vec![
-                region_indicator(is_active, region_indicator_style, bg),
+                Span::styled(
+                    header_prefix,
+                    if is_active {
+                        region_indicator_style
+                    } else {
+                        Style::default().bg(bg)
+                    },
+                ),
                 Span::styled("note:", dim_style),
             ];
             body_lines.push(Line::from(header_spans));
 
-            let note_indent = "   "; // align with field labels
+            let line_num_style = Style::default().fg(app.theme.dim).bg(bg);
             let mut in_code_block = false;
-            for note_line in note_text.lines() {
+            for (line_num, note_line) in note_text.lines().enumerate() {
                 let trimmed = note_line.trim();
                 if trimmed.starts_with("```") {
                     in_code_block = !in_code_block;
                 }
 
-                let mut spans: Vec<Span> = Vec::new();
-                spans.push(Span::styled(
-                    note_indent.to_string(),
-                    Style::default().bg(bg),
-                ));
+                let num_str =
+                    format!("{:>width$} ", line_num + 1, width = num_display_width);
                 if in_code_block || trimmed.starts_with("```") {
-                    spans.push(Span::styled(
-                        note_line.to_string(),
-                        Style::default().fg(app.theme.dim).bg(bg),
-                    ));
+                    let spans: Vec<Span> = vec![
+                        Span::styled(num_str, line_num_style),
+                        Span::styled(
+                            note_line.to_string(),
+                            Style::default().fg(app.theme.dim).bg(bg),
+                        ),
+                    ];
                     body_lines.push(Line::from(spans));
                 } else {
-                    spans.push(Span::styled(note_line.to_string(), text_style));
-                    let wrapped = wrap_styled_spans(spans, width, 3, bg);
-                    body_lines.extend(wrapped);
+                    // Wrap content separately to keep line number as a single span
+                    let content_spans =
+                        vec![Span::styled(note_line.to_string(), text_style)];
+                    let content_width = width.saturating_sub(gutter_width);
+                    let wrapped =
+                        wrap_styled_spans(content_spans, content_width, 0, bg);
+                    for (i, wrapped_line) in wrapped.into_iter().enumerate() {
+                        let prefix = if i == 0 {
+                            Span::styled(num_str.clone(), line_num_style)
+                        } else {
+                            Span::styled(
+                                " ".repeat(gutter_width),
+                                Style::default().bg(bg),
+                            )
+                        };
+                        let mut line_spans = vec![prefix];
+                        line_spans.extend(wrapped_line.spans);
+                        body_lines.push(Line::from(line_spans));
+                    }
                 }
             }
         } else if is_active {
@@ -710,19 +764,23 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
     {
         let clamped = vl.min(note_content_end_idx);
         body_active_line = Some(clamped);
-        // Replace the leading 3-char space with the indicator on the target line
+        // Replace the leading gutter with the cursor indicator on the target line
+        let cursor_indicator = format!(
+            "{}\u{258E} ",
+            " ".repeat(note_gutter_width.saturating_sub(2))
+        );
         if let Some(line) = body_lines.get_mut(clamped) {
             let mut new_spans: Vec<Span<'static>> = Vec::new();
             new_spans.push(Span::styled(
-                " \u{258E} ".to_string(),
+                cursor_indicator.clone(),
                 region_indicator_style,
             ));
-            // Skip the first span if it's the 3-char indent/blank indicator
+            // Skip the first span if it's the gutter (line number or blank padding)
             let mut skipped_prefix = false;
             for span in line.spans.iter() {
                 if !skipped_prefix {
-                    let content = span.content.as_ref();
-                    if content == "   " || content == " \u{258E} " {
+                    let content_len = span.content.chars().count();
+                    if content_len == note_gutter_width {
                         skipped_prefix = true;
                         continue;
                     }
@@ -737,8 +795,11 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
         {
             let mut new_spans: Vec<Span<'static>> = Vec::new();
             for span in line.spans.iter() {
-                if span.content.as_ref() == " \u{258E} " {
-                    new_spans.push(Span::styled("   ".to_string(), Style::default().bg(bg)));
+                if span.content.contains('\u{258E}') {
+                    new_spans.push(Span::styled(
+                        " ".repeat(note_gutter_width),
+                        Style::default().bg(bg),
+                    ));
                 } else {
                     new_spans.push(span.clone());
                 }
@@ -812,16 +873,21 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             }
             if let Some(line) = body_lines.get_mut(line_idx) {
                 let mut new_spans: Vec<Span<'static>> = Vec::new();
-                for span in line.spans.drain(..) {
+                for (span_idx, span) in line.spans.drain(..).enumerate() {
                     let content = span.content.into_owned();
-                    let fg = if span.style.fg == Some(app.theme.text)
-                        || span.style.fg == Some(app.theme.dim)
-                    {
-                        app.theme.text_bright
+                    if span_idx == 0 {
+                        // Keep line number gutter dim
+                        new_spans.push(Span::styled(content, span.style));
                     } else {
-                        span.style.fg.unwrap_or(app.theme.text_bright)
-                    };
-                    new_spans.push(Span::styled(content, span.style.fg(fg)));
+                        let fg = if span.style.fg == Some(app.theme.text)
+                            || span.style.fg == Some(app.theme.dim)
+                        {
+                            app.theme.text_bright
+                        } else {
+                            span.style.fg.unwrap_or(app.theme.text_bright)
+                        };
+                        new_spans.push(Span::styled(content, span.style.fg(fg)));
+                    }
                 }
                 *line = Line::from(new_spans);
             }
