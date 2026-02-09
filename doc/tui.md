@@ -356,6 +356,15 @@ With selection active (Select mode):
 
 Actions are context-sensitive — the available set depends on the current view (Track, Detail, Tracks, Inbox, Recent). Uses fuzzy matching: type any part of an action name to filter. Each action shows its keyboard shortcut, making the palette useful for discovering keybindings.
 
+Some actions are **palette-only** (no direct key binding):
+
+| Action | View | Description |
+|--------|------|-------------|
+| Mark done (#wontdo) | Track | Add `#wontdo` tag and mark task done |
+| Mark done (#duplicate) | Track | Add `#duplicate` tag and mark task done |
+| Collapse all | Track | Collapse all expanded tasks |
+| Expand all | Track | Expand all tasks with children |
+
 ## Overlays
 
 ### Help Overlay (`?`)

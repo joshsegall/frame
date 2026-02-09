@@ -22,7 +22,7 @@ Frame is a markdown-based task tracker (TUI + CLI) where `.md` files are the sou
 
 - **`src/model/`** — Data types: `Task`, `Track`, `Inbox`, `ProjectConfig`, `Project`
 - **`src/parse/`** — Markdown parser and serializer pairs for tasks, tracks, and inbox
-- **`src/io/`** — Project discovery, file locking, config I/O, UI state persistence, file watcher
+- **`src/io/`** — Project discovery, file locking, config I/O, UI state persistence, file watcher, project registry
 - **`src/ops/`** — Business logic: task CRUD, track management, inbox, search, clean, check, import
 - **`src/cli/`** — CLI interface (clap commands, handlers, JSON/human output)
 - **`src/tui/`** — TUI interface: app state, undo, input handling, rendering
@@ -33,9 +33,12 @@ See `doc/architecture.md` for detailed design decisions and invariants.
 
 A Frame project has a `frame/` directory containing:
 - `project.toml` — project config
-- `*.md` track files (one per track)
 - `inbox.md` — inbox items
+- `tracks/*.md` — track files (one per track)
+- `archive/*.md` — done-task archives (per track, created by `fr clean`)
+- `archive/_tracks/` — archived whole-track files
 - `.lock` — advisory lock file
+- `.state.json` — TUI state (cursor, scroll, expanded sets)
 
 ## Documentation
 
