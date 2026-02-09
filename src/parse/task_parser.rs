@@ -1,4 +1,5 @@
 use crate::model::task::{Metadata, Task, TaskState};
+use crate::parse::has_continuation_at_indent;
 
 /// Maximum nesting depth (3 levels: top, sub, sub-sub)
 const MAX_DEPTH: usize = 3;
@@ -362,7 +363,7 @@ fn parse_note_block(lines: &[String], start_idx: usize, block_indent: usize) -> 
         if line.trim().is_empty() {
             // Blank line inside note — include it
             // But check if the next non-blank line is still part of the note
-            if is_note_continuation(lines, idx, block_indent) {
+            if has_continuation_at_indent(lines, idx + 1, block_indent) {
                 note_lines.push(String::new());
                 idx += 1;
                 continue;
@@ -393,18 +394,6 @@ fn parse_note_block(lines: &[String], start_idx: usize, block_indent: usize) -> 
     }
 
     (note_lines.join("\n"), idx)
-}
-
-/// Check if a blank line is followed by more note content at the expected indent
-fn is_note_continuation(lines: &[String], blank_idx: usize, block_indent: usize) -> bool {
-    for line in &lines[(blank_idx + 1)..] {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let indent = count_indent(line);
-        return indent >= block_indent;
-    }
-    false
 }
 
 /// Strip block indent from a line, preserving relative indentation

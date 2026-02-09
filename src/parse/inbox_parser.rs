@@ -1,4 +1,5 @@
 use crate::model::inbox::{Inbox, InboxItem};
+use crate::parse::has_continuation_at_indent;
 
 /// Parse an inbox file from its source text.
 ///
@@ -74,7 +75,14 @@ pub fn parse_inbox(source: &str) -> Inbox {
 
                 if !in_code_fence {
                     if body_trimmed.is_empty() {
-                        // Blank line — end of this item
+                        // Blank line — check if more body content follows
+                        // (indented lines at 1+ spaces). If so, this is a
+                        // paragraph break within the body, not the item separator.
+                        if has_continuation_at_indent(&lines, idx + 1, 1) {
+                            body_lines.push(String::new());
+                            idx += 1;
+                            continue;
+                        }
                         break;
                     }
 
@@ -290,5 +298,89 @@ mod tests {
         let source = "# Inbox\n";
         let inbox = parse_inbox(source);
         assert!(inbox.items.is_empty());
+    }
+
+    #[test]
+    fn test_parse_inbox_body_with_blank_lines() {
+        let source = "\
+# Inbox
+
+- Multi-paragraph item #design
+  First paragraph of body.
+
+  Second paragraph of body.
+
+- Next item #bug";
+        let inbox = parse_inbox(source);
+        assert_eq!(inbox.items.len(), 2);
+
+        let body = inbox.items[0].body.as_ref().unwrap();
+        assert!(body.contains("First paragraph"));
+        assert!(body.contains("Second paragraph"));
+        assert!(body.contains("\n\n"), "blank line within body should be preserved");
+
+        assert_eq!(inbox.items[1].title, "Next item");
+        assert_eq!(inbox.items[1].tags, vec!["bug"]);
+    }
+
+    #[test]
+    fn test_parse_inbox_body_multiple_blank_lines() {
+        let source = "\
+# Inbox
+
+- Item with double blank #tag
+  Para one.
+
+
+  Para two.
+
+- Next";
+        let inbox = parse_inbox(source);
+        assert_eq!(inbox.items.len(), 2);
+
+        let body = inbox.items[0].body.as_ref().unwrap();
+        assert!(body.contains("Para one."));
+        assert!(body.contains("Para two."));
+        // Two consecutive blank lines should both be preserved
+        assert!(body.contains("\n\n\n"));
+    }
+
+    #[test]
+    fn test_parse_inbox_body_blank_line_before_code_block() {
+        let source = "\
+# Inbox
+
+- Item with code #dev
+  Some text.
+
+  ```
+  fn main() {}
+  ```
+
+- Next";
+        let inbox = parse_inbox(source);
+        assert_eq!(inbox.items.len(), 2);
+
+        let body = inbox.items[0].body.as_ref().unwrap();
+        assert!(body.contains("Some text."));
+        assert!(body.contains("fn main()"));
+    }
+
+    #[test]
+    fn test_parse_inbox_trailing_blank_not_in_body() {
+        // A blank line followed by a new item should NOT be included in the body
+        let source = "\
+# Inbox
+
+- First item
+  Body text.
+
+- Second item";
+        let inbox = parse_inbox(source);
+        assert_eq!(inbox.items.len(), 2);
+
+        let body = inbox.items[0].body.as_ref().unwrap();
+        assert_eq!(body, "Body text.");
+        assert!(!body.contains('\n'), "no trailing blank should be in body");
     }
 }

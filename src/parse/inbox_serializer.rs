@@ -94,4 +94,21 @@ mod tests {
         let output = serialize_inbox(&inbox);
         assert_eq!(output, source);
     }
+
+    #[test]
+    fn test_round_trip_inbox_body_with_blank_lines() {
+        let source = "\
+# Inbox
+
+- Multi-paragraph item #design
+  First paragraph.
+
+  Second paragraph.
+
+- Simple item #bug";
+
+        let inbox = parse_inbox(source);
+        let output = serialize_inbox(&inbox);
+        assert_eq!(output, source);
+    }
 }
