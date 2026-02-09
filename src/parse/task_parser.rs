@@ -31,10 +31,16 @@ pub fn parse_tasks(
                 idx += 1;
             }
         } else {
-            // Not a task line — stop parsing tasks.
-            // Blank lines, section headers, and other content are handled by the
-            // caller (track parser). This ensures round-trip fidelity: blank lines
-            // between sections are captured as trailing/header lines, not lost.
+            // Not a task line. Blank lines and orphaned deeper-indent content
+            // can appear between tasks (e.g., after multi-line notes with
+            // trailing blank lines, or orphaned subtasks from previous parse
+            // errors). Skip past them if more tasks at our indent follow.
+            if (line.trim().is_empty() || count_indent(line) > indent)
+                && has_more_tasks_at_indent(lines, idx + 1, indent)
+            {
+                idx += 1;
+                continue;
+            }
             break;
         }
     }
@@ -96,7 +102,24 @@ fn parse_single_task(
             continue;
         }
 
-        // Blank line or unrecognized — stop
+        // Blank line — check if more metadata or subtasks follow.
+        // This handles multi-line notes with trailing blank lines before subtasks,
+        // and empty notes (- note:\n\n) followed by more metadata.
+        if line.trim().is_empty() {
+            let mut peek = idx + 1;
+            while peek < lines.len() && lines[peek].trim().is_empty() {
+                peek += 1;
+            }
+            if peek < lines.len()
+                && (is_metadata_line(&lines[peek], meta_indent)
+                    || task_indent(&lines[peek]).is_some_and(|ti| ti == meta_indent))
+            {
+                idx += 1;
+                continue;
+            }
+        }
+
+        // Unrecognized content or end of task — stop
         break;
     }
 
@@ -218,6 +241,23 @@ fn task_indent(line: &str) -> Option<usize> {
 /// Count leading spaces
 fn count_indent(line: &str) -> usize {
     line.len() - line.trim_start_matches(' ').len()
+}
+
+/// Look ahead through blank lines and deeper-indent content to check if
+/// there are more tasks at the given indent level. Used by parse_tasks to
+/// skip gaps caused by multi-line notes with trailing blank lines.
+fn has_more_tasks_at_indent(lines: &[String], start: usize, indent: usize) -> bool {
+    for line in lines.iter().skip(start) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if count_indent(line) > indent {
+            continue; // skip deeper-indent content (orphaned subtasks/metadata)
+        }
+        // Found non-blank line at or below our indent — check if it's a task
+        return task_indent(line).is_some_and(|ti| ti == indent);
+    }
+    false
 }
 
 /// Check if a line is a metadata line at the given indent: `  - key: value`
@@ -531,6 +571,76 @@ mod tests {
             tasks[0].subtasks[0].subtasks[0].id.as_deref(),
             Some("EFF-014.2.1")
         );
+    }
+
+    #[test]
+    fn test_blank_lines_between_note_and_subtasks() {
+        // Multi-line note with trailing blank lines before subtasks
+        let input = lines(
+            "- [ ] `T-001` Parent task\n\
+             \x20\x20- note:\n\
+             \x20\x20\x20\x20Some note content\n\
+             \n\
+             \n\
+             \x20\x20- [ ] `T-001.1` First subtask\n\
+             \x20\x20- [ ] `T-001.2` Second subtask",
+        );
+        let (tasks, _) = parse_tasks(&input, 0, 0, 0);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].subtasks.len(), 2);
+        assert_eq!(tasks[0].subtasks[0].id.as_deref(), Some("T-001.1"));
+        assert_eq!(tasks[0].subtasks[1].id.as_deref(), Some("T-001.2"));
+        if let Metadata::Note(note) = &tasks[0].metadata[0] {
+            assert!(note.contains("Some note content"));
+        } else {
+            panic!("Expected Note metadata");
+        }
+    }
+
+    #[test]
+    fn test_blank_line_between_empty_note_and_metadata() {
+        // Empty note (- note:\n\n) followed by more metadata
+        let input = lines(
+            "- [ ] `T-001` Task\n\
+             \x20\x20- note:\n\
+             \n\
+             \x20\x20- spec: some-file.md\n\
+             \x20\x20- dep: T-002",
+        );
+        let (tasks, _) = parse_tasks(&input, 0, 0, 0);
+        assert_eq!(tasks[0].metadata.len(), 3); // note, spec, dep
+        assert!(matches!(&tasks[0].metadata[0], Metadata::Note(n) if n.is_empty()));
+        assert!(matches!(&tasks[0].metadata[1], Metadata::Spec(s) if s == "some-file.md"));
+        assert!(matches!(&tasks[0].metadata[2], Metadata::Dep(d) if d == &["T-002"]));
+    }
+
+    #[test]
+    fn test_blank_lines_between_sibling_tasks() {
+        // Blank lines between two top-level tasks should not lose the second task
+        let input = lines(
+            "- [ ] `T-001` First task\n\
+             \x20\x20- added: 2025-01-01\n\
+             \n\
+             - [ ] `T-002` Second task",
+        );
+        let (tasks, _) = parse_tasks(&input, 0, 0, 0);
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].id.as_deref(), Some("T-001"));
+        assert_eq!(tasks[1].id.as_deref(), Some("T-002"));
+    }
+
+    #[test]
+    fn test_blank_lines_before_section_header_stops() {
+        // Blank lines followed by non-task content (like a section header)
+        // should still stop parsing
+        let input = lines(
+            "- [ ] `T-001` First task\n\
+             \n\
+             ## Done",
+        );
+        let (tasks, next_idx) = parse_tasks(&input, 0, 0, 0);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(next_idx, 1); // stopped at blank line, not past it
     }
 
     #[test]
