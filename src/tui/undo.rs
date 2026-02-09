@@ -139,11 +139,11 @@ pub fn nav_target_for_op(op: &Operation, is_undo: bool) -> Option<UndoNavTarget>
                 })
             }
         }
-        Operation::InboxTitleEdit { index, .. } | Operation::InboxTagsEdit { index, .. } => {
-            Some(UndoNavTarget::Inbox {
-                cursor: Some(*index),
-            })
-        }
+        Operation::InboxTitleEdit { index, .. }
+        | Operation::InboxTagsEdit { index, .. }
+        | Operation::InboxNoteEdit { index, .. } => Some(UndoNavTarget::Inbox {
+            cursor: Some(*index),
+        }),
         Operation::InboxMove {
             old_index,
             new_index,
@@ -355,6 +355,12 @@ pub enum Operation {
     },
     /// An inbox item was moved (reordered)
     InboxMove { old_index: usize, new_index: usize },
+    /// An inbox item's note/body was edited
+    InboxNoteEdit {
+        index: usize,
+        old_body: Option<String>,
+        new_body: Option<String>,
+    },
     /// An inbox item was triaged into a track
     InboxTriage {
         /// The inbox item that was removed
@@ -652,6 +658,17 @@ fn apply_inverse(
                 && let Some(item) = inbox.items.get_mut(*index)
             {
                 item.tags = old_tags.clone();
+                item.dirty = true;
+            }
+            None
+        }
+        Operation::InboxNoteEdit {
+            index, old_body, ..
+        } => {
+            if let Some(inbox) = inbox
+                && let Some(item) = inbox.items.get_mut(*index)
+            {
+                item.body = old_body.clone();
                 item.dirty = true;
             }
             None
@@ -965,6 +982,17 @@ fn apply_forward(
                 && let Some(item) = inbox.items.get_mut(*index)
             {
                 item.tags = new_tags.clone();
+                item.dirty = true;
+            }
+            None
+        }
+        Operation::InboxNoteEdit {
+            index, new_body, ..
+        } => {
+            if let Some(inbox) = inbox
+                && let Some(item) = inbox.items.get_mut(*index)
+            {
+                item.body = new_body.clone();
                 item.dirty = true;
             }
             None

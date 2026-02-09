@@ -255,7 +255,6 @@ pub fn format_track_header(track_id: &str, track: &Track) -> String {
     format!("== {} ({}) ==", track.title, track_id)
 }
 
-
 /// Format a track's task listing
 pub fn format_track_listing(
     track_id: &str,

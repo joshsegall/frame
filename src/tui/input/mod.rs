@@ -527,10 +527,12 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             app.search_zero_confirmed = false;
         }
 
-        // n: note edit in detail view, or search next
+        // n: note edit in detail/inbox view, or search next
         (KeyModifiers::NONE, KeyCode::Char('n')) => {
             if matches!(app.view, View::Detail { .. }) {
                 detail_jump_to_region_and_edit(app, DetailRegion::Note);
+            } else if matches!(app.view, View::Inbox) {
+                inbox_edit_note(app);
             } else if app.last_search.is_some() {
                 search_next(app, 1);
             }
@@ -7115,8 +7117,14 @@ fn snapshot_multiline(app: &mut App) {
     }
 }
 
-/// Confirm a detail view multi-line edit (note)
+/// Confirm a detail view or inbox multi-line edit (note)
 fn confirm_detail_multiline(app: &mut App) {
+    // Check if this is an inbox note edit
+    if let Some(item_index) = app.inbox_note_index.take() {
+        confirm_inbox_note_edit(app, item_index);
+        return;
+    }
+
     let (track_id, task_id) = match &app.view {
         View::Detail { track_id, task_id } => (track_id.clone(), task_id.clone()),
         _ => {
@@ -7166,6 +7174,54 @@ fn confirm_detail_multiline(app: &mut App) {
     if let Some(ds) = &mut app.detail_state {
         ds.editing = false;
     }
+}
+
+/// Confirm an inbox item note edit (called from confirm_detail_multiline)
+fn confirm_inbox_note_edit(app: &mut App, item_index: usize) {
+    let new_body_raw = app
+        .detail_state
+        .as_ref()
+        .map(|ds| ds.edit_buffer.clone())
+        .unwrap_or_default();
+    let original_raw = app
+        .detail_state
+        .as_ref()
+        .map(|ds| ds.edit_original.clone())
+        .unwrap_or_default();
+
+    // Normalize: all-whitespace becomes None
+    let new_body = if new_body_raw.trim().is_empty() {
+        None
+    } else {
+        Some(new_body_raw.clone())
+    };
+    let old_body = if original_raw.trim().is_empty() {
+        None
+    } else {
+        Some(original_raw)
+    };
+
+    // Apply the body change
+    if let Some(inbox) = &mut app.project.inbox
+        && let Some(item) = inbox.items.get_mut(item_index)
+    {
+        item.body = new_body.clone();
+        item.dirty = true;
+    }
+    let _ = app.save_inbox();
+
+    if new_body != old_body {
+        app.undo_stack.push(Operation::InboxNoteEdit {
+            index: item_index,
+            old_body,
+            new_body,
+        });
+    }
+
+    // Exit edit mode
+    app.mode = Mode::Navigate;
+    app.detail_state = None;
+    app.inbox_note_editor_scroll = 0;
 }
 
 /// Confirm a detail view single-line edit (title, tags, deps, spec, refs)
@@ -8164,6 +8220,54 @@ fn inbox_edit_tags(app: &mut App) {
     app.autocomplete = Some(AutocompleteState::new(AutocompleteKind::Tag, candidates));
     update_autocomplete_filter(app);
 
+    app.mode = Mode::Edit;
+}
+
+/// Edit the note/body of the selected inbox item (multi-line inline editor).
+fn inbox_edit_note(app: &mut App) {
+    let inbox = match &app.project.inbox {
+        Some(inbox) => inbox,
+        None => return,
+    };
+    let item = match inbox.items.get(app.inbox_cursor) {
+        Some(item) => item,
+        None => return,
+    };
+
+    let body_text = item.body.as_deref().unwrap_or("").to_string();
+    let line_count = body_text.split('\n').count();
+    let last_line_len = body_text.split('\n').next_back().map_or(0, |l| l.len());
+
+    // Create a DetailState to reuse the multiline edit infrastructure
+    let ds = DetailState {
+        region: DetailRegion::Note,
+        scroll_offset: 0,
+        regions: vec![DetailRegion::Note],
+        return_view_idx: 0,
+        editing: true,
+        edit_buffer: body_text.clone(),
+        edit_cursor_line: line_count.saturating_sub(1),
+        edit_cursor_col: last_line_len,
+        edit_original: body_text.clone(),
+        subtask_cursor: 0,
+        flat_subtask_ids: Vec::new(),
+        multiline_selection_anchor: None,
+        note_h_scroll: 0,
+        total_lines: 0,
+        note_view_line: None,
+        note_header_line: None,
+        note_content_end: 0,
+    };
+
+    app.detail_state = Some(ds);
+    app.inbox_note_index = Some(app.inbox_cursor);
+    app.inbox_note_editor_scroll = 0;
+    app.edit_target = None; // multiline pattern: edit_target is None
+    app.edit_history = Some(EditHistory::new(
+        &body_text,
+        last_line_len,
+        line_count.saturating_sub(1),
+    ));
     app.mode = Mode::Edit;
 }
 
@@ -9548,7 +9652,11 @@ fn dispatch_palette_action(app: &mut App, action_id: &str, track_index: Option<u
             detail_jump_to_region_and_edit(app, DetailRegion::Deps);
         }
         "edit_note" => {
-            detail_jump_to_region_and_edit(app, DetailRegion::Note);
+            if matches!(app.view, View::Inbox) {
+                inbox_edit_note(app);
+            } else {
+                detail_jump_to_region_and_edit(app, DetailRegion::Note);
+            }
         }
         "back_to_track" => {
             // Simulate Esc in detail view

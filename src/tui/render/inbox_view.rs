@@ -5,8 +5,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::tui::app::{App, EditTarget, Mode};
+use crate::tui::input::{multiline_selection_range, selection_cols_for_line};
 
 use super::push_highlighted_spans;
+
+/// Maximum visible lines for the note editor / view-mode body
+const MAX_NOTE_LINES: usize = 8;
 
 /// Render the inbox view
 pub fn render_inbox_view(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -35,10 +39,28 @@ pub fn render_inbox_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let search_re = app.active_search_re();
 
+    // Determine if we're editing a note for the cursor item
+    let editing_note_for =
+        if app.mode == Mode::Edit && app.edit_target.is_none() && app.inbox_note_index.is_some() {
+            app.inbox_note_index
+        } else {
+            None
+        };
+
+    // Snapshot item data to avoid borrow conflict with mutable app borrow in editor
+    let items_snapshot: Vec<_> = inbox
+        .items
+        .iter()
+        .map(|item| (item.title.clone(), item.tags.clone(), item.body.clone()))
+        .collect();
+
     // Build all display lines with their item indices
     let mut display_lines: Vec<(Option<usize>, Line)> = Vec::new();
 
-    for (i, item) in inbox.items.iter().enumerate() {
+    // Track the editor cursor line (for scroll adjustment)
+    let mut editor_active_line: Option<usize> = None;
+
+    for (i, (title, tags, body)) in items_snapshot.iter().enumerate() {
         let is_cursor = i == cursor;
         let bg = if is_cursor {
             app.theme.selection_bg
@@ -112,10 +134,10 @@ pub fn render_inbox_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 .add_modifier(Modifier::BOLD);
             // Truncate title at available width
             let prefix_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-            let tag_width: usize = item.tags.iter().map(|t| t.len() + 2).sum::<usize>()
-                + if item.tags.is_empty() { 0 } else { 2 };
+            let tag_width: usize = tags.iter().map(|t| t.len() + 2).sum::<usize>()
+                + if tags.is_empty() { 0 } else { 2 };
             let available = (area.width as usize).saturating_sub(prefix_width + tag_width + 1);
-            let display_title = super::truncate_with_ellipsis(&item.title, available);
+            let display_title = super::truncate_with_ellipsis(title, available);
             push_highlighted_spans(
                 &mut spans,
                 &display_title,
@@ -141,13 +163,13 @@ pub fn render_inbox_view(frame: &mut Frame, app: &mut App, area: Rect) {
             if !after.is_empty() {
                 spans.push(Span::styled(after.to_string(), edit_style));
             }
-        } else if !item.tags.is_empty() {
+        } else if !tags.is_empty() {
             spans.push(Span::styled("  ", Style::default().bg(bg)));
             let tag_hl_style = Style::default()
                 .fg(app.theme.search_match_fg)
                 .bg(app.theme.search_match_bg)
                 .add_modifier(Modifier::BOLD);
-            for (j, tag) in item.tags.iter().enumerate() {
+            for (j, tag) in tags.iter().enumerate() {
                 if j > 0 {
                     spans.push(Span::styled(" ", Style::default().bg(bg)));
                 }
@@ -177,28 +199,13 @@ pub fn render_inbox_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
         display_lines.push((Some(i), Line::from(spans)));
 
-        // Body text (dimmed, indented)
-        if let Some(body) = &item.body {
-            let body_style = Style::default().fg(app.theme.text).bg(app.theme.background);
-            let body_hl_style = Style::default()
-                .fg(app.theme.search_match_fg)
-                .bg(app.theme.search_match_bg)
-                .add_modifier(Modifier::BOLD);
-            for body_line in body.lines() {
-                let mut body_spans: Vec<Span> = Vec::new();
-                body_spans.push(Span::styled(
-                    "      ",
-                    Style::default().bg(app.theme.background),
-                ));
-                push_highlighted_spans(
-                    &mut body_spans,
-                    body_line,
-                    body_style,
-                    body_hl_style,
-                    search_re.as_ref(),
-                );
-                display_lines.push((Some(i), Line::from(body_spans)));
-            }
+        // Inline note editor or body text
+        if editing_note_for == Some(i) {
+            // Render the multi-line note editor inline
+            render_inline_note_editor(app, &mut display_lines, &mut editor_active_line, i, area);
+        } else if let Some(body) = body {
+            // View-mode body text
+            render_body_view_mode(app, &mut display_lines, body, i, search_re.as_ref(), area);
         }
     }
 
@@ -219,6 +226,21 @@ pub fn render_inbox_view(frame: &mut Frame, app: &mut App, area: Rect) {
             scroll = cdl.saturating_sub(visible_height - 1);
         }
     }
+
+    // When editing a note, ensure the editor's active line (cursor line) is visible
+    if let Some(active) = editor_active_line {
+        if active >= scroll + visible_height {
+            scroll = active.saturating_sub(visible_height - 1);
+        }
+        // Also ensure the header (cursor item line) stays visible
+        if let Some(cdl) = cursor_display_line
+            && cdl < scroll
+        {
+            // Header scrolled off top — pull scroll back so header is row 0
+            scroll = cdl;
+        }
+    }
+
     app.inbox_scroll = scroll;
 
     // Set autocomplete anchor if editing tags or in triage mode
@@ -243,4 +265,254 @@ pub fn render_inbox_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let paragraph = Paragraph::new(lines).style(Style::default().bg(app.theme.background));
     frame.render_widget(paragraph, area);
+}
+
+/// Render body text in view mode with optional line numbers (>= 4 lines)
+/// and capped at MAX_NOTE_LINES with a "N more lines" indicator.
+fn render_body_view_mode(
+    app: &App,
+    display_lines: &mut Vec<(Option<usize>, Line)>,
+    body: &str,
+    item_index: usize,
+    search_re: Option<&regex::Regex>,
+    _area: Rect,
+) {
+    let body_lines: Vec<&str> = body.lines().collect();
+    let line_count = body_lines.len();
+    let truncated = line_count > MAX_NOTE_LINES;
+    let visible_count = if truncated {
+        MAX_NOTE_LINES
+    } else {
+        line_count
+    };
+
+    let body_style = Style::default().fg(app.theme.text).bg(app.theme.background);
+    let body_hl_style = Style::default()
+        .fg(app.theme.search_match_fg)
+        .bg(app.theme.search_match_bg)
+        .add_modifier(Modifier::BOLD);
+    let dim_style = Style::default().fg(app.theme.dim).bg(app.theme.background);
+    let indent = "      ";
+
+    for body_line in body_lines.iter().take(visible_count) {
+        let mut body_spans: Vec<Span> = Vec::new();
+        body_spans.push(Span::styled(
+            indent,
+            Style::default().bg(app.theme.background),
+        ));
+
+        push_highlighted_spans(
+            &mut body_spans,
+            body_line,
+            body_style,
+            body_hl_style,
+            search_re,
+        );
+        display_lines.push((Some(item_index), Line::from(body_spans)));
+    }
+
+    if truncated {
+        let remaining = line_count - MAX_NOTE_LINES;
+        let indicator = format!(
+            "{}… {} more line{}",
+            indent,
+            remaining,
+            if remaining == 1 { "" } else { "s" }
+        );
+        display_lines.push((
+            Some(item_index),
+            Line::from(Span::styled(indicator, dim_style)),
+        ));
+    }
+}
+
+/// Render the inline multi-line note editor below the selected inbox item.
+fn render_inline_note_editor(
+    app: &mut App,
+    display_lines: &mut Vec<(Option<usize>, Line)>,
+    editor_active_line: &mut Option<usize>,
+    item_index: usize,
+    area: Rect,
+) {
+    let ds = match &app.detail_state {
+        Some(ds) => ds,
+        None => return,
+    };
+
+    let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
+    let total_lines = edit_lines.len();
+    let visible_lines = total_lines.clamp(1, MAX_NOTE_LINES);
+
+    // Auto-adjust editor scroll to keep cursor line visible
+    let cursor_line = ds.edit_cursor_line;
+    let mut editor_scroll = app.inbox_note_editor_scroll;
+    // Clamp scroll so the editor always fills its visible_lines window
+    let max_scroll = total_lines.saturating_sub(visible_lines);
+    editor_scroll = editor_scroll.min(max_scroll);
+    if cursor_line < editor_scroll {
+        editor_scroll = cursor_line;
+    } else if cursor_line >= editor_scroll + visible_lines {
+        editor_scroll = cursor_line.saturating_sub(visible_lines - 1);
+    }
+    app.inbox_note_editor_scroll = editor_scroll;
+
+    // Compute gutter width from total line count
+    let num_width = total_lines.max(1).to_string().len();
+    let gutter_width = (num_width + 1).max(3);
+    let num_display_width = gutter_width - 1;
+
+    // Available width for note content (gutter eats into base indent)
+    const BASE_INDENT: usize = 6;
+    let indent_width = BASE_INDENT.saturating_sub(gutter_width);
+    let note_available = (area.width as usize).saturating_sub(BASE_INDENT);
+
+    let cursor_col = ds.edit_cursor_col;
+    let bright_style = Style::default()
+        .fg(app.theme.text_bright)
+        .bg(app.theme.background);
+    let text_style = Style::default().fg(app.theme.text).bg(app.theme.background);
+    let cursor_style = Style::default()
+        .fg(app.theme.background)
+        .bg(app.theme.text_bright);
+    let selection_style = Style::default()
+        .fg(app.theme.text_bright)
+        .bg(app.theme.blue);
+    let dim_arrow_style = Style::default().fg(app.theme.dim).bg(app.theme.background);
+
+    // Horizontal scroll auto-adjustment
+    let mut h_scroll = ds.note_h_scroll;
+    if note_available > 0 {
+        let margin = 10.min(note_available / 3);
+        let cursor_line_len = edit_lines.get(cursor_line).map_or(0, |l| l.len());
+        let content_end = if cursor_col >= cursor_line_len {
+            cursor_line_len + 1
+        } else {
+            cursor_line_len
+        };
+        if cursor_col >= h_scroll + note_available.saturating_sub(margin) {
+            h_scroll = cursor_col.saturating_sub(note_available.saturating_sub(margin + 1));
+        }
+        h_scroll = h_scroll.min(content_end.saturating_sub(note_available.saturating_sub(1)));
+        if cursor_col < h_scroll + margin {
+            h_scroll = cursor_col.saturating_sub(margin);
+        }
+    }
+
+    // Compute selection range
+    let sel_range = multiline_selection_range(ds);
+
+    // Render visible editor lines
+    for view_row in 0..visible_lines {
+        let line_idx = editor_scroll + view_row;
+        if line_idx >= total_lines {
+            break;
+        }
+        let edit_line = edit_lines[line_idx];
+        let has_cursor = line_idx == cursor_line;
+
+        if has_cursor {
+            *editor_active_line = Some(display_lines.len());
+        }
+
+        let mut spans: Vec<Span> = Vec::new();
+        if indent_width > 0 {
+            spans.push(Span::styled(
+                " ".repeat(indent_width),
+                Style::default().bg(app.theme.background),
+            ));
+        }
+
+        let line_chars: Vec<char> = edit_line.chars().collect();
+        let total_line_chars = line_chars.len();
+        let clipped_left = h_scroll > 0 && total_line_chars > 0;
+        let left_indicator = if clipped_left { 1 } else { 0 };
+        let avail_after_left = note_available.saturating_sub(left_indicator);
+        let clipped_right = h_scroll + avail_after_left < total_line_chars;
+        let right_indicator = if clipped_right { 1 } else { 0 };
+        let view_chars = avail_after_left.saturating_sub(right_indicator);
+        let view_start = h_scroll.min(total_line_chars);
+        let view_end = (view_start + view_chars).min(total_line_chars);
+
+        // Line number
+        let line_num_str = format!("{:>width$}", line_idx + 1, width = num_display_width);
+        if clipped_left {
+            spans.push(Span::styled(line_num_str, text_style));
+            spans.push(Span::styled("\u{25C2}", dim_arrow_style)); // ◂
+        } else {
+            spans.push(Span::styled(format!("{} ", line_num_str), text_style));
+        }
+
+        let line_sel =
+            sel_range.and_then(|(s, e)| selection_cols_for_line(&ds.edit_buffer, s, e, line_idx));
+
+        // Render the visible viewport of this line
+        if let Some((sc, ec)) = line_sel {
+            for (idx, ch) in line_chars
+                .iter()
+                .enumerate()
+                .skip(view_start)
+                .take(view_end - view_start)
+            {
+                let s = if idx >= sc && idx < ec {
+                    selection_style
+                } else {
+                    bright_style
+                };
+                spans.push(Span::styled(ch.to_string(), s));
+            }
+            if sc == ec && total_line_chars == 0 && !has_cursor {
+                spans.push(Span::styled(" ", selection_style));
+            }
+            if has_cursor && cursor_col >= total_line_chars && cursor_col >= view_start {
+                spans.push(Span::styled(" ", cursor_style));
+            }
+        } else if has_cursor {
+            let col = cursor_col.min(total_line_chars);
+            for (idx, ch) in line_chars
+                .iter()
+                .enumerate()
+                .skip(view_start)
+                .take(view_end - view_start)
+            {
+                if idx == col {
+                    spans.push(Span::styled(ch.to_string(), cursor_style));
+                } else {
+                    spans.push(Span::styled(ch.to_string(), bright_style));
+                }
+            }
+            if col >= total_line_chars && col >= view_start {
+                spans.push(Span::styled(" ", cursor_style));
+            }
+        } else if view_start < view_end {
+            let slice: String = line_chars[view_start..view_end].iter().collect();
+            spans.push(Span::styled(slice, bright_style));
+        }
+
+        // Right clip indicator
+        if clipped_right {
+            spans.push(Span::styled("\u{25B8}", dim_arrow_style)); // ▸
+        }
+
+        display_lines.push((Some(item_index), Line::from(spans)));
+    }
+
+    // Scroll indicator if there are more lines than visible
+    if total_lines > visible_lines {
+        let dim_style = Style::default().fg(app.theme.dim).bg(app.theme.background);
+        let indicator = format!(
+            "{}[{}/{}]",
+            " ".repeat(BASE_INDENT),
+            editor_scroll + visible_lines,
+            total_lines
+        );
+        display_lines.push((
+            Some(item_index),
+            Line::from(Span::styled(indicator, dim_style)),
+        ));
+    }
+
+    // Write back adjusted h_scroll
+    if let Some(ds_mut) = app.detail_state.as_mut() {
+        ds_mut.note_h_scroll = h_scroll;
+    }
 }

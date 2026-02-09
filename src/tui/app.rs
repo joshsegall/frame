@@ -773,6 +773,10 @@ pub struct App {
     pub recent_cursor: usize,
     /// Scroll offset for inbox view
     pub inbox_scroll: usize,
+    /// Index of inbox item whose note is being edited (None when not editing)
+    pub inbox_note_index: Option<usize>,
+    /// Scroll offset for the inline note editor in inbox view
+    pub inbox_note_editor_scroll: usize,
     /// Scroll offset for recent view
     pub recent_scroll: usize,
     /// Help overlay visible
@@ -955,6 +959,8 @@ impl App {
             inbox_cursor: 0,
             recent_cursor: 0,
             inbox_scroll: 0,
+            inbox_note_index: None,
+            inbox_note_editor_scroll: 0,
             recent_scroll: 0,
             show_help: false,
             help_scroll: 0,

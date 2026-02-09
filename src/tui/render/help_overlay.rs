@@ -339,6 +339,7 @@ fn build_inbox_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("p".into(), "Push to top".into()),
         HelpEntry::Binding("e".into(), "Edit title".into()),
         HelpEntry::Binding("t".into(), "Edit tags".into()),
+        HelpEntry::Binding("n".into(), "Edit note".into()),
         HelpEntry::Binding("x".into(), "Delete item".into()),
         HelpEntry::Binding("m".into(), "Move mode".into()),
     ];

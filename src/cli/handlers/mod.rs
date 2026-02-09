@@ -650,7 +650,13 @@ fn cmd_tracks(json: bool) -> Result<(), Box<dyn std::error::Error>> {
                 .cloned()
                 .unwrap_or_default();
             let is_cc = project.config.agent.cc_focus.as_deref() == Some(&tc.id);
-            let entry = (tc.id.clone(), tc.name.clone(), prefix, tc.file.clone(), is_cc);
+            let entry = (
+                tc.id.clone(),
+                tc.name.clone(),
+                prefix,
+                tc.file.clone(),
+                is_cc,
+            );
             match tc.state.as_str() {
                 "active" => active_entries.push(entry),
                 "shelved" => shelved_entries.push(entry),
@@ -692,7 +698,10 @@ fn cmd_tracks(json: bool) -> Result<(), Box<dyn std::error::Error>> {
         let print_header = |label: &str| {
             println!(
                 " {:<name_w$}  {:<id_w$}  {:<pfx_w$}  {:<file_w$}",
-                label, "id", "pfx", "file",
+                label,
+                "id",
+                "pfx",
+                "file",
                 name_w = name_w,
                 id_w = id_w,
                 pfx_w = pfx_w,
@@ -700,18 +709,21 @@ fn cmd_tracks(json: bool) -> Result<(), Box<dyn std::error::Error>> {
             );
         };
 
-        let print_row =
-            |name: &str, id: &str, pfx: &str, file: &str, is_cc: bool| {
-                let cc_str = if is_cc { "  cc" } else { "" };
-                println!(
-                    " {:<name_w$}  {:<id_w$}  {:<pfx_w$}  {:<file_w$}{}",
-                    name, id, pfx, file, cc_str,
-                    name_w = name_w,
-                    id_w = id_w,
-                    pfx_w = pfx_w,
-                    file_w = file_w,
-                );
-            };
+        let print_row = |name: &str, id: &str, pfx: &str, file: &str, is_cc: bool| {
+            let cc_str = if is_cc { "  cc" } else { "" };
+            println!(
+                " {:<name_w$}  {:<id_w$}  {:<pfx_w$}  {:<file_w$}{}",
+                name,
+                id,
+                pfx,
+                file,
+                cc_str,
+                name_w = name_w,
+                id_w = id_w,
+                pfx_w = pfx_w,
+                file_w = file_w,
+            );
+        };
 
         if !active_entries.is_empty() {
             print_header("Active");
@@ -818,27 +830,32 @@ fn cmd_stats(args: StatsArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
         let print_header = |label: &str| {
             println!(
                 " {:<name_w$}  {:<pfx_w$}  {:>4}  {:>4}  {:>4}  {:>4}  {:>4}",
-                label, "pfx", "[ ]", "[>]", "[-]", "[x]", "[~]",
+                label,
+                "pfx",
+                "[ ]",
+                "[>]",
+                "[-]",
+                "[x]",
+                "[~]",
                 name_w = name_w,
                 pfx_w = pfx_w,
             );
         };
 
-        let print_row =
-            |name: &str, pfx: &str, stats: &track_ops::TrackStats| {
-                println!(
-                    " {:<name_w$}  {:<pfx_w$}  {:>4}  {:>4}  {:>4}  {:>4}  {:>4}",
-                    name,
-                    pfx,
-                    stats.todo,
-                    stats.active,
-                    stats.blocked,
-                    stats.done,
-                    stats.parked,
-                    name_w = name_w,
-                    pfx_w = pfx_w,
-                );
-            };
+        let print_row = |name: &str, pfx: &str, stats: &track_ops::TrackStats| {
+            println!(
+                " {:<name_w$}  {:<pfx_w$}  {:>4}  {:>4}  {:>4}  {:>4}  {:>4}",
+                name,
+                pfx,
+                stats.todo,
+                stats.active,
+                stats.blocked,
+                stats.done,
+                stats.parked,
+                name_w = name_w,
+                pfx_w = pfx_w,
+            );
+        };
 
         if !active_entries.is_empty() {
             print_header("Active");

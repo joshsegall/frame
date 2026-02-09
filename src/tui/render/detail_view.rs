@@ -441,8 +441,7 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             note_gutter_width = gutter_width;
 
             // Multi-line editing mode
-            let header_prefix =
-                format!("{}\u{258E} ", " ".repeat(gutter_width.saturating_sub(2)));
+            let header_prefix = format!("{}\u{258E} ", " ".repeat(gutter_width.saturating_sub(2)));
             let header_spans: Vec<Span> = vec![
                 Span::styled(header_prefix, region_indicator_style),
                 Span::styled("note:", dim_style),
@@ -519,10 +518,7 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                         spans.push(Span::styled(line_num_str, text_style));
                         spans.push(Span::styled("\u{25C2}", dim_arrow_style)); // ◂
                     } else {
-                        spans.push(Span::styled(
-                            format!("{} ", line_num_str),
-                            text_style,
-                        ));
+                        spans.push(Span::styled(format!("{} ", line_num_str), text_style));
                     }
 
                     let line_sel = sel_range.and_then(|(s, e)| {
@@ -600,10 +596,7 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             note_gutter_width = gutter_width;
 
             let header_prefix = if is_active {
-                format!(
-                    "{}\u{258E} ",
-                    " ".repeat(gutter_width.saturating_sub(2))
-                )
+                format!("{}\u{258E} ", " ".repeat(gutter_width.saturating_sub(2)))
             } else {
                 " ".repeat(gutter_width)
             };
@@ -628,8 +621,7 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                     in_code_block = !in_code_block;
                 }
 
-                let num_str =
-                    format!("{:>width$} ", line_num + 1, width = num_display_width);
+                let num_str = format!("{:>width$} ", line_num + 1, width = num_display_width);
                 if in_code_block || trimmed.starts_with("```") {
                     let spans: Vec<Span> = vec![
                         Span::styled(num_str, line_num_style),
@@ -641,19 +633,14 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                     body_lines.push(Line::from(spans));
                 } else {
                     // Wrap content separately to keep line number as a single span
-                    let content_spans =
-                        vec![Span::styled(note_line.to_string(), text_style)];
+                    let content_spans = vec![Span::styled(note_line.to_string(), text_style)];
                     let content_width = width.saturating_sub(gutter_width);
-                    let wrapped =
-                        wrap_styled_spans(content_spans, content_width, 0, bg);
+                    let wrapped = wrap_styled_spans(content_spans, content_width, 0, bg);
                     for (i, wrapped_line) in wrapped.into_iter().enumerate() {
                         let prefix = if i == 0 {
                             Span::styled(num_str.clone(), line_num_style)
                         } else {
-                            Span::styled(
-                                " ".repeat(gutter_width),
-                                Style::default().bg(bg),
-                            )
+                            Span::styled(" ".repeat(gutter_width), Style::default().bg(bg))
                         };
                         let mut line_spans = vec![prefix];
                         line_spans.extend(wrapped_line.spans);

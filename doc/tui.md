@@ -197,6 +197,7 @@ With selection active (Select mode):
 | `p` | Add new inbox item (top) |
 | `e` | Edit item title |
 | `t` | Edit item tags |
+| `n` | Edit item note (inline multi-line editor) |
 | `x` | Delete item (with confirmation) |
 | `m` | Reorder item (enter move mode) |
 | `Enter` | Triage item to a track |
@@ -286,7 +287,7 @@ With selection active (Select mode):
 | `Enter` | Accept suggestion and confirm edit |
 | `Esc` | Dismiss dropdown |
 
-**Multi-line note editing (Detail view):**
+**Multi-line note editing (Detail view, Inbox view):**
 
 | Key | Action |
 |-----|--------|

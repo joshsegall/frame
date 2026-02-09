@@ -140,6 +140,15 @@ pub fn filter_actions(query: &str, actions: &[PaletteAction]) -> Vec<ScoredActio
                 }
             }
 
+            // Also highlight shortcut independently if the combined
+            // match consumed all query chars in the label portion
+            if shortcut_matched.is_empty()
+                && !shortcut.is_empty()
+                && let Some((_, sc_indices)) = fuzzy_score(query, shortcut)
+            {
+                shortcut_matched = sc_indices;
+            }
+
             Some(ScoredAction {
                 action: a.clone(),
                 score,
@@ -601,7 +610,7 @@ fn static_actions() -> Vec<PaletteAction> {
             id: "edit_note",
             label: "Edit note".into(),
             shortcut: Some("n"),
-            contexts: &[ViewContext::DetailView],
+            contexts: &[ViewContext::DetailView, ViewContext::InboxView],
             category: ActionCategory::Edit,
         },
         PaletteAction {
