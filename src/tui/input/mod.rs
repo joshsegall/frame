@@ -2170,6 +2170,7 @@ fn perform_undo(app: &mut App) {
                     let tid = track_id.clone();
                     let taskid = task_id.clone();
                     app.cancel_pending_move(&tid, &taskid);
+                    app.cancel_pending_subtask_hide(&tid, &taskid);
                 }
             }
             Operation::Reopen {
@@ -3146,9 +3147,10 @@ fn task_state_action(app: &mut App, action: StateAction) {
         app.flash_state = Some(new_state);
         app.flash_task(&task_id);
 
-        // If transitioning away from Done, cancel any pending ToDone move
+        // If transitioning away from Done, cancel any pending ToDone move and subtask hide
         if old_state == crate::model::task::TaskState::Done {
             app.cancel_pending_move(&track_id, &task_id);
+            app.cancel_pending_subtask_hide(&track_id, &task_id);
         }
 
         app.undo_stack.push(Operation::StateChange {
@@ -3175,11 +3177,9 @@ fn task_state_action(app: &mut App, action: StateAction) {
 
         // If task is now Done and is a top-level Backlog task, schedule pending move
         if new_state == crate::model::task::TaskState::Done {
-            let is_top_level_backlog = task_ops::is_top_level_in_section(
-                App::find_track_in_project(&app.project, &track_id).unwrap(),
-                &task_id,
-                SectionKind::Backlog,
-            );
+            let track_ref = App::find_track_in_project(&app.project, &track_id).unwrap();
+            let is_top_level_backlog =
+                task_ops::is_top_level_in_section(track_ref, &task_id, SectionKind::Backlog);
             if is_top_level_backlog {
                 app.pending_moves.push(PendingMove {
                     kind: PendingMoveKind::ToDone,
@@ -3187,6 +3187,18 @@ fn task_state_action(app: &mut App, action: StateAction) {
                     task_id: task_id.clone(),
                     deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
                 });
+            } else {
+                // Subtask (not top-level in any section): schedule hide grace period
+                let is_top_level_parked =
+                    task_ops::is_top_level_in_section(track_ref, &task_id, SectionKind::Parked);
+                if !is_top_level_parked {
+                    app.pending_subtask_hides
+                        .push(crate::tui::app::PendingSubtaskHide {
+                            track_id: track_id.clone(),
+                            task_id: task_id.clone(),
+                            deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+                        });
+                }
             }
         }
     }
@@ -5672,15 +5684,17 @@ fn is_paragraph_boundary(item: &FlatItem) -> bool {
         } => *depth == 0 && !*is_context,
         FlatItem::ParkedSeparator => false,
         FlatItem::BulkMoveStandin { .. } => false,
+        FlatItem::DoneSummary { .. } => false,
     }
 }
 
-/// Check if a flat item is non-selectable (separator or context row)
+/// Check if a flat item is non-selectable (separator, context row, or done summary)
 fn is_non_selectable(item: &FlatItem) -> bool {
     match item {
         FlatItem::ParkedSeparator => true,
         FlatItem::Task { is_context, .. } => *is_context,
         FlatItem::BulkMoveStandin { .. } => false,
+        FlatItem::DoneSummary { .. } => true,
     }
 }
 

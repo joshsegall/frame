@@ -348,6 +348,14 @@ pub struct PendingMove {
     pub deadline: Instant,
 }
 
+/// A pending subtask hide with a grace period (subtask stays visible briefly after being marked done)
+#[derive(Debug, Clone)]
+pub struct PendingSubtaskHide {
+    pub track_id: String,
+    pub task_id: String,
+    pub deadline: Instant,
+}
+
 /// State filter for track view filtering
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StateFilter {
@@ -757,6 +765,13 @@ pub enum FlatItem {
     ParkedSeparator,
     /// Stand-in row during bulk move showing "━━━ N tasks ━━━"
     BulkMoveStandin { count: usize },
+    /// Summary row showing "X/Y done" for hidden done subtasks
+    DoneSummary {
+        depth: usize,
+        done_count: usize,
+        total_count: usize,
+        ancestor_last: Vec<bool>,
+    },
 }
 
 /// Main application state
@@ -876,6 +891,8 @@ pub struct App {
     pub flash_started: Option<Instant>,
     /// Pending section moves (grace period before moving tasks between sections)
     pub pending_moves: Vec<PendingMove>,
+    /// Pending subtask hides (grace period before hiding done subtasks)
+    pub pending_subtask_hides: Vec<PendingSubtaskHide>,
     /// Expanded task IDs in the Recent view (for tree structure)
     pub recent_expanded: HashSet<String>,
     /// Global filter state for track views (not persisted)
@@ -1015,6 +1032,7 @@ impl App {
             flash_detail_region: None,
             flash_started: None,
             pending_moves: Vec::new(),
+            pending_subtask_hides: Vec::new(),
             recent_expanded: HashSet::new(),
             filter_state: FilterState::default(),
             filter_pending: false,
@@ -1212,6 +1230,26 @@ impl App {
                 task.mark_dirty();
                 Some(pm.track_id.clone())
             }
+        }
+    }
+
+    /// Cancel a pending subtask hide for a specific task.
+    pub fn cancel_pending_subtask_hide(&mut self, track_id: &str, task_id: &str) {
+        self.pending_subtask_hides
+            .retain(|ph| ph.track_id != track_id || ph.task_id != task_id);
+    }
+
+    /// Flush expired subtask hides (remove entries past deadline — purely visual, no file save).
+    pub fn flush_expired_subtask_hides(&mut self) {
+        let now = Instant::now();
+        self.pending_subtask_hides.retain(|ph| now < ph.deadline);
+    }
+
+    /// Reset all subtask hide deadlines (called on every keypress).
+    pub fn reset_pending_subtask_hide_deadlines(&mut self) {
+        let new_deadline = Instant::now() + std::time::Duration::from_secs(5);
+        for ph in &mut self.pending_subtask_hides {
+            ph.deadline = new_deadline;
         }
     }
 
@@ -2150,17 +2188,42 @@ impl App {
         let state = self.track_states.get(track_id);
         let expanded = state.map(|s| &s.expanded);
 
+        // Build set of subtask IDs still in grace period (visible despite being done)
+        let now = Instant::now();
+        let grace_ids: HashSet<String> = self
+            .pending_subtask_hides
+            .iter()
+            .filter(|ph| ph.track_id == track_id && now < ph.deadline)
+            .map(|ph| ph.task_id.clone())
+            .collect();
+
         let mut items = Vec::new();
 
         // Backlog tasks
         let backlog = track.backlog();
-        flatten_tasks(backlog, SectionKind::Backlog, 0, &mut items, expanded, &[]);
+        flatten_tasks(
+            backlog,
+            SectionKind::Backlog,
+            0,
+            &mut items,
+            expanded,
+            &[],
+            &grace_ids,
+        );
 
         // Parked section (if non-empty)
         let parked = track.parked();
         if !parked.is_empty() {
             items.push(FlatItem::ParkedSeparator);
-            flatten_tasks(parked, SectionKind::Parked, 0, &mut items, expanded, &[]);
+            flatten_tasks(
+                parked,
+                SectionKind::Parked,
+                0,
+                &mut items,
+                expanded,
+                &[],
+                &grace_ids,
+            );
         }
 
         // Done tasks are NOT shown in track view (they're in Recent)
@@ -2236,10 +2299,21 @@ fn flatten_tasks(
     items: &mut Vec<FlatItem>,
     expanded: Option<&HashSet<String>>,
     ancestor_last: &[bool],
+    grace_ids: &HashSet<String>,
 ) {
-    flatten_tasks_inner(tasks, section, depth, items, expanded, ancestor_last, &[]);
+    flatten_tasks_inner(
+        tasks,
+        section,
+        depth,
+        items,
+        expanded,
+        ancestor_last,
+        &[],
+        grace_ids,
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn flatten_tasks_inner(
     tasks: &[Task],
     section: SectionKind,
@@ -2248,41 +2322,129 @@ fn flatten_tasks_inner(
     expanded: Option<&HashSet<String>>,
     ancestor_last: &[bool],
     parent_path: &[usize],
+    grace_ids: &HashSet<String>,
 ) {
     let count = tasks.len();
-    for (i, task) in tasks.iter().enumerate() {
-        let is_last = i == count - 1;
-        let has_children = !task.subtasks.is_empty();
 
-        let mut path = parent_path.to_vec();
-        path.push(i);
+    // For subtasks (depth > 0), determine which are visible vs hidden
+    if depth > 0 {
+        let total_count = count;
+        let mut visible_indices: Vec<usize> = Vec::new();
+        let mut done_count = 0usize;
 
-        let key = task_expand_key(task, section, &path);
-        let is_expanded = has_children && expanded.is_some_and(|set| set.contains(&key));
+        for (i, task) in tasks.iter().enumerate() {
+            let is_done = task.state == TaskState::Done;
+            if is_done {
+                done_count += 1;
+                // Visible during grace period
+                let in_grace = task.id.as_ref().is_some_and(|id| grace_ids.contains(id));
+                if in_grace {
+                    visible_indices.push(i);
+                }
+            } else {
+                visible_indices.push(i);
+            }
+        }
 
-        items.push(FlatItem::Task {
-            section,
-            path: path.clone(),
-            depth,
-            has_children,
-            is_expanded,
-            is_last_sibling: is_last,
-            ancestor_last: ancestor_last.to_vec(),
-            is_context: false,
-        });
+        let hidden_count = done_count.saturating_sub(
+            // done tasks that are in grace (still visible)
+            tasks
+                .iter()
+                .filter(|t| {
+                    t.state == TaskState::Done
+                        && t.id.as_ref().is_some_and(|id| grace_ids.contains(id))
+                })
+                .count(),
+        );
 
-        if is_expanded {
-            let mut new_ancestor_last = ancestor_last.to_vec();
-            new_ancestor_last.push(is_last);
-            flatten_tasks_inner(
-                &task.subtasks,
+        // Insert DoneSummary if any subtasks are actually hidden
+        if hidden_count > 0 {
+            items.push(FlatItem::DoneSummary {
+                depth,
+                done_count,
+                total_count,
+                ancestor_last: ancestor_last.to_vec(),
+            });
+        }
+
+        // Flatten only visible subtasks
+        let visible_count = visible_indices.len();
+        for (vi, &real_idx) in visible_indices.iter().enumerate() {
+            let task = &tasks[real_idx];
+            // is_last_sibling: last visible subtask, and no DoneSummary comes after
+            // (DoneSummary is before visible subtasks, so last visible is truly last)
+            let is_last = vi == visible_count - 1;
+            let has_children = !task.subtasks.is_empty();
+
+            let mut path = parent_path.to_vec();
+            path.push(real_idx); // use real index to preserve resolve_task_from_flat correctness
+
+            let key = task_expand_key(task, section, &path);
+            let is_expanded = has_children && expanded.is_some_and(|set| set.contains(&key));
+
+            items.push(FlatItem::Task {
                 section,
-                depth + 1,
-                items,
-                expanded,
-                &new_ancestor_last,
-                &path,
-            );
+                path: path.clone(),
+                depth,
+                has_children,
+                is_expanded,
+                is_last_sibling: is_last,
+                ancestor_last: ancestor_last.to_vec(),
+                is_context: false,
+            });
+
+            if is_expanded {
+                let mut new_ancestor_last = ancestor_last.to_vec();
+                new_ancestor_last.push(is_last);
+                flatten_tasks_inner(
+                    &task.subtasks,
+                    section,
+                    depth + 1,
+                    items,
+                    expanded,
+                    &new_ancestor_last,
+                    &path,
+                    grace_ids,
+                );
+            }
+        }
+    } else {
+        // Top-level tasks: no done-subtask hiding at this level
+        for (i, task) in tasks.iter().enumerate() {
+            let is_last = i == count - 1;
+            let has_children = !task.subtasks.is_empty();
+
+            let mut path = parent_path.to_vec();
+            path.push(i);
+
+            let key = task_expand_key(task, section, &path);
+            let is_expanded = has_children && expanded.is_some_and(|set| set.contains(&key));
+
+            items.push(FlatItem::Task {
+                section,
+                path: path.clone(),
+                depth,
+                has_children,
+                is_expanded,
+                is_last_sibling: is_last,
+                ancestor_last: ancestor_last.to_vec(),
+                is_context: false,
+            });
+
+            if is_expanded {
+                let mut new_ancestor_last = ancestor_last.to_vec();
+                new_ancestor_last.push(is_last);
+                flatten_tasks_inner(
+                    &task.subtasks,
+                    section,
+                    depth + 1,
+                    items,
+                    expanded,
+                    &new_ancestor_last,
+                    &path,
+                    grace_ids,
+                );
+            }
         }
     }
 }
@@ -2369,6 +2531,22 @@ fn apply_filter(items: &mut Vec<FlatItem>, track: &Track, filter: &FilterState, 
             }
         }
         // ParkedSeparator: keep if any parked task is kept (handled below)
+    }
+
+    // Keep DoneSummary if its parent task is kept
+    for i in 0..items.len() {
+        if let FlatItem::DoneSummary { depth, .. } = &items[i] {
+            let summary_depth = *depth;
+            // Walk backwards to find the nearest Task at depth-1 (the parent)
+            for j in (0..i).rev() {
+                if let FlatItem::Task { depth: d, .. } = &items[j]
+                    && *d == summary_depth.saturating_sub(1)
+                {
+                    keep[i] = keep[j];
+                    break;
+                }
+            }
+        }
     }
 
     // Keep ParkedSeparator only if at least one Parked task is kept
@@ -2791,6 +2969,11 @@ fn run_event_loop(
             }
         }
 
+        // Flush expired subtask hides (purely visual, no file save needed)
+        if !app.pending_subtask_hides.is_empty() {
+            app.flush_expired_subtask_hides();
+        }
+
         terminal.draw(|frame| render::render(frame, app))?;
 
         // Poll for file watcher events
@@ -2857,6 +3040,9 @@ fn run_event_loop(
                 if !app.pending_moves.is_empty() {
                     app.reset_pending_move_deadlines();
                 }
+                if !app.pending_subtask_hides.is_empty() {
+                    app.reset_pending_subtask_hide_deadlines();
+                }
 
                 // Flush all pending moves on view change
                 if app.view != old_view && !app.pending_moves.is_empty() {
@@ -2864,6 +3050,11 @@ fn run_event_loop(
                     for tid in &modified {
                         let _ = app.save_track(tid);
                     }
+                }
+
+                // Clear subtask hide grace periods on view/tab change
+                if app.view != old_view {
+                    app.pending_subtask_hides.clear();
                 }
 
                 // Process pending reload when returning to Navigate mode
@@ -2921,6 +3112,22 @@ fn is_repeatable_key(mode: &Mode, key: &crossterm::event::KeyEvent) -> bool {
 
 /// Handle an external file reload (when specific changed paths are known)
 fn handle_external_reload(app: &mut App, paths: &[std::path::PathBuf]) {
+    // Clear subtask hide grace entries for affected tracks
+    let affected_track_ids: HashSet<String> = paths
+        .iter()
+        .filter_map(|p| {
+            let file_name = p.file_name()?.to_str()?;
+            app.project
+                .config
+                .tracks
+                .iter()
+                .find(|tc| tc.file == file_name || tc.file.ends_with(&format!("/{}", file_name)))
+                .map(|tc| tc.id.clone())
+        })
+        .collect();
+    app.pending_subtask_hides
+        .retain(|ph| !affected_track_ids.contains(&ph.track_id));
+
     let conflict_task = app.reload_changed_files(paths);
     if conflict_task.is_some() {
         // Save the orphaned edit text in conflict_text

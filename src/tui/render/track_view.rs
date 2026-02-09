@@ -194,6 +194,21 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
             FlatItem::BulkMoveStandin { count } => {
                 lines.push(render_bulk_standin(app, *count, area.width as usize));
             }
+            FlatItem::DoneSummary {
+                depth,
+                done_count,
+                total_count,
+                ancestor_last,
+            } => {
+                lines.push(render_done_summary(
+                    app,
+                    *depth,
+                    *done_count,
+                    *total_count,
+                    ancestor_last,
+                    area.width as usize,
+                ));
+            }
         }
     }
 
@@ -758,6 +773,51 @@ fn render_bulk_standin<'a>(app: &'a App, count: usize, width: usize) -> Line<'a>
     );
 
     spans.push(Span::styled(line_text, style));
+    Line::from(spans)
+}
+
+/// Render the "X/Y done" summary row for hidden done subtasks
+fn render_done_summary<'a>(
+    app: &'a App,
+    _depth: usize,
+    done_count: usize,
+    total_count: usize,
+    ancestor_last: &[bool],
+    width: usize,
+) -> Line<'a> {
+    let bg = app.theme.background;
+    let dim_style = Style::default().fg(app.theme.dim).bg(bg);
+
+    let mut spans: Vec<Span> = Vec::new();
+
+    // Column 0: space (never selectable)
+    spans.push(Span::styled(" ", Style::default().bg(bg)));
+
+    // Tree indentation (same logic as subtask rendering)
+    for (d, is_ancestor_last) in ancestor_last.iter().enumerate() {
+        if d == 0 || *is_ancestor_last {
+            spans.push(Span::styled("   ", dim_style));
+        } else {
+            spans.push(Span::styled("\u{2502}  ", dim_style)); // │ + 2 spaces
+        }
+    }
+
+    // Tree char: vertical bar + space (continuation, not a branch)
+    spans.push(Span::styled("\u{2502} ", dim_style)); // │ + space
+
+    // Summary text
+    let text = format!("{}/{} done", done_count, total_count);
+    spans.push(Span::styled(text.clone(), dim_style));
+
+    // Fill remaining width
+    let used: usize = 1 + ancestor_last.len() * 3 + 2 + text.len();
+    if width > used {
+        spans.push(Span::styled(
+            " ".repeat(width - used),
+            Style::default().bg(bg),
+        ));
+    }
+
     Line::from(spans)
 }
 
