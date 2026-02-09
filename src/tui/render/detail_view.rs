@@ -177,9 +177,13 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut edit_anchor_line: Option<usize> = None; // index into body_lines
     #[allow(unused_assignments)]
     let mut note_header_idx: usize = 0; // index into body_lines
+    // Track body line ranges per region for targeted flash
+    let mut region_line_ranges: std::collections::HashMap<DetailRegion, (usize, usize)> =
+        std::collections::HashMap::new();
 
     // --- Tags region ---
     {
+        let region_start = body_lines.len();
         let is_active = current_region == DetailRegion::Tags;
         if is_active {
             body_active_line = Some(body_lines.len());
@@ -214,6 +218,9 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 body_active_line = Some(start);
             }
         }
+        if body_lines.len() > region_start {
+            region_line_ranges.insert(DetailRegion::Tags, (region_start, body_lines.len() - 1));
+        }
     }
 
     // --- Added region ---
@@ -234,6 +241,7 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // --- Deps region ---
     {
+        let region_start = body_lines.len();
         let is_active = current_region == DetailRegion::Deps;
         if is_active {
             body_active_line = Some(body_lines.len());
@@ -287,10 +295,14 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             spans.push(Span::styled("(none)", dim_style));
             body_lines.push(Line::from(spans));
         }
+        if body_lines.len() > region_start {
+            region_line_ranges.insert(DetailRegion::Deps, (region_start, body_lines.len() - 1));
+        }
     }
 
     // --- Spec region ---
     {
+        let region_start = body_lines.len();
         let is_active = current_region == DetailRegion::Spec;
         if is_active {
             body_active_line = Some(body_lines.len());
@@ -334,10 +346,14 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             spans.push(Span::styled("(none)", dim_style));
             body_lines.push(Line::from(spans));
         }
+        if body_lines.len() > region_start {
+            region_line_ranges.insert(DetailRegion::Spec, (region_start, body_lines.len() - 1));
+        }
     }
 
     // --- Refs region ---
     {
+        let region_start = body_lines.len();
         let is_active = current_region == DetailRegion::Refs;
         if is_active {
             body_active_line = Some(body_lines.len());
@@ -384,6 +400,9 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             spans.push(Span::styled("ref: ", dim_style));
             spans.push(Span::styled("(none)", dim_style));
             body_lines.push(Line::from(spans));
+        }
+        if body_lines.len() > region_start {
+            region_line_ranges.insert(DetailRegion::Refs, (region_start, body_lines.len() - 1));
         }
     }
 
@@ -594,6 +613,9 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
     let note_content_end_idx = body_lines.len().saturating_sub(1);
+    if note_content_end_idx >= note_header_idx {
+        region_line_ranges.insert(DetailRegion::Note, (note_header_idx, note_content_end_idx));
+    }
 
     // --- Subtasks region ---
     if !task.subtasks.is_empty() {
@@ -639,9 +661,18 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
         None => UNDO_FLASH_COLORS,
     };
 
-    // Flash always highlights the title row in the header (where the state checkbox lives)
+    // Flash highlights the edited region: body region for field edits, header for state changes
     if is_flashing {
-        apply_flash_to_lines(&mut header_lines, title_line_start, title_line_end, flash_bg, flash_border, width);
+        if let Some(region) = app.flash_detail_region {
+            if let Some(&(start, end)) = region_line_ranges.get(&region) {
+                apply_flash_to_lines(&mut body_lines, start, end, flash_bg, flash_border, width);
+            } else {
+                // Region not visible — fall back to header
+                apply_flash_to_lines(&mut header_lines, title_line_start, title_line_end, flash_bg, flash_border, width);
+            }
+        } else {
+            apply_flash_to_lines(&mut header_lines, title_line_start, title_line_end, flash_bg, flash_border, width);
+        }
     }
 
     // Store total lines, note header, and note content end for input handler use

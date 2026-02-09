@@ -2544,7 +2544,9 @@ fn navigate_to_undo_target(app: &mut App, nav: &UndoNavTarget) {
                 app.flash_task(task_id);
 
                 // If the operation targets a detail region, navigate to it
+                // and flash the specific region instead of the header
                 if let Some(region) = detail_region {
+                    app.flash_detail_region = Some(*region);
                     if !stay_in_detail {
                         let task_exists = App::find_track_in_project(&app.project, track_id)
                             .and_then(|track| task_ops::find_task_in_track(track, task_id))

@@ -43,7 +43,7 @@ pub enum View {
 }
 
 /// Regions in the detail view that can be navigated
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DetailRegion {
     Title,
     Tags,
@@ -857,6 +857,8 @@ pub struct App {
     pub flash_task_ids: HashSet<String>,
     /// Track ID to flash-highlight in tracks view after undo/redo
     pub flash_track_id: Option<String>,
+    /// Detail region to flash (for field edit undo — flashes the specific region, not header)
+    pub flash_detail_region: Option<DetailRegion>,
     /// When the flash started (for auto-clearing after timeout)
     pub flash_started: Option<Instant>,
     /// Pending section moves (grace period before moving tasks between sections)
@@ -993,6 +995,7 @@ impl App {
             flash_task_id: None,
             flash_task_ids: HashSet::new(),
             flash_track_id: None,
+            flash_detail_region: None,
             flash_started: None,
             pending_moves: Vec::new(),
             recent_expanded: HashSet::new(),
@@ -1078,6 +1081,7 @@ impl App {
         self.flash_task_id = Some(task_id.to_string());
         self.flash_task_ids.clear();
         self.flash_track_id = None;
+        self.flash_detail_region = None;
         self.flash_started = Some(Instant::now());
     }
 
@@ -1130,6 +1134,7 @@ impl App {
                 self.flash_task_id = None;
                 self.flash_task_ids.clear();
                 self.flash_track_id = None;
+                self.flash_detail_region = None;
                 self.flash_started = None;
             }
         }
