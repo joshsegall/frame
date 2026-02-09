@@ -6856,8 +6856,8 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                 }
             }
         }
-        // Enter: newline (delete selection first)
-        (KeyModifiers::NONE, KeyCode::Enter) => {
+        // Enter / Shift+Enter / Ctrl+Enter: newline (delete selection first)
+        (KeyModifiers::NONE | KeyModifiers::SHIFT | KeyModifiers::CONTROL, KeyCode::Enter) => {
             if let Some(ds) = &mut app.detail_state {
                 delete_multiline_selection(ds);
                 let mut edit_lines: Vec<String> =
@@ -7021,37 +7021,65 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                 ds.edit_cursor_col = line_len;
             }
         }
-        // Word movement (Alt+arrow, with or without Shift)
+        // Word movement (Alt+arrow, with or without Shift); crosses line boundaries
         (m, KeyCode::Left) if m.contains(KeyModifiers::ALT) => {
             if let Some(ds) = &mut app.detail_state {
                 let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
-                let line = &edit_lines[ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1))];
-                ds.edit_cursor_col = word_boundary_left(line, ds.edit_cursor_col);
+                let line_idx = ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1));
+                let new_col = word_boundary_left(edit_lines[line_idx], ds.edit_cursor_col);
+                if new_col == ds.edit_cursor_col && ds.edit_cursor_col == 0 && line_idx > 0 {
+                    // At start of line: jump to end of previous line
+                    ds.edit_cursor_line = line_idx - 1;
+                    ds.edit_cursor_col = edit_lines[line_idx - 1].len();
+                } else {
+                    ds.edit_cursor_col = new_col;
+                }
             }
         }
         (m, KeyCode::Right) if m.contains(KeyModifiers::ALT) => {
             if let Some(ds) = &mut app.detail_state {
                 let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
-                let line = &edit_lines[ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1))];
-                ds.edit_cursor_col = word_boundary_right(line, ds.edit_cursor_col);
+                let line_idx = ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1));
+                let line_len = edit_lines[line_idx].len();
+                let new_col = word_boundary_right(edit_lines[line_idx], ds.edit_cursor_col);
+                if new_col == ds.edit_cursor_col && ds.edit_cursor_col == line_len && line_idx + 1 < edit_lines.len() {
+                    // At end of line: jump to start of next line
+                    ds.edit_cursor_line = line_idx + 1;
+                    ds.edit_cursor_col = 0;
+                } else {
+                    ds.edit_cursor_col = new_col;
+                }
             }
         }
-        // Readline word movement: Alt+B (backward) / Alt+F (forward)
+        // Readline word movement: Alt+B (backward) / Alt+F (forward); crosses line boundaries
         (m, KeyCode::Char('b')) if m.contains(KeyModifiers::ALT) => {
             if let Some(ds) = &mut app.detail_state {
                 let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
-                let line = &edit_lines[ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1))];
-                ds.edit_cursor_col = word_boundary_left(line, ds.edit_cursor_col);
+                let line_idx = ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1));
+                let new_col = word_boundary_left(edit_lines[line_idx], ds.edit_cursor_col);
+                if new_col == ds.edit_cursor_col && ds.edit_cursor_col == 0 && line_idx > 0 {
+                    ds.edit_cursor_line = line_idx - 1;
+                    ds.edit_cursor_col = edit_lines[line_idx - 1].len();
+                } else {
+                    ds.edit_cursor_col = new_col;
+                }
             }
         }
         (m, KeyCode::Char('f')) if m.contains(KeyModifiers::ALT) => {
             if let Some(ds) = &mut app.detail_state {
                 let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
-                let line = &edit_lines[ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1))];
-                ds.edit_cursor_col = word_boundary_right(line, ds.edit_cursor_col);
+                let line_idx = ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1));
+                let line_len = edit_lines[line_idx].len();
+                let new_col = word_boundary_right(edit_lines[line_idx], ds.edit_cursor_col);
+                if new_col == ds.edit_cursor_col && ds.edit_cursor_col == line_len && line_idx + 1 < edit_lines.len() {
+                    ds.edit_cursor_line = line_idx + 1;
+                    ds.edit_cursor_col = 0;
+                } else {
+                    ds.edit_cursor_col = new_col;
+                }
             }
         }
-        // Word backspace (Alt or Ctrl): delete selection or word
+        // Word backspace (Alt or Ctrl): delete selection or word (joins lines at col 0)
         (m, KeyCode::Backspace)
             if m.contains(KeyModifiers::ALT) || m.contains(KeyModifiers::CONTROL) =>
         {
@@ -7062,9 +7090,18 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                     ds.edit_buffer.split('\n').map(String::from).collect();
                 let line_idx = ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1));
                 let col = ds.edit_cursor_col.min(edit_lines[line_idx].len());
-                let new_pos = word_boundary_left(&edit_lines[line_idx], col);
-                edit_lines[line_idx].drain(new_pos..col);
-                ds.edit_cursor_col = new_pos;
+                if col == 0 && line_idx > 0 {
+                    // At start of line: join with previous line
+                    let current_line = edit_lines.remove(line_idx);
+                    let prev_len = edit_lines[line_idx - 1].len();
+                    edit_lines[line_idx - 1].push_str(&current_line);
+                    ds.edit_cursor_line = line_idx - 1;
+                    ds.edit_cursor_col = prev_len;
+                } else {
+                    let new_pos = word_boundary_left(&edit_lines[line_idx], col);
+                    edit_lines[line_idx].drain(new_pos..col);
+                    ds.edit_cursor_col = new_pos;
+                }
                 ds.edit_buffer = edit_lines.join("\n");
             }
             snapshot_multiline(app);
