@@ -39,6 +39,8 @@ programmatic access. Both read and write the same markdown files.
 cargo install frame
 ```
 
+Or download a pre-built binary from [GitHub Releases](https://github.com/joshsegall/frame/releases).
+
 ## Quick start
 
 ```bash
