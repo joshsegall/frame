@@ -5000,7 +5000,7 @@ fn handle_move(app: &mut App, key: KeyEvent) {
 
     match (key.modifiers, key.code) {
         // Confirm
-        (_, KeyCode::Enter) => {
+        (_, KeyCode::Enter) | (_, KeyCode::Char('m')) => {
             if let Some(ms) = app.move_state.take() {
                 match ms {
                     MoveState::Task {
