@@ -62,7 +62,7 @@ pub fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Commands::Tracks => cmd_tracks(json),
-            Commands::Stats => cmd_stats(json),
+            Commands::Stats(args) => cmd_stats(args, json),
             Commands::Recent(args) => cmd_recent(args, json),
             Commands::Deps(args) => cmd_deps(args),
             Commands::Check => cmd_check(json),
@@ -664,32 +664,51 @@ fn cmd_tracks(json: bool) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn cmd_stats(json: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_stats(args: StatsArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let project = load_project_cwd()?;
+    let mut active_entries = Vec::new();
+    let mut shelved_entries = Vec::new();
     let mut totals = track_ops::TrackStats::default();
-    let mut entries = Vec::new();
 
     for tc in &project.config.tracks {
-        if tc.state != "active" {
+        let is_active = tc.state == "active";
+        if !is_active && !args.all {
             continue;
         }
         let stats = find_track(&project, &tc.id)
             .map(track_ops::task_counts)
             .unwrap_or_default();
+        let prefix = project
+            .config
+            .ids
+            .prefixes
+            .get(&tc.id)
+            .cloned()
+            .unwrap_or_default();
+
         totals.active += stats.active;
         totals.blocked += stats.blocked;
         totals.todo += stats.todo;
         totals.parked += stats.parked;
         totals.done += stats.done;
 
-        entries.push((tc.id.clone(), tc.name.clone(), stats));
+        let entry = (tc.id.clone(), tc.name.clone(), prefix, stats);
+        if is_active {
+            active_entries.push(entry);
+        } else {
+            shelved_entries.push(entry);
+        }
     }
 
     if json {
+        let all_entries: Vec<_> = active_entries
+            .iter()
+            .chain(shelved_entries.iter())
+            .collect();
         let output = StatsJson {
-            tracks: entries
+            tracks: all_entries
                 .iter()
-                .map(|(id, name, stats)| TrackStatsEntryJson {
+                .map(|(id, name, _, stats)| TrackStatsEntryJson {
                     id: id.clone(),
                     name: name.clone(),
                     stats: stats_to_json(stats),
@@ -699,16 +718,78 @@ fn cmd_stats(json: bool) -> Result<(), Box<dyn std::error::Error>> {
         };
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
-        for (id, name, stats) in &entries {
+        // Compute column widths across all entries
+        let all_entries: Vec<_> = active_entries
+            .iter()
+            .chain(shelved_entries.iter())
+            .collect();
+        let name_w = all_entries
+            .iter()
+            .map(|(_, name, _, _)| name.len())
+            .max()
+            .unwrap_or(0)
+            .max(5); // "Total"
+        let pfx_w = all_entries
+            .iter()
+            .map(|(_, _, pfx, _)| pfx.len())
+            .max()
+            .unwrap_or(0)
+            .max(3); // "pfx"
+
+        let print_header = |label: &str| {
             println!(
-                "  {} ({})  {}▸ {}⊘ {}○ {}◇ {}✓",
-                name, id, stats.active, stats.blocked, stats.todo, stats.parked, stats.done
+                " {:<name_w$}  {:<pfx_w$}  {:>4}  {:>4}  {:>4}  {:>4}  {:>4}",
+                label, "pfx", "[ ]", "[>]", "[-]", "[x]", "[~]",
+                name_w = name_w,
+                pfx_w = pfx_w,
             );
+        };
+
+        let print_row =
+            |name: &str, pfx: &str, stats: &track_ops::TrackStats| {
+                println!(
+                    " {:<name_w$}  {:<pfx_w$}  {:>4}  {:>4}  {:>4}  {:>4}  {:>4}",
+                    name,
+                    pfx,
+                    stats.todo,
+                    stats.active,
+                    stats.blocked,
+                    stats.done,
+                    stats.parked,
+                    name_w = name_w,
+                    pfx_w = pfx_w,
+                );
+            };
+
+        if !active_entries.is_empty() {
+            print_header("Active");
+            for (_, name, pfx, stats) in &active_entries {
+                print_row(name, pfx, stats);
+            }
         }
+
+        if !shelved_entries.is_empty() {
+            if !active_entries.is_empty() {
+                println!();
+            }
+            print_header("Shelved");
+            for (_, name, pfx, stats) in &shelved_entries {
+                print_row(name, pfx, stats);
+            }
+        }
+
         println!();
         println!(
-            "  Total  {}▸ {}⊘ {}○ {}◇ {}✓",
-            totals.active, totals.blocked, totals.todo, totals.parked, totals.done
+            " {:<name_w$}  {:<pfx_w$}  {:>4}  {:>4}  {:>4}  {:>4}  {:>4}",
+            "Total",
+            "",
+            totals.todo,
+            totals.active,
+            totals.blocked,
+            totals.done,
+            totals.parked,
+            name_w = name_w,
+            pfx_w = pfx_w,
         );
     }
     Ok(())

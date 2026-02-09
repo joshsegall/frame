@@ -34,7 +34,7 @@ pub enum Commands {
     /// List all tracks
     Tracks,
     /// Show task statistics
-    Stats,
+    Stats(StatsArgs),
     /// Show recently completed tasks
     Recent(RecentArgs),
     /// Show dependency tree for a task
@@ -149,6 +149,13 @@ pub struct InboxCmd {
     /// Note body for the new inbox item
     #[arg(long)]
     pub note: Option<String>,
+}
+
+#[derive(Args)]
+pub struct StatsArgs {
+    /// Include shelved tracks
+    #[arg(long)]
+    pub all: bool,
 }
 
 #[derive(Args)]
