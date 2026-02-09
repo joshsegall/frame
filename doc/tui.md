@@ -173,7 +173,7 @@ With selection active (Select mode):
 | `k`, `Up` | Move cursor up |
 | `g`, `Home` | Jump to top |
 | `G`, `End` | Jump to bottom |
-| `Enter`, `l` | Open track in Track view |
+| `Enter` | Open track in Track view |
 | `a`, `=` | Add new track (bottom of active list) |
 | `-` | Insert new track after cursor |
 | `p` | Add new track (top of active list) |

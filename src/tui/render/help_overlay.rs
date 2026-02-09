@@ -183,14 +183,60 @@ fn build_columns(view: &View) -> (Vec<HelpEntry>, Vec<HelpEntry>) {
     }
 }
 
+/// Standard "Views" section entries, identical across overlays.
+/// `include_tab` is false for Detail view (Tab/S-Tab repurposed for region nav).
+fn views_entries(include_tab: bool) -> Vec<HelpEntry> {
+    let mut entries = vec![
+        HelpEntry::Header("Views".into()),
+        HelpEntry::Binding("1-9".into(), "Track N".into()),
+    ];
+    if include_tab {
+        entries.push(HelpEntry::Binding(
+            "Tab/S-Tab".into(),
+            "Prev / next view".into(),
+        ));
+    }
+    entries.push(HelpEntry::Binding("0/`".into(), "Tracks overview".into()));
+    entries.push(HelpEntry::Binding("i".into(), "Inbox".into()));
+    entries.push(HelpEntry::Binding("r".into(), "Recent".into()));
+    entries
+}
+
+/// Standard "Other" section entries, identical core across overlays.
+/// Per-view extras (D, C, .) are inserted between J and T.
+fn other_entries(include_deps: bool, include_cc: bool, include_repeat: bool) -> Vec<HelpEntry> {
+    let mut entries = vec![
+        HelpEntry::Header("Other".into()),
+        HelpEntry::Binding("/".into(), "Search".into()),
+        HelpEntry::Binding(">".into(), "Command palette".into()),
+        HelpEntry::Binding("J".into(), "Jump to task".into()),
+    ];
+    if include_deps {
+        entries.push(HelpEntry::Binding("D".into(), "Show deps".into()));
+    }
+    if include_cc {
+        entries.push(HelpEntry::Binding("C".into(), "Set cc-focus".into()));
+    }
+    if include_repeat {
+        entries.push(HelpEntry::Binding(".".into(), "Repeat last action".into()));
+    }
+    entries.push(HelpEntry::Binding("T".into(), "Tag colors".into()));
+    entries.push(HelpEntry::Binding("P".into(), "Projects".into()));
+    entries.push(HelpEntry::Binding("z/u".into(), "Undo".into()));
+    entries.push(HelpEntry::Binding("Z".into(), "Redo".into()));
+    entries.push(HelpEntry::Binding("?".into(), "Help".into()));
+    entries.push(HelpEntry::Binding("QQ".into(), "Quit".into()));
+    entries
+}
+
 fn build_track_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
-    let left = vec![
+    let mut left = vec![
         HelpEntry::Header("Navigation".into()),
         HelpEntry::Binding("\u{25B2}\u{25BC}/jk".into(), "Move up/down".into()),
-        HelpEntry::Binding("Alt+\u{25B2}\u{25BC}".into(), "Prev/next top-level".into()),
         HelpEntry::Binding("\u{25C0}/h".into(), "Collapse / parent".into()),
         HelpEntry::Binding("\u{25B6}/l".into(), "Expand / child".into()),
         HelpEntry::Binding("g/G".into(), "Top / bottom".into()),
+        HelpEntry::Binding("Enter".into(), "Open detail".into()),
         HelpEntry::Binding("Esc".into(), "Back / close".into()),
         HelpEntry::Blank,
         HelpEntry::Header("Task State".into()),
@@ -205,20 +251,16 @@ fn build_track_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("fa".into(), "Active only".into()),
         HelpEntry::Binding("fo".into(), "Todo only".into()),
         HelpEntry::Binding("fb".into(), "Blocked only".into()),
+        HelpEntry::Binding("fp".into(), "Parked only".into()),
         HelpEntry::Binding("fr".into(), "Ready (deps met)".into()),
         HelpEntry::Binding("ft".into(), "Filter by tag".into()),
         HelpEntry::Binding("f Space".into(), "Clear state filter".into()),
         HelpEntry::Binding("ff".into(), "Clear all filters".into()),
         HelpEntry::Blank,
-        HelpEntry::Header("Views".into()),
-        HelpEntry::Binding("1-9".into(), "Track N".into()),
-        HelpEntry::Binding("Tab".into(), "Next track".into()),
-        HelpEntry::Binding("0/`".into(), "Tracks overview".into()),
-        HelpEntry::Binding("i".into(), "Inbox".into()),
-        HelpEntry::Binding("r".into(), "Recent".into()),
     ];
+    left.extend(views_entries(true));
 
-    let right = vec![
+    let mut right = vec![
         HelpEntry::Header("Edit".into()),
         HelpEntry::Binding("e".into(), "Edit title".into()),
         HelpEntry::Binding("t".into(), "Edit tags".into()),
@@ -238,44 +280,19 @@ fn build_track_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("x/b/o/~".into(), "Bulk state".into()),
         HelpEntry::Binding("t/d/m/M".into(), "Bulk tag/dep/move".into()),
         HelpEntry::Blank,
-        HelpEntry::Header("Other".into()),
-        HelpEntry::Binding("/".into(), "Search".into()),
-        HelpEntry::Binding("J".into(), "Jump to task".into()),
-        HelpEntry::Binding("D".into(), "Show deps".into()),
-        HelpEntry::Binding("T".into(), "Tag colors".into()),
-        HelpEntry::Binding("P".into(), "Projects".into()),
-        HelpEntry::Binding("C".into(), "Set cc-focus".into()),
-        HelpEntry::Binding(".".into(), "Repeat last action".into()),
-        HelpEntry::Binding("z/u".into(), "Undo".into()),
-        HelpEntry::Binding("Z".into(), "Redo".into()),
-        HelpEntry::Binding("?".into(), "Help".into()),
-        HelpEntry::Binding("QQ".into(), "Quit".into()),
     ];
+    right.extend(other_entries(true, true, true));
 
     (left, right)
 }
 
 fn build_detail_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
-    let left = vec![
+    let mut left = vec![
         HelpEntry::Header("Navigation".into()),
         HelpEntry::Binding("\u{25B2}\u{25BC}/jk".into(), "Move between regions".into()),
-        HelpEntry::Binding("Tab".into(), "Next editable region".into()),
-        HelpEntry::Binding("S-Tab".into(), "Prev editable region".into()),
+        HelpEntry::Binding("Tab/S-Tab".into(), "Next / prev region".into()),
         HelpEntry::Binding("g/G".into(), "Top / bottom".into()),
-        HelpEntry::Binding("J".into(), "Jump to task".into()),
-        HelpEntry::Binding("D".into(), "Show deps".into()),
-        HelpEntry::Binding("T".into(), "Tag colors".into()),
-        HelpEntry::Binding("P".into(), "Projects".into()),
-        HelpEntry::Binding("Esc".into(), "Back".into()),
-    ];
-
-    let right = vec![
-        HelpEntry::Header("Edit".into()),
-        HelpEntry::Binding("e/Enter".into(), "Edit region / open sub".into()),
-        HelpEntry::Binding("t".into(), "Edit tags".into()),
-        HelpEntry::Binding("@".into(), "Edit refs".into()),
-        HelpEntry::Binding("d".into(), "Edit deps".into()),
-        HelpEntry::Binding("n".into(), "Edit note".into()),
+        HelpEntry::Binding("Esc".into(), "Back / close".into()),
         HelpEntry::Blank,
         HelpEntry::Header("Task State".into()),
         HelpEntry::Binding("Space".into(), "Cycle state".into()),
@@ -284,8 +301,20 @@ fn build_detail_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("b".into(), "Set blocked".into()),
         HelpEntry::Binding("~".into(), "Set parked".into()),
         HelpEntry::Binding("M".into(), "Move to track".into()),
-        HelpEntry::Binding(".".into(), "Repeat last action".into()),
     ];
+    left.push(HelpEntry::Blank);
+    left.extend(views_entries(false));
+
+    let mut right = vec![
+        HelpEntry::Header("Edit".into()),
+        HelpEntry::Binding("e/Enter".into(), "Edit region / open sub".into()),
+        HelpEntry::Binding("t".into(), "Edit tags".into()),
+        HelpEntry::Binding("@".into(), "Edit refs".into()),
+        HelpEntry::Binding("d".into(), "Edit deps".into()),
+        HelpEntry::Binding("n".into(), "Edit note".into()),
+        HelpEntry::Blank,
+    ];
+    right.extend(other_entries(true, false, true));
 
     (left, right)
 }
@@ -296,7 +325,7 @@ fn build_tracks_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("\u{25B2}\u{25BC}/jk".into(), "Move cursor".into()),
         HelpEntry::Binding("g/G".into(), "Top / bottom".into()),
         HelpEntry::Binding("Enter".into(), "Open track".into()),
-        HelpEntry::Binding("1-9".into(), "Switch to track N".into()),
+        HelpEntry::Binding("Esc".into(), "Back / close".into()),
         HelpEntry::Blank,
         HelpEntry::Header("Track Actions".into()),
         HelpEntry::Binding("a/=".into(), "Add track (bottom)".into()),
@@ -306,33 +335,31 @@ fn build_tracks_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("s".into(), "Shelve / activate".into()),
         HelpEntry::Binding("X".into(), "Archive / delete".into()),
         HelpEntry::Binding("R".into(), "Rename prefix".into()),
-        HelpEntry::Binding("m".into(), "Reorder track".into()),
+        HelpEntry::Binding("m".into(), "Move mode".into()),
         HelpEntry::Binding("C".into(), "Set cc-focus".into()),
     ];
 
-    let right = vec![
-        HelpEntry::Header("Views & Other".into()),
-        HelpEntry::Binding("Tab".into(), "Next view".into()),
-        HelpEntry::Binding("/".into(), "Search".into()),
-        HelpEntry::Binding("J".into(), "Jump to task".into()),
-        HelpEntry::Binding("T".into(), "Tag colors".into()),
-        HelpEntry::Binding("P".into(), "Projects".into()),
-        HelpEntry::Binding("z/u".into(), "Undo".into()),
-        HelpEntry::Binding("Z".into(), "Redo".into()),
-        HelpEntry::Binding("?".into(), "Help".into()),
-        HelpEntry::Binding("QQ".into(), "Quit".into()),
-    ];
+    let mut right = views_entries(true);
+    right.push(HelpEntry::Blank);
+    right.extend(other_entries(false, false, false));
 
     (left, right)
 }
 
 fn build_inbox_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
-    let left = vec![
+    let mut left = vec![
         HelpEntry::Header("Navigation".into()),
         HelpEntry::Binding("\u{25B2}\u{25BC}/jk".into(), "Move cursor".into()),
         HelpEntry::Binding("g/G".into(), "Top / bottom".into()),
-        HelpEntry::Binding("/".into(), "Search inbox".into()),
+        HelpEntry::Binding("Esc".into(), "Back / close".into()),
         HelpEntry::Blank,
+        HelpEntry::Header("Triage".into()),
+        HelpEntry::Binding("Enter".into(), "Triage to track".into()),
+        HelpEntry::Blank,
+    ];
+    left.extend(views_entries(true));
+
+    let mut right = vec![
         HelpEntry::Header("Edit".into()),
         HelpEntry::Binding("a/=".into(), "Add item (bottom)".into()),
         HelpEntry::Binding("-".into(), "Insert after cursor".into()),
@@ -342,51 +369,32 @@ fn build_inbox_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("n".into(), "Edit note".into()),
         HelpEntry::Binding("x".into(), "Delete item".into()),
         HelpEntry::Binding("m".into(), "Move mode".into()),
-    ];
-
-    let right = vec![
-        HelpEntry::Header("Triage".into()),
-        HelpEntry::Binding("Enter".into(), "Triage to track".into()),
         HelpEntry::Blank,
-        HelpEntry::Header("Views & Other".into()),
-        HelpEntry::Binding("Tab".into(), "Next view".into()),
-        HelpEntry::Binding("J".into(), "Jump to task".into()),
-        HelpEntry::Binding("T".into(), "Tag colors".into()),
-        HelpEntry::Binding("P".into(), "Projects".into()),
-        HelpEntry::Binding("z/u".into(), "Undo".into()),
-        HelpEntry::Binding("Z".into(), "Redo".into()),
-        HelpEntry::Binding("?".into(), "Help".into()),
-        HelpEntry::Binding("QQ".into(), "Quit".into()),
     ];
+    right.extend(other_entries(false, false, false));
 
     (left, right)
 }
 
 fn build_recent_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
-    let left = vec![
+    let mut left = vec![
         HelpEntry::Header("Navigation".into()),
         HelpEntry::Binding("\u{25B2}\u{25BC}/jk".into(), "Move cursor".into()),
         HelpEntry::Binding("\u{25B6}/l".into(), "Expand subtasks".into()),
         HelpEntry::Binding("\u{25C0}/h".into(), "Collapse subtasks".into()),
         HelpEntry::Binding("Enter".into(), "Open detail".into()),
         HelpEntry::Binding("g/G".into(), "Top / bottom".into()),
-        HelpEntry::Binding("/".into(), "Search".into()),
+        HelpEntry::Binding("Esc".into(), "Back / close".into()),
         HelpEntry::Blank,
+    ];
+    left.extend(views_entries(true));
+
+    let mut right = vec![
         HelpEntry::Header("Actions".into()),
         HelpEntry::Binding("Space".into(), "Reopen as todo".into()),
+        HelpEntry::Blank,
     ];
-
-    let right = vec![
-        HelpEntry::Header("Views & Other".into()),
-        HelpEntry::Binding("Tab".into(), "Next view".into()),
-        HelpEntry::Binding("J".into(), "Jump to task".into()),
-        HelpEntry::Binding("T".into(), "Tag colors".into()),
-        HelpEntry::Binding("P".into(), "Projects".into()),
-        HelpEntry::Binding("z/u".into(), "Undo".into()),
-        HelpEntry::Binding("Z".into(), "Redo".into()),
-        HelpEntry::Binding("?".into(), "Help".into()),
-        HelpEntry::Binding("QQ".into(), "Quit".into()),
-    ];
+    right.extend(other_entries(false, false, false));
 
     (left, right)
 }
