@@ -168,6 +168,7 @@ fr sub EFF-014 "Test with nested closures"
 | `fr blocked` | Blocked tasks and their blockers |
 | `fr tracks` | All tracks with stats |
 | `fr stats` | Task count summary for active tracks |
+| `fr stats --all` | Include shelved tracks in stats |
 | `fr recent` | Recently completed tasks |
 | `fr recent --limit <n>` | Limit results (default: 20) |
 | `fr inbox` | List inbox items |

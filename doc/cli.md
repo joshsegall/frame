@@ -101,7 +101,15 @@ List all tracks grouped by state (active, shelved, archived) with task counts.
 
 ### `fr stats`
 
-Show aggregate task statistics across all active tracks.
+Show aggregate task statistics across all active tracks in a tabular format.
+
+```
+fr stats [--all]
+```
+
+| Flag    | Description            |
+|---------|------------------------|
+| `--all` | Include shelved tracks |
 
 ### `fr recent`
 
