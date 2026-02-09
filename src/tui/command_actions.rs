@@ -929,7 +929,7 @@ mod tests {
         ];
         // "fa" should match both via label, but "Filter: active only" also via shortcut
         let results = filter_actions("fa", &actions);
-        assert!(results.len() >= 1);
+        assert!(!results.is_empty());
         assert_eq!(results[0].action.id, "fa");
     }
 }

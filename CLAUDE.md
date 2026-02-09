@@ -10,7 +10,7 @@ cargo test               # Run all tests (unit + integration)
 cargo test <test_name>   # Run a single test by name
 cargo test --lib         # Run only unit tests
 cargo test --test round_trip  # Run only integration tests
-cargo clippy             # Lint
+cargo clippy --all-targets -- -D warnings  # Lint (matches CI)
 cargo fmt --check        # Check formatting
 ```
 
@@ -54,7 +54,7 @@ After any plan or task that modifies Rust code, always run these checks before c
 
 ```bash
 cargo fmt --check        # Fix any issues with: cargo fmt
-cargo clippy             # Fix any warnings before committing
+cargo clippy --all-targets -- -D warnings  # Lint all targets (including tests), deny warnings
 cargo test               # Ensure all tests pass
 ```
 
