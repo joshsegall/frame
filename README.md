@@ -140,4 +140,4 @@ changes are detected.
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE).
+Apache 2.0 — see [LICENSE.md](LICENSE.md).
