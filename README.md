@@ -1,6 +1,7 @@
 # [>] frame
 
 [![CI](https://github.com/joshsegall/frame/actions/workflows/ci.yml/badge.svg)](https://github.com/joshsegall/frame/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/frame.svg)](https://crates.io/crates/frame)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 **your backlog is plain text**
