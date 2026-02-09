@@ -527,6 +527,10 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                             };
                             spans.push(Span::styled(ch.to_string(), s));
                         }
+                        // Blank line in selection: show a one-column indicator
+                        if sc == ec && total_line_chars == 0 && !has_cursor {
+                            spans.push(Span::styled(" ", selection_style));
+                        }
                         if has_cursor && cursor_col >= total_line_chars
                             && cursor_col >= view_start
                         {

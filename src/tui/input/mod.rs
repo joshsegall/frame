@@ -144,6 +144,11 @@ pub fn selection_cols_for_line(
             let vis_start = sel_start.max(offset);
             let vis_end = sel_end.min(line_end);
             if vis_start >= vis_end {
+                // Blank line within selection: return (0, 0) so the renderer
+                // can show a one-column selection indicator.
+                if line.is_empty() && sel_start <= offset && sel_end > offset {
+                    return Some((0, 0));
+                }
                 return None;
             }
             return Some((vis_start - offset, vis_end - offset));
