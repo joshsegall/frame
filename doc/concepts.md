@@ -168,7 +168,11 @@ TUI display settings:
 
 ```toml
 [ui]
-kitty_keyboard = true      # Kitty keyboard protocol (default: true, set false if terminal has issues)
+kitty_keyboard = true      # Kitty keyboard protocol for reliable key detection (default: true)
+                           # Supported by Kitty, Ghostty, WezTerm, foot, and most modern terminals.
+                           # If you experience missed or double keypresses, set to false to fall back
+                           # to standard terminal input. The main thing you lose is reliable disambiguation
+                           # of some modified keys (e.g., Ctrl+Shift+Z vs Ctrl+Z).
 ref_extensions = ["md"]    # file extensions for ref/spec autocomplete (empty = all)
 ref_paths = ["doc", "spec", "docs", "design", "papers"]  # directories for ref/spec autocomplete (empty = whole project)
 default_tags = ["cc"]      # tags always shown in autocomplete (even if no tasks use them yet)

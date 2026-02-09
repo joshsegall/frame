@@ -59,8 +59,8 @@ Full view of a single task showing all fields as navigable regions: Title, Tags,
 | `T` | Open tag color editor |
 | `P` | Open project picker |
 | `J` | Jump to task by ID |
-| `z`, `u`, `Ctrl+Z` | Undo |
-| `Z`, `Ctrl+Y`, `Ctrl+Shift+Z` | Redo |
+| `z`, `u`, `Ctrl+Z`, `Super+Z` | Undo |
+| `Z`, `Ctrl+Y`, `Ctrl+Shift+Z`, `Super+Shift+Z` | Redo |
 
 ### Track View — Navigate Mode
 
@@ -72,6 +72,8 @@ Full view of a single task showing all fields as navigable regions: Title, Tags,
 | `k`, `Up` | Move cursor up |
 | `g`, `Home` | Jump to top |
 | `G`, `End` | Jump to bottom |
+| `Alt+Up` | Jump to previous top-level task |
+| `Alt+Down` | Jump to next top-level task |
 
 **Expand/collapse:**
 
@@ -261,17 +263,17 @@ With selection active (Select mode):
 | `Left`, `Right` | Move cursor |
 | `Alt+Left`, `Alt+Right` | Move by word |
 | `Alt+b`, `Alt+f` | Move by word (readline) |
-| `Home` | Jump to start of line |
+| `Home`, `Ctrl+A` | Jump to start of line |
 | `Ctrl+E`, `End` | Jump to end of line |
 | `Backspace` | Delete backward |
 | `Alt+Backspace`, `Ctrl+Backspace` | Delete word backward |
+| `Ctrl+U` | Kill to start of line |
 | `Shift+Left/Right` | Extend selection |
-| `Ctrl+A` | Select all |
-| `Ctrl+C` | Copy selection |
-| `Ctrl+X` | Cut selection |
-| `Ctrl+V` | Paste |
-| `Ctrl+Z` | Inline undo |
-| `Ctrl+Y`, `Ctrl+Shift+Z` | Inline redo |
+| `Ctrl+C`, `Super+C` | Copy selection |
+| `Ctrl+X`, `Super+X` | Cut selection |
+| `Ctrl+V`, `Super+V` | Paste |
+| `Ctrl+Z`, `Super+Z` | Inline undo |
+| `Ctrl+Y`, `Ctrl+Shift+Z`, `Super+Shift+Z` | Inline redo |
 | `Enter` | Confirm edit |
 | `Esc` | Cancel edit |
 
@@ -291,6 +293,7 @@ With selection active (Select mode):
 | `Enter` | Insert newline |
 | `Tab` | Insert 4 spaces |
 | `Up`, `Down` | Move between lines |
+| `Alt+Up`, `Alt+Down` | Jump between paragraphs |
 | `Esc` | Save and exit edit |
 
 ### Move Mode
@@ -491,7 +494,11 @@ The entire subtask tree moves as a unit. Subtasks cannot be moved between sectio
 
 ### Clipboard
 
-In Edit mode: `Ctrl+C` copies, `Ctrl+X` cuts, `Ctrl+V` pastes. Text selection via `Shift+arrows`.
+In Edit mode: `Ctrl+C`/`Super+C` copies, `Ctrl+X`/`Super+X` cuts, `Ctrl+V`/`Super+V` pastes. Text selection via `Shift+arrows`.
+
+## Keyboard Protocol
+
+Frame uses the Kitty keyboard protocol by default for unambiguous key event reporting. This matters most for modified keys like `Ctrl+Shift+Z` (redo) and distinguishing `Tab` from `Ctrl+I`. If your terminal doesn't support it, Frame falls back gracefully — most keybindings still work, but a few modified-key combos may not register. Set `kitty_keyboard = false` in `project.toml` if you see input issues.
 
 ## Configuration
 
