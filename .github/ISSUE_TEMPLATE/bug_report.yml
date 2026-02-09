@@ -1,0 +1,41 @@
+name: Bug report
+description: Something isn't working
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `fr --version`
+      placeholder: "frame 0.1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: interface
+    attributes:
+      label: Interface
+      options:
+        - TUI
+        - CLI
+        - Both
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps to trigger the bug. Include the track file content if relevant.
+      render: markdown
+  - type: input
+    id: terminal
+    attributes:
+      label: Terminal
+      description: Terminal emulator and OS
+      placeholder: "Ghostty on macOS 15.2"
