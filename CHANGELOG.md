@@ -7,6 +7,12 @@ All notable changes to frame will be documented in this file.
 ### Added
 - Soft word wrap for notes in Detail view and Inbox (view mode always wraps; edit mode wraps by default, togglable with `w` / `Alt+w`)
 
+### Fixed
+- Unicode correctness throughout TUI: CJK, emoji, combining marks, and fullwidth characters now display and edit correctly
+- Cursor movement in edit mode uses grapheme clusters instead of raw bytes, preventing panics on non-ASCII text
+- Display width calculations use terminal cell width instead of character count, fixing column alignment for wide characters
+- Word wrap in note editor respects grapheme boundaries and character display widths
+
 ## v0.1.1 - 2026-02-10
 
 ### Added

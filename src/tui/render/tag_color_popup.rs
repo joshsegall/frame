@@ -6,6 +6,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::tui::app::{App, TAG_COLOR_PALETTE};
 use crate::tui::theme;
+use crate::util::unicode;
 
 /// Render the tag color editor popup overlay
 pub fn render_tag_color_popup(frame: &mut Frame, app: &App, area: Rect) {
@@ -44,7 +45,7 @@ pub fn render_tag_color_popup(frame: &mut Frame, app: &App, area: Rect) {
                 text.to_string(),
                 Style::default().fg(dim).bg(bg),
             )];
-            let used = text.chars().count();
+            let used = unicode::display_width(text);
             if used < inner_w {
                 spans.push(Span::styled(
                     " ".repeat(inner_w - used),
@@ -58,7 +59,7 @@ pub fn render_tag_color_popup(frame: &mut Frame, app: &App, area: Rect) {
         let max_tag_len = tcp
             .tags
             .iter()
-            .map(|(name, _)| name.chars().count())
+            .map(|(name, _)| unicode::display_width(name))
             .max()
             .unwrap_or(0);
         // Tag list
@@ -86,7 +87,7 @@ pub fn render_tag_color_popup(frame: &mut Frame, app: &App, area: Rect) {
             spans.push(Span::styled(tag_name.to_string(), tag_style));
 
             // Pad tag name to fixed column width
-            let tag_chars = tag_name.chars().count();
+            let tag_chars = unicode::display_width(tag_name);
             let pad_after_tag = max_tag_len + 2 - tag_chars; // align to color_col
             spans.push(Span::styled(" ".repeat(pad_after_tag), row_pad));
 
@@ -118,7 +119,7 @@ pub fn render_tag_color_popup(frame: &mut Frame, app: &App, area: Rect) {
         "Enter pick  Bksp clear  Esc close"
     };
     let hint_style = Style::default().fg(dim).bg(bg);
-    let hint_len = hint.chars().count();
+    let hint_len = unicode::display_width(hint);
     let hint_pad = inner_w.saturating_sub(hint_len);
     let left_pad = hint_pad / 2;
     let right_pad = hint_pad - left_pad;
@@ -278,7 +279,10 @@ fn resolve_tag_color(app: &App, tag_name: &str, hex_opt: Option<&str>) -> ratatu
 
 /// Pad spans to fill `target_width` with background.
 fn pad_to_width<'a>(spans: &mut Vec<Span<'a>>, target_width: usize, pad_style: Style) {
-    let total_used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let total_used: usize = spans
+        .iter()
+        .map(|s| unicode::display_width(&s.content))
+        .sum();
     if total_used < target_width {
         spans.push(Span::styled(
             " ".repeat(target_width - total_used),

@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::tui::app::App;
+use crate::util::unicode;
 
 const MAX_VISIBLE: usize = 10;
 const MAX_INNER_WIDTH: u16 = 60;
@@ -52,7 +53,7 @@ pub fn render_command_palette(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled("\u{258C}", cursor_style),
     ];
     // Pad to fill width
-    let input_used: usize = 3 + cp.input.chars().count() + 1;
+    let input_used: usize = 3 + unicode::display_width(&cp.input) + 1;
     if input_used < inner_w {
         input_spans.push(Span::styled(" ".repeat(inner_w - input_used), blank_style));
     }
@@ -70,7 +71,7 @@ pub fn render_command_palette(frame: &mut Frame, app: &App, area: Rect) {
         // Empty state
         lines.push(Line::from(Span::styled(" ".repeat(inner_w), blank_style)));
         let msg = "No matching actions";
-        let msg_len = msg.chars().count();
+        let msg_len = unicode::display_width(msg);
         let left_pad = inner_w.saturating_sub(msg_len) / 2;
         let right_pad = inner_w.saturating_sub(msg_len + left_pad);
         lines.push(Line::from(vec![
@@ -138,7 +139,7 @@ pub fn render_command_palette(frame: &mut Frame, app: &App, area: Rect) {
             // Right-align shortcut with matched character highlights
             let shortcut_text = scored.action.shortcut.unwrap_or("");
             let label_len = 3 + label_chars.len(); // indicator + label
-            let shortcut_len = shortcut_text.chars().count();
+            let shortcut_len = unicode::display_width(shortcut_text);
             let total_needed = label_len + 1 + shortcut_len; // +1 for min gap
 
             if total_needed < inner_w && !shortcut_text.is_empty() {
@@ -166,7 +167,7 @@ pub fn render_command_palette(frame: &mut Frame, app: &App, area: Rect) {
 
     // Footer: "  N of M actions"
     let footer_text = format!("   {} of {} actions", cp.results.len(), cp.total_count);
-    let footer_len = footer_text.chars().count();
+    let footer_len = unicode::display_width(&footer_text);
     let mut footer_spans = vec![Span::styled(footer_text, footer_style)];
     if footer_len < inner_w {
         footer_spans.push(Span::styled(" ".repeat(inner_w - footer_len), blank_style));

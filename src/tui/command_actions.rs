@@ -1,4 +1,5 @@
 use crate::tui::app::{App, View};
+use crate::util::unicode;
 
 /// Which views an action is available in
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,7 +129,7 @@ pub fn filter_actions(query: &str, actions: &[PaletteAction]) -> Vec<ScoredActio
             let (score, indices) = fuzzy_score(query, &combined)?;
 
             // Split indices into label vs shortcut portions
-            let label_char_count = a.label.chars().count();
+            let label_char_count = unicode::display_width(&a.label);
             let separator = 1; // the space between label and shortcut
             let mut label_matched = Vec::new();
             let mut shortcut_matched = Vec::new();

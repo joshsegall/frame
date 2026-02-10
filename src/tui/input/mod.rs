@@ -9,6 +9,7 @@ use crate::model::task::{Metadata, Task};
 use crate::model::track::Track;
 use crate::ops::search::{search_inbox, search_tasks};
 use crate::ops::task_ops::{self, InsertPosition};
+use crate::util::unicode;
 
 use super::app::{
     App, AutocompleteKind, AutocompleteState, DepPopupEntry, DetailRegion, DetailState,
@@ -4092,8 +4093,8 @@ fn handle_edit(app: &mut App, key: KeyEvent) {
                 && !key.modifiers.contains(KeyModifiers::CONTROL)
                 && !key.modifiers.contains(KeyModifiers::SUPER) =>
         {
-            if app.edit_cursor > 0 {
-                app.edit_cursor -= 1;
+            if let Some(prev) = unicode::prev_grapheme_boundary(&app.edit_buffer, app.edit_cursor) {
+                app.edit_cursor = prev;
             }
         }
         (_, KeyCode::Right)
@@ -4101,8 +4102,8 @@ fn handle_edit(app: &mut App, key: KeyEvent) {
                 && !key.modifiers.contains(KeyModifiers::CONTROL)
                 && !key.modifiers.contains(KeyModifiers::SUPER) =>
         {
-            if app.edit_cursor < app.edit_buffer.len() {
-                app.edit_cursor += 1;
+            if let Some(next) = unicode::next_grapheme_boundary(&app.edit_buffer, app.edit_cursor) {
+                app.edit_cursor = next;
             }
         }
         // Jump to start/end of line (Cmd/Super, with or without Shift)
@@ -4151,9 +4152,12 @@ fn handle_edit(app: &mut App, key: KeyEvent) {
         }
         // Backspace: delete selection or single char
         (KeyModifiers::NONE, KeyCode::Backspace) => {
-            if !app.delete_selection() && app.edit_cursor > 0 {
-                app.edit_buffer.remove(app.edit_cursor - 1);
-                app.edit_cursor -= 1;
+            if !app.delete_selection()
+                && let Some(prev) =
+                    unicode::prev_grapheme_boundary(&app.edit_buffer, app.edit_cursor)
+            {
+                app.edit_buffer.drain(prev..app.edit_cursor);
+                app.edit_cursor = prev;
             }
             if let Some(eh) = &mut app.edit_history {
                 eh.snapshot(&app.edit_buffer, app.edit_cursor, 0);
@@ -4201,7 +4205,7 @@ fn handle_edit(app: &mut App, key: KeyEvent) {
                 c
             };
             app.edit_buffer.insert(app.edit_cursor, c);
-            app.edit_cursor += 1;
+            app.edit_cursor += c.len_utf8();
             if let Some(eh) = &mut app.edit_history {
                 eh.snapshot(&app.edit_buffer, app.edit_cursor, 0);
             }
@@ -4235,29 +4239,30 @@ fn update_edit_h_scroll(app: &mut App) {
     if width == 0 {
         return;
     }
-    let cursor_char = app.edit_buffer[..app.edit_cursor.min(app.edit_buffer.len())]
-        .chars()
-        .count();
+    let cursor_col = unicode::byte_offset_to_display_col(
+        &app.edit_buffer,
+        app.edit_cursor.min(app.edit_buffer.len()),
+    );
     let margin = 10.min(width / 3);
-    let total = app.edit_buffer.chars().count();
+    let total = unicode::display_width(&app.edit_buffer);
     // When cursor is at end, the cursor block needs one extra column
-    let content_end = if cursor_char >= total {
+    let content_end = if cursor_col >= total {
         total + 1
     } else {
         total
     };
 
     // Scroll right: cursor approaching right edge
-    if cursor_char >= app.edit_h_scroll + width.saturating_sub(margin) {
-        app.edit_h_scroll = cursor_char.saturating_sub(width.saturating_sub(margin + 1));
+    if cursor_col >= app.edit_h_scroll + width.saturating_sub(margin) {
+        app.edit_h_scroll = cursor_col.saturating_sub(width.saturating_sub(margin + 1));
     }
     // Clamp: don't scroll past content end
     app.edit_h_scroll = app
         .edit_h_scroll
         .min(content_end.saturating_sub(width.saturating_sub(1)));
     // Scroll left: cursor approaching left edge
-    if cursor_char < app.edit_h_scroll + margin {
-        app.edit_h_scroll = cursor_char.saturating_sub(margin);
+    if cursor_col < app.edit_h_scroll + margin {
+        app.edit_h_scroll = cursor_col.saturating_sub(margin);
     }
 }
 
@@ -4960,39 +4965,11 @@ fn dedup_preserve_order(iter: impl Iterator<Item = String>) -> Vec<String> {
 }
 
 fn word_boundary_left(s: &str, pos: usize) -> usize {
-    if pos == 0 {
-        return 0;
-    }
-    let bytes = s.as_bytes();
-    let mut i = pos - 1;
-    // Skip spaces
-    while i > 0 && bytes[i] == b' ' {
-        i -= 1;
-    }
-    // Skip word chars
-    while i > 0 && bytes[i - 1] != b' ' {
-        i -= 1;
-    }
-    i
+    unicode::word_boundary_left(s, pos)
 }
 
-/// Find the byte offset of the next word boundary
 fn word_boundary_right(s: &str, pos: usize) -> usize {
-    let len = s.len();
-    if pos >= len {
-        return len;
-    }
-    let bytes = s.as_bytes();
-    let mut i = pos;
-    // Skip current word
-    while i < len && bytes[i] != b' ' {
-        i += 1;
-    }
-    // Skip spaces
-    while i < len && bytes[i] == b' ' {
-        i += 1;
-    }
-    i
+    unicode::word_boundary_right(s, pos)
 }
 
 /// Find the line index of the previous paragraph boundary (blank line or start of buffer).
@@ -7561,11 +7538,12 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
         {
             if let Some(ds) = &mut app.detail_state {
                 ds.sticky_col = None;
-                if ds.edit_cursor_col > 0 {
-                    ds.edit_cursor_col -= 1;
+                let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
+                let cur_line = edit_lines.get(ds.edit_cursor_line).unwrap_or(&"");
+                if let Some(prev) = unicode::prev_grapheme_boundary(cur_line, ds.edit_cursor_col) {
+                    ds.edit_cursor_col = prev;
                 } else if ds.edit_cursor_line > 0 {
                     ds.edit_cursor_line -= 1;
-                    let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
                     ds.edit_cursor_col = edit_lines.get(ds.edit_cursor_line).map_or(0, |l| l.len());
                 }
             }
@@ -7579,9 +7557,9 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
             if let Some(ds) = &mut app.detail_state {
                 ds.sticky_col = None;
                 let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
-                let line_len = edit_lines.get(ds.edit_cursor_line).map_or(0, |l| l.len());
-                if ds.edit_cursor_col < line_len {
-                    ds.edit_cursor_col += 1;
+                let cur_line = edit_lines.get(ds.edit_cursor_line).unwrap_or(&"");
+                if let Some(next) = unicode::next_grapheme_boundary(cur_line, ds.edit_cursor_col) {
+                    ds.edit_cursor_col = next;
                 } else if ds.edit_cursor_line + 1 < edit_lines.len() {
                     ds.edit_cursor_line += 1;
                     ds.edit_cursor_col = 0;
@@ -7611,10 +7589,11 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                                     &vls,
                                     ds.edit_cursor_line,
                                     ds.edit_cursor_col,
+                                    &edit_lines,
                                 )
                             });
                             let (new_line, new_col) =
-                                wrap::visual_row_to_logical(&vls, cur_row - 1, vcol);
+                                wrap::visual_row_to_logical(&vls, cur_row - 1, vcol, &edit_lines);
                             ds.edit_cursor_line = new_line;
                             ds.edit_cursor_col = new_col;
                             ds.sticky_col = Some(vcol);
@@ -7650,10 +7629,11 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                                     &vls,
                                     ds.edit_cursor_line,
                                     ds.edit_cursor_col,
+                                    &edit_lines,
                                 )
                             });
                             let (new_line, new_col) =
-                                wrap::visual_row_to_logical(&vls, cur_row + 1, vcol);
+                                wrap::visual_row_to_logical(&vls, cur_row + 1, vcol, &edit_lines);
                             ds.edit_cursor_line = new_line;
                             ds.edit_cursor_col = new_col;
                             ds.sticky_col = Some(vcol);
@@ -7869,8 +7849,10 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                 let col = ds.edit_cursor_col.min(edit_lines[line].len());
 
                 if col > 0 {
-                    edit_lines[line].remove(col - 1);
-                    ds.edit_cursor_col = col - 1;
+                    if let Some(prev) = unicode::prev_grapheme_boundary(&edit_lines[line], col) {
+                        edit_lines[line].drain(prev..col);
+                        ds.edit_cursor_col = prev;
+                    }
                 } else if line > 0 {
                     // Merge with previous line
                     let current_line = edit_lines.remove(line);
@@ -7906,7 +7888,7 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                 let col = ds.edit_cursor_col.min(edit_lines[line].len());
                 edit_lines[line].insert(col, c);
                 ds.edit_buffer = edit_lines.join("\n");
-                ds.edit_cursor_col = col + 1;
+                ds.edit_cursor_col = col + c.len_utf8();
             }
             snapshot_multiline(app);
         }
@@ -9362,8 +9344,8 @@ fn inbox_delete_item(app: &mut App) {
     }
 
     let title = &inbox.items[app.inbox_cursor].title;
-    let short_title = if title.len() > 30 {
-        format!("{}...", &title[..30])
+    let short_title = if unicode::display_width(title) > 30 {
+        unicode::truncate_to_width(title, 30)
     } else {
         title.clone()
     };

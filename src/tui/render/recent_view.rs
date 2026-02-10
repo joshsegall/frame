@@ -7,6 +7,7 @@ use ratatui::widgets::Paragraph;
 use crate::model::task::{Task, TaskState};
 use crate::tui::app::{App, PendingMoveKind};
 use crate::tui::input::build_recent_entries;
+use crate::util::unicode;
 
 use super::push_highlighted_spans;
 
@@ -142,7 +143,10 @@ pub fn render_recent_view(frame: &mut Frame, app: &mut App, area: Rect) {
             .bg(app.theme.search_match_bg)
             .add_modifier(Modifier::BOLD);
         // Truncate title at available width
-        let prefix_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let prefix_width: usize = spans
+            .iter()
+            .map(|s| unicode::display_width(&s.content))
+            .sum();
         let track_suffix_width = entry.track_name.len() + 2;
         let available = (area.width as usize).saturating_sub(prefix_width + track_suffix_width + 1);
         let display_title = super::truncate_with_ellipsis(&entry.title, available);
@@ -155,7 +159,10 @@ pub fn render_recent_view(frame: &mut Frame, app: &mut App, area: Rect) {
         );
 
         // Track origin (right-justified with 1-space buffer)
-        let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let content_width: usize = spans
+            .iter()
+            .map(|s| unicode::display_width(&s.content))
+            .sum();
         let track_label = &entry.track_name;
         let track_label_width = track_label.len();
         let w = area.width as usize;
@@ -172,7 +179,10 @@ pub fn render_recent_view(frame: &mut Frame, app: &mut App, area: Rect) {
             Style::default().fg(app.theme.dim).bg(bg),
         ));
         // 1-space right buffer
-        let final_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let final_width: usize = spans
+            .iter()
+            .map(|s| unicode::display_width(&s.content))
+            .sum();
         if final_width < w {
             spans.push(Span::styled(
                 " ".repeat(w - final_width),
@@ -304,7 +314,10 @@ fn render_subtask_tree<'a>(
             .fg(app.theme.search_match_fg)
             .bg(app.theme.search_match_bg)
             .add_modifier(Modifier::BOLD);
-        let prefix_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let prefix_width: usize = spans
+            .iter()
+            .map(|s| unicode::display_width(&s.content))
+            .sum();
         let available = (area.width as usize).saturating_sub(prefix_width + 1);
         let display_title = super::truncate_with_ellipsis(&task.title, available);
         push_highlighted_spans(&mut spans, &display_title, title_style, hl_style, search_re);

@@ -7,6 +7,7 @@ use ratatui::widgets::Paragraph;
 use crate::tui::app::{App, EditTarget, Mode};
 use crate::tui::input::{multiline_selection_range, selection_cols_for_line};
 use crate::tui::wrap;
+use crate::util::unicode;
 
 use super::detail_view::wrap_styled_spans;
 use super::push_highlighted_spans;
@@ -135,7 +136,10 @@ pub fn render_inbox_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 .bg(app.theme.search_match_bg)
                 .add_modifier(Modifier::BOLD);
             // Truncate title at available width
-            let prefix_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+            let prefix_width: usize = spans
+                .iter()
+                .map(|s| unicode::display_width(&s.content))
+                .sum();
             let tag_width: usize = tags.iter().map(|t| t.len() + 2).sum::<usize>()
                 + if tags.is_empty() { 0 } else { 2 };
             let available = (area.width as usize).saturating_sub(prefix_width + tag_width + 1);
@@ -189,7 +193,10 @@ pub fn render_inbox_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
         // Pad cursor line
         if is_cursor {
-            let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+            let content_width: usize = spans
+                .iter()
+                .map(|s| unicode::display_width(&s.content))
+                .sum();
             let w = area.width as usize;
             if content_width < w {
                 spans.push(Span::styled(
@@ -422,7 +429,8 @@ fn render_inline_note_editor(
             let vl = &visual_lines[vrow_idx];
             let line_text = edit_lines.get(vl.logical_line).copied().unwrap_or("");
             let slice = &line_text[vl.byte_start..vl.byte_end];
-            let slice_chars: Vec<char> = slice.chars().collect();
+            let graphemes: Vec<(usize, &str)> =
+                unicode_segmentation::UnicodeSegmentation::grapheme_indices(slice, true).collect();
 
             let has_cursor = vrow_idx == cursor_vrow;
             if has_cursor {
@@ -455,49 +463,46 @@ fn render_inline_note_editor(
             let vl_sel = sel_range
                 .and_then(|(s, e)| selection_cols_for_line(&ds.edit_buffer, s, e, vl.logical_line));
 
-            let cursor_in_row = if has_cursor {
+            let cursor_byte_in_row = if has_cursor {
                 Some(cursor_col.saturating_sub(vl.char_start))
             } else {
                 None
             };
 
             if let Some((sc, ec)) = vl_sel {
-                for (ci, ch) in slice_chars.iter().enumerate() {
-                    let abs_col = vl.char_start + ci;
-                    let s = if abs_col >= sc && abs_col < ec {
+                for &(gi, g) in &graphemes {
+                    let abs_byte = vl.byte_start + gi;
+                    let s = if abs_byte >= sc && abs_byte < ec {
                         selection_style
                     } else {
                         bright_style
                     };
-                    if cursor_in_row == Some(ci) {
-                        spans.push(Span::styled(ch.to_string(), cursor_style));
+                    if cursor_byte_in_row == Some(gi) {
+                        spans.push(Span::styled(g.to_string(), cursor_style));
                     } else {
-                        spans.push(Span::styled(ch.to_string(), s));
+                        spans.push(Span::styled(g.to_string(), s));
                     }
                 }
-                if sc == ec && slice_chars.is_empty() && !has_cursor {
+                if sc == ec && graphemes.is_empty() && !has_cursor {
                     spans.push(Span::styled(" ", selection_style));
                 }
                 if has_cursor && cursor_col >= vl.char_end {
                     spans.push(Span::styled(" ", cursor_style));
                 }
             } else if has_cursor {
-                let col_in_row = cursor_col.min(vl.char_end).saturating_sub(vl.char_start);
-                for (ci, ch) in slice_chars.iter().enumerate() {
-                    if ci == col_in_row {
-                        spans.push(Span::styled(ch.to_string(), cursor_style));
+                let byte_in_row = cursor_col.min(vl.char_end).saturating_sub(vl.char_start);
+                for &(gi, g) in &graphemes {
+                    if gi == byte_in_row {
+                        spans.push(Span::styled(g.to_string(), cursor_style));
                     } else {
-                        spans.push(Span::styled(ch.to_string(), bright_style));
+                        spans.push(Span::styled(g.to_string(), bright_style));
                     }
                 }
-                if col_in_row >= slice_chars.len() {
+                if byte_in_row >= slice.len() {
                     spans.push(Span::styled(" ", cursor_style));
                 }
-            } else if !slice_chars.is_empty() {
-                spans.push(Span::styled(
-                    slice_chars.iter().collect::<String>(),
-                    bright_style,
-                ));
+            } else if !slice.is_empty() {
+                spans.push(Span::styled(slice.to_string(), bright_style));
             }
 
             display_lines.push((Some(item_index), Line::from(spans)));
@@ -556,16 +561,18 @@ fn render_inline_note_editor(
                 ));
             }
 
-            let line_chars: Vec<char> = edit_line.chars().collect();
-            let total_line_chars = line_chars.len();
-            let clipped_left = h_scroll > 0 && total_line_chars > 0;
+            let graphemes: Vec<(usize, &str)> =
+                unicode_segmentation::UnicodeSegmentation::grapheme_indices(edit_line, true)
+                    .collect();
+            let total_graphemes = graphemes.len();
+            let clipped_left = h_scroll > 0 && total_graphemes > 0;
             let left_indicator = if clipped_left { 1 } else { 0 };
             let avail_after_left = note_available.saturating_sub(left_indicator);
-            let clipped_right = h_scroll + avail_after_left < total_line_chars;
+            let clipped_right = h_scroll + avail_after_left < total_graphemes;
             let right_indicator = if clipped_right { 1 } else { 0 };
-            let view_chars = avail_after_left.saturating_sub(right_indicator);
-            let view_start = h_scroll.min(total_line_chars);
-            let view_end = (view_start + view_chars).min(total_line_chars);
+            let view_count = avail_after_left.saturating_sub(right_indicator);
+            let view_start = h_scroll.min(total_graphemes);
+            let view_end = (view_start + view_count).min(total_graphemes);
 
             let line_num_str = format!("{:>width$}", line_idx + 1, width = num_display_width);
             if clipped_left {
@@ -578,45 +585,58 @@ fn render_inline_note_editor(
             let line_sel = sel_range
                 .and_then(|(s, e)| selection_cols_for_line(&ds.edit_buffer, s, e, line_idx));
 
+            // Convert cursor byte offset to grapheme index
+            let cursor_gi = graphemes
+                .iter()
+                .position(|&(bo, _)| bo >= cursor_col)
+                .unwrap_or(total_graphemes);
+
             if let Some((sc, ec)) = line_sel {
-                for (idx, ch) in line_chars
+                for (gi, &(bo, g)) in graphemes
                     .iter()
                     .enumerate()
                     .skip(view_start)
                     .take(view_end - view_start)
                 {
-                    let s = if idx >= sc && idx < ec {
+                    let s = if bo >= sc && bo < ec {
                         selection_style
                     } else {
                         bright_style
                     };
-                    spans.push(Span::styled(ch.to_string(), s));
+                    if has_cursor && gi == cursor_gi {
+                        spans.push(Span::styled(g.to_string(), cursor_style));
+                    } else {
+                        spans.push(Span::styled(g.to_string(), s));
+                    }
                 }
-                if sc == ec && total_line_chars == 0 && !has_cursor {
+                if sc == ec && total_graphemes == 0 && !has_cursor {
                     spans.push(Span::styled(" ", selection_style));
                 }
-                if has_cursor && cursor_col >= total_line_chars && cursor_col >= view_start {
+                if has_cursor && cursor_gi >= total_graphemes && cursor_gi >= view_start {
                     spans.push(Span::styled(" ", cursor_style));
                 }
             } else if has_cursor {
-                let col = cursor_col.min(total_line_chars);
-                for (idx, ch) in line_chars
+                let col_gi = cursor_gi.min(total_graphemes);
+                for (gi, &(_bo, g)) in graphemes
                     .iter()
                     .enumerate()
                     .skip(view_start)
                     .take(view_end - view_start)
                 {
-                    if idx == col {
-                        spans.push(Span::styled(ch.to_string(), cursor_style));
+                    if gi == col_gi {
+                        spans.push(Span::styled(g.to_string(), cursor_style));
                     } else {
-                        spans.push(Span::styled(ch.to_string(), bright_style));
+                        spans.push(Span::styled(g.to_string(), bright_style));
                     }
                 }
-                if col >= total_line_chars && col >= view_start {
+                if col_gi >= total_graphemes && col_gi >= view_start {
                     spans.push(Span::styled(" ", cursor_style));
                 }
             } else if view_start < view_end {
-                let slice: String = line_chars[view_start..view_end].iter().collect();
+                let slice: String = graphemes[view_start..view_end]
+                    .iter()
+                    .map(|g| g.1)
+                    .collect();
                 spans.push(Span::styled(slice, bright_style));
             }
 

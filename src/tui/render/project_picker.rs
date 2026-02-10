@@ -7,6 +7,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use crate::io::registry::abbreviate_path;
 use crate::tui::app::{App, ProjectPickerState};
 use crate::tui::theme::Theme;
+use crate::util::unicode;
 
 /// Render the project picker popup overlay using the App's theme and picker state.
 pub fn render_project_picker(frame: &mut Frame, app: &App, area: Rect) {
@@ -66,7 +67,7 @@ fn render_project_picker_inner(
                 padded.clone(),
                 Style::default().fg(dim).bg(bg),
             )];
-            let used = padded.chars().count();
+            let used = unicode::display_width(&padded);
             if used < inner_w {
                 spans.push(Span::styled(" ".repeat(inner_w - used), bg_style));
             }
@@ -77,7 +78,7 @@ fn render_project_picker_inner(
         let max_name = picker
             .entries
             .iter()
-            .map(|e| e.name.chars().count())
+            .map(|e| unicode::display_width(&e.name))
             .max()
             .unwrap_or(0)
             .min(content_w / 3);
@@ -109,7 +110,7 @@ fn render_project_picker_inner(
             spans.push(Span::styled(indicator, row_style));
 
             // Project name
-            let name_display: String = if entry.name.chars().count() > max_name {
+            let name_display: String = if unicode::display_width(&entry.name) > max_name {
                 let truncated: String = entry.name.chars().take(max_name - 1).collect();
                 format!("{}\u{2026}", truncated)
             } else {
@@ -134,7 +135,7 @@ fn render_project_picker_inner(
             spans.push(Span::styled(name_display.clone(), name_style));
 
             // Pad name column
-            let name_chars = name_display.chars().count();
+            let name_chars = unicode::display_width(&name_display);
             let pad = name_col.saturating_sub(name_chars);
             spans.push(Span::styled(" ".repeat(pad), row_pad));
 
@@ -146,7 +147,7 @@ fn render_project_picker_inner(
             } else {
                 abbreviate_path(&entry.path)
             };
-            let path_display = if path_full.chars().count() > path_budget {
+            let path_display = if unicode::display_width(&path_full) > path_budget {
                 let truncated: String = path_full
                     .chars()
                     .take(path_budget.saturating_sub(1))
@@ -191,7 +192,7 @@ fn render_project_picker_inner(
         Span::styled(" ", bg_style),
         Span::styled(sort_label, sort_style),
     ];
-    let sort_used = 1 + sort_label.chars().count();
+    let sort_used = 1 + unicode::display_width(sort_label);
     if sort_used < inner_w {
         sort_spans.push(Span::styled(" ".repeat(inner_w - sort_used), bg_style));
     }
@@ -201,8 +202,8 @@ fn render_project_picker_inner(
     let hint_style = Style::default().fg(dim).bg(bg);
     let hint1 = " \u{2191}\u{2193}/jk navigate  Enter open  s sort";
     let hint2 = " X remove  Esc close";
-    let hint1_len = hint1.chars().count();
-    let hint2_len = hint2.chars().count();
+    let hint1_len = unicode::display_width(hint1);
+    let hint2_len = unicode::display_width(hint2);
     let mut hint1_spans = vec![Span::styled(hint1, hint_style)];
     if hint1_len < inner_w {
         hint1_spans.push(Span::styled(" ".repeat(inner_w - hint1_len), bg_style));
@@ -254,7 +255,10 @@ fn render_project_picker_inner(
 
 /// Pad spans to fill `target_width` with background.
 fn pad_to_width<'a>(spans: &mut Vec<Span<'a>>, target_width: usize, pad_style: Style) {
-    let total_used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let total_used: usize = spans
+        .iter()
+        .map(|s| unicode::display_width(&s.content))
+        .sum();
     if total_used < target_width {
         spans.push(Span::styled(
             " ".repeat(target_width - total_used),

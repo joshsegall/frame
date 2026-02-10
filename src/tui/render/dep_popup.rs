@@ -6,6 +6,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::model::TaskState;
 use crate::tui::app::{App, DepPopupEntry};
+use crate::util::unicode;
 
 use super::truncate_with_ellipsis;
 
@@ -202,7 +203,7 @@ pub fn render_dep_popup(frame: &mut Frame, app: &App, area: Rect) {
                 spans.push(Span::styled(display_title.clone(), title_style));
 
                 // Pad between title and track name
-                let title_display_len = display_title.chars().count();
+                let title_display_len = unicode::display_width(&display_title);
                 let used_so_far = fixed_left + title_display_len;
                 let target_end = usable_w.saturating_sub(right_part_len);
                 if used_so_far < target_end {
@@ -235,7 +236,7 @@ pub fn render_dep_popup(frame: &mut Frame, app: &App, area: Rect) {
     // Hint bar
     let hint_style = Style::default().fg(dim).bg(bg);
     let hint = "\u{2190}\u{2192} expand   Enter jump   Esc close";
-    let hint_len = hint.chars().count();
+    let hint_len = unicode::display_width(hint);
     let hint_pad = inner_w.saturating_sub(hint_len);
     let left_pad = hint_pad / 2;
     let right_pad = hint_pad - left_pad;
@@ -302,7 +303,10 @@ pub fn render_dep_popup(frame: &mut Frame, app: &App, area: Rect) {
 
 /// Pad spans to fill `target_width` with background.
 fn pad_to_width<'a>(spans: &mut Vec<Span<'a>>, target_width: usize, pad_style: Style) {
-    let total_used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let total_used: usize = spans
+        .iter()
+        .map(|s| unicode::display_width(&s.content))
+        .sum();
     if total_used < target_width {
         spans.push(Span::styled(
             " ".repeat(target_width - total_used),

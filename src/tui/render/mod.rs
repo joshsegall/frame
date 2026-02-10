@@ -21,6 +21,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use regex::Regex;
 
+use crate::util::unicode;
+
 use super::app::{App, TriageStep, View};
 
 /// Main render function — dispatches to sub-renderers
@@ -103,7 +105,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         && matches!(app.edit_target, Some(super::app::EditTarget::JumpTo))
     {
         // " jump: " = 7 chars, then edit_buffer text, then cursor
-        let x = chunks[2].x + 7 + app.edit_buffer.chars().count() as u16;
+        let x = chunks[2].x + 7 + unicode::display_width(&app.edit_buffer) as u16;
         let y = chunks[2].y;
         app.autocomplete_anchor = Some((x, y));
     }
@@ -216,20 +218,9 @@ fn render_triage_position_popup(frame: &mut Frame, app: &App) {
     frame.render_widget(paragraph, popup_area);
 }
 
-/// Truncate a string to fit within `max_chars`, adding "…" if truncated.
-pub(super) fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
-        return String::new();
-    }
-    let char_count = s.chars().count();
-    if char_count <= max_chars {
-        s.to_string()
-    } else if max_chars <= 1 {
-        "\u{2026}".to_string()
-    } else {
-        let truncated: String = s.chars().take(max_chars - 1).collect();
-        format!("{}\u{2026}", truncated)
-    }
+/// Truncate a string to fit within `max_cells` terminal cells, adding "…" if truncated.
+pub(super) fn truncate_with_ellipsis(s: &str, max_cells: usize) -> String {
+    unicode::truncate_to_width(s, max_cells)
 }
 
 /// Push spans for text with regex match highlighting. If no regex or no matches,

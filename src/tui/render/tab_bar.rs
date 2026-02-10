@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::tui::app::{App, StateFilter, View};
+use crate::util::unicode;
 
 /// Result of tab layout computation: labels and layout mode
 #[derive(Debug, Clone, PartialEq)]
@@ -19,9 +20,9 @@ pub(crate) struct TabLayout {
 
 /// Width of a single track tab given its label and whether it has cc-focus star
 fn track_tab_width(label: &str, is_cc: bool) -> usize {
-    // " label " = label.chars().count() + 2, plus "|" separator = +1
+    // " label " = display_width(label) + 2, plus "|" separator = +1
     // cc-focus adds "★ " = +2
-    let base = label.chars().count() + 2 + 1;
+    let base = unicode::display_width(label) + 2 + 1;
     if is_cc { base + 2 } else { base }
 }
 
@@ -63,9 +64,22 @@ fn fits(labels: &[String], cc_focus_idx: Option<usize>, fixed: usize, available:
     track_total + fixed <= available
 }
 
-/// Truncate a string to at most `n` chars (unicode-safe)
-fn truncate_chars(s: &str, n: usize) -> String {
-    s.chars().take(n).collect()
+/// Truncate a string to at most `n` display-width cells (no ellipsis)
+fn truncate_display(s: &str, n: usize) -> String {
+    if unicode::display_width(s) <= n {
+        return s.to_string();
+    }
+    let mut width = 0;
+    let mut result = String::new();
+    for c in s.chars() {
+        let cw = unicode::char_display_width(c);
+        if width + cw > n {
+            break;
+        }
+        width += cw;
+        result.push(c);
+    }
+    result
 }
 
 /// Compute tab layout with progressive shrinking and optional scroll mode.
@@ -130,8 +144,9 @@ pub(crate) fn compute_tab_layout(
     let label_floors: Vec<usize> = prefixes
         .iter()
         .map(|p| {
-            p.as_ref()
-                .map_or(default_floor, |s| s.chars().count().min(default_floor))
+            p.as_ref().map_or(default_floor, |s| {
+                unicode::display_width(s).min(default_floor)
+            })
         })
         .collect();
 
@@ -140,7 +155,7 @@ pub(crate) fn compute_tab_layout(
         let mut best_idx: Option<usize> = None;
         let mut best_len: usize = 0;
         for (i, label) in labels.iter().enumerate() {
-            let len = label.chars().count();
+            let len = unicode::display_width(label);
             if len > label_floors[i] && len >= best_len {
                 best_len = len;
                 best_idx = Some(i);
@@ -152,17 +167,17 @@ pub(crate) fn compute_tab_layout(
             None => break, // all labels at min_len — need scroll mode
         };
 
-        // Truncate by one char
-        let char_count = labels[idx].chars().count();
-        labels[idx] = truncate_chars(&labels[idx], char_count - 1);
+        // Truncate by one display-width cell
+        let current_width = unicode::display_width(&labels[idx]);
+        labels[idx] = truncate_display(&labels[idx], current_width - 1);
 
         // When the label reaches exactly the prefix length, swap to the
         // prefix (a purpose-built short identifier) instead of a truncated
         // name. This is a zero-width swap so it doesn't skip any sizes.
-        let new_len = labels[idx].chars().count();
+        let new_len = unicode::display_width(&labels[idx]);
         if !using_prefix[idx]
             && let Some(ref prefix) = prefixes[idx]
-            && prefix.chars().count() == new_len
+            && unicode::display_width(prefix) == new_len
         {
             labels[idx] = prefix.clone();
             using_prefix[idx] = true;
@@ -219,7 +234,7 @@ fn render_tabs(frame: &mut Frame, app: &mut App, area: Rect) -> Vec<usize> {
     let cc_focus_idx = cc_focus.and_then(|cf| app.active_track_ids.iter().position(|id| id == cf));
     let inbox_count = app.inbox_count();
     let project_name = app.project.config.project.name.clone();
-    let project_name_len = project_name.chars().count();
+    let project_name_len = unicode::display_width(&project_name);
 
     let layout = compute_tab_layout(
         &names,
@@ -328,7 +343,7 @@ fn render_tabs(frame: &mut Frame, app: &mut App, area: Rect) -> Vec<usize> {
                 let max_chars = partial_space.saturating_sub(overhead);
                 if max_chars > 0 {
                     app.tab_scroll = prev;
-                    first_partial = Some(truncate_chars(&layout.labels[prev], max_chars));
+                    first_partial = Some(truncate_display(&layout.labels[prev], max_chars));
                     first_partial_show_cc = show_cc;
                 }
             }
@@ -392,7 +407,7 @@ fn render_tabs(frame: &mut Frame, app: &mut App, area: Rect) -> Vec<usize> {
             };
             let max_chars = partial_budget.saturating_sub(overhead);
             if max_chars > 0 {
-                let trunc_label = truncate_chars(&layout.labels[full_end], max_chars);
+                let trunc_label = truncate_display(&layout.labels[full_end], max_chars);
                 let partial_w = track_tab_width(&trunc_label, show_cc);
                 tabs_used += partial_w;
                 render_track_tab(
@@ -436,7 +451,12 @@ fn render_tabs(frame: &mut Frame, app: &mut App, area: Rect) -> Vec<usize> {
     // Tracks view tab (▶)
     let is_tracks = app.view == View::Tracks;
     spans.push(Span::styled(" \u{25B6} ", tab_style(app, is_tracks)));
-    sep_cols.push(spans.iter().map(|s| s.content.chars().count()).sum());
+    sep_cols.push(
+        spans
+            .iter()
+            .map(|s| unicode::display_width(&s.content))
+            .sum(),
+    );
     spans.push(sep.clone());
 
     // Inbox tab with count (*N)
@@ -457,18 +477,31 @@ fn render_tabs(frame: &mut Frame, app: &mut App, area: Rect) -> Vec<usize> {
     } else {
         spans.push(Span::styled(" ", style));
     }
-    sep_cols.push(spans.iter().map(|s| s.content.chars().count()).sum());
+    sep_cols.push(
+        spans
+            .iter()
+            .map(|s| unicode::display_width(&s.content))
+            .sum(),
+    );
     spans.push(sep.clone());
 
     // Recent tab (✓)
     let is_recent = app.view == View::Recent;
     spans.push(Span::styled(" \u{2713} ", tab_style(app, is_recent)));
-    sep_cols.push(spans.iter().map(|s| s.content.chars().count()).sum());
+    sep_cols.push(
+        spans
+            .iter()
+            .map(|s| unicode::display_width(&s.content))
+            .sum(),
+    );
     spans.push(sep.clone());
 
     // Right-justify project name in remaining space (only in non-scroll mode)
     if layout.show_project_name {
-        let tabs_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let tabs_width: usize = spans
+            .iter()
+            .map(|s| unicode::display_width(&s.content))
+            .sum();
         let available = total_width.saturating_sub(tabs_width);
         let name_style = Style::default().fg(app.theme.text).bg(app.theme.background);
 
@@ -543,7 +576,12 @@ fn render_track_tab(
     } else {
         spans.push(Span::styled(format!(" {} ", label), style));
     }
-    sep_cols.push(spans.iter().map(|s| s.content.chars().count()).sum());
+    sep_cols.push(
+        spans
+            .iter()
+            .map(|s| unicode::display_width(&s.content))
+            .sum(),
+    );
     spans.push(sep.clone());
 }
 
@@ -592,7 +630,7 @@ fn render_separator(frame: &mut Frame, app: &App, area: Rect, sep_cols: &[usize]
         // Calculate indicator width
         let indicator_width: usize = indicator_spans
             .iter()
-            .map(|s| s.content.chars().count())
+            .map(|s| unicode::display_width(&s.content))
             .sum();
         // +2: one space before indicator, one space after (right edge buffer)
         let separator_end = width.saturating_sub(indicator_width + 2);
@@ -611,7 +649,10 @@ fn render_separator(frame: &mut Frame, app: &App, area: Rect, sep_cols: &[usize]
         spans.push(Span::styled(" ", Style::default().bg(bg)));
         spans.extend(indicator_spans);
         // Trailing space
-        let current_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let current_width: usize = spans
+            .iter()
+            .map(|s| unicode::display_width(&s.content))
+            .sum();
         if current_width < width {
             spans.push(Span::styled(
                 " ".repeat(width - current_width),
@@ -692,7 +733,11 @@ mod tests {
         let layout = compute_tab_layout(&names, &prefixes, None, 45, 0, 0);
         assert!(!layout.scroll_mode);
         // Longest (Infrastructure) should absorb most shrinking; shorter labels preserved
-        let lens: Vec<usize> = layout.labels.iter().map(|l| l.chars().count()).collect();
+        let lens: Vec<usize> = layout
+            .labels
+            .iter()
+            .map(|l| unicode::display_width(l))
+            .collect();
         assert!(
             lens[0] >= lens[1],
             "longest name should still be >= shorter: {:?}",
@@ -708,7 +753,7 @@ mod tests {
         let total: usize = layout
             .labels
             .iter()
-            .map(|l| l.chars().count() + 2 + 1)
+            .map(|l| unicode::display_width(l) + 2 + 1)
             .sum::<usize>()
             + 15;
         assert!(total <= 45);
@@ -774,7 +819,7 @@ mod tests {
         let layout = compute_tab_layout(&names, &prefixes, None, 39, 0, 0);
         assert!(!layout.scroll_mode);
         for label in &layout.labels {
-            assert_eq!(label.chars().count(), 3);
+            assert_eq!(unicode::display_width(label), 3);
         }
     }
 
@@ -806,7 +851,7 @@ mod tests {
         let total: usize = layout
             .labels
             .iter()
-            .map(|l| l.chars().count() + 2 + 1)
+            .map(|l| unicode::display_width(l) + 2 + 1)
             .sum::<usize>()
             + 15;
         assert!(total <= 75, "total {} should be <= 75", total);
@@ -828,7 +873,11 @@ mod tests {
         // Full: 8*3 = 24, +15 = 39. Width 37: need 2 chars removed.
         let layout = compute_tab_layout(&names, &prefixes, None, 37, 0, 0);
         assert!(!layout.scroll_mode);
-        let lens: Vec<usize> = layout.labels.iter().map(|l| l.chars().count()).collect();
+        let lens: Vec<usize> = layout
+            .labels
+            .iter()
+            .map(|l| unicode::display_width(l))
+            .collect();
         let max = *lens.iter().max().unwrap();
         let min = *lens.iter().min().unwrap();
         assert!(max - min <= 1, "labels should be balanced: {:?}", lens);

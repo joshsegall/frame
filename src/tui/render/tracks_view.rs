@@ -6,6 +6,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::ops::track_ops::task_counts;
 use crate::tui::app::{App, EditTarget, Mode};
+use crate::util::unicode;
 
 use super::push_highlighted_spans;
 
@@ -46,7 +47,7 @@ pub fn render_tracks_view(frame: &mut Frame, app: &mut App, area: Rect) {
         .config
         .tracks
         .iter()
-        .map(|tc| tc.name.chars().count())
+        .map(|tc| unicode::display_width(&tc.name))
         .max()
         .unwrap_or(10);
     // Columns can grow but not shrink within a single Tracks view session
@@ -63,8 +64,8 @@ pub fn render_tracks_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 .ids
                 .prefixes
                 .get(&tc.id)
-                .map(|p| p.chars().count())
-                .unwrap_or_else(|| tc.id.chars().count())
+                .map(|p| unicode::display_width(p))
+                .unwrap_or_else(|| unicode::display_width(&tc.id))
         })
         .max()
         .unwrap_or(2);
@@ -298,7 +299,7 @@ fn render_section_row<'a>(
 
     // " Label" left-aligned, then pad to name_col
     let label_text = format!(" {}", label);
-    let label_len = label_text.chars().count();
+    let label_len = unicode::display_width(&label_text);
     spans.push(Span::styled(label_text, label_style));
 
     if label_len < name_col {
@@ -385,7 +386,7 @@ fn render_track_row<'a>(
     push_highlighted_spans(&mut spans, &tc.name, name_style, hl_style, search_re);
 
     // Pad name to max_name_len
-    let name_len = tc.name.chars().count();
+    let name_len = unicode::display_width(&tc.name);
     if name_len < max_name_len {
         spans.push(Span::styled(
             " ".repeat(max_name_len - name_len),
@@ -442,7 +443,10 @@ fn render_track_row<'a>(
 
     // Pad to full width for cursor/flash highlight
     if is_cursor || is_flash {
-        let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let content_width: usize = spans
+            .iter()
+            .map(|s| unicode::display_width(&s.content))
+            .sum();
         let w = width as usize;
         if content_width < w {
             spans.push(Span::styled(
@@ -492,23 +496,22 @@ fn render_edit_row<'a>(
     let buf_char_len;
 
     if cursor_pos < buffer.len() {
-        let (before, rest) = buffer.split_at(cursor_pos);
-        let mut chars = rest.chars();
-        let cursor_char = chars.next().unwrap_or(' ');
-        let after: String = chars.collect();
-        buf_char_len = buffer.chars().count();
+        let before = &buffer[..cursor_pos];
+        let grapheme = unicode::grapheme_at(buffer, cursor_pos);
+        let after = &buffer[cursor_pos + grapheme.len()..];
+        buf_char_len = unicode::display_width(buffer);
 
         spans.push(Span::styled(before.to_string(), text_style));
         spans.push(Span::styled(
-            cursor_char.to_string(),
+            grapheme.to_string(),
             Style::default()
                 .fg(app.theme.background)
                 .bg(app.theme.highlight)
                 .add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::styled(after, text_style));
+        spans.push(Span::styled(after.to_string(), text_style));
     } else {
-        buf_char_len = buffer.chars().count() + 1; // +1 for cursor block
+        buf_char_len = unicode::display_width(buffer) + 1; // +1 for cursor block
         spans.push(Span::styled(buffer.to_string(), text_style));
         spans.push(Span::styled("\u{258C}", cursor_style));
     }
@@ -579,7 +582,10 @@ fn render_edit_row<'a>(
     }
 
     // Pad to full width
-    let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let content_width: usize = spans
+        .iter()
+        .map(|s| unicode::display_width(&s.content))
+        .sum();
     let w = width as usize;
     if content_width < w {
         spans.push(Span::styled(
@@ -622,27 +628,29 @@ fn render_new_track_edit_row<'a>(
     let cursor_style = Style::default().fg(app.theme.highlight).bg(bg);
 
     if cursor_pos < buffer.len() {
-        let (before, rest) = buffer.split_at(cursor_pos);
-        let mut chars = rest.chars();
-        let cursor_char = chars.next().unwrap_or(' ');
-        let after: String = chars.collect();
+        let before = &buffer[..cursor_pos];
+        let grapheme = unicode::grapheme_at(buffer, cursor_pos);
+        let after = &buffer[cursor_pos + grapheme.len()..];
 
         spans.push(Span::styled(before.to_string(), text_style));
         spans.push(Span::styled(
-            cursor_char.to_string(),
+            grapheme.to_string(),
             Style::default()
                 .fg(app.theme.background)
                 .bg(app.theme.highlight)
                 .add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::styled(after, text_style));
+        spans.push(Span::styled(after.to_string(), text_style));
     } else {
         spans.push(Span::styled(buffer.to_string(), text_style));
         spans.push(Span::styled("\u{258C}", cursor_style));
     }
 
     // Pad to full width
-    let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let content_width: usize = spans
+        .iter()
+        .map(|s| unicode::display_width(&s.content))
+        .sum();
     let w = width as usize;
     if content_width < w {
         spans.push(Span::styled(
@@ -705,14 +713,13 @@ fn render_prefix_edit_row<'a>(app: &'a App, num_width: usize, width: u16) -> Lin
             ));
         }
     } else if cursor_pos < buffer.len() {
-        let (before, rest) = buffer.split_at(cursor_pos);
-        let mut chars = rest.chars();
-        let cursor_char = chars.next().unwrap_or(' ');
-        let after: String = chars.collect();
+        let before = &buffer[..cursor_pos];
+        let grapheme = unicode::grapheme_at(buffer, cursor_pos);
+        let after = &buffer[cursor_pos + grapheme.len()..];
 
         spans.push(Span::styled(before.to_string(), text_style));
-        spans.push(Span::styled(cursor_char.to_string(), cursor_style));
-        spans.push(Span::styled(after, text_style));
+        spans.push(Span::styled(grapheme.to_string(), cursor_style));
+        spans.push(Span::styled(after.to_string(), text_style));
     } else {
         spans.push(Span::styled(buffer.to_string(), text_style));
         spans.push(Span::styled(
@@ -733,7 +740,10 @@ fn render_prefix_edit_row<'a>(app: &'a App, num_width: usize, width: u16) -> Lin
     }
 
     // Pad to full width
-    let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let content_width: usize = spans
+        .iter()
+        .map(|s| unicode::display_width(&s.content))
+        .sum();
     let w = width as usize;
     if content_width < w {
         spans.push(Span::styled(

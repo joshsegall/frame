@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::tui::app::{App, EditTarget, Mode, MoveState, TriageSource, View};
+use crate::util::unicode;
 
 /// Render the status row (bottom of screen)
 pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
@@ -49,7 +50,7 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
                 Line::from(spans)
             } else if app.show_startup_hints {
                 let hint = "? help    > commands    QQ quit";
-                let hint_width = hint.chars().count();
+                let hint_width = unicode::display_width(hint);
                 let left_pad = width.saturating_sub(hint_width) / 2;
                 let right_pad = width.saturating_sub(hint_width + left_pad);
                 Line::from(vec![
@@ -112,8 +113,11 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
                     Style::default().fg(app.theme.highlight).bg(bg),
                 ));
             }
-            let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-            let hint_width = hint.chars().count();
+            let content_width: usize = spans
+                .iter()
+                .map(|s| unicode::display_width(&s.content))
+                .sum();
+            let hint_width = unicode::display_width(hint);
             if content_width + hint_width < width {
                 let padding = width - content_width - hint_width;
                 spans.push(Span::styled(" ".repeat(padding), Style::default().bg(bg)));
@@ -199,7 +203,10 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
                 ));
             }
             // Pad to full width
-            let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+            let content_width: usize = spans
+                .iter()
+                .map(|s| unicode::display_width(&s.content))
+                .sum();
             if content_width < width {
                 spans.push(Span::styled(
                     " ".repeat(width - content_width),
@@ -243,9 +250,12 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
                 "x/b/o/~ t d m Esc"
             };
             let mut spans = vec![Span::styled(" ", Style::default().bg(bg)), mode_label];
-            let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-            let count_width = count_text.chars().count();
-            let hint_width = hint.chars().count();
+            let content_width: usize = spans
+                .iter()
+                .map(|s| unicode::display_width(&s.content))
+                .sum();
+            let count_width = unicode::display_width(&count_text);
+            let hint_width = unicode::display_width(hint);
             let right_width = count_width + 4 + hint_width;
             if content_width + right_width < width {
                 let padding = width - content_width - right_width;
@@ -298,7 +308,10 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
                         .add_modifier(Modifier::BOLD),
                 ),
             ];
-            let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+            let content_width: usize = spans
+                .iter()
+                .map(|s| unicode::display_width(&s.content))
+                .sum();
             if content_width < width {
                 spans.push(Span::styled(
                     " ".repeat(width - content_width),
@@ -332,8 +345,11 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
                 ),
             ];
             let right = format!("{}  ^D off", kitty_tag);
-            let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-            let right_width = right.chars().count();
+            let content_width: usize = spans
+                .iter()
+                .map(|s| unicode::display_width(&s.content))
+                .sum();
+            let right_width = unicode::display_width(&right);
             if content_width + right_width + 2 < width {
                 let padding = width - content_width - right_width;
                 spans.push(Span::styled(" ".repeat(padding), Style::default().bg(bg)));
@@ -358,7 +374,7 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
                     Style::default().fg(app.theme.dim).bg(bg),
                 ),
             ];
-            let content_width = text.chars().count();
+            let content_width = unicode::display_width(&text);
             if content_width < width {
                 spans.push(Span::styled(
                     " ".repeat(width - content_width),
@@ -386,8 +402,11 @@ fn build_right_side<'a>(
     bg: Color,
     is_navigate: bool,
 ) {
-    let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-    let hint_width = hint.chars().count();
+    let content_width: usize = spans
+        .iter()
+        .map(|s| unicode::display_width(&s.content))
+        .sum();
+    let hint_width = unicode::display_width(hint);
 
     // Determine message text and style
     let message: Option<(String, Style)> = if is_navigate {
@@ -407,7 +426,7 @@ fn build_right_side<'a>(
 
     if let Some((ref msg_text, msg_style)) = message {
         let padded_msg = format!(" {} ", msg_text);
-        let msg_width = padded_msg.chars().count();
+        let msg_width = unicode::display_width(&padded_msg);
         let right_width = msg_width + spacer + hint_width;
         if content_width + right_width < width {
             let padding = width - content_width - right_width;
@@ -460,8 +479,11 @@ fn build_mode_hint<'a>(
     bg: Color,
     text_bright: Color,
 ) {
-    let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-    let hint_width = hint.chars().count();
+    let content_width: usize = spans
+        .iter()
+        .map(|s| unicode::display_width(&s.content))
+        .sum();
+    let hint_width = unicode::display_width(hint);
     if content_width + hint_width < width {
         let padding = width - content_width - hint_width;
         spans.push(Span::styled(" ".repeat(padding), Style::default().bg(bg)));
@@ -482,7 +504,7 @@ fn render_centered_message<'a>(
     } else {
         msg.to_string()
     };
-    let msg_len = msg_text.chars().count();
+    let msg_len = unicode::display_width(&msg_text);
     let left_pad = width.saturating_sub(msg_len) / 2;
     let right_pad = width.saturating_sub(msg_len + left_pad);
     let msg_style = if is_error {

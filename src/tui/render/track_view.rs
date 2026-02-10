@@ -7,6 +7,7 @@ use regex::Regex;
 
 use crate::model::{Metadata, SectionKind, Task, TaskState};
 use crate::tui::app::{App, EditTarget, FlatItem, Mode, MoveState};
+use crate::util::unicode;
 
 use super::detail_view::{UNDO_FLASH_COLORS, state_flash_colors};
 use super::push_highlighted_spans;
@@ -438,7 +439,12 @@ fn render_task_line<'a>(
 
     if is_editing && !is_editing_tags {
         // Record prefix width for autocomplete anchor
-        edit_col = Some(spans.iter().map(|s| s.content.chars().count() as u16).sum());
+        edit_col = Some(
+            spans
+                .iter()
+                .map(|s| unicode::display_width(&s.content) as u16)
+                .sum(),
+        );
         // Render edit buffer with cursor/selection highlighting
         let buf = &app.edit_buffer;
         let cursor_pos = app.edit_cursor.min(buf.len());
@@ -471,9 +477,9 @@ fn render_task_line<'a>(
                     spans.push(Span::styled(before.to_string(), title_style));
                 }
                 if cursor_pos < buf.len() {
-                    let cursor_char = &buf[cursor_pos..cursor_pos + 1];
-                    spans.push(Span::styled(cursor_char.to_string(), cursor_style));
-                    let after = &buf[cursor_pos + 1..];
+                    let grapheme = unicode::grapheme_at(buf, cursor_pos);
+                    spans.push(Span::styled(grapheme.to_string(), cursor_style));
+                    let after = &buf[cursor_pos + grapheme.len()..];
                     if !after.is_empty() {
                         spans.push(Span::styled(after.to_string(), title_style));
                     }
@@ -487,9 +493,9 @@ fn render_task_line<'a>(
                 spans.push(Span::styled(before.to_string(), title_style));
             }
             if cursor_pos < buf.len() {
-                let cursor_char = &buf[cursor_pos..cursor_pos + 1];
-                spans.push(Span::styled(cursor_char.to_string(), cursor_style));
-                let after = &buf[cursor_pos + 1..];
+                let grapheme = unicode::grapheme_at(buf, cursor_pos);
+                spans.push(Span::styled(grapheme.to_string(), cursor_style));
+                let after = &buf[cursor_pos + grapheme.len()..];
                 if !after.is_empty() {
                     spans.push(Span::styled(after.to_string(), title_style));
                 }
@@ -503,7 +509,10 @@ fn render_task_line<'a>(
             .bg(app.theme.search_match_bg)
             .add_modifier(Modifier::BOLD);
         // Truncate title if it would overflow the available width
-        let prefix_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let prefix_width: usize = spans
+            .iter()
+            .map(|s| unicode::display_width(&s.content))
+            .sum();
         let tag_width: usize = task.tags.iter().map(|t| t.len() + 2).sum::<usize>()
             + if task.tags.is_empty() { 0 } else { 2 };
         let available = width.saturating_sub(prefix_width + tag_width + 1);
@@ -521,7 +530,12 @@ fn render_task_line<'a>(
     if is_editing_tags {
         spans.push(Span::styled("  ", Style::default().bg(bg)));
         // Record prefix width for autocomplete anchor (after the "  " spacer)
-        edit_col = Some(spans.iter().map(|s| s.content.chars().count() as u16).sum());
+        edit_col = Some(
+            spans
+                .iter()
+                .map(|s| unicode::display_width(&s.content) as u16)
+                .sum(),
+        );
         let buf = &app.edit_buffer;
         let cursor_pos = app.edit_cursor.min(buf.len());
         let cursor_style = Style::default()
@@ -553,9 +567,9 @@ fn render_task_line<'a>(
                     spans.push(Span::styled(before.to_string(), tag_edit_style));
                 }
                 if cursor_pos < buf.len() {
-                    let cursor_char = &buf[cursor_pos..cursor_pos + 1];
-                    spans.push(Span::styled(cursor_char.to_string(), cursor_style));
-                    let after = &buf[cursor_pos + 1..];
+                    let grapheme = unicode::grapheme_at(buf, cursor_pos);
+                    spans.push(Span::styled(grapheme.to_string(), cursor_style));
+                    let after = &buf[cursor_pos + grapheme.len()..];
                     if !after.is_empty() {
                         spans.push(Span::styled(after.to_string(), tag_edit_style));
                     }
@@ -569,9 +583,9 @@ fn render_task_line<'a>(
                 spans.push(Span::styled(before.to_string(), tag_edit_style));
             }
             if cursor_pos < buf.len() {
-                let cursor_char = &buf[cursor_pos..cursor_pos + 1];
-                spans.push(Span::styled(cursor_char.to_string(), cursor_style));
-                let after = &buf[cursor_pos + 1..];
+                let grapheme = unicode::grapheme_at(buf, cursor_pos);
+                spans.push(Span::styled(grapheme.to_string(), cursor_style));
+                let after = &buf[cursor_pos + grapheme.len()..];
                 if !after.is_empty() {
                     spans.push(Span::styled(after.to_string(), tag_edit_style));
                 }
@@ -607,8 +621,11 @@ fn render_task_line<'a>(
 
     // Hidden match indicator for non-visible field matches
     if let Some(indicator) = hidden_match_indicator(task, search_re) {
-        let indicator_width = indicator.chars().count() + 2; // "  " + indicator
-        let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let indicator_width = unicode::display_width(&indicator) + 2; // "  " + indicator
+        let content_width: usize = spans
+            .iter()
+            .map(|s| unicode::display_width(&s.content))
+            .sum();
 
         // Truncate line content if needed to make room for indicator
         if content_width + indicator_width > width {
@@ -629,7 +646,10 @@ fn render_task_line<'a>(
 
     // Highlight cursor line, flash line, or selected line
     if is_cursor || is_flash || is_selected {
-        let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let content_width: usize = spans
+            .iter()
+            .map(|s| unicode::display_width(&s.content))
+            .sum();
         if content_width < width {
             spans.push(Span::styled(
                 " ".repeat(width - content_width),
@@ -679,7 +699,10 @@ fn render_bulk_editor_line<'a>(app: &'a App, label: &str, width: usize) -> (Line
         Style::default().fg(app.theme.dim).bg(bg),
     ));
 
-    let prefix_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let prefix_width: usize = spans
+        .iter()
+        .map(|s| unicode::display_width(&s.content))
+        .sum();
     let edit_col = prefix_width as u16;
 
     // Edit buffer with cursor
@@ -695,9 +718,9 @@ fn render_bulk_editor_line<'a>(app: &'a App, label: &str, width: usize) -> (Line
         spans.push(Span::styled(before.to_string(), title_style));
     }
     if cursor_pos < buf.len() {
-        let cursor_char = &buf[cursor_pos..cursor_pos + 1];
-        spans.push(Span::styled(cursor_char.to_string(), cursor_style));
-        let after = &buf[cursor_pos + 1..];
+        let grapheme = unicode::grapheme_at(buf, cursor_pos);
+        spans.push(Span::styled(grapheme.to_string(), cursor_style));
+        let after = &buf[cursor_pos + grapheme.len()..];
         if !after.is_empty() {
             spans.push(Span::styled(after.to_string(), title_style));
         }
@@ -706,7 +729,10 @@ fn render_bulk_editor_line<'a>(app: &'a App, label: &str, width: usize) -> (Line
     }
 
     // Fill remaining width
-    let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let content_width: usize = spans
+        .iter()
+        .map(|s| unicode::display_width(&s.content))
+        .sum();
     if content_width < width {
         spans.push(Span::styled(
             " ".repeat(width - content_width),
@@ -896,7 +922,7 @@ fn truncate_spans(spans: &mut Vec<Span<'_>>, max_width: usize) {
     let mut truncate_at = spans.len();
 
     for (i, span) in spans.iter().enumerate() {
-        let span_width = span.content.chars().count();
+        let span_width = unicode::display_width(&span.content);
         if total + span_width > max_width {
             truncate_at = i;
             // Truncate this span's content to fit

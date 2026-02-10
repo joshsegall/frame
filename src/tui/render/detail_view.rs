@@ -6,12 +6,15 @@ use ratatui::widgets::Paragraph;
 
 use regex::Regex;
 
+use unicode_segmentation::UnicodeSegmentation;
+
 use crate::model::{Metadata, Task, TaskState};
 use crate::ops::task_ops;
 use crate::tui::app::{App, DetailRegion, Mode, ReturnView, View, flatten_subtask_ids};
 use crate::tui::input::{multiline_selection_range, selection_cols_for_line};
 use crate::tui::theme::Theme;
 use crate::tui::wrap;
+use crate::util::unicode;
 
 use super::push_highlighted_spans;
 
@@ -236,7 +239,12 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
         spans.push(Span::styled("tags: ", dim_style));
 
         if is_active && editing && app.mode == Mode::Edit {
-            edit_anchor_col = Some(spans.iter().map(|s| s.content.chars().count() as u16).sum());
+            edit_anchor_col = Some(
+                spans
+                    .iter()
+                    .map(|s| unicode::display_width(&s.content) as u16)
+                    .sum(),
+            );
             edit_anchor_line = Some(body_lines.len());
             let (aw, hs) = render_edit_inline_scrolled(&mut spans, app, bright_style, width);
             app.last_edit_available_width = aw;
@@ -302,7 +310,12 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             let mut spans: Vec<Span> = Vec::new();
             spans.push(region_indicator(is_active, region_indicator_style, bg));
             spans.push(Span::styled("dep: ", dim_style));
-            edit_anchor_col = Some(spans.iter().map(|s| s.content.chars().count() as u16).sum());
+            edit_anchor_col = Some(
+                spans
+                    .iter()
+                    .map(|s| unicode::display_width(&s.content) as u16)
+                    .sum(),
+            );
             edit_anchor_line = Some(body_lines.len());
             let (aw, hs) = render_edit_inline_scrolled(&mut spans, app, bright_style, width);
             app.last_edit_available_width = aw;
@@ -376,7 +389,12 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             let mut spans: Vec<Span> = Vec::new();
             spans.push(region_indicator(is_active, region_indicator_style, bg));
             spans.push(Span::styled("spec: ", dim_style));
-            edit_anchor_col = Some(spans.iter().map(|s| s.content.chars().count() as u16).sum());
+            edit_anchor_col = Some(
+                spans
+                    .iter()
+                    .map(|s| unicode::display_width(&s.content) as u16)
+                    .sum(),
+            );
             edit_anchor_line = Some(body_lines.len());
             let (aw, hs) = render_edit_inline_scrolled(&mut spans, app, bright_style, width);
             app.last_edit_available_width = aw;
@@ -427,7 +445,12 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             let mut spans: Vec<Span> = Vec::new();
             spans.push(region_indicator(is_active, region_indicator_style, bg));
             spans.push(Span::styled("ref: ", dim_style));
-            edit_anchor_col = Some(spans.iter().map(|s| s.content.chars().count() as u16).sum());
+            edit_anchor_col = Some(
+                spans
+                    .iter()
+                    .map(|s| unicode::display_width(&s.content) as u16)
+                    .sum(),
+            );
             edit_anchor_line = Some(body_lines.len());
             let (aw, hs) = render_edit_inline_scrolled(&mut spans, app, bright_style, width);
             app.last_edit_available_width = aw;
@@ -541,7 +564,11 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                         let mut spans: Vec<Span> = Vec::new();
                         let line_text = edit_lines.get(vl.logical_line).copied().unwrap_or("");
                         let slice = &line_text[vl.byte_start..vl.byte_end];
-                        let slice_chars: Vec<char> = slice.chars().collect();
+                        let graphemes: Vec<(usize, &str)> =
+                            unicode_segmentation::UnicodeSegmentation::grapheme_indices(
+                                slice, true,
+                            )
+                            .collect();
 
                         let has_cursor = vrow_idx == cursor_vrow;
                         if has_cursor {
@@ -564,12 +591,13 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                         }
 
                         // Compute selection columns for this visual row (in logical coords)
+                        // These are byte offsets within the logical line.
                         let vl_sel = sel_range.and_then(|(s, e)| {
                             selection_cols_for_line(&ds.edit_buffer, s, e, vl.logical_line)
                         });
 
-                        // Cursor position within this visual row (char offset from vl.char_start)
-                        let cursor_in_row = if has_cursor {
+                        // Cursor byte offset within this visual row
+                        let cursor_byte_in_row = if has_cursor {
                             Some(cursor_col.saturating_sub(vl.char_start))
                         } else {
                             None
@@ -577,21 +605,21 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
                         if let Some((sc, ec)) = vl_sel {
                             // Selection active on this logical line
-                            for (ci, ch) in slice_chars.iter().enumerate() {
-                                let abs_col = vl.char_start + ci;
-                                let s = if abs_col >= sc && abs_col < ec {
+                            for &(gi, g) in &graphemes {
+                                let abs_byte = vl.byte_start + gi;
+                                let s = if abs_byte >= sc && abs_byte < ec {
                                     selection_style
                                 } else {
                                     bright_style
                                 };
-                                if cursor_in_row == Some(ci) {
-                                    spans.push(Span::styled(ch.to_string(), cursor_style));
+                                if cursor_byte_in_row == Some(gi) {
+                                    spans.push(Span::styled(g.to_string(), cursor_style));
                                 } else {
-                                    spans.push(Span::styled(ch.to_string(), s));
+                                    spans.push(Span::styled(g.to_string(), s));
                                 }
                             }
                             // Blank line selection indicator
-                            if sc == ec && slice_chars.is_empty() && !has_cursor {
+                            if sc == ec && graphemes.is_empty() && !has_cursor {
                                 spans.push(Span::styled(" ", selection_style));
                             }
                             // Cursor past end of visual row
@@ -599,23 +627,20 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                                 spans.push(Span::styled(" ", cursor_style));
                             }
                         } else if has_cursor {
-                            let col_in_row =
+                            let byte_in_row =
                                 cursor_col.min(vl.char_end).saturating_sub(vl.char_start);
-                            for (ci, ch) in slice_chars.iter().enumerate() {
-                                if ci == col_in_row {
-                                    spans.push(Span::styled(ch.to_string(), cursor_style));
+                            for &(gi, g) in &graphemes {
+                                if gi == byte_in_row {
+                                    spans.push(Span::styled(g.to_string(), cursor_style));
                                 } else {
-                                    spans.push(Span::styled(ch.to_string(), bright_style));
+                                    spans.push(Span::styled(g.to_string(), bright_style));
                                 }
                             }
-                            if col_in_row >= slice_chars.len() {
+                            if byte_in_row >= slice.len() {
                                 spans.push(Span::styled(" ", cursor_style));
                             }
-                        } else if !slice_chars.is_empty() {
-                            spans.push(Span::styled(
-                                slice_chars.iter().collect::<String>(),
-                                bright_style,
-                            ));
+                        } else if !slice.is_empty() {
+                            spans.push(Span::styled(slice.to_string(), bright_style));
                         }
 
                         body_lines.push(Line::from(spans));
@@ -652,16 +677,20 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                             body_active_line = Some(body_lines.len());
                         }
 
-                        let line_chars: Vec<char> = edit_line.chars().collect();
-                        let total_line_chars = line_chars.len();
-                        let clipped_left = h_scroll > 0 && total_line_chars > 0;
+                        let graphemes: Vec<(usize, &str)> =
+                            unicode_segmentation::UnicodeSegmentation::grapheme_indices(
+                                *edit_line, true,
+                            )
+                            .collect();
+                        let total_graphemes = graphemes.len();
+                        let clipped_left = h_scroll > 0 && total_graphemes > 0;
                         let left_indicator = if clipped_left { 1 } else { 0 };
                         let avail_after_left = note_available.saturating_sub(left_indicator);
-                        let clipped_right = h_scroll + avail_after_left < total_line_chars;
+                        let clipped_right = h_scroll + avail_after_left < total_graphemes;
                         let right_indicator = if clipped_right { 1 } else { 0 };
-                        let view_chars = avail_after_left.saturating_sub(right_indicator);
-                        let view_start = h_scroll.min(total_line_chars);
-                        let view_end = (view_start + view_chars).min(total_line_chars);
+                        let view_count = avail_after_left.saturating_sub(right_indicator);
+                        let view_start = h_scroll.min(total_graphemes);
+                        let view_end = (view_start + view_count).min(total_graphemes);
 
                         let line_num_str =
                             format!("{:>width$}", line_idx + 1, width = num_display_width);
@@ -676,48 +705,59 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                             selection_cols_for_line(&ds.edit_buffer, s, e, line_idx)
                         });
 
+                        // Convert cursor byte offset to grapheme index for comparison
+                        let cursor_gi = graphemes
+                            .iter()
+                            .position(|&(bo, _)| bo >= cursor_col)
+                            .unwrap_or(total_graphemes);
+
                         if let Some((sc, ec)) = line_sel {
-                            for (i, ch) in line_chars
+                            for (gi, &(bo, g)) in graphemes
                                 .iter()
                                 .enumerate()
                                 .skip(view_start)
                                 .take(view_end - view_start)
                             {
-                                let s = if i >= sc && i < ec {
+                                let s = if bo >= sc && bo < ec {
                                     selection_style
                                 } else {
                                     bright_style
                                 };
-                                spans.push(Span::styled(ch.to_string(), s));
+                                if has_cursor && gi == cursor_gi {
+                                    spans.push(Span::styled(g.to_string(), cursor_style));
+                                } else {
+                                    spans.push(Span::styled(g.to_string(), s));
+                                }
                             }
-                            if sc == ec && total_line_chars == 0 && !has_cursor {
+                            if sc == ec && total_graphemes == 0 && !has_cursor {
                                 spans.push(Span::styled(" ", selection_style));
                             }
-                            if has_cursor
-                                && cursor_col >= total_line_chars
-                                && cursor_col >= view_start
+                            if has_cursor && cursor_gi >= total_graphemes && cursor_gi >= view_start
                             {
                                 spans.push(Span::styled(" ", cursor_style));
                             }
                         } else if has_cursor {
-                            let col = cursor_col.min(total_line_chars);
-                            for (i, ch) in line_chars
+                            let col_gi = cursor_gi.min(total_graphemes);
+                            for (gi, &(_bo, g)) in graphemes
                                 .iter()
                                 .enumerate()
                                 .skip(view_start)
                                 .take(view_end - view_start)
                             {
-                                if i == col {
-                                    spans.push(Span::styled(ch.to_string(), cursor_style));
+                                if gi == col_gi {
+                                    spans.push(Span::styled(g.to_string(), cursor_style));
                                 } else {
-                                    spans.push(Span::styled(ch.to_string(), bright_style));
+                                    spans.push(Span::styled(g.to_string(), bright_style));
                                 }
                             }
-                            if col >= total_line_chars && col >= view_start {
+                            if col_gi >= total_graphemes && col_gi >= view_start {
                                 spans.push(Span::styled(" ", cursor_style));
                             }
                         } else if view_start < view_end {
-                            let slice: String = line_chars[view_start..view_end].iter().collect();
+                            let slice: String = graphemes[view_start..view_end]
+                                .iter()
+                                .map(|g| g.1)
+                                .collect();
                             spans.push(Span::styled(slice, bright_style));
                         }
 
@@ -922,7 +962,7 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             let mut skipped_prefix = false;
             for span in line.spans.iter() {
                 if !skipped_prefix {
-                    let content_len = span.content.chars().count();
+                    let content_len = unicode::display_width(&span.content);
                     if content_len == note_gutter_width {
                         skipped_prefix = true;
                         continue;
@@ -995,8 +1035,10 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                     };
                     new_spans.push(Span::styled(content, new_style));
                 }
-                let content_width: usize =
-                    new_spans.iter().map(|s| s.content.chars().count()).sum();
+                let content_width: usize = new_spans
+                    .iter()
+                    .map(|s| unicode::display_width(&s.content))
+                    .sum();
                 if content_width < width {
                     new_spans.push(Span::styled(
                         " ".repeat(width - content_width),
@@ -1171,36 +1213,12 @@ pub(super) fn wrap_styled_spans(
                     .unwrap_or(remaining.len())
             };
             let chunk = &remaining[..chunk_end];
-            let chunk_chars = chunk.chars().count();
+            let chunk_chars = unicode::display_width(chunk);
 
             if col + chunk_chars <= max_width {
                 // Fits on current line
                 current_line.push(Span::styled(chunk.to_string(), style));
                 col += chunk_chars;
-            } else if (col == 0 || (col == continuation_indent && result_lines.is_empty()))
-                && !chunk.starts_with(char::is_whitespace)
-            {
-                // First token on line but too wide — char-wrap it
-                let effective_width = max_width.saturating_sub(col);
-                let chars_vec: Vec<char> = chunk.chars().collect();
-                let mut ci = 0;
-                while ci < chars_vec.len() {
-                    let seg_start = ci;
-                    let seg_end = (ci + effective_width).min(chars_vec.len());
-                    let seg: String = chars_vec[seg_start..seg_end].iter().collect();
-                    let seg_len = seg_end - seg_start;
-                    current_line.push(Span::styled(seg, style));
-                    ci = seg_end;
-                    if ci < chars_vec.len() {
-                        // More chars remain — emit line and start new one
-                        result_lines.push(std::mem::take(&mut current_line));
-                        let indent_str = " ".repeat(continuation_indent);
-                        current_line.push(Span::styled(indent_str, Style::default().bg(bg)));
-                        col = continuation_indent;
-                    } else {
-                        col = continuation_indent + seg_len;
-                    }
-                }
             } else if chunk.starts_with(char::is_whitespace) {
                 // Whitespace at wrap point — skip it and start new line
                 result_lines.push(std::mem::take(&mut current_line));
@@ -1209,7 +1227,8 @@ pub(super) fn wrap_styled_spans(
                 col = continuation_indent;
                 // Don't push the whitespace chunk
             } else {
-                // Word doesn't fit — check if breaking mid-word is better
+                // Word doesn't fit on current line.
+                // Decide whether to break mid-word or wrap to next line.
                 let remaining_space = max_width.saturating_sub(col);
                 let blank_fraction = if max_width > 0 {
                     remaining_space as f64 / max_width as f64
@@ -1217,38 +1236,36 @@ pub(super) fn wrap_styled_spans(
                     0.0
                 };
 
-                if blank_fraction > 0.5 && remaining_space > 0 {
-                    // Break mid-word: fill remaining space, continue on next line
-                    let mut byte_pos = 0;
-                    let mut chars_placed = 0;
-                    for c in chunk.chars() {
-                        if chars_placed >= remaining_space {
-                            break;
-                        }
-                        byte_pos += c.len_utf8();
-                        chars_placed += 1;
-                    }
-                    if byte_pos > 0 {
-                        current_line.push(Span::styled(chunk[..byte_pos].to_string(), style));
-                    }
-                    // Start new line with remainder
+                if blank_fraction <= 0.5 || remaining_space == 0 {
+                    // Word-wrap: start new line first
                     result_lines.push(std::mem::take(&mut current_line));
                     let indent_str = " ".repeat(continuation_indent);
                     current_line.push(Span::styled(indent_str, Style::default().bg(bg)));
                     col = continuation_indent;
-                    let rest = &chunk[byte_pos..];
-                    if !rest.is_empty() {
-                        current_line.push(Span::styled(rest.to_string(), style));
-                        col += chunk_chars - chars_placed;
+                }
+
+                // Grapheme-wrap the chunk across as many lines as needed
+                let mut effective_width = max_width.saturating_sub(col);
+                let mut seg = String::new();
+                let mut seg_width = 0usize;
+                for grapheme in unicode_segmentation::UnicodeSegmentation::graphemes(chunk, true) {
+                    let gw = unicode::display_width(grapheme);
+                    if seg_width + gw > effective_width && !seg.is_empty() {
+                        // Emit current segment and start new line
+                        current_line.push(Span::styled(std::mem::take(&mut seg), style));
+                        result_lines.push(std::mem::take(&mut current_line));
+                        let indent_str = " ".repeat(continuation_indent);
+                        current_line.push(Span::styled(indent_str, Style::default().bg(bg)));
+                        col = continuation_indent;
+                        seg_width = 0;
+                        effective_width = max_width.saturating_sub(continuation_indent);
                     }
-                } else {
-                    // Word-wrap: start new line with this word
-                    result_lines.push(std::mem::take(&mut current_line));
-                    let indent_str = " ".repeat(continuation_indent);
-                    current_line.push(Span::styled(indent_str, Style::default().bg(bg)));
-                    col = continuation_indent;
-                    current_line.push(Span::styled(chunk.to_string(), style));
-                    col += chunk_chars;
+                    seg.push_str(grapheme);
+                    seg_width += gw;
+                }
+                if !seg.is_empty() {
+                    current_line.push(Span::styled(seg, style));
+                    col += seg_width;
                 }
             }
             remaining = &remaining[chunk_end..];
@@ -1276,7 +1293,10 @@ fn render_edit_inline_scrolled(
     style: Style,
     total_width: usize,
 ) -> (u16, usize) {
-    let prefix_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let prefix_width: usize = spans
+        .iter()
+        .map(|s| unicode::display_width(&s.content))
+        .sum();
     let available = total_width.saturating_sub(prefix_width);
 
     if available == 0 {
@@ -1284,48 +1304,41 @@ fn render_edit_inline_scrolled(
     }
 
     let buf = &app.edit_buffer;
-    let buf_chars: Vec<char> = buf.chars().collect();
-    let total_chars = buf_chars.len();
-    let cursor_char_pos = buf[..app.edit_cursor.min(buf.len())].chars().count();
+    let total_display = unicode::display_width(buf);
+    let cursor_col = unicode::byte_offset_to_display_col(buf, app.edit_cursor.min(buf.len()));
 
-    // Auto-adjust h_scroll to keep cursor visible.
-    // When cursor is at the end, the cursor block needs one extra column.
-    let content_end = if cursor_char_pos >= total_chars {
-        total_chars + 1
+    // Auto-adjust h_scroll (in display columns) to keep cursor visible.
+    let content_end = if cursor_col >= total_display {
+        total_display + 1
     } else {
-        total_chars
+        total_display
     };
     let mut h_scroll = app.edit_h_scroll;
     let margin = 10.min(available / 3);
-    if cursor_char_pos >= h_scroll + available.saturating_sub(margin) {
-        h_scroll = cursor_char_pos.saturating_sub(available.saturating_sub(margin + 1));
+    if cursor_col >= h_scroll + available.saturating_sub(margin) {
+        h_scroll = cursor_col.saturating_sub(available.saturating_sub(margin + 1));
     }
     h_scroll = h_scroll.min(content_end.saturating_sub(available.saturating_sub(1)));
-    if cursor_char_pos < h_scroll + margin {
-        h_scroll = cursor_char_pos.saturating_sub(margin);
+    if cursor_col < h_scroll + margin {
+        h_scroll = cursor_col.saturating_sub(margin);
     }
 
     let clipped_left = h_scroll > 0;
-    // Account for indicator characters in available space
-    let view_start = h_scroll;
     let indicator_overhead = if clipped_left { 1 } else { 0 };
     let effective_available = available.saturating_sub(indicator_overhead);
-    let clipped_right = view_start + effective_available < total_chars;
+    let clipped_right = h_scroll + effective_available < total_display;
     let effective_available = if clipped_right {
         effective_available.saturating_sub(1)
     } else {
         effective_available
     };
-    let view_end = (view_start + effective_available).min(total_chars);
 
     let dim_arrow_style = Style::default().fg(app.theme.dim).bg(app.theme.background);
 
-    // Left clip indicator
     if clipped_left {
-        spans.push(Span::styled("\u{25C2}", dim_arrow_style)); // ◂
+        spans.push(Span::styled("\u{25C2}", dim_arrow_style));
     }
 
-    // Build the visible portion with cursor/selection
     let cursor_style = Style::default()
         .fg(app.theme.background)
         .bg(app.theme.text_bright);
@@ -1333,61 +1346,57 @@ fn render_edit_inline_scrolled(
         .fg(app.theme.text_bright)
         .bg(app.theme.blue);
 
-    // Convert selection range from byte to char positions
-    let sel_char_range = app.edit_selection_range().and_then(|(sb, se)| {
+    // Selection range in display columns
+    let sel_col_range = app.edit_selection_range().and_then(|(sb, se)| {
         if sb == se {
             return None;
         }
-        let sc = app.edit_buffer[..sb].chars().count();
-        let ec = app.edit_buffer[..se].chars().count();
+        let sc = unicode::byte_offset_to_display_col(buf, sb);
+        let ec = unicode::byte_offset_to_display_col(buf, se);
         Some((sc, ec))
     });
 
-    if let Some((sel_start, sel_end)) = sel_char_range {
-        // Render with selection in the visible window
-        for (i, ch) in buf_chars
-            .iter()
-            .enumerate()
-            .skip(view_start)
-            .take(view_end - view_start)
-        {
-            let s = if i >= sel_start && i < sel_end {
-                selection_style
-            } else {
-                style
-            };
-            spans.push(Span::styled(ch.to_string(), s));
+    // Iterate graphemes, tracking display column
+    let mut col = 0;
+    for grapheme in buf.graphemes(true) {
+        let gw = unicode::display_width(grapheme);
+        let next_col = col + gw;
+
+        // Skip graphemes before visible window
+        if next_col <= h_scroll {
+            col = next_col;
+            continue;
         }
-        // Cursor block at end if cursor is past content
-        if cursor_char_pos >= total_chars
-            && cursor_char_pos >= view_start
-            && cursor_char_pos < view_start + effective_available + 1
-        {
-            spans.push(Span::styled(" ", cursor_style));
+        // Stop if past visible window
+        if col >= h_scroll + effective_available {
+            break;
         }
-    } else {
-        // No selection: render with cursor highlight
-        for (i, ch) in buf_chars
-            .iter()
-            .enumerate()
-            .skip(view_start)
-            .take(view_end - view_start)
-        {
-            if i == cursor_char_pos {
-                spans.push(Span::styled(ch.to_string(), cursor_style));
-            } else {
-                spans.push(Span::styled(ch.to_string(), style));
-            }
-        }
-        // Cursor block at end if cursor is at/past end of visible content
-        if cursor_char_pos >= total_chars && cursor_char_pos >= view_start {
-            spans.push(Span::styled(" ", cursor_style));
-        }
+
+        let is_cursor = col == cursor_col;
+        let in_selection =
+            sel_col_range.is_some_and(|(sel_start, sel_end)| col >= sel_start && col < sel_end);
+
+        let s = if is_cursor && sel_col_range.is_none() {
+            cursor_style
+        } else if in_selection {
+            selection_style
+        } else {
+            style
+        };
+        spans.push(Span::styled(grapheme.to_string(), s));
+        col = next_col;
     }
 
-    // Right clip indicator
+    // Cursor block at end if cursor is at/past end of content
+    if cursor_col >= total_display
+        && cursor_col >= h_scroll
+        && cursor_col < h_scroll + effective_available + 1
+    {
+        spans.push(Span::styled(" ", cursor_style));
+    }
+
     if clipped_right {
-        spans.push(Span::styled("\u{25B8}", dim_arrow_style)); // ▸
+        spans.push(Span::styled("\u{25B8}", dim_arrow_style));
     }
 
     (available as u16, h_scroll)
@@ -1535,7 +1544,10 @@ fn render_subtask_tree(
         }
 
         // Pad to full width
-        let content_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let content_width: usize = spans
+            .iter()
+            .map(|s| unicode::display_width(&s.content))
+            .sum();
         if content_width < width {
             spans.push(Span::styled(
                 " ".repeat(width - content_width),
@@ -1670,7 +1682,10 @@ fn apply_flash_to_lines(
                     ));
                 }
             }
-            let content_width: usize = new_spans.iter().map(|s| s.content.chars().count()).sum();
+            let content_width: usize = new_spans
+                .iter()
+                .map(|s| unicode::display_width(&s.content))
+                .sum();
             if content_width < width {
                 new_spans.push(Span::styled(
                     " ".repeat(width - content_width),
