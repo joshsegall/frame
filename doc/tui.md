@@ -321,6 +321,8 @@ With selection active (Select mode):
 | `Up` | Previous search history |
 | `Down` | Next search history |
 
+After confirming a search with `Enter`, clear the active search with `Esc` in most views. In Detail view, use `Backspace` instead (since `Esc` navigates back).
+
 ### Triage Mode
 
 **Step 1 — Select track:**

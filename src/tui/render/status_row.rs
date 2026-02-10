@@ -4,7 +4,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::tui::app::{App, EditTarget, Mode, MoveState, TriageSource};
+use crate::tui::app::{App, EditTarget, Mode, MoveState, TriageSource, View};
 
 /// Render the status row (bottom of screen)
 pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
@@ -40,7 +40,11 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
                     format!("/{}", pattern),
                     Style::default().fg(app.theme.text_bright).bg(bg),
                 )];
-                let hint = "n/N next/prev  Esc clear";
+                let hint = if matches!(app.view, View::Detail { .. }) {
+                    "n/N next/prev  Bkspc clear"
+                } else {
+                    "n/N next/prev  Esc clear"
+                };
                 build_right_side(app, &mut spans, hint, width, bg, true);
                 Line::from(spans)
             } else if app.show_startup_hints {

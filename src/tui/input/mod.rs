@@ -520,6 +520,17 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             }
         }
 
+        // Backspace: clear active search in Detail view (where Esc navigates back)
+        (_, KeyCode::Backspace)
+            if app.last_search.is_some() && matches!(app.view, View::Detail { .. }) =>
+        {
+            app.last_search = None;
+            app.search_match_idx = 0;
+            app.search_wrap_message = None;
+            app.search_match_count = None;
+            app.search_zero_confirmed = false;
+        }
+
         // Help overlay
         (KeyModifiers::NONE, KeyCode::Char('?')) => {
             app.show_help = true;
