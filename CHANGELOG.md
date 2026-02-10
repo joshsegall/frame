@@ -2,23 +2,22 @@
 
 All notable changes to frame will be documented in this file.
 
-<!--
-## v0.2.0 - 2025-XX-XX
+## v0.1.1 - 2026-XX-XX
 
 ### Added
-- Bulk cross-track move for selected tasks
-- Tag color editor overlay (T key)
+- Subtask reparenting in TUI move mode: `h` outdents (promotes), `l` indents (makes child of sibling above), `j`/`k` cross parent boundaries; IDs re-keyed on confirm
+- CLI `fr mv --promote` and `fr mv --parent <id>` flags for subtask reparenting
+- Search highlighting in detail view (title, ID, tags, deps, spec, refs, note, subtasks)
+- `n`/`N` navigation in detail view to cycle between search matches
+- Startup hints in status bar (`? help  > commands  QQ quit`) until first keypress
+- Actionable empty-state messages ("No tracks — press **a** to create one", "No tasks yet — press **a** to add one")
 
 ### Changed
-- Filter indicator moved to tab separator row
+- Search match count now only counts visible tasks (excludes Done section, respects filters, skips context rows)
+- Search match count refreshes on tab/view switch
 
 ### Fixed
-- Cursor position lost after external file reload
-- Blank lines accumulating in Parked section on save
-
-### Removed
-- Deprecated `--verbose` flag from `fr clean`
--->
+- Subtask move undo operating on wrong sibling list (added `parent_id` to `Operation::TaskMove`)
 
 ## v0.1.0 - 2026-02-09
 
