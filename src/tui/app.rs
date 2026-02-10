@@ -339,6 +339,10 @@ pub enum PendingMoveKind {
     ToDone,
     /// Task reopened from Done → will move to Backlog
     ToBacklog,
+    /// Task parked in Backlog → will move to Parked section
+    ToParked,
+    /// Task un-parked in Parked → will move to Backlog section
+    FromParked,
 }
 
 /// A pending section move with a grace period
@@ -1249,6 +1253,33 @@ impl App {
                 let task = crate::ops::task_ops::find_task_mut_in_track(track, &pm.task_id)?;
                 task.metadata.retain(|m| m.key() != "resolved");
                 task.mark_dirty();
+                Some(pm.track_id.clone())
+            }
+            PendingMoveKind::ToParked => {
+                let source_index = move_task_between_sections(
+                    track,
+                    &pm.task_id,
+                    SectionKind::Backlog,
+                    SectionKind::Parked,
+                )?;
+                self.undo_stack.push(Operation::SectionMove {
+                    track_id: pm.track_id.clone(),
+                    task_id: pm.task_id.clone(),
+                    from_section: SectionKind::Backlog,
+                    to_section: SectionKind::Parked,
+                    from_index: source_index,
+                });
+                Some(pm.track_id.clone())
+            }
+            PendingMoveKind::FromParked => {
+                // Un-park flush: move from Parked to Backlog top
+                // No extra undo entry — the StateChange undo handles reversal
+                move_task_between_sections(
+                    track,
+                    &pm.task_id,
+                    SectionKind::Parked,
+                    SectionKind::Backlog,
+                )?;
                 Some(pm.track_id.clone())
             }
         }

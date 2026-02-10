@@ -3210,8 +3210,10 @@ fn task_state_action(app: &mut App, action: StateAction) {
         app.flash_state = Some(new_state);
         app.flash_task(&task_id);
 
-        // If transitioning away from Done, cancel any pending ToDone move and subtask hide
-        if old_state == crate::model::task::TaskState::Done {
+        // If transitioning away from Done or Parked, cancel any pending move and subtask hide
+        if old_state == crate::model::task::TaskState::Done
+            || old_state == crate::model::task::TaskState::Parked
+        {
             app.cancel_pending_move(&track_id, &task_id);
             app.cancel_pending_subtask_hide(&track_id, &task_id);
         }
@@ -3262,6 +3264,39 @@ fn task_state_action(app: &mut App, action: StateAction) {
                             deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
                         });
                 }
+            }
+        }
+
+        // If task is now Parked and is a top-level Backlog task, schedule pending move
+        if new_state == crate::model::task::TaskState::Parked {
+            let track_ref = App::find_track_in_project(&app.project, &track_id).unwrap();
+            let is_top_level_backlog =
+                task_ops::is_top_level_in_section(track_ref, &task_id, SectionKind::Backlog);
+            if is_top_level_backlog {
+                app.pending_moves.push(PendingMove {
+                    kind: PendingMoveKind::ToParked,
+                    track_id: track_id.clone(),
+                    task_id: task_id.clone(),
+                    deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+                });
+            }
+        }
+
+        // If task was Parked and is now something else, and is top-level in Parked section,
+        // schedule pending move back to Backlog
+        if old_state == crate::model::task::TaskState::Parked
+            && new_state != crate::model::task::TaskState::Parked
+        {
+            let track_ref = App::find_track_in_project(&app.project, &track_id).unwrap();
+            let is_top_level_parked =
+                task_ops::is_top_level_in_section(track_ref, &task_id, SectionKind::Parked);
+            if is_top_level_parked {
+                app.pending_moves.push(PendingMove {
+                    kind: PendingMoveKind::FromParked,
+                    track_id: track_id.clone(),
+                    task_id: task_id.clone(),
+                    deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+                });
             }
         }
     }
