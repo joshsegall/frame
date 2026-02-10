@@ -147,3 +147,9 @@ changes are detected.
 
 **Multiple projects** are supported via a global registry — use
 `fr projects` to list, add, or remove projects.
+
+## Terminal support
+
+Tested on macOS with Ghostty. It should work on any terminal that
+supports the Kitty keyboard protocol (Kitty, WezTerm, foot), 
+but hasn't been tested.
