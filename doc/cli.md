@@ -48,8 +48,16 @@ Shows Backlog + Parked sections. Done section only shown when `--state done`.
 Show full details for a task, including metadata and subtasks.
 
 ```
-fr show EFF-014
+fr show ID [--context]
 ```
+
+| Flag | Description |
+|------|-------------|
+| `--context` | Include ancestor context (parent chain, root-first) |
+
+With `--context`, each ancestor is shown with a `── Parent ──` separator and all its fields, followed by the target task with a `── Task ──` separator. Useful for subtasks whose parent tasks contain specs, notes, or dependencies that explain the subtask's purpose.
+
+In JSON mode (`--json`), an `ancestors` array is always included regardless of `--context`. The array is ordered root-first and is empty for top-level tasks.
 
 ### `fr ready`
 

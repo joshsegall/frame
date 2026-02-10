@@ -28,6 +28,8 @@ pub struct TaskJson {
     pub resolved: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub subtasks: Vec<TaskJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ancestors: Vec<TaskJson>,
 }
 
 #[derive(Serialize)]
@@ -134,6 +136,7 @@ pub fn task_to_json(task: &Task) -> TaskJson {
         added,
         resolved,
         subtasks: task.subtasks.iter().map(task_to_json).collect(),
+        ancestors: Vec::new(),
     }
 }
 
@@ -243,6 +246,90 @@ pub fn format_task_detail(task: &Task) -> Vec<String> {
         for sub in &task.subtasks {
             for line in format_task_tree(sub, 1) {
                 lines.push(line);
+            }
+        }
+    }
+
+    lines
+}
+
+/// Format a separator line for context display
+fn format_context_separator(label: &str, task: &Task) -> String {
+    let id_str = task
+        .id
+        .as_ref()
+        .map(|id| format!("{} ", id))
+        .unwrap_or_default();
+    format!("── {} ── {}{}", label, id_str, task.title)
+}
+
+/// Format task detail with ancestor context (--context flag)
+pub fn format_task_detail_with_context(ancestors: &[&Task], task: &Task) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    for ancestor in ancestors {
+        lines.push(format_context_separator("Parent", ancestor));
+        lines.extend(format_context_fields(ancestor));
+        lines.push(String::new());
+    }
+
+    lines.push(format_context_separator("Task", task));
+    lines.extend(format_context_fields(task));
+
+    // Subtasks
+    if !task.subtasks.is_empty() {
+        lines.push(String::new());
+        lines.push("subtasks:".to_string());
+        for sub in &task.subtasks {
+            for line in format_task_tree(sub, 1) {
+                lines.push(line);
+            }
+        }
+    }
+
+    lines
+}
+
+/// Format the fields of a task for context display (indented, no header)
+fn format_context_fields(task: &Task) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    let state_str = match task.state {
+        TaskState::Todo => "todo",
+        TaskState::Active => "active",
+        TaskState::Blocked => "blocked",
+        TaskState::Done => "done",
+        TaskState::Parked => "parked",
+    };
+    lines.push(format!("  state: {}", state_str));
+
+    if !task.tags.is_empty() {
+        lines.push(format!(
+            "  tags: {}",
+            task.tags
+                .iter()
+                .map(|t| format!("#{}", t))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+    }
+
+    for m in &task.metadata {
+        match m {
+            Metadata::Added(d) => lines.push(format!("  added: {}", d)),
+            Metadata::Resolved(d) => lines.push(format!("  resolved: {}", d)),
+            Metadata::Dep(deps) => lines.push(format!("  dep: {}", deps.join(", "))),
+            Metadata::Spec(s) => lines.push(format!("  spec: {}", s)),
+            Metadata::Ref(refs) => {
+                for r in refs {
+                    lines.push(format!("  ref: {}", r));
+                }
+            }
+            Metadata::Note(n) => {
+                lines.push("  note:".to_string());
+                for line in n.lines() {
+                    lines.push(format!("    {}", line));
+                }
             }
         }
     }

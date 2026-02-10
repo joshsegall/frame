@@ -11,6 +11,7 @@ All notable changes to frame will be documented in this file.
 - `n`/`N` navigation in detail view to cycle between search matches
 - Startup hints in status bar (`? help  > commands  QQ quit`) until first keypress
 - Actionable empty-state messages ("No tracks — press **a** to create one", "No tasks yet — press **a** to add one")
+- `fr show --context` flag to display ancestor chain (parent tasks root-first) for subtasks; JSON output always includes `ancestors` array
 
 ### Changed
 - Search match count now only counts visible tasks (excludes Done section, respects filters, skips context rows)

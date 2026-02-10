@@ -93,7 +93,7 @@ fr ready
 fr ready --track effects
 
 # Read task details and deps before starting
-fr show EFF-014
+fr show EFF-014 --context
 fr deps EFF-014
 
 # Claim it
@@ -162,6 +162,7 @@ fr sub EFF-014 "Test with nested closures"
 | `fr list --tag <tag>` | Filter by tag |
 | `fr list --all` | Include shelved and archived tracks |
 | `fr show <id>` | Full task details |
+| `fr show <id> --context` | Task details with ancestor context |
 | `fr search <pattern>` | Regex search across tasks and inbox |
 | `fr search <pattern> --track <id>` | Search within one track |
 | `fr deps <id>` | Dependency tree for a task |
@@ -279,6 +280,12 @@ fr add effects "Handle empty effect blocks #cc-added" --found-from EFF-014
 - **`fr add <track>`** — you know the track
 - **`--found-from <id>`** — discovered while working on another task
 
+### Subtask context
+
+Always use `--context` when showing a task. Parent tasks often contain
+specs, notes, and dependencies that explain why the subtask exists. In
+`--json` mode, ancestor context is included automatically.
+
 ### Subtask structure
 
 Use `fr sub` to break work down. Subtasks get dotted IDs automatically
@@ -298,7 +305,7 @@ fr ready --cc
 # → [infra] [ ] INFRA-015 Add span tracking to HIR nodes #cc
 
 # 2. Read details
-fr show INFRA-015
+fr show INFRA-015 --context
 
 # 3. Claim it
 fr state INFRA-015 active

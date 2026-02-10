@@ -333,7 +333,22 @@ fn cmd_show(args: ShowArgs, json: bool) -> Result<(), Box<dyn std::error::Error>
     for (_, track) in &project.tracks {
         if let Some(task) = task_ops::find_task_in_track(track, &args.id) {
             if json {
-                println!("{}", serde_json::to_string_pretty(&task_to_json(task))?);
+                let mut tj = task_to_json(task);
+                // JSON always includes ancestors
+                tj.ancestors = collect_ancestor_ids(&args.id)
+                    .iter()
+                    .filter_map(|aid| task_ops::find_task_in_track(track, aid))
+                    .map(task_to_json)
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&tj)?);
+            } else if args.context {
+                let ancestors: Vec<&Task> = collect_ancestor_ids(&args.id)
+                    .iter()
+                    .filter_map(|aid| task_ops::find_task_in_track(track, aid))
+                    .collect();
+                for line in format_task_detail_with_context(&ancestors, task) {
+                    println!("{}", line);
+                }
             } else {
                 for line in format_task_detail(task) {
                     println!("{}", line);
@@ -344,6 +359,19 @@ fn cmd_show(args: ShowArgs, json: bool) -> Result<(), Box<dyn std::error::Error>
     }
 
     Err(format!("task not found: {}", args.id).into())
+}
+
+/// Collect ancestor task IDs from a dotted ID, root-first.
+/// e.g. "FOO-001.1.2" → ["FOO-001", "FOO-001.1"]
+fn collect_ancestor_ids(task_id: &str) -> Vec<String> {
+    let mut ancestors = Vec::new();
+    let mut id = task_id.to_string();
+    while let Some(dot_pos) = id.rfind('.') {
+        id = id[..dot_pos].to_string();
+        ancestors.push(id.clone());
+    }
+    ancestors.reverse();
+    ancestors
 }
 
 fn cmd_ready(args: ReadyArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {

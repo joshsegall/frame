@@ -115,6 +115,9 @@ pub struct ListArgs {
 pub struct ShowArgs {
     /// Task ID to show
     pub id: String,
+    /// Include ancestor context (parent chain)
+    #[arg(long)]
+    pub context: bool,
 }
 
 #[derive(Args)]

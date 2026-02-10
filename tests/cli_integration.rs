@@ -1240,3 +1240,78 @@ deep = "D"
         stderr.contains("depth") || stderr.contains("DepthExceeded") || stderr.contains("nesting")
     );
 }
+
+// ---------------------------------------------------------------------------
+// Show --context tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_show_context_subtask() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+
+    let (stdout, _, success) = run_fr(tmp.path(), &["show", "M-003.1", "--context"]);
+    assert!(success);
+
+    // Should have parent separator
+    assert!(stdout.contains("── Parent ── M-003"));
+    // Should have task separator
+    assert!(stdout.contains("── Task ── M-003.1"));
+    // Parent fields should be present
+    assert!(stdout.contains("state: todo"));
+}
+
+#[test]
+fn test_show_context_top_level() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+
+    // Top-level task with --context: should show "── Task ──" separator but no parents
+    let (stdout, _, success) = run_fr(tmp.path(), &["show", "M-003", "--context"]);
+    assert!(success);
+
+    assert!(!stdout.contains("── Parent ──"));
+    assert!(stdout.contains("── Task ── M-003"));
+}
+
+#[test]
+fn test_show_no_context_unchanged() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+
+    // Without --context, output should not have separators
+    let (stdout, _, success) = run_fr(tmp.path(), &["show", "M-003.1"]);
+    assert!(success);
+    assert!(!stdout.contains("── Parent ──"));
+    assert!(!stdout.contains("── Task ──"));
+}
+
+#[test]
+fn test_show_json_always_has_ancestors() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+
+    // JSON output always includes ancestors, even without --context
+    let (stdout, _, success) = run_fr(tmp.path(), &["show", "M-003.1", "--json"]);
+    assert!(success);
+
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let ancestors = json["ancestors"].as_array().unwrap();
+    assert_eq!(ancestors.len(), 1);
+    assert_eq!(ancestors[0]["id"], "M-003");
+    assert_eq!(ancestors[0]["title"], "Third task with subtasks");
+}
+
+#[test]
+fn test_show_json_top_level_empty_ancestors() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+
+    // Top-level task JSON should have empty ancestors (omitted by skip_serializing_if)
+    let (stdout, _, success) = run_fr(tmp.path(), &["show", "M-003", "--json"]);
+    assert!(success);
+
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    // ancestors should be absent (empty vec is skipped) or empty array
+    assert!(json.get("ancestors").is_none() || json["ancestors"].as_array().unwrap().is_empty());
+}
