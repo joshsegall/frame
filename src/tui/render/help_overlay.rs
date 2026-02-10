@@ -312,6 +312,7 @@ fn build_detail_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("@".into(), "Edit refs".into()),
         HelpEntry::Binding("d".into(), "Edit deps".into()),
         HelpEntry::Binding("n".into(), "Edit note".into()),
+        HelpEntry::Binding("w/Alt+w".into(), "Toggle note wrap".into()),
         HelpEntry::Blank,
     ];
     right.extend(other_entries(true, false, true));
@@ -367,6 +368,7 @@ fn build_inbox_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("e".into(), "Edit title".into()),
         HelpEntry::Binding("t".into(), "Edit tags".into()),
         HelpEntry::Binding("n".into(), "Edit note".into()),
+        HelpEntry::Binding("w/Alt+w".into(), "Toggle note wrap".into()),
         HelpEntry::Binding("x".into(), "Delete item".into()),
         HelpEntry::Binding("m".into(), "Move mode".into()),
         HelpEntry::Blank,

@@ -253,6 +253,7 @@ With selection active (Select mode):
 
 | Key | Action |
 |-----|--------|
+| `w` | Toggle note wrap |
 | `D` | Open dependency popup |
 | `.` | Repeat last action |
 | `Esc`, `Backspace` | Return to origin view (Track or Recent) |
@@ -296,6 +297,7 @@ With selection active (Select mode):
 | `Tab` | Insert 4 spaces |
 | `Up`, `Down` | Move between lines |
 | `Alt+Up`, `Alt+Down` | Jump between paragraphs |
+| `Alt+w` | Toggle note wrap |
 | `Esc` | Save and exit edit |
 
 ### Move Mode
@@ -522,6 +524,7 @@ UI-relevant settings in `project.toml`:
 ```toml
 [ui]
 kitty_keyboard = true      # enhanced keyboard protocol (disable if terminal has issues)
+note_wrap = true           # soft word wrap for note editing (toggle with w / Alt+w)
 ref_extensions = ["md"]    # file types for ref/spec autocomplete
 ref_paths = ["doc"]        # directories for ref/spec autocomplete
 
@@ -533,4 +536,4 @@ design = "#44DDFF"
 # state/UI color overrides
 ```
 
-The TUI persists cursor positions, scroll offsets, and expanded task state in `frame/.state.json` (auto-saved, not meant for manual editing).
+The TUI persists cursor positions, scroll offsets, expanded task state, and note wrap preference in `frame/.state.json` (auto-saved, not meant for manual editing).

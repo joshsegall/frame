@@ -100,4 +100,7 @@ pub struct UiConfig {
     /// Disable if your terminal has issues with enhanced key reporting.
     #[serde(default)]
     pub kitty_keyboard: Option<bool>,
+    /// Whether note editing uses soft word wrap (default: true).
+    #[serde(default = "default_true")]
+    pub note_wrap: bool,
 }

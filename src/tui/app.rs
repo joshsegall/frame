@@ -267,6 +267,8 @@ pub struct DetailState {
     pub multiline_selection_anchor: Option<(usize, usize)>,
     /// Horizontal scroll offset for multi-line note editing
     pub note_h_scroll: usize,
+    /// Sticky column for visual-row cursor movement (in visual-column space)
+    pub sticky_col: Option<usize>,
     /// Total rendered lines (set during render, used for scroll clamping)
     pub total_lines: usize,
     /// Virtual cursor line for note view-mode scrolling (None = not scrolling)
@@ -936,6 +938,8 @@ pub struct App {
     pub tab_scroll: usize,
     /// Show startup hints in status bar until first real keypress
     pub show_startup_hints: bool,
+    /// Effective note wrap setting (override > config > true)
+    pub note_wrap: bool,
 }
 
 impl App {
@@ -949,6 +953,7 @@ impl App {
             .collect();
 
         let theme = Theme::from_config(&project.config.ui);
+        let note_wrap = project.config.ui.note_wrap;
 
         let initial_view = if active_track_ids.is_empty() {
             View::Tracks
@@ -1060,6 +1065,7 @@ impl App {
             last_edit_available_width: 0,
             tab_scroll: 0,
             show_startup_hints: true,
+            note_wrap,
         }
     }
 
@@ -1120,6 +1126,11 @@ impl App {
             return None;
         }
         Some(self.edit_buffer[start..end].to_string())
+    }
+
+    /// Toggle note wrap on/off and persist the override to state
+    pub fn toggle_note_wrap(&mut self) {
+        self.note_wrap = !self.note_wrap;
     }
 
     /// Start flashing a task (highlight after undo/redo navigation)
@@ -2180,6 +2191,7 @@ impl App {
             flat_subtask_ids: Vec::new(),
             multiline_selection_anchor: None,
             note_h_scroll: 0,
+            sticky_col: None,
             total_lines: 0,
             note_view_line: None,
             note_header_line: None,
@@ -2665,6 +2677,11 @@ pub fn restore_ui_state(app: &mut App) {
 
     // Restore search history
     app.search_history = ui_state.search_history;
+
+    // Restore note wrap override
+    if let Some(wrap_override) = ui_state.note_wrap_override {
+        app.note_wrap = wrap_override;
+    }
 }
 
 /// Save UI state to .state.json
@@ -2694,12 +2711,19 @@ pub fn save_ui_state(app: &App) {
         );
     }
 
+    let note_wrap_override = if app.note_wrap != app.project.config.ui.note_wrap {
+        Some(app.note_wrap)
+    } else {
+        None
+    };
+
     let ui_state = UiState {
         view: view_str,
         active_track,
         tracks,
         last_search: app.last_search.clone(),
         search_history: app.search_history.clone(),
+        note_wrap_override,
     };
 
     let _ = write_ui_state(&app.project.frame_dir, &ui_state);

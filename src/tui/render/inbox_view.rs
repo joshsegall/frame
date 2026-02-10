@@ -6,7 +6,9 @@ use ratatui::widgets::Paragraph;
 
 use crate::tui::app::{App, EditTarget, Mode};
 use crate::tui::input::{multiline_selection_range, selection_cols_for_line};
+use crate::tui::wrap;
 
+use super::detail_view::wrap_styled_spans;
 use super::push_highlighted_spans;
 
 /// Maximum visible lines for the note editor / view-mode body
@@ -275,7 +277,7 @@ fn render_body_view_mode(
     body: &str,
     item_index: usize,
     search_re: Option<&regex::Regex>,
-    _area: Rect,
+    area: Rect,
 ) {
     let body_lines: Vec<&str> = body.lines().collect();
     let line_count = body_lines.len();
@@ -293,23 +295,33 @@ fn render_body_view_mode(
         .add_modifier(Modifier::BOLD);
     let dim_style = Style::default().fg(app.theme.dim).bg(app.theme.background);
     let indent = "      ";
+    let indent_len = indent.len();
+    let content_width = (area.width as usize).saturating_sub(indent_len);
 
+    let mut visual_lines_rendered = 0;
     for body_line in body_lines.iter().take(visible_count) {
-        let mut body_spans: Vec<Span> = Vec::new();
-        body_spans.push(Span::styled(
-            indent,
-            Style::default().bg(app.theme.background),
-        ));
-
+        let mut content_spans: Vec<Span> = Vec::new();
         push_highlighted_spans(
-            &mut body_spans,
+            &mut content_spans,
             body_line,
             body_style,
             body_hl_style,
             search_re,
         );
-        display_lines.push((Some(item_index), Line::from(body_spans)));
+
+        let wrapped = wrap_styled_spans(content_spans, content_width, 0, app.theme.background);
+        for wrapped_line in wrapped {
+            let indent_span = Span::styled(
+                indent.to_string(),
+                Style::default().bg(app.theme.background),
+            );
+            let mut line_spans = vec![indent_span];
+            line_spans.extend(wrapped_line.spans);
+            display_lines.push((Some(item_index), Line::from(line_spans)));
+            visual_lines_rendered += 1;
+        }
     }
+    let _ = visual_lines_rendered;
 
     if truncated {
         let remaining = line_count - MAX_NOTE_LINES;
@@ -357,8 +369,7 @@ fn render_inline_note_editor(
     app.inbox_note_editor_scroll = editor_scroll;
 
     // Compute gutter width from total line count
-    let num_width = total_lines.max(1).to_string().len();
-    let gutter_width = (num_width + 1).max(3);
+    let gutter_width = wrap::gutter_width(total_lines);
     let num_display_width = gutter_width - 1;
 
     // Available width for note content (gutter eats into base indent)
@@ -366,6 +377,7 @@ fn render_inline_note_editor(
     let indent_width = BASE_INDENT.saturating_sub(gutter_width);
     let note_available = (area.width as usize).saturating_sub(BASE_INDENT);
 
+    app.last_edit_available_width = note_available as u16;
     let cursor_col = ds.edit_cursor_col;
     let bright_style = Style::default()
         .fg(app.theme.text_bright)
@@ -379,136 +391,256 @@ fn render_inline_note_editor(
         .bg(app.theme.blue);
     let dim_arrow_style = Style::default().fg(app.theme.dim).bg(app.theme.background);
 
-    // Horizontal scroll auto-adjustment
-    let mut h_scroll = ds.note_h_scroll;
-    if note_available > 0 {
-        let margin = 10.min(note_available / 3);
-        let cursor_line_len = edit_lines.get(cursor_line).map_or(0, |l| l.len());
-        let content_end = if cursor_col >= cursor_line_len {
-            cursor_line_len + 1
-        } else {
-            cursor_line_len
-        };
-        if cursor_col >= h_scroll + note_available.saturating_sub(margin) {
-            h_scroll = cursor_col.saturating_sub(note_available.saturating_sub(margin + 1));
-        }
-        h_scroll = h_scroll.min(content_end.saturating_sub(note_available.saturating_sub(1)));
-        if cursor_col < h_scroll + margin {
-            h_scroll = cursor_col.saturating_sub(margin);
-        }
-    }
-
     // Compute selection range
     let sel_range = multiline_selection_range(ds);
 
-    // Render visible editor lines
-    for view_row in 0..visible_lines {
-        let line_idx = editor_scroll + view_row;
-        if line_idx >= total_lines {
-            break;
-        }
-        let edit_line = edit_lines[line_idx];
-        let has_cursor = line_idx == cursor_line;
+    let mut h_scroll = ds.note_h_scroll;
 
-        if has_cursor {
-            *editor_active_line = Some(display_lines.len());
+    if app.note_wrap && note_available > 0 {
+        // --- Wrap-aware rendering ---
+        let visual_lines = wrap::wrap_lines(&edit_lines, note_available);
+        let total_visual = visual_lines.len();
+        let visible_visual = total_visual.clamp(1, MAX_NOTE_LINES);
+
+        let cursor_vrow = wrap::logical_to_visual_row(&visual_lines, cursor_line, cursor_col);
+
+        // Scroll to keep cursor visual row visible
+        let max_vscroll = total_visual.saturating_sub(visible_visual);
+        editor_scroll = editor_scroll.min(max_vscroll);
+        if cursor_vrow < editor_scroll {
+            editor_scroll = cursor_vrow;
+        } else if cursor_vrow >= editor_scroll + visible_visual {
+            editor_scroll = cursor_vrow.saturating_sub(visible_visual - 1);
+        }
+        app.inbox_note_editor_scroll = editor_scroll;
+
+        for view_row in 0..visible_visual {
+            let vrow_idx = editor_scroll + view_row;
+            if vrow_idx >= total_visual {
+                break;
+            }
+            let vl = &visual_lines[vrow_idx];
+            let line_text = edit_lines.get(vl.logical_line).copied().unwrap_or("");
+            let slice = &line_text[vl.byte_start..vl.byte_end];
+            let slice_chars: Vec<char> = slice.chars().collect();
+
+            let has_cursor = vrow_idx == cursor_vrow;
+            if has_cursor {
+                *editor_active_line = Some(display_lines.len());
+            }
+
+            let mut spans: Vec<Span> = Vec::new();
+            if indent_width > 0 {
+                spans.push(Span::styled(
+                    " ".repeat(indent_width),
+                    Style::default().bg(app.theme.background),
+                ));
+            }
+
+            // Gutter
+            if vl.is_first {
+                let num_str = format!(
+                    "{:>width$} ",
+                    vl.logical_line + 1,
+                    width = num_display_width,
+                );
+                spans.push(Span::styled(num_str, text_style));
+            } else {
+                spans.push(Span::styled(
+                    " ".repeat(gutter_width),
+                    Style::default().bg(app.theme.background),
+                ));
+            }
+
+            let vl_sel = sel_range
+                .and_then(|(s, e)| selection_cols_for_line(&ds.edit_buffer, s, e, vl.logical_line));
+
+            let cursor_in_row = if has_cursor {
+                Some(cursor_col.saturating_sub(vl.char_start))
+            } else {
+                None
+            };
+
+            if let Some((sc, ec)) = vl_sel {
+                for (ci, ch) in slice_chars.iter().enumerate() {
+                    let abs_col = vl.char_start + ci;
+                    let s = if abs_col >= sc && abs_col < ec {
+                        selection_style
+                    } else {
+                        bright_style
+                    };
+                    if cursor_in_row == Some(ci) {
+                        spans.push(Span::styled(ch.to_string(), cursor_style));
+                    } else {
+                        spans.push(Span::styled(ch.to_string(), s));
+                    }
+                }
+                if sc == ec && slice_chars.is_empty() && !has_cursor {
+                    spans.push(Span::styled(" ", selection_style));
+                }
+                if has_cursor && cursor_col >= vl.char_end {
+                    spans.push(Span::styled(" ", cursor_style));
+                }
+            } else if has_cursor {
+                let col_in_row = cursor_col.min(vl.char_end).saturating_sub(vl.char_start);
+                for (ci, ch) in slice_chars.iter().enumerate() {
+                    if ci == col_in_row {
+                        spans.push(Span::styled(ch.to_string(), cursor_style));
+                    } else {
+                        spans.push(Span::styled(ch.to_string(), bright_style));
+                    }
+                }
+                if col_in_row >= slice_chars.len() {
+                    spans.push(Span::styled(" ", cursor_style));
+                }
+            } else if !slice_chars.is_empty() {
+                spans.push(Span::styled(
+                    slice_chars.iter().collect::<String>(),
+                    bright_style,
+                ));
+            }
+
+            display_lines.push((Some(item_index), Line::from(spans)));
         }
 
-        let mut spans: Vec<Span> = Vec::new();
-        if indent_width > 0 {
-            spans.push(Span::styled(
-                " ".repeat(indent_width),
-                Style::default().bg(app.theme.background),
+        // Scroll indicator
+        if total_visual > visible_visual {
+            let dim_style = Style::default().fg(app.theme.dim).bg(app.theme.background);
+            let indicator = format!(
+                "{}[{}/{}]",
+                " ".repeat(BASE_INDENT),
+                editor_scroll + visible_visual,
+                total_visual
+            );
+            display_lines.push((
+                Some(item_index),
+                Line::from(Span::styled(indicator, dim_style)),
             ));
         }
-
-        let line_chars: Vec<char> = edit_line.chars().collect();
-        let total_line_chars = line_chars.len();
-        let clipped_left = h_scroll > 0 && total_line_chars > 0;
-        let left_indicator = if clipped_left { 1 } else { 0 };
-        let avail_after_left = note_available.saturating_sub(left_indicator);
-        let clipped_right = h_scroll + avail_after_left < total_line_chars;
-        let right_indicator = if clipped_right { 1 } else { 0 };
-        let view_chars = avail_after_left.saturating_sub(right_indicator);
-        let view_start = h_scroll.min(total_line_chars);
-        let view_end = (view_start + view_chars).min(total_line_chars);
-
-        // Line number
-        let line_num_str = format!("{:>width$}", line_idx + 1, width = num_display_width);
-        if clipped_left {
-            spans.push(Span::styled(line_num_str, text_style));
-            spans.push(Span::styled("\u{25C2}", dim_arrow_style)); // ◂
-        } else {
-            spans.push(Span::styled(format!("{} ", line_num_str), text_style));
+    } else {
+        // --- Original horizontal-scroll rendering ---
+        if note_available > 0 {
+            let margin = 10.min(note_available / 3);
+            let cursor_line_len = edit_lines.get(cursor_line).map_or(0, |l| l.len());
+            let content_end = if cursor_col >= cursor_line_len {
+                cursor_line_len + 1
+            } else {
+                cursor_line_len
+            };
+            if cursor_col >= h_scroll + note_available.saturating_sub(margin) {
+                h_scroll = cursor_col.saturating_sub(note_available.saturating_sub(margin + 1));
+            }
+            h_scroll = h_scroll.min(content_end.saturating_sub(note_available.saturating_sub(1)));
+            if cursor_col < h_scroll + margin {
+                h_scroll = cursor_col.saturating_sub(margin);
+            }
         }
 
-        let line_sel =
-            sel_range.and_then(|(s, e)| selection_cols_for_line(&ds.edit_buffer, s, e, line_idx));
+        for view_row in 0..visible_lines {
+            let line_idx = editor_scroll + view_row;
+            if line_idx >= total_lines {
+                break;
+            }
+            let edit_line = edit_lines[line_idx];
+            let has_cursor = line_idx == cursor_line;
 
-        // Render the visible viewport of this line
-        if let Some((sc, ec)) = line_sel {
-            for (idx, ch) in line_chars
-                .iter()
-                .enumerate()
-                .skip(view_start)
-                .take(view_end - view_start)
-            {
-                let s = if idx >= sc && idx < ec {
-                    selection_style
-                } else {
-                    bright_style
-                };
-                spans.push(Span::styled(ch.to_string(), s));
+            if has_cursor {
+                *editor_active_line = Some(display_lines.len());
             }
-            if sc == ec && total_line_chars == 0 && !has_cursor {
-                spans.push(Span::styled(" ", selection_style));
+
+            let mut spans: Vec<Span> = Vec::new();
+            if indent_width > 0 {
+                spans.push(Span::styled(
+                    " ".repeat(indent_width),
+                    Style::default().bg(app.theme.background),
+                ));
             }
-            if has_cursor && cursor_col >= total_line_chars && cursor_col >= view_start {
-                spans.push(Span::styled(" ", cursor_style));
+
+            let line_chars: Vec<char> = edit_line.chars().collect();
+            let total_line_chars = line_chars.len();
+            let clipped_left = h_scroll > 0 && total_line_chars > 0;
+            let left_indicator = if clipped_left { 1 } else { 0 };
+            let avail_after_left = note_available.saturating_sub(left_indicator);
+            let clipped_right = h_scroll + avail_after_left < total_line_chars;
+            let right_indicator = if clipped_right { 1 } else { 0 };
+            let view_chars = avail_after_left.saturating_sub(right_indicator);
+            let view_start = h_scroll.min(total_line_chars);
+            let view_end = (view_start + view_chars).min(total_line_chars);
+
+            let line_num_str = format!("{:>width$}", line_idx + 1, width = num_display_width);
+            if clipped_left {
+                spans.push(Span::styled(line_num_str, text_style));
+                spans.push(Span::styled("\u{25C2}", dim_arrow_style)); // ◂
+            } else {
+                spans.push(Span::styled(format!("{} ", line_num_str), text_style));
             }
-        } else if has_cursor {
-            let col = cursor_col.min(total_line_chars);
-            for (idx, ch) in line_chars
-                .iter()
-                .enumerate()
-                .skip(view_start)
-                .take(view_end - view_start)
-            {
-                if idx == col {
-                    spans.push(Span::styled(ch.to_string(), cursor_style));
-                } else {
-                    spans.push(Span::styled(ch.to_string(), bright_style));
+
+            let line_sel = sel_range
+                .and_then(|(s, e)| selection_cols_for_line(&ds.edit_buffer, s, e, line_idx));
+
+            if let Some((sc, ec)) = line_sel {
+                for (idx, ch) in line_chars
+                    .iter()
+                    .enumerate()
+                    .skip(view_start)
+                    .take(view_end - view_start)
+                {
+                    let s = if idx >= sc && idx < ec {
+                        selection_style
+                    } else {
+                        bright_style
+                    };
+                    spans.push(Span::styled(ch.to_string(), s));
                 }
+                if sc == ec && total_line_chars == 0 && !has_cursor {
+                    spans.push(Span::styled(" ", selection_style));
+                }
+                if has_cursor && cursor_col >= total_line_chars && cursor_col >= view_start {
+                    spans.push(Span::styled(" ", cursor_style));
+                }
+            } else if has_cursor {
+                let col = cursor_col.min(total_line_chars);
+                for (idx, ch) in line_chars
+                    .iter()
+                    .enumerate()
+                    .skip(view_start)
+                    .take(view_end - view_start)
+                {
+                    if idx == col {
+                        spans.push(Span::styled(ch.to_string(), cursor_style));
+                    } else {
+                        spans.push(Span::styled(ch.to_string(), bright_style));
+                    }
+                }
+                if col >= total_line_chars && col >= view_start {
+                    spans.push(Span::styled(" ", cursor_style));
+                }
+            } else if view_start < view_end {
+                let slice: String = line_chars[view_start..view_end].iter().collect();
+                spans.push(Span::styled(slice, bright_style));
             }
-            if col >= total_line_chars && col >= view_start {
-                spans.push(Span::styled(" ", cursor_style));
+
+            if clipped_right {
+                spans.push(Span::styled("\u{25B8}", dim_arrow_style)); // ▸
             }
-        } else if view_start < view_end {
-            let slice: String = line_chars[view_start..view_end].iter().collect();
-            spans.push(Span::styled(slice, bright_style));
+
+            display_lines.push((Some(item_index), Line::from(spans)));
         }
 
-        // Right clip indicator
-        if clipped_right {
-            spans.push(Span::styled("\u{25B8}", dim_arrow_style)); // ▸
+        // Scroll indicator
+        if total_lines > visible_lines {
+            let dim_style = Style::default().fg(app.theme.dim).bg(app.theme.background);
+            let indicator = format!(
+                "{}[{}/{}]",
+                " ".repeat(BASE_INDENT),
+                editor_scroll + visible_lines,
+                total_lines
+            );
+            display_lines.push((
+                Some(item_index),
+                Line::from(Span::styled(indicator, dim_style)),
+            ));
         }
-
-        display_lines.push((Some(item_index), Line::from(spans)));
-    }
-
-    // Scroll indicator if there are more lines than visible
-    if total_lines > visible_lines {
-        let dim_style = Style::default().fg(app.theme.dim).bg(app.theme.background);
-        let indicator = format!(
-            "{}[{}/{}]",
-            " ".repeat(BASE_INDENT),
-            editor_scroll + visible_lines,
-            total_lines
-        );
-        display_lines.push((
-            Some(item_index),
-            Line::from(Span::styled(indicator, dim_style)),
-        ));
     }
 
     // Write back adjusted h_scroll

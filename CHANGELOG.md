@@ -2,6 +2,11 @@
 
 All notable changes to frame will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- Soft word wrap for notes in Detail view and Inbox (view mode always wraps; edit mode wraps by default, togglable with `w` / `Alt+w`)
+
 ## v0.1.1 - 2026-02-10
 
 ### Added

@@ -614,6 +614,13 @@ fn static_actions() -> Vec<PaletteAction> {
             category: ActionCategory::Edit,
         },
         PaletteAction {
+            id: "toggle_note_wrap",
+            label: "Toggle note wrap".into(),
+            shortcut: Some("w"),
+            contexts: &[ViewContext::DetailView],
+            category: ActionCategory::Edit,
+        },
+        PaletteAction {
             id: "back_to_track",
             label: "Back to track".into(),
             shortcut: Some("Esc"),

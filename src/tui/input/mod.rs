@@ -16,6 +16,7 @@ use super::app::{
     RepeatEditRegion, RepeatableAction, StateFilter, TriageSource, View, resolve_task_from_flat,
 };
 use super::undo::{Operation, UndoNavTarget};
+use super::wrap;
 
 // ---------------------------------------------------------------------------
 // Clipboard helpers (macOS pbcopy/pbpaste, Linux xclip)
@@ -492,6 +493,7 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
                         flat_subtask_ids: Vec::new(),
                         multiline_selection_anchor: None,
                         note_h_scroll: 0,
+                        sticky_col: None,
                         total_lines: 0,
                         note_view_line: None,
                         note_header_line: None,
@@ -807,6 +809,19 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
         // Set cc-focus to current track
         (KeyModifiers::SHIFT, KeyCode::Char('C')) => {
             set_cc_focus_current(app);
+        }
+
+        // Toggle note wrap (detail view only)
+        (KeyModifiers::NONE, KeyCode::Char('w')) if matches!(app.view, View::Detail { .. }) => {
+            app.toggle_note_wrap();
+            app.status_message = Some(
+                if app.note_wrap {
+                    "wrap: on"
+                } else {
+                    "wrap: off"
+                }
+                .into(),
+            );
         }
 
         // Move mode (track, tracks, or inbox view)
@@ -1323,6 +1338,7 @@ fn handle_select(app: &mut App, key: KeyEvent) {
                         flat_subtask_ids: Vec::new(),
                         multiline_selection_anchor: None,
                         note_h_scroll: 0,
+                        sticky_col: None,
                         total_lines: 0,
                         note_view_line: None,
                         note_header_line: None,
@@ -7340,20 +7356,53 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
             app.edit_history = None;
             confirm_detail_multiline(app);
         }
-        // Home / Ctrl+A (macOS Cmd+Left sends ^A): jump to start of current line
+        // Home / Ctrl+A (macOS Cmd+Left sends ^A): jump to start of current visual row
         (m, KeyCode::Char('a')) if m.contains(KeyModifiers::CONTROL) => {
             if let Some(ds) = &mut app.detail_state {
                 ds.multiline_selection_anchor = None;
-                ds.edit_cursor_col = 0;
+                ds.sticky_col = None;
+                if app.note_wrap {
+                    let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
+                    let note_width = app.last_edit_available_width as usize;
+                    if note_width > 0 {
+                        let vls = wrap::wrap_lines(&edit_lines, note_width);
+                        let row = wrap::logical_to_visual_row(
+                            &vls,
+                            ds.edit_cursor_line,
+                            ds.edit_cursor_col,
+                        );
+                        if let Some(vl) = vls.get(row) {
+                            ds.edit_cursor_col = vl.char_start;
+                        }
+                    }
+                } else {
+                    ds.edit_cursor_col = 0;
+                }
             }
         }
-        // End / Ctrl+E (macOS Cmd+Right sends ^E): jump to end of line
+        // End / Ctrl+E (macOS Cmd+Right sends ^E): jump to end of current visual row
         (m, KeyCode::Char('e')) if m.contains(KeyModifiers::CONTROL) => {
             if let Some(ds) = &mut app.detail_state {
                 ds.multiline_selection_anchor = None;
+                ds.sticky_col = None;
                 let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
-                let line_len = edit_lines.get(ds.edit_cursor_line).map_or(0, |l| l.len());
-                ds.edit_cursor_col = line_len;
+                if app.note_wrap {
+                    let note_width = app.last_edit_available_width as usize;
+                    if note_width > 0 {
+                        let vls = wrap::wrap_lines(&edit_lines, note_width);
+                        let row = wrap::logical_to_visual_row(
+                            &vls,
+                            ds.edit_cursor_line,
+                            ds.edit_cursor_col,
+                        );
+                        if let Some(vl) = vls.get(row) {
+                            ds.edit_cursor_col = vl.char_end;
+                        }
+                    }
+                } else {
+                    let line_len = edit_lines.get(ds.edit_cursor_line).map_or(0, |l| l.len());
+                    ds.edit_cursor_col = line_len;
+                }
             }
         }
         // Kill to start of line: Ctrl+U (macOS Cmd+Backspace sends ^U)
@@ -7511,6 +7560,7 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                 && !key.modifiers.contains(KeyModifiers::SUPER) =>
         {
             if let Some(ds) = &mut app.detail_state {
+                ds.sticky_col = None;
                 if ds.edit_cursor_col > 0 {
                     ds.edit_cursor_col -= 1;
                 } else if ds.edit_cursor_line > 0 {
@@ -7527,6 +7577,7 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                 && !key.modifiers.contains(KeyModifiers::SUPER) =>
         {
             if let Some(ds) = &mut app.detail_state {
+                ds.sticky_col = None;
                 let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
                 let line_len = edit_lines.get(ds.edit_cursor_line).map_or(0, |l| l.len());
                 if ds.edit_cursor_col < line_len {
@@ -7543,13 +7594,37 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                 && !key.modifiers.contains(KeyModifiers::CONTROL)
                 && !key.modifiers.contains(KeyModifiers::SUPER) =>
         {
-            if let Some(ds) = &mut app.detail_state
-                && ds.edit_cursor_line > 0
-            {
-                ds.edit_cursor_line -= 1;
+            if let Some(ds) = &mut app.detail_state {
                 let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
-                let line_len = edit_lines.get(ds.edit_cursor_line).map_or(0, |l| l.len());
-                ds.edit_cursor_col = ds.edit_cursor_col.min(line_len);
+                if app.note_wrap {
+                    let note_width = app.last_edit_available_width as usize;
+                    if note_width > 0 {
+                        let vls = wrap::wrap_lines(&edit_lines, note_width);
+                        let cur_row = wrap::logical_to_visual_row(
+                            &vls,
+                            ds.edit_cursor_line,
+                            ds.edit_cursor_col,
+                        );
+                        if cur_row > 0 {
+                            let vcol = ds.sticky_col.unwrap_or_else(|| {
+                                wrap::logical_to_visual_col(
+                                    &vls,
+                                    ds.edit_cursor_line,
+                                    ds.edit_cursor_col,
+                                )
+                            });
+                            let (new_line, new_col) =
+                                wrap::visual_row_to_logical(&vls, cur_row - 1, vcol);
+                            ds.edit_cursor_line = new_line;
+                            ds.edit_cursor_col = new_col;
+                            ds.sticky_col = Some(vcol);
+                        }
+                    }
+                } else if ds.edit_cursor_line > 0 {
+                    ds.edit_cursor_line -= 1;
+                    let line_len = edit_lines.get(ds.edit_cursor_line).map_or(0, |l| l.len());
+                    ds.edit_cursor_col = ds.edit_cursor_col.min(line_len);
+                }
             }
         }
         // Cursor movement: Down (plain or Shift for selection)
@@ -7560,7 +7635,31 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
         {
             if let Some(ds) = &mut app.detail_state {
                 let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
-                if ds.edit_cursor_line + 1 < edit_lines.len() {
+                if app.note_wrap {
+                    let note_width = app.last_edit_available_width as usize;
+                    if note_width > 0 {
+                        let vls = wrap::wrap_lines(&edit_lines, note_width);
+                        let cur_row = wrap::logical_to_visual_row(
+                            &vls,
+                            ds.edit_cursor_line,
+                            ds.edit_cursor_col,
+                        );
+                        if cur_row + 1 < vls.len() {
+                            let vcol = ds.sticky_col.unwrap_or_else(|| {
+                                wrap::logical_to_visual_col(
+                                    &vls,
+                                    ds.edit_cursor_line,
+                                    ds.edit_cursor_col,
+                                )
+                            });
+                            let (new_line, new_col) =
+                                wrap::visual_row_to_logical(&vls, cur_row + 1, vcol);
+                            ds.edit_cursor_line = new_line;
+                            ds.edit_cursor_col = new_col;
+                            ds.sticky_col = Some(vcol);
+                        }
+                    }
+                } else if ds.edit_cursor_line + 1 < edit_lines.len() {
                     ds.edit_cursor_line += 1;
                     let line_len = edit_lines.get(ds.edit_cursor_line).map_or(0, |l| l.len());
                     ds.edit_cursor_col = ds.edit_cursor_col.min(line_len);
@@ -7620,19 +7719,52 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                 ds.edit_cursor_col = line_len;
             }
         }
-        // Home/End keys: jump to start/end of line
+        // Home/End keys: jump to start/end of current visual row
         (_, KeyCode::Home) => {
             if let Some(ds) = &mut app.detail_state {
                 ds.multiline_selection_anchor = None;
-                ds.edit_cursor_col = 0;
+                ds.sticky_col = None;
+                if app.note_wrap {
+                    let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
+                    let note_width = app.last_edit_available_width as usize;
+                    if note_width > 0 {
+                        let vls = wrap::wrap_lines(&edit_lines, note_width);
+                        let row = wrap::logical_to_visual_row(
+                            &vls,
+                            ds.edit_cursor_line,
+                            ds.edit_cursor_col,
+                        );
+                        if let Some(vl) = vls.get(row) {
+                            ds.edit_cursor_col = vl.char_start;
+                        }
+                    }
+                } else {
+                    ds.edit_cursor_col = 0;
+                }
             }
         }
         (_, KeyCode::End) => {
             if let Some(ds) = &mut app.detail_state {
                 ds.multiline_selection_anchor = None;
+                ds.sticky_col = None;
                 let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
-                let line_len = edit_lines.get(ds.edit_cursor_line).map_or(0, |l| l.len());
-                ds.edit_cursor_col = line_len;
+                if app.note_wrap {
+                    let note_width = app.last_edit_available_width as usize;
+                    if note_width > 0 {
+                        let vls = wrap::wrap_lines(&edit_lines, note_width);
+                        let row = wrap::logical_to_visual_row(
+                            &vls,
+                            ds.edit_cursor_line,
+                            ds.edit_cursor_col,
+                        );
+                        if let Some(vl) = vls.get(row) {
+                            ds.edit_cursor_col = vl.char_end;
+                        }
+                    }
+                } else {
+                    let line_len = edit_lines.get(ds.edit_cursor_line).map_or(0, |l| l.len());
+                    ds.edit_cursor_col = line_len;
+                }
             }
         }
         // Word movement (Alt+arrow, with or without Shift); crosses line boundaries
@@ -7751,9 +7883,22 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
             }
             snapshot_multiline(app);
         }
+        // Toggle note wrap (Alt+w)
+        (m, KeyCode::Char('w')) if m.contains(KeyModifiers::ALT) => {
+            app.toggle_note_wrap();
+            app.status_message = Some(
+                if app.note_wrap {
+                    "wrap: on"
+                } else {
+                    "wrap: off"
+                }
+                .into(),
+            );
+        }
         // Type character: delete selection first, then insert
         (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
             if let Some(ds) = &mut app.detail_state {
+                ds.sticky_col = None;
                 delete_multiline_selection(ds);
                 let mut edit_lines: Vec<String> =
                     ds.edit_buffer.split('\n').map(String::from).collect();
@@ -9186,6 +9331,7 @@ fn inbox_edit_note(app: &mut App) {
         flat_subtask_ids: Vec::new(),
         multiline_selection_anchor: None,
         note_h_scroll: 0,
+        sticky_col: None,
         total_lines: 0,
         note_view_line: None,
         note_header_line: None,
@@ -10384,6 +10530,17 @@ fn dispatch_palette_action(app: &mut App, action_id: &str, track_index: Option<u
         "toggle_help" => {
             app.show_help = !app.show_help;
             app.help_scroll = 0;
+        }
+        "toggle_note_wrap" => {
+            app.toggle_note_wrap();
+            app.status_message = Some(
+                if app.note_wrap {
+                    "wrap: on"
+                } else {
+                    "wrap: off"
+                }
+                .into(),
+            );
         }
         "undo" => {
             perform_undo(app);
