@@ -13,6 +13,7 @@ All notable changes to frame will be documented in this file.
 - Actionable empty-state messages ("No tracks — press **a** to create one", "No tasks yet — press **a** to add one")
 - `fr show --context` flag to display ancestor chain (parent tasks root-first) for subtasks; JSON output always includes `ancestors` array
 - `cc_only` setting in `[agent]` config (default: `true`); included in `fr ready --cc --json` output so agents know whether to broaden search when no `#cc` tasks are available
+- Agent setup guide (`doc/agent-setup.md`) documenting how to configure frame for AI coding agents
 
 ### Changed
 - Search match count now only counts visible tasks (excludes Done section, respects filters, skips context rows)

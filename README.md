@@ -98,7 +98,8 @@ The short version: `↑↓`/`jk` to move, `←→`/`hl` to collapse/expand,
 
 Designed for coding agents. Every read command supports `--json`.
 See [`skills/managing-frame-tasks/SKILL.md`](skills/managing-frame-tasks/SKILL.md)
-for the full agent reference.
+for the full agent reference, and [`doc/agent-setup.md`](doc/agent-setup.md)
+for how to configure frame for agent use in your project.
 
 ```bash
 # What should I work on?
