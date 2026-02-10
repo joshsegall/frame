@@ -26,6 +26,8 @@ pub struct ProjectInfo {
 pub struct AgentConfig {
     #[serde(default)]
     pub cc_focus: Option<String>,
+    #[serde(default = "default_true")]
+    pub cc_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

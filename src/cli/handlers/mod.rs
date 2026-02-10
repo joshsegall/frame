@@ -412,8 +412,14 @@ fn cmd_ready(args: ReadyArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
         } else {
             None
         };
+        let cc_only = if args.cc {
+            Some(project.config.agent.cc_only)
+        } else {
+            None
+        };
         let output = ReadyJson {
             focus_track,
+            cc_only,
             tasks: ready_tasks
                 .iter()
                 .map(|(tid, task)| TaskWithTrackJson {

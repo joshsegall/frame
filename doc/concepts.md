@@ -149,7 +149,11 @@ Settings for AI agent integration:
 ```toml
 [agent]
 cc_focus = "effects"       # track for `fr ready --cc`
+cc_only = true             # true: agent only works on #cc tasks (default)
+                           # false: agent can pick up any unblocked task
 ```
+
+When `cc_only` is `true` (default), agents should only work on `#cc`-tagged tasks and stop to ask for direction when none are available. When `false`, agents may fall back to untagged tasks across active tracks. The setting is included in `fr ready --cc --json` output.
 
 ### `[clean]`
 

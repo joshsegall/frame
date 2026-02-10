@@ -33,6 +33,8 @@ name = "{{PROJECT_NAME}}"
 #
 [agent]
 cc_focus = ""                # track ID for `fr ready --cc` (empty = none)
+cc_only = true               # true: agent only works on #cc tasks
+                             # false: agent can pick up any unblocked task
 
 # Clean
 # -----

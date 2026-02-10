@@ -126,9 +126,14 @@ fr sub EFF-014 "Test with nested closures"
 
 ### When stuck
 
-- **`fr ready --cc` returns nothing** → Run `fr ready` (all tracks). If
-  still nothing, check `fr blocked` for tasks you can unblock, or ask the
-  human for direction.
+- **`fr ready --cc` returns nothing** → Check the `cc_only` field in
+  `fr ready --cc --json` output.
+  - If `cc_only` is `true`: Do not broaden your search. Run `fr blocked`
+    to see if you can unblock a `#cc` task. If not, stop and ask the
+    human for direction.
+  - If `cc_only` is `false`: Run `fr ready` to see all unblocked tasks
+    across active tracks. Pick up the highest-priority task you can
+    handle. If still nothing, check `fr blocked` or ask the human.
 - **Task is blocked** → Check `fr deps <id>` to see what's blocking it.
   If the blocker is something you can do, pick that up first. If it needs
   human input, tag the blocker `#needs-input` and move on.

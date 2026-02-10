@@ -42,6 +42,8 @@ pub struct TaskListJson {
 pub struct ReadyJson {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub focus_track: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cc_only: Option<bool>,
     pub tasks: Vec<TaskWithTrackJson>,
 }
 

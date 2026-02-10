@@ -73,6 +73,8 @@ fr ready [--cc] [--track TRACK] [--tag TAG]
 | `--track TRACK` | Filter to specific track |
 | `--tag TAG` | Filter by tag |
 
+With `--cc --json`, the output includes `focus_track` and `cc_only` fields so agents can determine whether to broaden their search when no `#cc` tasks are available.
+
 ### `fr blocked`
 
 Show all blocked tasks with their blocking dependencies.
