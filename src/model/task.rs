@@ -135,3 +135,111 @@ impl PartialEq for Task {
 }
 
 impl Eq for Task {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checkbox_char_all_states() {
+        assert_eq!(TaskState::Todo.checkbox_char(), ' ');
+        assert_eq!(TaskState::Active.checkbox_char(), '>');
+        assert_eq!(TaskState::Blocked.checkbox_char(), '-');
+        assert_eq!(TaskState::Done.checkbox_char(), 'x');
+        assert_eq!(TaskState::Parked.checkbox_char(), '~');
+    }
+
+    #[test]
+    fn from_checkbox_char_valid() {
+        assert_eq!(TaskState::from_checkbox_char(' '), Some(TaskState::Todo));
+        assert_eq!(TaskState::from_checkbox_char('>'), Some(TaskState::Active));
+        assert_eq!(TaskState::from_checkbox_char('-'), Some(TaskState::Blocked));
+        assert_eq!(TaskState::from_checkbox_char('x'), Some(TaskState::Done));
+        assert_eq!(TaskState::from_checkbox_char('~'), Some(TaskState::Parked));
+    }
+
+    #[test]
+    fn from_checkbox_char_invalid() {
+        assert_eq!(TaskState::from_checkbox_char('?'), None);
+        assert_eq!(TaskState::from_checkbox_char('X'), None);
+        assert_eq!(TaskState::from_checkbox_char('a'), None);
+    }
+
+    #[test]
+    fn metadata_key_all_variants() {
+        assert_eq!(Metadata::Dep(vec![]).key(), "dep");
+        assert_eq!(Metadata::Ref(vec![]).key(), "ref");
+        assert_eq!(Metadata::Spec(String::new()).key(), "spec");
+        assert_eq!(Metadata::Note(String::new()).key(), "note");
+        assert_eq!(Metadata::Added(String::new()).key(), "added");
+        assert_eq!(Metadata::Resolved(String::new()).key(), "resolved");
+    }
+
+    #[test]
+    fn task_new_fields() {
+        let task = Task::new(TaskState::Active, Some("T-001".into()), "My task".into());
+        assert_eq!(task.state, TaskState::Active);
+        assert_eq!(task.id.as_deref(), Some("T-001"));
+        assert_eq!(task.title, "My task");
+        assert!(task.tags.is_empty());
+        assert!(task.metadata.is_empty());
+        assert!(task.subtasks.is_empty());
+        assert_eq!(task.depth, 0);
+        assert!(task.source_lines.is_none());
+        assert!(task.source_text.is_none());
+        assert!(task.dirty);
+    }
+
+    #[test]
+    fn task_new_no_id() {
+        let task = Task::new(TaskState::Todo, None, "No ID".into());
+        assert!(task.id.is_none());
+    }
+
+    #[test]
+    fn mark_dirty_sets_flag() {
+        let mut task = Task::new(TaskState::Todo, None, "test".into());
+        task.dirty = false;
+        task.mark_dirty();
+        assert!(task.dirty);
+    }
+
+    #[test]
+    fn partial_eq_equal_tasks() {
+        let a = Task::new(TaskState::Todo, Some("T-001".into()), "Same".into());
+        let b = Task::new(TaskState::Todo, Some("T-001".into()), "Same".into());
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn partial_eq_ignores_source_and_dirty() {
+        let mut a = Task::new(TaskState::Todo, Some("T-001".into()), "Same".into());
+        let mut b = Task::new(TaskState::Todo, Some("T-001".into()), "Same".into());
+        a.source_text = Some(vec!["- [ ] `T-001` Same".into()]);
+        a.source_lines = Some(0..1);
+        a.dirty = false;
+        b.dirty = true;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn partial_eq_differs_by_state() {
+        let a = Task::new(TaskState::Todo, Some("T-001".into()), "Same".into());
+        let b = Task::new(TaskState::Done, Some("T-001".into()), "Same".into());
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn partial_eq_differs_by_title() {
+        let a = Task::new(TaskState::Todo, Some("T-001".into()), "Alpha".into());
+        let b = Task::new(TaskState::Todo, Some("T-001".into()), "Beta".into());
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn partial_eq_differs_by_id() {
+        let a = Task::new(TaskState::Todo, Some("T-001".into()), "Same".into());
+        let b = Task::new(TaskState::Todo, Some("T-002".into()), "Same".into());
+        assert_ne!(a, b);
+    }
+}

@@ -104,3 +104,54 @@ pub struct UiConfig {
     #[serde(default = "default_true")]
     pub note_wrap: bool,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clean_config_default() {
+        let c = CleanConfig::default();
+        assert!(c.auto_clean);
+        assert_eq!(c.done_threshold, 250);
+        assert!(c.archive_per_track);
+    }
+
+    #[test]
+    fn agent_config_default() {
+        let a = AgentConfig::default();
+        assert!(a.cc_focus.is_none());
+        // cc_only default when using Default trait is false (bool default),
+        // but serde default_true applies during deserialization
+        assert!(!a.cc_only);
+    }
+
+    #[test]
+    fn agent_config_serde_default_true() {
+        // When deserialized from an empty object, cc_only should be true via serde
+        let a: AgentConfig = serde_json::from_str("{}").unwrap();
+        assert!(a.cc_only);
+        assert!(a.cc_focus.is_none());
+    }
+
+    #[test]
+    fn ui_config_default() {
+        let u = UiConfig::default();
+        assert!(!u.show_key_hints);
+        assert!(u.colors.is_empty());
+        assert!(u.tag_colors.is_empty());
+        assert!(u.ref_extensions.is_empty());
+        assert!(u.ref_paths.is_empty());
+        assert!(u.default_tags.is_empty());
+        assert!(u.kitty_keyboard.is_none());
+        // note_wrap default via Default trait is false (bool default)
+        assert!(!u.note_wrap);
+    }
+
+    #[test]
+    fn ui_config_serde_note_wrap_default_true() {
+        // When deserialized from empty object, note_wrap should be true via serde
+        let u: UiConfig = serde_json::from_str("{}").unwrap();
+        assert!(u.note_wrap);
+    }
+}

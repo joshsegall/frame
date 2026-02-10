@@ -1,5 +1,4 @@
 use crate::tui::app::{App, View};
-use crate::util::unicode;
 
 /// Which views an action is available in
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,7 +128,7 @@ pub fn filter_actions(query: &str, actions: &[PaletteAction]) -> Vec<ScoredActio
             let (score, indices) = fuzzy_score(query, &combined)?;
 
             // Split indices into label vs shortcut portions
-            let label_char_count = unicode::display_width(&a.label);
+            let label_char_count = a.label.chars().count();
             let separator = 1; // the space between label and shortcut
             let mut label_matched = Vec::new();
             let mut shortcut_matched = Vec::new();
@@ -939,5 +938,111 @@ mod tests {
         let results = filter_actions("fa", &actions);
         assert!(!results.is_empty());
         assert_eq!(results[0].action.id, "fa");
+    }
+
+    #[test]
+    fn fuzzy_score_single_char() {
+        let result = fuzzy_score("a", "a");
+        assert!(result.is_some());
+        let (_, indices) = result.unwrap();
+        assert_eq!(indices, vec![0]);
+    }
+
+    #[test]
+    fn fuzzy_score_consecutive_accumulation() {
+        // "abcd" in "abcd" should get consecutive bonuses for b, c, d
+        let (score, indices) = fuzzy_score("abcd", "abcd").unwrap();
+        assert_eq!(indices, vec![0, 1, 2, 3]);
+        // 10 (word start a) + 5*3 (consecutive b,c,d) + first-half bonuses
+        assert!(score >= 20);
+    }
+
+    #[test]
+    fn fuzzy_score_large_gap_penalty() {
+        // Match with a big gap should score lower than a tight match
+        let (tight, _) = fuzzy_score("ab", "ab").unwrap();
+        let (gapped, _) = fuzzy_score("ab", "a          b").unwrap();
+        assert!(tight > gapped);
+    }
+
+    #[test]
+    fn fuzzy_score_unicode_case_folding() {
+        // Accented characters should match case-insensitively
+        let result = fuzzy_score("e", "É");
+        // 'É'.to_lowercase() is 'é', not 'e', so this should not match
+        assert!(result.is_none());
+        // But matching the same accented char should work
+        let result = fuzzy_score("é", "É");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn fuzzy_score_query_longer_than_target() {
+        let result = fuzzy_score("abcdef", "abc");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn filter_actions_unicode_label_splitting() {
+        // CJK characters have display_width=2 but chars().count()=1.
+        // After the bug fix, we use chars().count() so the split is correct.
+        let actions = vec![PaletteAction {
+            id: "cjk",
+            label: "任務".into(), // 2 CJK chars, display_width=4 but char_count=2
+            shortcut: Some("x"),
+            contexts: &[ViewContext::Global],
+            category: ActionCategory::State,
+        }];
+        let results = filter_actions("x", &actions);
+        assert_eq!(results.len(), 1);
+        // "x" should match in the shortcut portion (index 3 in "任務 x", which is past label_char_count=2 + separator=1)
+        assert!(!results[0].shortcut_matched.is_empty());
+    }
+
+    #[test]
+    fn filter_actions_emoji_label_splitting() {
+        let actions = vec![PaletteAction {
+            id: "emoji",
+            label: "🚀 Launch".into(),
+            shortcut: Some("L"),
+            contexts: &[ViewContext::Global],
+            category: ActionCategory::State,
+        }];
+        // "L" should match in "🚀 Launch L" — both label and shortcut
+        let results = filter_actions("L", &actions);
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn filter_actions_empty_slice() {
+        let results = filter_actions("test", &[]);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn filter_actions_no_shortcut() {
+        let actions = vec![PaletteAction {
+            id: "a",
+            label: "Alpha beta".into(),
+            shortcut: None,
+            contexts: &[ViewContext::Global],
+            category: ActionCategory::State,
+        }];
+        let results = filter_actions("ab", &actions);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].shortcut_matched.is_empty());
+    }
+
+    #[test]
+    fn filter_actions_all_filtered_out() {
+        let actions = vec![PaletteAction {
+            id: "a",
+            label: "Alpha".into(),
+            shortcut: None,
+            contexts: &[ViewContext::Global],
+            category: ActionCategory::State,
+        }];
+        let results = filter_actions("zzz", &actions);
+        assert!(results.is_empty());
     }
 }

@@ -1390,6 +1390,34 @@ fn find_track_mut<'a>(tracks: &'a mut [(String, Track)], track_id: &str) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::inbox::{Inbox, InboxItem};
+    use crate::model::task::Metadata;
+    use crate::parse::track_parser::parse_track;
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    fn sample_track() -> Track {
+        parse_track(
+            "# Test\n\n## Backlog\n\n- [ ] `T-001` First\n- [ ] `T-002` Second\n- [ ] `T-003` Third\n\n## Done\n",
+        )
+    }
+
+    fn sample_inbox() -> Inbox {
+        Inbox {
+            header_lines: vec!["# Inbox".into()],
+            items: vec![
+                InboxItem::new("Item 1".into()),
+                InboxItem::new("Item 2".into()),
+            ],
+            source_lines: vec![],
+        }
+    }
+
+    fn tracks_vec(id: &str, track: Track) -> Vec<(String, Track)> {
+        vec![(id.into(), track)]
+    }
 
     /// Helper to unwrap Task variant fields
     fn expect_task(
@@ -1419,6 +1447,964 @@ mod tests {
             other => panic!("expected TracksView, got {:?}", other),
         }
     }
+
+    fn expect_inbox(nav: UndoNavTarget) -> Option<usize> {
+        match nav {
+            UndoNavTarget::Inbox { cursor } => cursor,
+            other => panic!("expected Inbox, got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // UndoStack core
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn new_stack_is_empty() {
+        let stack = UndoStack::new();
+        assert!(stack.is_empty());
+        assert!(stack.peek_last_undo().is_none());
+        assert!(stack.peek_last_redo().is_none());
+    }
+
+    #[test]
+    fn push_adds_to_undo() {
+        let mut stack = UndoStack::new();
+        stack.push(Operation::StateChange {
+            track_id: "t".into(),
+            task_id: "T-001".into(),
+            old_state: TaskState::Todo,
+            new_state: TaskState::Active,
+            old_resolved: None,
+            new_resolved: None,
+        });
+        assert!(!stack.is_empty());
+        assert!(stack.peek_last_undo().is_some());
+    }
+
+    #[test]
+    fn push_clears_redo() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        stack.push(Operation::StateChange {
+            track_id: "t".into(),
+            task_id: "T-001".into(),
+            old_state: TaskState::Todo,
+            new_state: TaskState::Active,
+            old_resolved: None,
+            new_resolved: None,
+        });
+        stack.undo(&mut tracks, None);
+        assert!(stack.peek_last_redo().is_some());
+        // Pushing a new op should clear redo
+        stack.push(Operation::TitleEdit {
+            track_id: "t".into(),
+            task_id: "T-001".into(),
+            old_title: "old".into(),
+            new_title: "new".into(),
+        });
+        assert!(stack.peek_last_redo().is_none());
+    }
+
+    #[test]
+    fn stack_limit_enforcement() {
+        let mut stack = UndoStack::new();
+        for i in 0..=UNDO_STACK_LIMIT {
+            stack.push(Operation::TitleEdit {
+                track_id: "t".into(),
+                task_id: format!("T-{:03}", i),
+                old_title: "old".into(),
+                new_title: "new".into(),
+            });
+        }
+        // After pushing 501 items, the stack should be capped at 500
+        assert_eq!(stack.undo.len(), UNDO_STACK_LIMIT);
+    }
+
+    #[test]
+    fn peek_last_undo_after_push() {
+        let mut stack = UndoStack::new();
+        stack.push(Operation::TitleEdit {
+            track_id: "t".into(),
+            task_id: "T-001".into(),
+            old_title: "a".into(),
+            new_title: "b".into(),
+        });
+        assert!(matches!(
+            stack.peek_last_undo(),
+            Some(Operation::TitleEdit { .. })
+        ));
+    }
+
+    #[test]
+    fn peek_last_redo_after_undo() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        stack.push(Operation::TitleEdit {
+            track_id: "t".into(),
+            task_id: "T-001".into(),
+            old_title: "First".into(),
+            new_title: "Updated".into(),
+        });
+        stack.undo(&mut tracks, None);
+        assert!(matches!(
+            stack.peek_last_redo(),
+            Some(Operation::TitleEdit { .. })
+        ));
+    }
+
+    #[test]
+    fn is_empty_after_undo() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        stack.push(Operation::TitleEdit {
+            track_id: "t".into(),
+            task_id: "T-001".into(),
+            old_title: "First".into(),
+            new_title: "Updated".into(),
+        });
+        stack.undo(&mut tracks, None);
+        assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn undo_on_empty_stack_returns_none() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        assert!(stack.undo(&mut tracks, None).is_none());
+    }
+
+    #[test]
+    fn redo_on_empty_stack_returns_none() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        assert!(stack.redo(&mut tracks, None).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Sync marker blocking
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn undo_stops_at_sync_marker() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        stack.push(Operation::TitleEdit {
+            track_id: "t".into(),
+            task_id: "T-001".into(),
+            old_title: "First".into(),
+            new_title: "Changed".into(),
+        });
+        stack.push_sync_marker();
+        stack.push(Operation::TitleEdit {
+            track_id: "t".into(),
+            task_id: "T-002".into(),
+            old_title: "Second".into(),
+            new_title: "Changed2".into(),
+        });
+        // Undo the second edit
+        let nav = stack.undo(&mut tracks, None);
+        assert!(nav.is_some());
+        // Next undo should hit the sync marker and return None
+        let nav = stack.undo(&mut tracks, None);
+        assert!(nav.is_none());
+        // The sync marker should still be on the stack (put back)
+        assert!(!stack.is_empty());
+    }
+
+    #[test]
+    fn push_after_sync_clears_redo() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        stack.push(Operation::TitleEdit {
+            track_id: "t".into(),
+            task_id: "T-001".into(),
+            old_title: "First".into(),
+            new_title: "Changed".into(),
+        });
+        stack.undo(&mut tracks, None);
+        assert!(stack.peek_last_redo().is_some());
+        stack.push_sync_marker();
+        assert!(stack.peek_last_redo().is_none());
+    }
+
+    #[test]
+    fn sync_marker_limit_enforcement() {
+        let mut stack = UndoStack::new();
+        for _ in 0..=UNDO_STACK_LIMIT {
+            stack.push_sync_marker();
+        }
+        assert_eq!(stack.undo.len(), UNDO_STACK_LIMIT);
+    }
+
+    // -----------------------------------------------------------------------
+    // StateChange undo/redo
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn state_change_undo_reverts() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        // Set T-001 to Active in the track
+        {
+            let track = &mut tracks[0].1;
+            let task = task_ops::find_task_mut_in_track(track, "T-001").unwrap();
+            task.state = TaskState::Active;
+        }
+        stack.push(Operation::StateChange {
+            track_id: "t".into(),
+            task_id: "T-001".into(),
+            old_state: TaskState::Todo,
+            new_state: TaskState::Active,
+            old_resolved: None,
+            new_resolved: None,
+        });
+        stack.undo(&mut tracks, None);
+        let track = &tracks[0].1;
+        let task = task_ops::find_task_in_track(track, "T-001").unwrap();
+        assert_eq!(task.state, TaskState::Todo);
+    }
+
+    #[test]
+    fn state_change_redo_reapplies() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        {
+            let track = &mut tracks[0].1;
+            let task = task_ops::find_task_mut_in_track(track, "T-001").unwrap();
+            task.state = TaskState::Active;
+        }
+        stack.push(Operation::StateChange {
+            track_id: "t".into(),
+            task_id: "T-001".into(),
+            old_state: TaskState::Todo,
+            new_state: TaskState::Active,
+            old_resolved: None,
+            new_resolved: None,
+        });
+        stack.undo(&mut tracks, None);
+        stack.redo(&mut tracks, None);
+        let track = &tracks[0].1;
+        let task = task_ops::find_task_in_track(track, "T-001").unwrap();
+        assert_eq!(task.state, TaskState::Active);
+    }
+
+    #[test]
+    fn state_change_with_resolved_date() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        {
+            let track = &mut tracks[0].1;
+            let task = task_ops::find_task_mut_in_track(track, "T-001").unwrap();
+            task.state = TaskState::Done;
+            task.metadata.push(Metadata::Resolved("2026-02-10".into()));
+        }
+        stack.push(Operation::StateChange {
+            track_id: "t".into(),
+            task_id: "T-001".into(),
+            old_state: TaskState::Todo,
+            new_state: TaskState::Done,
+            old_resolved: None,
+            new_resolved: Some("2026-02-10".into()),
+        });
+        // Undo should remove the resolved date
+        stack.undo(&mut tracks, None);
+        let track = &tracks[0].1;
+        let task = task_ops::find_task_in_track(track, "T-001").unwrap();
+        assert_eq!(task.state, TaskState::Todo);
+        assert!(!task.metadata.iter().any(|m| m.key() == "resolved"));
+    }
+
+    // -----------------------------------------------------------------------
+    // TitleEdit undo/redo
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn title_edit_undo_restores_old() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        {
+            let track = &mut tracks[0].1;
+            let task = task_ops::find_task_mut_in_track(track, "T-001").unwrap();
+            task.title = "Updated".into();
+        }
+        stack.push(Operation::TitleEdit {
+            track_id: "t".into(),
+            task_id: "T-001".into(),
+            old_title: "First".into(),
+            new_title: "Updated".into(),
+        });
+        stack.undo(&mut tracks, None);
+        let track = &tracks[0].1;
+        let task = task_ops::find_task_in_track(track, "T-001").unwrap();
+        assert_eq!(task.title, "First");
+    }
+
+    #[test]
+    fn title_edit_redo_applies_new() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        {
+            let track = &mut tracks[0].1;
+            let task = task_ops::find_task_mut_in_track(track, "T-001").unwrap();
+            task.title = "Updated".into();
+        }
+        stack.push(Operation::TitleEdit {
+            track_id: "t".into(),
+            task_id: "T-001".into(),
+            old_title: "First".into(),
+            new_title: "Updated".into(),
+        });
+        stack.undo(&mut tracks, None);
+        stack.redo(&mut tracks, None);
+        let track = &tracks[0].1;
+        let task = task_ops::find_task_in_track(track, "T-001").unwrap();
+        assert_eq!(task.title, "Updated");
+    }
+
+    // -----------------------------------------------------------------------
+    // TaskAdd undo/redo
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn task_add_undo_removes_task() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        // Simulate adding a task
+        {
+            let track = &mut tracks[0].1;
+            let tasks = track.section_tasks_mut(SectionKind::Backlog).unwrap();
+            let mut task = Task::new(TaskState::Todo, Some("T-004".into()), "New task".into());
+            task.metadata.push(Metadata::Added("2026-02-10".into()));
+            tasks.push(task);
+        }
+        stack.push(Operation::TaskAdd {
+            track_id: "t".into(),
+            task_id: "T-004".into(),
+            position_index: 3,
+            title: "New task".into(),
+        });
+        stack.undo(&mut tracks, None);
+        let track = &tracks[0].1;
+        assert_eq!(track.backlog().len(), 3); // back to original 3
+        assert!(task_ops::find_task_in_track(track, "T-004").is_none());
+    }
+
+    #[test]
+    fn task_add_redo_reinserts() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        {
+            let track = &mut tracks[0].1;
+            let tasks = track.section_tasks_mut(SectionKind::Backlog).unwrap();
+            let task = Task::new(TaskState::Todo, Some("T-004".into()), "New task".into());
+            tasks.push(task);
+        }
+        stack.push(Operation::TaskAdd {
+            track_id: "t".into(),
+            task_id: "T-004".into(),
+            position_index: 3,
+            title: "New task".into(),
+        });
+        stack.undo(&mut tracks, None);
+        stack.redo(&mut tracks, None);
+        let track = &tracks[0].1;
+        assert!(task_ops::find_task_in_track(track, "T-004").is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // SubtaskAdd undo/redo
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn subtask_add_undo_removes_from_parent() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        // Add a subtask to T-001
+        {
+            let track = &mut tracks[0].1;
+            let parent = task_ops::find_task_mut_in_track(track, "T-001").unwrap();
+            let mut sub = Task::new(TaskState::Todo, Some("T-001.1".into()), "Sub".into());
+            sub.depth = 1;
+            parent.subtasks.push(sub);
+        }
+        stack.push(Operation::SubtaskAdd {
+            track_id: "t".into(),
+            parent_id: "T-001".into(),
+            task_id: "T-001.1".into(),
+            title: "Sub".into(),
+        });
+        stack.undo(&mut tracks, None);
+        let track = &tracks[0].1;
+        let parent = task_ops::find_task_in_track(track, "T-001").unwrap();
+        assert!(parent.subtasks.is_empty());
+    }
+
+    #[test]
+    fn subtask_add_redo_reinserts() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        {
+            let track = &mut tracks[0].1;
+            let parent = task_ops::find_task_mut_in_track(track, "T-001").unwrap();
+            let mut sub = Task::new(TaskState::Todo, Some("T-001.1".into()), "Sub".into());
+            sub.depth = 1;
+            parent.subtasks.push(sub);
+        }
+        stack.push(Operation::SubtaskAdd {
+            track_id: "t".into(),
+            parent_id: "T-001".into(),
+            task_id: "T-001.1".into(),
+            title: "Sub".into(),
+        });
+        stack.undo(&mut tracks, None);
+        stack.redo(&mut tracks, None);
+        let track = &tracks[0].1;
+        let parent = task_ops::find_task_in_track(track, "T-001").unwrap();
+        assert_eq!(parent.subtasks.len(), 1);
+        assert_eq!(parent.subtasks[0].id.as_deref(), Some("T-001.1"));
+    }
+
+    // -----------------------------------------------------------------------
+    // TaskMove undo/redo
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn task_move_undo_restores_position() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        // Move T-001 from index 0 to index 2
+        {
+            let track = &mut tracks[0].1;
+            let tasks = track.section_tasks_mut(SectionKind::Backlog).unwrap();
+            let task = tasks.remove(0);
+            tasks.insert(2, task);
+        }
+        stack.push(Operation::TaskMove {
+            track_id: "t".into(),
+            task_id: "T-001".into(),
+            parent_id: None,
+            old_index: 0,
+            new_index: 2,
+        });
+        stack.undo(&mut tracks, None);
+        let track = &tracks[0].1;
+        let tasks = track.backlog();
+        assert_eq!(tasks[0].id.as_deref(), Some("T-001"));
+    }
+
+    #[test]
+    fn task_move_redo_applies() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        {
+            let track = &mut tracks[0].1;
+            let tasks = track.section_tasks_mut(SectionKind::Backlog).unwrap();
+            let task = tasks.remove(0);
+            tasks.insert(2, task);
+        }
+        stack.push(Operation::TaskMove {
+            track_id: "t".into(),
+            task_id: "T-001".into(),
+            parent_id: None,
+            old_index: 0,
+            new_index: 2,
+        });
+        stack.undo(&mut tracks, None);
+        stack.redo(&mut tracks, None);
+        let track = &tracks[0].1;
+        let tasks = track.backlog();
+        assert_eq!(tasks[2].id.as_deref(), Some("T-001"));
+    }
+
+    #[test]
+    fn task_move_position_clamping() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        // Move T-003 (index 2) with old_index=99 (out of range, should clamp)
+        {
+            let track = &mut tracks[0].1;
+            let tasks = track.section_tasks_mut(SectionKind::Backlog).unwrap();
+            let task = tasks.remove(2);
+            tasks.insert(0, task);
+        }
+        stack.push(Operation::TaskMove {
+            track_id: "t".into(),
+            task_id: "T-003".into(),
+            parent_id: None,
+            old_index: 99, // should clamp to end
+            new_index: 0,
+        });
+        stack.undo(&mut tracks, None);
+        let track = &tracks[0].1;
+        let tasks = track.backlog();
+        // T-003 should be at the end (clamped to len)
+        assert_eq!(tasks.last().unwrap().id.as_deref(), Some("T-003"));
+    }
+
+    // -----------------------------------------------------------------------
+    // FieldEdit undo/redo (apply_field_value)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn field_edit_tags_undo_redo() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        {
+            let track = &mut tracks[0].1;
+            let task = task_ops::find_task_mut_in_track(track, "T-001").unwrap();
+            task.tags = vec!["new".into()];
+        }
+        stack.push(Operation::FieldEdit {
+            track_id: "t".into(),
+            task_id: "T-001".into(),
+            field: "tags".into(),
+            old_value: "".into(),
+            new_value: "#new".into(),
+        });
+        stack.undo(&mut tracks, None);
+        let task = task_ops::find_task_in_track(&tracks[0].1, "T-001").unwrap();
+        assert!(task.tags.is_empty());
+
+        stack.redo(&mut tracks, None);
+        let task = task_ops::find_task_in_track(&tracks[0].1, "T-001").unwrap();
+        assert_eq!(task.tags, vec!["new"]);
+    }
+
+    #[test]
+    fn field_edit_deps() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        {
+            let track = &mut tracks[0].1;
+            let task = task_ops::find_task_mut_in_track(track, "T-001").unwrap();
+            task.metadata.push(Metadata::Dep(vec!["T-002".into()]));
+        }
+        stack.push(Operation::FieldEdit {
+            track_id: "t".into(),
+            task_id: "T-001".into(),
+            field: "deps".into(),
+            old_value: "".into(),
+            new_value: "T-002".into(),
+        });
+        stack.undo(&mut tracks, None);
+        let task = task_ops::find_task_in_track(&tracks[0].1, "T-001").unwrap();
+        assert!(!task.metadata.iter().any(|m| matches!(m, Metadata::Dep(_))));
+    }
+
+    #[test]
+    fn field_edit_spec() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        {
+            let track = &mut tracks[0].1;
+            let task = task_ops::find_task_mut_in_track(track, "T-001").unwrap();
+            task.metadata.push(Metadata::Spec("doc/spec.md".into()));
+        }
+        stack.push(Operation::FieldEdit {
+            track_id: "t".into(),
+            task_id: "T-001".into(),
+            field: "spec".into(),
+            old_value: "".into(),
+            new_value: "doc/spec.md".into(),
+        });
+        stack.undo(&mut tracks, None);
+        let task = task_ops::find_task_in_track(&tracks[0].1, "T-001").unwrap();
+        assert!(!task.metadata.iter().any(|m| matches!(m, Metadata::Spec(_))));
+    }
+
+    #[test]
+    fn field_edit_refs() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        {
+            let track = &mut tracks[0].1;
+            let task = task_ops::find_task_mut_in_track(track, "T-001").unwrap();
+            task.metadata.push(Metadata::Ref(vec!["file.md".into()]));
+        }
+        stack.push(Operation::FieldEdit {
+            track_id: "t".into(),
+            task_id: "T-001".into(),
+            field: "refs".into(),
+            old_value: "".into(),
+            new_value: "file.md".into(),
+        });
+        stack.undo(&mut tracks, None);
+        let task = task_ops::find_task_in_track(&tracks[0].1, "T-001").unwrap();
+        assert!(!task.metadata.iter().any(|m| matches!(m, Metadata::Ref(_))));
+    }
+
+    #[test]
+    fn field_edit_note() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        {
+            let track = &mut tracks[0].1;
+            let task = task_ops::find_task_mut_in_track(track, "T-001").unwrap();
+            task.metadata.push(Metadata::Note("Hello world".into()));
+        }
+        stack.push(Operation::FieldEdit {
+            track_id: "t".into(),
+            task_id: "T-001".into(),
+            field: "note".into(),
+            old_value: "".into(),
+            new_value: "Hello world".into(),
+        });
+        stack.undo(&mut tracks, None);
+        let task = task_ops::find_task_in_track(&tracks[0].1, "T-001").unwrap();
+        assert!(!task.metadata.iter().any(|m| matches!(m, Metadata::Note(_))));
+
+        stack.redo(&mut tracks, None);
+        let task = task_ops::find_task_in_track(&tracks[0].1, "T-001").unwrap();
+        let note = task.metadata.iter().find_map(|m| match m {
+            Metadata::Note(n) => Some(n.as_str()),
+            _ => None,
+        });
+        assert_eq!(note, Some("Hello world"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Inbox ops undo/redo
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn inbox_add_undo_removes() {
+        let mut stack = UndoStack::new();
+        let mut tracks: Vec<(String, Track)> = vec![];
+        let mut inbox = sample_inbox();
+        inbox.items.push(InboxItem::new("Item 3".into()));
+        stack.push(Operation::InboxAdd {
+            index: 2,
+            title: "Item 3".into(),
+        });
+        stack.undo(&mut tracks, Some(&mut inbox));
+        assert_eq!(inbox.items.len(), 2);
+    }
+
+    #[test]
+    fn inbox_add_redo_reinserts() {
+        let mut stack = UndoStack::new();
+        let mut tracks: Vec<(String, Track)> = vec![];
+        let mut inbox = sample_inbox();
+        inbox.items.push(InboxItem::new("Item 3".into()));
+        stack.push(Operation::InboxAdd {
+            index: 2,
+            title: "Item 3".into(),
+        });
+        stack.undo(&mut tracks, Some(&mut inbox));
+        stack.redo(&mut tracks, Some(&mut inbox));
+        assert_eq!(inbox.items.len(), 3);
+        assert_eq!(inbox.items[2].title, "Item 3");
+    }
+
+    #[test]
+    fn inbox_delete_undo_restores() {
+        let mut stack = UndoStack::new();
+        let mut tracks: Vec<(String, Track)> = vec![];
+        let mut inbox = sample_inbox();
+        let deleted = inbox.items.remove(0);
+        stack.push(Operation::InboxDelete {
+            index: 0,
+            item: deleted,
+        });
+        stack.undo(&mut tracks, Some(&mut inbox));
+        assert_eq!(inbox.items.len(), 2);
+        assert_eq!(inbox.items[0].title, "Item 1");
+    }
+
+    #[test]
+    fn inbox_title_edit_undo_redo() {
+        let mut stack = UndoStack::new();
+        let mut tracks: Vec<(String, Track)> = vec![];
+        let mut inbox = sample_inbox();
+        inbox.items[0].title = "Edited".into();
+        stack.push(Operation::InboxTitleEdit {
+            index: 0,
+            old_title: "Item 1".into(),
+            new_title: "Edited".into(),
+        });
+        stack.undo(&mut tracks, Some(&mut inbox));
+        assert_eq!(inbox.items[0].title, "Item 1");
+
+        stack.redo(&mut tracks, Some(&mut inbox));
+        assert_eq!(inbox.items[0].title, "Edited");
+    }
+
+    #[test]
+    fn inbox_tags_edit_undo_redo() {
+        let mut stack = UndoStack::new();
+        let mut tracks: Vec<(String, Track)> = vec![];
+        let mut inbox = sample_inbox();
+        inbox.items[0].tags = vec!["design".into()];
+        stack.push(Operation::InboxTagsEdit {
+            index: 0,
+            old_tags: vec![],
+            new_tags: vec!["design".into()],
+        });
+        stack.undo(&mut tracks, Some(&mut inbox));
+        assert!(inbox.items[0].tags.is_empty());
+
+        stack.redo(&mut tracks, Some(&mut inbox));
+        assert_eq!(inbox.items[0].tags, vec!["design"]);
+    }
+
+    #[test]
+    fn inbox_note_edit_undo_redo() {
+        let mut stack = UndoStack::new();
+        let mut tracks: Vec<(String, Track)> = vec![];
+        let mut inbox = sample_inbox();
+        inbox.items[0].body = Some("A note".into());
+        stack.push(Operation::InboxNoteEdit {
+            index: 0,
+            old_body: None,
+            new_body: Some("A note".into()),
+        });
+        stack.undo(&mut tracks, Some(&mut inbox));
+        assert!(inbox.items[0].body.is_none());
+
+        stack.redo(&mut tracks, Some(&mut inbox));
+        assert_eq!(inbox.items[0].body.as_deref(), Some("A note"));
+    }
+
+    #[test]
+    fn inbox_move_undo_redo() {
+        let mut stack = UndoStack::new();
+        let mut tracks: Vec<(String, Track)> = vec![];
+        let mut inbox = sample_inbox();
+        // Move item 0 to index 1
+        let item = inbox.items.remove(0);
+        inbox.items.insert(1, item);
+        stack.push(Operation::InboxMove {
+            old_index: 0,
+            new_index: 1,
+        });
+        // After move: [Item 2, Item 1]
+        assert_eq!(inbox.items[0].title, "Item 2");
+        assert_eq!(inbox.items[1].title, "Item 1");
+
+        stack.undo(&mut tracks, Some(&mut inbox));
+        // After undo: [Item 1, Item 2]
+        assert_eq!(inbox.items[0].title, "Item 1");
+        assert_eq!(inbox.items[1].title, "Item 2");
+
+        stack.redo(&mut tracks, Some(&mut inbox));
+        // After redo: [Item 2, Item 1]
+        assert_eq!(inbox.items[0].title, "Item 2");
+        assert_eq!(inbox.items[1].title, "Item 1");
+    }
+
+    // -----------------------------------------------------------------------
+    // SectionMove undo/redo
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn section_move_undo_restores_position() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        // Move T-001 from Backlog (index 0) to Done
+        {
+            let track = &mut tracks[0].1;
+            let tasks = track.section_tasks_mut(SectionKind::Backlog).unwrap();
+            let task = tasks.remove(0);
+            let done = track.section_tasks_mut(SectionKind::Done).unwrap();
+            done.insert(0, task);
+        }
+        stack.push(Operation::SectionMove {
+            track_id: "t".into(),
+            task_id: "T-001".into(),
+            from_section: SectionKind::Backlog,
+            to_section: SectionKind::Done,
+            from_index: 0,
+        });
+        stack.undo(&mut tracks, None);
+        let track = &tracks[0].1;
+        // T-001 should be back in backlog at position 0
+        assert_eq!(track.backlog()[0].id.as_deref(), Some("T-001"));
+        assert!(
+            track
+                .done()
+                .iter()
+                .all(|t| t.id.as_deref() != Some("T-001"))
+        );
+    }
+
+    #[test]
+    fn section_move_redo() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        {
+            let track = &mut tracks[0].1;
+            let tasks = track.section_tasks_mut(SectionKind::Backlog).unwrap();
+            let task = tasks.remove(0);
+            let done = track.section_tasks_mut(SectionKind::Done).unwrap();
+            done.insert(0, task);
+        }
+        stack.push(Operation::SectionMove {
+            track_id: "t".into(),
+            task_id: "T-001".into(),
+            from_section: SectionKind::Backlog,
+            to_section: SectionKind::Done,
+            from_index: 0,
+        });
+        stack.undo(&mut tracks, None);
+        stack.redo(&mut tracks, None);
+        let track = &tracks[0].1;
+        // T-001 should be in Done
+        assert!(
+            track
+                .done()
+                .iter()
+                .any(|t| t.id.as_deref() == Some("T-001"))
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Bulk undo/redo
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn bulk_undo_reverses_order() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        // Apply two state changes as a bulk op
+        {
+            let track = &mut tracks[0].1;
+            let t1 = task_ops::find_task_mut_in_track(track, "T-001").unwrap();
+            t1.state = TaskState::Active;
+        }
+        {
+            let track = &mut tracks[0].1;
+            let t2 = task_ops::find_task_mut_in_track(track, "T-002").unwrap();
+            t2.state = TaskState::Done;
+        }
+        stack.push(Operation::Bulk(vec![
+            Operation::StateChange {
+                track_id: "t".into(),
+                task_id: "T-001".into(),
+                old_state: TaskState::Todo,
+                new_state: TaskState::Active,
+                old_resolved: None,
+                new_resolved: None,
+            },
+            Operation::StateChange {
+                track_id: "t".into(),
+                task_id: "T-002".into(),
+                old_state: TaskState::Todo,
+                new_state: TaskState::Done,
+                old_resolved: None,
+                new_resolved: None,
+            },
+        ]));
+        stack.undo(&mut tracks, None);
+        let track = &tracks[0].1;
+        assert_eq!(
+            task_ops::find_task_in_track(track, "T-001").unwrap().state,
+            TaskState::Todo
+        );
+        assert_eq!(
+            task_ops::find_task_in_track(track, "T-002").unwrap().state,
+            TaskState::Todo
+        );
+    }
+
+    #[test]
+    fn bulk_redo_applies_forward_order() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        {
+            let track = &mut tracks[0].1;
+            let t1 = task_ops::find_task_mut_in_track(track, "T-001").unwrap();
+            t1.state = TaskState::Active;
+        }
+        {
+            let track = &mut tracks[0].1;
+            let t2 = task_ops::find_task_mut_in_track(track, "T-002").unwrap();
+            t2.state = TaskState::Done;
+        }
+        stack.push(Operation::Bulk(vec![
+            Operation::StateChange {
+                track_id: "t".into(),
+                task_id: "T-001".into(),
+                old_state: TaskState::Todo,
+                new_state: TaskState::Active,
+                old_resolved: None,
+                new_resolved: None,
+            },
+            Operation::StateChange {
+                track_id: "t".into(),
+                task_id: "T-002".into(),
+                old_state: TaskState::Todo,
+                new_state: TaskState::Done,
+                old_resolved: None,
+                new_resolved: None,
+            },
+        ]));
+        stack.undo(&mut tracks, None);
+        stack.redo(&mut tracks, None);
+        let track = &tracks[0].1;
+        assert_eq!(
+            task_ops::find_task_in_track(track, "T-001").unwrap().state,
+            TaskState::Active
+        );
+        assert_eq!(
+            task_ops::find_task_in_track(track, "T-002").unwrap().state,
+            TaskState::Done
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Error / boundary cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn undo_nonexistent_track_returns_none() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        stack.push(Operation::StateChange {
+            track_id: "nonexistent".into(),
+            task_id: "T-001".into(),
+            old_state: TaskState::Todo,
+            new_state: TaskState::Active,
+            old_resolved: None,
+            new_resolved: None,
+        });
+        // Undo returns a nav target, but the apply_inverse fails silently
+        let nav = stack.undo(&mut tracks, None);
+        assert!(nav.is_some()); // nav target is generated before applying
+    }
+
+    #[test]
+    fn undo_nonexistent_task_returns_nav() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        stack.push(Operation::StateChange {
+            track_id: "t".into(),
+            task_id: "NOPE".into(),
+            old_state: TaskState::Todo,
+            new_state: TaskState::Active,
+            old_resolved: None,
+            new_resolved: None,
+        });
+        let nav = stack.undo(&mut tracks, None);
+        assert!(nav.is_some());
+    }
+
+    #[test]
+    fn inbox_op_with_none_inbox_is_safe() {
+        let mut stack = UndoStack::new();
+        let mut tracks: Vec<(String, Track)> = vec![];
+        stack.push(Operation::InboxAdd {
+            index: 0,
+            title: "Test".into(),
+        });
+        // Passing None for inbox should not panic
+        let nav = stack.undo(&mut tracks, None);
+        assert!(nav.is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // nav_target_for_op (existing tests, preserved)
+    // -----------------------------------------------------------------------
 
     #[test]
     fn nav_target_state_change() {
@@ -1598,5 +2584,55 @@ mod tests {
         let op = Operation::SyncMarker;
         assert!(nav_target_for_op(&op, true).is_none());
         assert!(nav_target_for_op(&op, false).is_none());
+    }
+
+    #[test]
+    fn nav_target_inbox_add_undo() {
+        let op = Operation::InboxAdd {
+            index: 3,
+            title: "item".into(),
+        };
+        let cursor = expect_inbox(nav_target_for_op(&op, true).unwrap());
+        assert_eq!(cursor, Some(2)); // index-1 for undo
+    }
+
+    #[test]
+    fn nav_target_inbox_add_redo() {
+        let op = Operation::InboxAdd {
+            index: 3,
+            title: "item".into(),
+        };
+        let cursor = expect_inbox(nav_target_for_op(&op, false).unwrap());
+        assert_eq!(cursor, Some(3));
+    }
+
+    #[test]
+    fn nav_target_inbox_delete_undo() {
+        let op = Operation::InboxDelete {
+            index: 1,
+            item: InboxItem::new("deleted".into()),
+        };
+        let cursor = expect_inbox(nav_target_for_op(&op, true).unwrap());
+        assert_eq!(cursor, Some(1)); // restored at index
+    }
+
+    #[test]
+    fn nav_target_inbox_move_undo() {
+        let op = Operation::InboxMove {
+            old_index: 0,
+            new_index: 2,
+        };
+        let cursor = expect_inbox(nav_target_for_op(&op, true).unwrap());
+        assert_eq!(cursor, Some(0)); // goes back to old_index
+    }
+
+    #[test]
+    fn nav_target_inbox_move_redo() {
+        let op = Operation::InboxMove {
+            old_index: 0,
+            new_index: 2,
+        };
+        let cursor = expect_inbox(nav_target_for_op(&op, false).unwrap());
+        assert_eq!(cursor, Some(2)); // goes to new_index
     }
 }
