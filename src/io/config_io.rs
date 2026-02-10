@@ -31,6 +31,22 @@ pub fn write_config(frame_dir: &Path, doc: &toml_edit::DocumentMut) -> Result<()
     Ok(())
 }
 
+/// Write config from the in-memory struct (no toml_edit document available).
+/// Uses `toml::to_string_pretty` — key order is stable (IndexMap insertion order)
+/// but comments and non-standard formatting are not preserved.
+pub fn write_config_from_struct(
+    frame_dir: &Path,
+    config: &ProjectConfig,
+) -> Result<(), ProjectError> {
+    let config_path = frame_dir.join("project.toml");
+    let text = toml::to_string_pretty(config)?;
+    fs::write(&config_path, &text).map_err(|e| ProjectError::ReadError {
+        path: config_path,
+        source: e,
+    })?;
+    Ok(())
+}
+
 /// Update the cc_focus field in the config document
 pub fn set_cc_focus(doc: &mut toml_edit::DocumentMut, track_id: &str) {
     if !doc.contains_key("agent") {
@@ -397,5 +413,57 @@ name = "test"
         let mut doc: toml_edit::DocumentMut = config_text.parse().unwrap();
         // Should not panic
         clear_tag_color(&mut doc, "bug");
+    }
+
+    /// Struct-based serialization (toml::to_string_pretty) must preserve
+    /// the key order from the original file for map-like sections.
+    #[test]
+    fn test_struct_round_trip_preserves_prefix_order() {
+        let config_text = r#"[project]
+name = "test"
+
+[ids.prefixes]
+zebra = "ZEB"
+alpha = "ALP"
+middle = "MID"
+"#;
+        let config: ProjectConfig = toml::from_str(config_text).unwrap();
+        let output = toml::to_string_pretty(&config).unwrap();
+        let reparsed: ProjectConfig = toml::from_str(&output).unwrap();
+
+        // Keys must appear in the same order after round-trip
+        let keys: Vec<&String> = config.ids.prefixes.keys().collect();
+        let keys_rt: Vec<&String> = reparsed.ids.prefixes.keys().collect();
+        assert_eq!(keys, keys_rt, "prefix key order changed after round-trip");
+        assert_eq!(keys, vec!["zebra", "alpha", "middle"]);
+    }
+
+    /// Verify that write_config_from_struct produces a valid config that
+    /// re-parses identically.
+    #[test]
+    fn test_write_config_from_struct_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        fs::create_dir_all(&frame_dir).unwrap();
+
+        let config_text = r##"[project]
+name = "test"
+
+[ids.prefixes]
+zebra = "ZEB"
+alpha = "ALP"
+
+[ui.tag_colors]
+bug = "#FF0000"
+design = "#00FF00"
+"##;
+        let original: ProjectConfig = toml::from_str(config_text).unwrap();
+        write_config_from_struct(&frame_dir, &original).unwrap();
+
+        let (reloaded, _doc) = read_config(&frame_dir).unwrap();
+        let prefix_keys: Vec<&String> = reloaded.ids.prefixes.keys().collect();
+        let tag_keys: Vec<&String> = reloaded.ui.tag_colors.keys().collect();
+        assert_eq!(prefix_keys, vec!["zebra", "alpha"]);
+        assert_eq!(tag_keys, vec!["bug", "design"]);
     }
 }

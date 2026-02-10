@@ -291,7 +291,7 @@ mod tests {
         AgentConfig, CleanConfig, IdConfig, ProjectConfig, ProjectInfo, TrackConfig, UiConfig,
     };
     use crate::parse::parse_track;
-    use std::collections::HashMap;
+    use indexmap::IndexMap;
     use tempfile::TempDir;
 
     fn make_config() -> ProjectConfig {
@@ -308,7 +308,7 @@ mod tests {
             }],
             clean: CleanConfig::default(),
             ids: IdConfig {
-                prefixes: HashMap::new(),
+                prefixes: IndexMap::new(),
             },
             ui: UiConfig::default(),
         }

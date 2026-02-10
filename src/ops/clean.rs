@@ -795,12 +795,12 @@ mod tests {
         AgentConfig, CleanConfig, IdConfig, ProjectConfig, ProjectInfo, TrackConfig, UiConfig,
     };
     use crate::parse::parse_track;
-    use std::collections::HashMap;
+    use indexmap::IndexMap;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
     fn make_config(prefixes: Vec<(&str, &str)>) -> ProjectConfig {
-        let mut prefix_map = HashMap::new();
+        let mut prefix_map = IndexMap::new();
         for (k, v) in &prefixes {
             prefix_map.insert(k.to_string(), v.to_string());
         }

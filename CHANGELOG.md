@@ -11,6 +11,7 @@ All notable changes to frame will be documented in this file.
 - Undo stack is now capped at 500 entries to prevent unbounded memory growth in long TUI sessions
 
 ### Fixed
+- `[ids.prefixes]` and `[ui.tag_colors]` key order in `project.toml` no longer randomizes on each save; order now matches the original file
 - Parking a task with `~` now moves it to the Parked section after the grace period (previously only updated state without moving)
 - Unicode correctness throughout TUI: CJK, emoji, combining marks, and fullwidth characters now display and edit correctly
 - Cursor movement in edit mode uses grapheme clusters instead of raw bytes, preventing panics on non-ASCII text

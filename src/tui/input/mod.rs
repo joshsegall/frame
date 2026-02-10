@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+use crate::io::config_io;
 use crate::model::SectionKind;
 use crate::model::task::{Metadata, Task};
 use crate::model::track::Track;
@@ -2469,7 +2470,7 @@ fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo: bool) {
                             let _ = std::fs::remove_file(app.project.frame_dir.join(file));
                         }
                         app.project.config.tracks.retain(|t| t.id != tid);
-                        app.project.config.ids.prefixes.remove(&tid);
+                        app.project.config.ids.prefixes.shift_remove(&tid);
                         app.project.tracks.retain(|(id, _)| id != &tid);
                         rebuild_active_track_ids(app);
                         save_config(app);
@@ -2537,7 +2538,7 @@ fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo: bool) {
                             let _ = std::fs::remove_file(app.project.frame_dir.join(file));
                         }
                         app.project.config.tracks.retain(|t| t.id != tid);
-                        app.project.config.ids.prefixes.remove(&tid);
+                        app.project.config.ids.prefixes.shift_remove(&tid);
                         app.project.tracks.retain(|(id, _)| id != &tid);
                         rebuild_active_track_ids(app);
                         save_config(app);
@@ -3387,12 +3388,7 @@ fn set_cc_focus_current(app: &mut App) {
 
 /// Save the project config to project.toml.
 fn save_config(app: &mut App) {
-    let config_text = match toml::to_string_pretty(&app.project.config) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    let config_path = app.project.frame_dir.join("project.toml");
-    let _ = std::fs::write(&config_path, config_text);
+    let _ = config_io::write_config_from_struct(&app.project.frame_dir, &app.project.config);
     app.last_save_at = Some(std::time::Instant::now());
 }
 
@@ -10240,7 +10236,7 @@ fn confirm_delete_track(app: &mut App, track_id: &str) {
     // Remove from config
     app.project.config.tracks.retain(|t| t.id != track_id);
     if prefix.is_some() {
-        app.project.config.ids.prefixes.remove(track_id);
+        app.project.config.ids.prefixes.shift_remove(track_id);
     }
     save_config(app);
 
@@ -11529,7 +11525,7 @@ fn tag_color_clear(app: &mut App) {
     }
 
     // Update in-memory config
-    app.project.config.ui.tag_colors.remove(&tag);
+    app.project.config.ui.tag_colors.shift_remove(&tag);
 
     // Update theme: remove the explicit mapping so it falls back to hardcoded defaults
     // But we need to check if there's a hardcoded default; if so, keep it

@@ -357,7 +357,7 @@ pub fn delete_track(
     config_io::remove_track_from_config(doc, track_id);
     config_io::remove_prefix(doc, track_id);
     config.tracks.retain(|t| t.id != track_id);
-    config.ids.prefixes.remove(track_id);
+    config.ids.prefixes.shift_remove(track_id);
 
     Ok(())
 }
@@ -470,7 +470,7 @@ pub fn rename_track_id(
     config_io::rename_prefix_key(doc, old_id, new_id);
 
     // Update in-memory prefix map
-    if let Some(prefix) = config.ids.prefixes.remove(old_id) {
+    if let Some(prefix) = config.ids.prefixes.shift_remove(old_id) {
         config.ids.prefixes.insert(new_id.to_string(), prefix);
     }
 

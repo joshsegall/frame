@@ -19,6 +19,8 @@ pub enum ProjectError {
     },
     #[error("could not parse project.toml: {0}")]
     ConfigParseError(#[from] toml::de::Error),
+    #[error("could not serialize project.toml: {0}")]
+    ConfigSerializeError(#[from] toml::ser::Error),
     #[error("io error: {0}")]
     IoError(#[from] std::io::Error),
 }

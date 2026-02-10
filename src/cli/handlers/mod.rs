@@ -1699,9 +1699,7 @@ fn cmd_track_mv(args: TrackMvArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // Rewrite the config with the new order
     // We need to regenerate the TOML since reorder_tracks only modifies in-memory config
-    let config_text = toml::to_string_pretty(&project.config)?;
-    let config_path = project.frame_dir.join("project.toml");
-    std::fs::write(&config_path, config_text)?;
+    config_io::write_config_from_struct(&project.frame_dir, &project.config)?;
 
     println!("{} moved to position {}", args.id, args.position);
     Ok(())

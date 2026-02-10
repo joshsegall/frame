@@ -1,5 +1,5 @@
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Configuration from project.toml
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,7 +74,7 @@ fn default_done_threshold() -> usize {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IdConfig {
     #[serde(default)]
-    pub prefixes: HashMap<String, String>,
+    pub prefixes: IndexMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -82,9 +82,9 @@ pub struct UiConfig {
     #[serde(default)]
     pub show_key_hints: bool,
     #[serde(default)]
-    pub colors: HashMap<String, String>,
+    pub colors: IndexMap<String, String>,
     #[serde(default)]
-    pub tag_colors: HashMap<String, String>,
+    pub tag_colors: IndexMap<String, String>,
     /// File extensions to show in ref/spec autocomplete (e.g. ["md", "txt", "pdf"]).
     /// If empty, all files are shown.
     #[serde(default)]
