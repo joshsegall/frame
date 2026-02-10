@@ -503,7 +503,7 @@ Repeats the last repeatable action (state change, tag toggle, etc.) on the curre
 
 ### Grace Period Moves
 
-When a task is marked done in the TUI, it stays in Backlog for 5 seconds before moving to Done. During this period, undo cancels the move. The Recent view's reopen (`Space`) has a similar grace period in reverse.
+When a task is marked done or parked in the TUI, it stays in Backlog for 5 seconds before moving to its target section (Done or Parked). During this period, undo cancels the move. Un-parking a task in the Parked section and reopening a task in the Recent view (`Space`) have a similar grace period in reverse (task moves back to Backlog).
 
 The 5-second timer only counts down in Navigate mode. Entering Search, Edit, or Move mode pauses it. Switching views (e.g., Track to Inbox) or quitting immediately flushes all pending moves — tasks move to their target section without waiting.
 
