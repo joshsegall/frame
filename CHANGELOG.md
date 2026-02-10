@@ -2,7 +2,7 @@
 
 All notable changes to frame will be documented in this file.
 
-## v0.1.1 - 2026-XX-XX
+## v0.1.1 - 2026-02-10
 
 ### Added
 - Subtask reparenting in TUI move mode: `h` outdents (promotes), `l` indents (makes child of sibling above), `j`/`k` cross parent boundaries; IDs re-keyed on confirm
