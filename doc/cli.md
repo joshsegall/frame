@@ -249,10 +249,10 @@ fr title EFF-014 "New title text"
 
 ### `fr mv ID`
 
-Move a task (reorder within track or cross-track).
+Move a task (reorder within track, cross-track, or reparent).
 
 ```
-fr mv ID [POSITION] [--top] [--after ID] [--track TRACK]
+fr mv ID [POSITION] [--top] [--after ID] [--track TRACK] [--promote] [--parent ID]
 ```
 
 | Flag | Description |
@@ -261,8 +261,10 @@ fr mv ID [POSITION] [--top] [--after ID] [--track TRACK]
 | `--top` | Move to top of backlog |
 | `--after ID` | Move after this task |
 | `--track TRACK` | Move to a different track (cross-track) |
+| `--promote` | Promote subtask to top-level (placed after former parent by default) |
+| `--parent ID` | Reparent under the given task (becomes last child) |
 
-Cross-track moves rewrite the task's ID prefix to match the target track and update all dependency references in other tracks.
+Cross-track moves rewrite the task's ID prefix to match the target track. Reparenting (`--promote` or `--parent`) re-keys the task and all descendant IDs to match the new parent structure. Both operations update all dependency references across tracks.
 
 ### `fr triage INDEX --track TRACK`
 

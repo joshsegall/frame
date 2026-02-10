@@ -39,11 +39,12 @@ Task IDs use a prefix-per-track mapping defined in `[ids.prefixes]` in `project.
 
 - **Subtask IDs**: `PARENT.N` format, up to 3 levels deep (e.g., `E5.2.1`)
 - **Cross-track move**: Rewrites the moved task's ID (and all subtask IDs) to the target track's prefix, then scans **all** tracks to update dep references pointing to old IDs
+- **Reparent (depth/parent change)**: When a task changes parent via `h`/`l` in TUI move mode or `--promote`/`--parent` on CLI, all IDs in the subtree are re-keyed to match the new parent structure (e.g., `E5.2` → `E10` when promoted to top-level). ID re-keying happens on confirm (`Enter`), not during live preview.
 - **Collision detection**: Checked at track creation and ID/prefix rename time to prevent duplicate prefixes
 
 **Why**: Prefixes make task IDs globally unique and immediately identify which track a task belongs to. The rewrite-on-move rule preserves this invariant.
 
-**Code**: `src/ops/task_ops.rs` (ID assignment, cross-track move), `src/ops/track_ops.rs` (prefix management), `src/io/config_io.rs` (config mutations)
+**Code**: `src/ops/task_ops.rs` (ID assignment, cross-track move, reparent), `src/ops/track_ops.rs` (prefix management), `src/io/config_io.rs` (config mutations)
 
 ## TUI State Model
 

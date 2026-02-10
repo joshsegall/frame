@@ -204,6 +204,8 @@ fr sub EFF-014 "Test with nested closures"
 | `fr mv <id> --after <id>` | Move after another task |
 | `fr mv <id> <position>` | Move to numeric position (0-indexed) |
 | `fr mv <id> --track <track>` | Move to different track (rewrites ID prefix, updates deps) |
+| `fr mv <id> --promote` | Promote subtask to top-level (re-keys IDs) |
+| `fr mv <id> --parent <id>` | Reparent under another task (re-keys IDs) |
 
 ### Triage & import
 

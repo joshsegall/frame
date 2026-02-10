@@ -709,11 +709,18 @@ pub enum EditTarget {
 /// State for MOVE mode
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MoveState {
-    /// Moving a task within a track's backlog
+    /// Moving a task within a track's backlog (supports reparenting)
     Task {
         track_id: String,
         task_id: String,
-        original_index: usize,
+        original_parent_id: Option<String>,
+        original_section: SectionKind,
+        original_sibling_index: usize,
+        original_depth: usize,
+        /// Expand keys that were force-expanded to keep the moving task visible.
+        /// These are removed from the expanded set when the task moves away or
+        /// when the move is confirmed/cancelled.
+        force_expanded: HashSet<String>,
     },
     /// Moving an active track in the tracks list
     Track {

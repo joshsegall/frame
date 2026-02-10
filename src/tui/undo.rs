@@ -49,6 +49,7 @@ pub fn nav_target_for_op(op: &Operation, is_undo: bool) -> Option<UndoNavTarget>
             track_id,
             task_id,
             position_index,
+            ..
         } => {
             if is_undo {
                 Some(UndoNavTarget::Task {
@@ -72,6 +73,7 @@ pub fn nav_target_for_op(op: &Operation, is_undo: bool) -> Option<UndoNavTarget>
             track_id,
             parent_id,
             task_id,
+            ..
         } => {
             if is_undo {
                 Some(UndoNavTarget::Task {
@@ -115,7 +117,7 @@ pub fn nav_target_for_op(op: &Operation, is_undo: bool) -> Option<UndoNavTarget>
         Operation::TrackMove { track_id, .. } => Some(UndoNavTarget::TracksView {
             track_id: track_id.clone(),
         }),
-        Operation::InboxAdd { index } => {
+        Operation::InboxAdd { index, .. } => {
             if is_undo {
                 // Item was removed by undo — stay at same cursor
                 Some(UndoNavTarget::Inbox {
@@ -271,6 +273,35 @@ pub fn nav_target_for_op(op: &Operation, is_undo: bool) -> Option<UndoNavTarget>
                 })
             }
         }
+        Operation::Reparent {
+            track_id,
+            new_task_id,
+            id_mappings,
+            ..
+        } => {
+            if is_undo {
+                // Navigate to the original root ID (first mapping's old_id)
+                let old_root_id = id_mappings
+                    .first()
+                    .map(|(old, _)| old.clone())
+                    .unwrap_or_default();
+                Some(UndoNavTarget::Task {
+                    track_id: track_id.clone(),
+                    task_id: old_root_id,
+                    detail_region: None,
+                    task_removed: false,
+                    position_hint: None,
+                })
+            } else {
+                Some(UndoNavTarget::Task {
+                    track_id: track_id.clone(),
+                    task_id: new_task_id.clone(),
+                    detail_region: None,
+                    task_removed: false,
+                    position_hint: None,
+                })
+            }
+        }
         Operation::Bulk(ops) => {
             // Navigate to the first operation's target
             ops.first().and_then(|op| nav_target_for_op(op, is_undo))
@@ -306,17 +337,23 @@ pub enum Operation {
         task_id: String,
         /// Position index in backlog where it was inserted
         position_index: usize,
+        /// The title set during the add (so redo can restore it)
+        title: String,
     },
     /// A new subtask was added
     SubtaskAdd {
         track_id: String,
         parent_id: String,
         task_id: String,
+        /// The title set during the add (so redo can restore it)
+        title: String,
     },
-    /// A task was moved within the backlog
+    /// A task was moved within its sibling list (top-level backlog or within a parent's subtasks)
     TaskMove {
         track_id: String,
         task_id: String,
+        /// Parent task ID (None = top-level backlog)
+        parent_id: Option<String>,
         old_index: usize,
         new_index: usize,
     },
@@ -338,6 +375,8 @@ pub enum Operation {
     InboxAdd {
         /// The index where it was inserted
         index: usize,
+        /// The title set during the add (so redo can restore it)
+        title: String,
     },
     /// An inbox item was deleted
     InboxDelete { index: usize, item: InboxItem },
@@ -429,6 +468,17 @@ pub enum Operation {
         source_parent_id: Option<String>,
         /// Original depth of the task before move
         old_depth: usize,
+    },
+    /// A task was reparented (moved to different parent/depth) with ID re-keying
+    Reparent {
+        track_id: String,
+        new_task_id: String,
+        old_parent_id: Option<String>,
+        new_parent_id: Option<String>,
+        old_sibling_index: usize,
+        new_sibling_index: usize,
+        old_depth: usize,
+        id_mappings: Vec<(String, String)>, // (old_id, new_id)
     },
     /// A batch of operations applied as a single undo step (bulk SELECT mode actions)
     Bulk(Vec<Operation>),
@@ -577,6 +627,7 @@ fn apply_inverse(
             track_id,
             parent_id,
             task_id,
+            ..
         } => {
             // Undo subtask add = remove the subtask from parent
             let track = find_track_mut(tracks, track_id)?;
@@ -588,18 +639,23 @@ fn apply_inverse(
         Operation::TaskMove {
             track_id,
             task_id,
+            parent_id,
             old_index,
             ..
         } => {
             // Undo move = move back to old_index
             let track = find_track_mut(tracks, track_id)?;
-            let tasks = track.section_tasks_mut(SectionKind::Backlog)?;
-            let cur = tasks
+            let siblings = if let Some(pid) = parent_id {
+                &mut task_ops::find_task_mut_in_track(track, pid)?.subtasks
+            } else {
+                track.section_tasks_mut(SectionKind::Backlog)?
+            };
+            let cur = siblings
                 .iter()
                 .position(|t| t.id.as_deref() == Some(task_id))?;
-            let task = tasks.remove(cur);
-            let idx = (*old_index).min(tasks.len());
-            tasks.insert(idx, task);
+            let task = siblings.remove(cur);
+            let idx = (*old_index).min(siblings.len());
+            siblings.insert(idx, task);
             Some(track_id.clone())
         }
         Operation::FieldEdit {
@@ -623,7 +679,7 @@ fn apply_inverse(
         | Operation::TrackArchive { .. }
         | Operation::TrackDelete { .. }
         | Operation::TrackCcFocus { .. } => None,
-        Operation::InboxAdd { index } => {
+        Operation::InboxAdd { index, .. } => {
             // Undo add = remove the item
             if let Some(inbox) = inbox
                 && *index < inbox.items.len()
@@ -821,6 +877,45 @@ fn apply_inverse(
             task_ops::update_dep_references(tracks, task_id_new, task_id_old);
             None // Both tracks saved by caller
         }
+        Operation::Reparent {
+            track_id,
+            new_task_id,
+            old_parent_id,
+            old_sibling_index,
+            old_depth,
+            id_mappings,
+            ..
+        } => {
+            // Undo reparent: find task by new_task_id, reverse rekey, restore to old location
+            let track = find_track_mut(tracks, track_id)?;
+
+            // Remove from current location
+            let (mut task, _) = task_ops::remove_task_subtree(track, new_task_id)?;
+
+            // Reverse ID mappings: rename new IDs back to old IDs
+            for (old_id, new_id) in id_mappings.iter().rev() {
+                reverse_rekey_task(&mut task, new_id, old_id);
+            }
+
+            // Restore depth
+            task_ops::set_subtree_depth(&mut task, *old_depth);
+
+            // Insert at old location
+            let _ = task_ops::insert_task_subtree(
+                track,
+                task,
+                old_parent_id.as_deref(),
+                SectionKind::Backlog,
+                *old_sibling_index,
+            );
+
+            // Reverse dep references across all tracks
+            for (old_id, new_id) in id_mappings {
+                task_ops::update_dep_references(tracks, new_id, old_id);
+            }
+
+            Some(track_id.clone())
+        }
         Operation::Bulk(ops) => {
             // Apply inverse of each sub-operation in reverse order
             // Bulk operations don't involve inbox, so pass None for each sub-op
@@ -833,6 +928,17 @@ fn apply_inverse(
             result
         }
         Operation::SyncMarker => None,
+    }
+}
+
+/// Reverse a single ID rename within a task tree (new_id -> old_id).
+fn reverse_rekey_task(task: &mut Task, from_id: &str, to_id: &str) {
+    if task.id.as_deref() == Some(from_id) {
+        task.id = Some(to_id.to_string());
+        task.mark_dirty();
+    }
+    for sub in &mut task.subtasks {
+        reverse_rekey_task(sub, from_id, to_id);
     }
 }
 
@@ -877,15 +983,11 @@ fn apply_forward(
             track_id,
             task_id,
             position_index,
+            title,
         } => {
-            // Redo: re-add the task (it was removed during undo)
-            // We need to recreate it — this is a limitation, but we store enough info
-            // Actually, for simplicity, we can't perfectly redo an add because the task
-            // object was removed. We'll create a minimal placeholder.
-            // In practice, redo of add is less common. For now, create a new task.
             let track = find_track_mut(tracks, track_id)?;
             let tasks = track.section_tasks_mut(SectionKind::Backlog)?;
-            let mut task = Task::new(TaskState::Todo, Some(task_id.clone()), String::new());
+            let mut task = Task::new(TaskState::Todo, Some(task_id.clone()), title.clone());
             task.metadata.push(crate::model::task::Metadata::Added(
                 chrono::Local::now().format("%Y-%m-%d").to_string(),
             ));
@@ -897,10 +999,11 @@ fn apply_forward(
             track_id,
             parent_id,
             task_id,
+            title,
         } => {
             let track = find_track_mut(tracks, track_id)?;
             let parent = task_ops::find_task_mut_in_track(track, parent_id)?;
-            let mut sub = Task::new(TaskState::Todo, Some(task_id.clone()), String::new());
+            let mut sub = Task::new(TaskState::Todo, Some(task_id.clone()), title.clone());
             sub.depth = parent.depth + 1;
             sub.metadata.push(crate::model::task::Metadata::Added(
                 chrono::Local::now().format("%Y-%m-%d").to_string(),
@@ -912,17 +1015,22 @@ fn apply_forward(
         Operation::TaskMove {
             track_id,
             task_id,
+            parent_id,
             new_index,
             ..
         } => {
             let track = find_track_mut(tracks, track_id)?;
-            let tasks = track.section_tasks_mut(SectionKind::Backlog)?;
-            let cur = tasks
+            let siblings = if let Some(pid) = parent_id {
+                &mut task_ops::find_task_mut_in_track(track, pid)?.subtasks
+            } else {
+                track.section_tasks_mut(SectionKind::Backlog)?
+            };
+            let cur = siblings
                 .iter()
                 .position(|t| t.id.as_deref() == Some(task_id))?;
-            let task = tasks.remove(cur);
-            let idx = (*new_index).min(tasks.len());
-            tasks.insert(idx, task);
+            let task = siblings.remove(cur);
+            let idx = (*new_index).min(siblings.len());
+            siblings.insert(idx, task);
             Some(track_id.clone())
         }
         Operation::FieldEdit {
@@ -946,10 +1054,9 @@ fn apply_forward(
         | Operation::TrackArchive { .. }
         | Operation::TrackDelete { .. }
         | Operation::TrackCcFocus { .. } => None,
-        Operation::InboxAdd { index } => {
-            // Redo add = re-insert a blank item
+        Operation::InboxAdd { index, title } => {
             if let Some(inbox) = inbox {
-                let item = InboxItem::new(String::new());
+                let item = InboxItem::new(title.clone());
                 let idx = (*index).min(inbox.items.len());
                 inbox.items.insert(idx, item);
             }
@@ -1144,6 +1251,54 @@ fn apply_forward(
             task_ops::update_dep_references(tracks, task_id_old, task_id_new);
             None // Both tracks saved by caller
         }
+        Operation::Reparent {
+            track_id,
+            new_task_id,
+            new_parent_id,
+            new_sibling_index,
+            id_mappings,
+            ..
+        } => {
+            // Redo reparent: find task by old root ID, apply forward rekey, move to new location
+            let old_root_id = id_mappings
+                .first()
+                .map(|(old, _)| old.clone())
+                .unwrap_or_default();
+
+            let track = find_track_mut(tracks, track_id)?;
+
+            // Remove from old location
+            let (mut task, _) = task_ops::remove_task_subtree(track, &old_root_id)?;
+
+            // Apply forward ID mappings
+            let _ = task_ops::rekey_subtree(&mut task, new_task_id);
+
+            // Compute new depth
+            let new_depth = match new_parent_id {
+                None => 0,
+                Some(pid) => {
+                    let parent = task_ops::find_task_in_track(track, pid);
+                    parent.map_or(0, |p| p.depth + 1)
+                }
+            };
+            task_ops::set_subtree_depth(&mut task, new_depth);
+
+            // Insert at new location
+            let _ = task_ops::insert_task_subtree(
+                track,
+                task,
+                new_parent_id.as_deref(),
+                SectionKind::Backlog,
+                *new_sibling_index,
+            );
+
+            // Update dep references forward
+            for (old_id, new_id) in id_mappings {
+                task_ops::update_dep_references(tracks, old_id, new_id);
+            }
+
+            Some(track_id.clone())
+        }
         Operation::Bulk(ops) => {
             // Apply each sub-operation forward in order
             let mut result = None;
@@ -1294,6 +1449,7 @@ mod tests {
             track_id: "t1".into(),
             task_id: "T-003".into(),
             position_index: 2,
+            title: "Test task".into(),
         };
         let (_, _, _, task_removed, position_hint) =
             expect_task(nav_target_for_op(&op, true).unwrap());
@@ -1307,6 +1463,7 @@ mod tests {
             track_id: "t1".into(),
             task_id: "T-003".into(),
             position_index: 2,
+            title: "Test task".into(),
         };
         let (_, task_id, _, task_removed, _) = expect_task(nav_target_for_op(&op, false).unwrap());
         assert!(!task_removed);
@@ -1319,6 +1476,7 @@ mod tests {
             track_id: "t1".into(),
             parent_id: "T-010".into(),
             task_id: "T-010.1".into(),
+            title: "Sub task".into(),
         };
         let (_, task_id, _, task_removed, _) = expect_task(nav_target_for_op(&op, true).unwrap());
         assert_eq!(task_id, "T-010");
@@ -1331,6 +1489,7 @@ mod tests {
             track_id: "t1".into(),
             parent_id: "T-010".into(),
             task_id: "T-010.1".into(),
+            title: "Sub task".into(),
         };
         let (_, task_id, _, _, _) = expect_task(nav_target_for_op(&op, false).unwrap());
         assert_eq!(task_id, "T-010.1");
@@ -1341,6 +1500,7 @@ mod tests {
         let op = Operation::TaskMove {
             track_id: "t1".into(),
             task_id: "T-005".into(),
+            parent_id: None,
             old_index: 0,
             new_index: 3,
         };

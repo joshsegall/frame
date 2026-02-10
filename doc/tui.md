@@ -302,11 +302,13 @@ With selection active (Select mode):
 
 | Key | Action |
 |-----|--------|
-| `j`, `Down` | Move item down |
-| `k`, `Up` | Move item up |
+| `j`, `Down` | Move item down (same depth, crosses parent boundaries) |
+| `k`, `Up` | Move item up (same depth, crosses parent boundaries) |
+| `h`, `Left` | Outdent: promote to parent's level |
+| `l`, `Right` | Indent: make child of sibling above |
 | `g`, `Home` | Move to top |
 | `G`, `End` | Move to bottom |
-| `Enter` | Confirm position |
+| `Enter` | Confirm position (re-keys IDs if depth/parent changed) |
 | `Esc` | Cancel and restore |
 
 ### Search Mode

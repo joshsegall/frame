@@ -15,6 +15,28 @@ pub enum TaskError {
     MaxDepthReached,
     #[error("invalid position: {0}")]
     InvalidPosition(String),
+    #[error("reparenting would create a cycle")]
+    CycleDetected,
+    #[error("task is already top-level")]
+    AlreadyTopLevel,
+    #[error("reparenting would exceed maximum nesting depth (3)")]
+    DepthExceeded,
+}
+
+/// Location of a task in the track tree
+#[derive(Debug, Clone)]
+pub struct TaskLocation {
+    pub section: SectionKind,
+    pub parent_id: Option<String>,
+    pub sibling_index: usize,
+}
+
+/// Result of a reparent operation (for undo)
+#[derive(Debug, Clone)]
+pub struct ReparentResult {
+    pub new_root_id: String,
+    pub id_mappings: Vec<(String, String)>, // old_id -> new_id
+    pub old_location: TaskLocation,
 }
 
 // ---------------------------------------------------------------------------
@@ -576,6 +598,15 @@ pub fn update_dep_references(tracks: &mut [(String, Track)], old_id: &str, new_i
     }
 }
 
+/// Update all dep references within a single track from old_id to new_id.
+pub fn update_dep_references_in_track(track: &mut Track, old_id: &str, new_id: &str) {
+    for node in &mut track.nodes {
+        if let TrackNode::Section { tasks, .. } = node {
+            update_deps_in_tasks(tasks, old_id, new_id);
+        }
+    }
+}
+
 fn update_deps_in_tasks(tasks: &mut [Task], old_id: &str, new_id: &str) {
     for task in tasks.iter_mut() {
         let mut changed = false;
@@ -594,6 +625,280 @@ fn update_deps_in_tasks(tasks: &mut [Task], old_id: &str, new_id: &str) {
         }
         update_deps_in_tasks(&mut task.subtasks, old_id, new_id);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Reparent helpers
+// ---------------------------------------------------------------------------
+
+/// Find a task's location (parent and sibling index) within a track.
+pub fn find_task_location(
+    track: &Track,
+    task_id: &str,
+    section: SectionKind,
+) -> Option<TaskLocation> {
+    let tasks = track.section_tasks(section);
+    // Check top-level
+    for (i, task) in tasks.iter().enumerate() {
+        if task.id.as_deref() == Some(task_id) {
+            return Some(TaskLocation {
+                section,
+                parent_id: None,
+                sibling_index: i,
+            });
+        }
+        if let Some(loc) = find_in_subtasks(task, task_id, section) {
+            return Some(loc);
+        }
+    }
+    None
+}
+
+fn find_in_subtasks(parent: &Task, task_id: &str, section: SectionKind) -> Option<TaskLocation> {
+    let parent_id = parent.id.as_ref()?;
+    for (i, sub) in parent.subtasks.iter().enumerate() {
+        if sub.id.as_deref() == Some(task_id) {
+            return Some(TaskLocation {
+                section,
+                parent_id: Some(parent_id.clone()),
+                sibling_index: i,
+            });
+        }
+        if let Some(loc) = find_in_subtasks(sub, task_id, section) {
+            return Some(loc);
+        }
+    }
+    None
+}
+
+/// Find a task's location across all sections of a track.
+pub fn find_task_location_any_section(track: &Track, task_id: &str) -> Option<TaskLocation> {
+    for kind in &[SectionKind::Backlog, SectionKind::Parked, SectionKind::Done] {
+        if let Some(loc) = find_task_location(track, task_id, *kind) {
+            return Some(loc);
+        }
+    }
+    None
+}
+
+/// Remove a task (with its entire subtree) from its current position.
+/// Returns the task and its original location.
+pub fn remove_task_subtree(track: &mut Track, task_id: &str) -> Option<(Task, TaskLocation)> {
+    for node in &mut track.nodes {
+        if let TrackNode::Section { kind, tasks, .. } = node
+            && let Some(result) = remove_from_list(tasks, task_id, *kind, None)
+        {
+            return Some(result);
+        }
+    }
+    None
+}
+
+fn remove_from_list(
+    tasks: &mut Vec<Task>,
+    task_id: &str,
+    section: SectionKind,
+    parent_id: Option<&str>,
+) -> Option<(Task, TaskLocation)> {
+    for i in 0..tasks.len() {
+        if tasks[i].id.as_deref() == Some(task_id) {
+            let task = tasks.remove(i);
+            return Some((
+                task,
+                TaskLocation {
+                    section,
+                    parent_id: parent_id.map(|s| s.to_string()),
+                    sibling_index: i,
+                },
+            ));
+        }
+        let pid = tasks[i].id.clone();
+        if let Some(pid) = &pid
+            && let Some(result) =
+                remove_from_list(&mut tasks[i].subtasks, task_id, section, Some(pid))
+        {
+            tasks[i].mark_dirty();
+            return Some(result);
+        }
+    }
+    None
+}
+
+/// Insert a task subtree at a specific location in a track.
+pub fn insert_task_subtree(
+    track: &mut Track,
+    mut task: Task,
+    parent_id: Option<&str>,
+    section: SectionKind,
+    index: usize,
+) -> Result<(), TaskError> {
+    match parent_id {
+        None => {
+            // Insert as top-level task
+            let tasks = track
+                .section_tasks_mut(section)
+                .ok_or_else(|| TaskError::InvalidPosition("no such section".into()))?;
+            let idx = index.min(tasks.len());
+            task.mark_dirty();
+            tasks.insert(idx, task);
+            Ok(())
+        }
+        Some(pid) => {
+            let parent = find_task_mut_in_track(track, pid)
+                .ok_or_else(|| TaskError::NotFound(pid.to_string()))?;
+            let idx = index.min(parent.subtasks.len());
+            task.mark_dirty();
+            parent.subtasks.insert(idx, task);
+            parent.mark_dirty();
+            Ok(())
+        }
+    }
+}
+
+/// Recursively set the depth of a task and all its subtasks.
+pub fn set_subtree_depth(task: &mut Task, depth: usize) {
+    task.depth = depth;
+    task.mark_dirty();
+    for sub in &mut task.subtasks {
+        set_subtree_depth(sub, depth + 1);
+    }
+}
+
+/// Get the maximum relative depth of any descendant in a task's subtree.
+/// A task with no children returns 0. A task with children returns 1 + max of children.
+pub fn max_subtree_depth(task: &Task) -> usize {
+    if task.subtasks.is_empty() {
+        0
+    } else {
+        1 + task
+            .subtasks
+            .iter()
+            .map(max_subtree_depth)
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+/// Assign new IDs to a task and all its descendants.
+/// Returns the list of (old_id, new_id) mappings.
+pub fn rekey_subtree(task: &mut Task, new_id: &str) -> Vec<(String, String)> {
+    let mut mappings = Vec::new();
+    if let Some(ref old_id) = task.id {
+        mappings.push((old_id.clone(), new_id.to_string()));
+    }
+    task.id = Some(new_id.to_string());
+    task.mark_dirty();
+    for (i, sub) in task.subtasks.iter_mut().enumerate() {
+        let sub_new_id = format!("{}.{}", new_id, i + 1);
+        let sub_mappings = rekey_subtree(sub, &sub_new_id);
+        mappings.extend(sub_mappings);
+    }
+    mappings
+}
+
+/// Check if `candidate_id` is a descendant of `ancestor_id` in the given track.
+pub fn is_descendant_of(track: &Track, ancestor_id: &str, candidate_id: &str) -> bool {
+    if let Some(ancestor) = find_task_in_track(track, ancestor_id) {
+        return find_task_in_list(&ancestor.subtasks, candidate_id).is_some();
+    }
+    false
+}
+
+/// Compute the next available child number for a parent task.
+fn next_child_number(parent: &Task) -> usize {
+    parent.subtasks.len() + 1
+}
+
+/// Main reparent operation: move a task to a new parent (or promote to top-level).
+///
+/// - `new_parent_id`: None = promote to top-level, Some(id) = reparent under that task.
+/// - `sibling_index`: position among the new parent's children (or top-level tasks).
+///   Use `usize::MAX` to append at the end.
+/// - `prefix`: the track's ID prefix (e.g., "EFF") for generating new IDs.
+/// - `all_tracks`: all tracks in the project for updating dep references.
+pub fn reparent_task(
+    track: &mut Track,
+    task_id: &str,
+    new_parent_id: Option<&str>,
+    sibling_index: usize,
+    prefix: &str,
+    all_tracks: &mut [(String, Track)],
+) -> Result<ReparentResult, TaskError> {
+    // 1. Validate task exists
+    let _old_location = find_task_location_any_section(track, task_id)
+        .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
+
+    // 2. Cycle check: new_parent must not be a descendant of the task
+    if let Some(new_pid) = new_parent_id {
+        if is_descendant_of(track, task_id, new_pid) {
+            return Err(TaskError::CycleDetected);
+        }
+        if new_pid == task_id {
+            return Err(TaskError::CycleDetected);
+        }
+    }
+
+    // 3. Depth check: determine the new depth and verify max depth constraint
+    let new_depth = match &new_parent_id {
+        None => 0,
+        Some(pid) => {
+            let parent = find_task_in_track(track, pid)
+                .ok_or_else(|| TaskError::NotFound(pid.to_string()))?;
+            parent.depth + 1
+        }
+    };
+
+    // Get the task's max subtree depth before removing
+    let task_max_depth = find_task_in_track(track, task_id)
+        .map(max_subtree_depth)
+        .unwrap_or(0);
+
+    if new_depth + task_max_depth > 2 {
+        return Err(TaskError::DepthExceeded);
+    }
+
+    // 4. Remove the task subtree
+    let (mut task, actual_old_location) = remove_task_subtree(track, task_id)
+        .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
+
+    // 5. Compute new ID
+    let new_id = match &new_parent_id {
+        None => {
+            // Promote to top-level: get next available top-level ID
+            let next_num = next_id_number(track, prefix);
+            format!("{}-{:03}", prefix, next_num)
+        }
+        Some(pid) => {
+            // Reparent under parent: find next available child slot
+            let parent = find_task_in_track(track, pid)
+                .ok_or_else(|| TaskError::NotFound(pid.to_string()))?;
+            let child_num = next_child_number(parent);
+            format!("{}.{}", pid, child_num)
+        }
+    };
+
+    // 6. Rekey subtree
+    let id_mappings = rekey_subtree(&mut task, &new_id);
+
+    // 7. Set depths
+    set_subtree_depth(&mut task, new_depth);
+
+    // 8. Insert at new location
+    let section = actual_old_location.section;
+    insert_task_subtree(track, task, new_parent_id, section, sibling_index)?;
+
+    // 9. Update dep references across all tracks
+    for (old_id, new_mapped_id) in &id_mappings {
+        update_dep_references(all_tracks, old_id, new_mapped_id);
+        // Also update within the current track (which may not be in all_tracks)
+        update_dep_references_in_track(track, old_id, new_mapped_id);
+    }
+
+    Ok(ReparentResult {
+        new_root_id: new_id,
+        id_mappings,
+        old_location: actual_old_location,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -975,5 +1280,365 @@ mod tests {
         ));
         assert!(!is_top_level_in_section(&track, "T-001", SectionKind::Done));
         assert!(is_top_level_in_section(&track, "T-000", SectionKind::Done));
+    }
+
+    // --- Reparent helpers ---
+
+    #[test]
+    fn test_find_task_location_top_level() {
+        let track = sample_track();
+        let loc = find_task_location(&track, "T-001", SectionKind::Backlog).unwrap();
+        assert_eq!(loc.section, SectionKind::Backlog);
+        assert!(loc.parent_id.is_none());
+        assert_eq!(loc.sibling_index, 0);
+
+        let loc2 = find_task_location(&track, "T-003", SectionKind::Backlog).unwrap();
+        assert!(loc2.parent_id.is_none());
+        assert_eq!(loc2.sibling_index, 2);
+    }
+
+    #[test]
+    fn test_find_task_location_nested() {
+        let track = sample_track();
+        let loc = find_task_location(&track, "T-003.1", SectionKind::Backlog).unwrap();
+        assert_eq!(loc.section, SectionKind::Backlog);
+        assert_eq!(loc.parent_id.as_deref(), Some("T-003"));
+        assert_eq!(loc.sibling_index, 0);
+
+        let loc2 = find_task_location(&track, "T-003.2", SectionKind::Backlog).unwrap();
+        assert_eq!(loc2.parent_id.as_deref(), Some("T-003"));
+        assert_eq!(loc2.sibling_index, 1);
+    }
+
+    #[test]
+    fn test_find_task_location_not_found() {
+        let track = sample_track();
+        assert!(find_task_location(&track, "T-999", SectionKind::Backlog).is_none());
+    }
+
+    #[test]
+    fn test_find_task_location_any_section() {
+        let track = sample_track();
+        let loc = find_task_location_any_section(&track, "T-000").unwrap();
+        assert_eq!(loc.section, SectionKind::Done);
+        assert!(loc.parent_id.is_none());
+
+        let loc2 = find_task_location_any_section(&track, "T-010").unwrap();
+        assert_eq!(loc2.section, SectionKind::Parked);
+    }
+
+    #[test]
+    fn test_remove_insert_task_subtree_round_trip() {
+        let mut track = sample_track();
+        let original_count = track.backlog().len();
+
+        // Remove T-002
+        let (task, loc) = remove_task_subtree(&mut track, "T-002").unwrap();
+        assert_eq!(task.id.as_deref(), Some("T-002"));
+        assert!(loc.parent_id.is_none());
+        assert_eq!(loc.sibling_index, 1);
+        assert_eq!(track.backlog().len(), original_count - 1);
+
+        // Re-insert at the same position
+        insert_task_subtree(&mut track, task, None, SectionKind::Backlog, 1).unwrap();
+        assert_eq!(track.backlog().len(), original_count);
+        assert_eq!(track.backlog()[1].id.as_deref(), Some("T-002"));
+    }
+
+    #[test]
+    fn test_remove_insert_subtask_round_trip() {
+        let mut track = sample_track();
+        let original_sub_count = track.backlog()[2].subtasks.len();
+
+        // Remove T-003.1 (subtask)
+        let (task, loc) = remove_task_subtree(&mut track, "T-003.1").unwrap();
+        assert_eq!(task.id.as_deref(), Some("T-003.1"));
+        assert_eq!(loc.parent_id.as_deref(), Some("T-003"));
+        assert_eq!(loc.sibling_index, 0);
+        assert_eq!(track.backlog()[2].subtasks.len(), original_sub_count - 1);
+
+        // Re-insert
+        insert_task_subtree(&mut track, task, Some("T-003"), SectionKind::Backlog, 0).unwrap();
+        assert_eq!(track.backlog()[2].subtasks.len(), original_sub_count);
+        assert_eq!(
+            track.backlog()[2].subtasks[0].id.as_deref(),
+            Some("T-003.1")
+        );
+    }
+
+    #[test]
+    fn test_max_subtree_depth() {
+        let track = sample_track();
+        // T-001 has no subtasks
+        let t1 = find_task_in_track(&track, "T-001").unwrap();
+        assert_eq!(max_subtree_depth(t1), 0);
+
+        // T-003 has 2 subtasks (depth 1)
+        let t3 = find_task_in_track(&track, "T-003").unwrap();
+        assert_eq!(max_subtree_depth(t3), 1);
+    }
+
+    #[test]
+    fn test_max_subtree_depth_deep() {
+        // Create a 3-level task manually
+        let track = parse_track(
+            "\
+# Deep Track
+
+## Backlog
+
+- [ ] `D-001` Root
+  - [ ] `D-001.1` Child
+    - [ ] `D-001.1.1` Grandchild
+",
+        );
+        let root = find_task_in_track(&track, "D-001").unwrap();
+        assert_eq!(max_subtree_depth(root), 2);
+
+        let child = find_task_in_track(&track, "D-001.1").unwrap();
+        assert_eq!(max_subtree_depth(child), 1);
+
+        let grandchild = find_task_in_track(&track, "D-001.1.1").unwrap();
+        assert_eq!(max_subtree_depth(grandchild), 0);
+    }
+
+    #[test]
+    fn test_rekey_subtree() {
+        let mut track = sample_track();
+        // Extract T-003 with its subtasks
+        let (mut task, _) = remove_task_subtree(&mut track, "T-003").unwrap();
+
+        let mappings = rekey_subtree(&mut task, "T-005");
+        assert_eq!(mappings.len(), 3); // T-003, T-003.1, T-003.2
+        assert_eq!(mappings[0], ("T-003".to_string(), "T-005".to_string()));
+        assert_eq!(mappings[1], ("T-003.1".to_string(), "T-005.1".to_string()));
+        assert_eq!(mappings[2], ("T-003.2".to_string(), "T-005.2".to_string()));
+
+        assert_eq!(task.id.as_deref(), Some("T-005"));
+        assert_eq!(task.subtasks[0].id.as_deref(), Some("T-005.1"));
+        assert_eq!(task.subtasks[1].id.as_deref(), Some("T-005.2"));
+    }
+
+    #[test]
+    fn test_is_descendant_of() {
+        let track = sample_track();
+        assert!(is_descendant_of(&track, "T-003", "T-003.1"));
+        assert!(is_descendant_of(&track, "T-003", "T-003.2"));
+        assert!(!is_descendant_of(&track, "T-003", "T-001"));
+        assert!(!is_descendant_of(&track, "T-001", "T-003"));
+        // Not reflexive
+        assert!(!is_descendant_of(&track, "T-003", "T-003"));
+    }
+
+    #[test]
+    fn test_set_subtree_depth() {
+        let mut track = sample_track();
+        let (mut task, _) = remove_task_subtree(&mut track, "T-003").unwrap();
+
+        // Originally T-003 is depth 0, subtasks depth 1
+        set_subtree_depth(&mut task, 1);
+        assert_eq!(task.depth, 1);
+        assert_eq!(task.subtasks[0].depth, 2);
+        assert_eq!(task.subtasks[1].depth, 2);
+    }
+
+    #[test]
+    fn test_reparent_promote_to_top_level() {
+        let mut track = sample_track();
+        let mut all_tracks: Vec<(String, Track)> = Vec::new();
+
+        let result = reparent_task(
+            &mut track,
+            "T-003.1",
+            None, // promote to top-level
+            usize::MAX,
+            "T",
+            &mut all_tracks,
+        )
+        .unwrap();
+
+        // Should get a new top-level ID
+        assert!(result.new_root_id.starts_with("T-"));
+        assert!(!result.new_root_id.contains('.'));
+
+        // Old location should show parent
+        assert_eq!(result.old_location.parent_id.as_deref(), Some("T-003"));
+
+        // T-003 should now have only 1 subtask
+        let parent = find_task_in_track(&track, "T-003").unwrap();
+        assert_eq!(parent.subtasks.len(), 1);
+
+        // New task should be top-level in backlog
+        let promoted = find_task_in_track(&track, &result.new_root_id).unwrap();
+        assert_eq!(promoted.depth, 0);
+    }
+
+    #[test]
+    fn test_reparent_under_new_parent() {
+        let mut track = sample_track();
+        let mut all_tracks: Vec<(String, Track)> = Vec::new();
+
+        // Move T-001 to become a child of T-002
+        let result = reparent_task(
+            &mut track,
+            "T-001",
+            Some("T-002"),
+            usize::MAX,
+            "T",
+            &mut all_tracks,
+        )
+        .unwrap();
+
+        // New ID should be T-002.1
+        assert_eq!(result.new_root_id, "T-002.1");
+
+        // T-002 should now have T-001's content as a child
+        let parent = find_task_in_track(&track, "T-002").unwrap();
+        assert_eq!(parent.subtasks.len(), 1);
+        assert_eq!(parent.subtasks[0].id.as_deref(), Some("T-002.1"));
+        assert_eq!(parent.subtasks[0].title, "First task");
+
+        // The reparented task should have depth 1
+        let reparented = find_task_in_track(&track, "T-002.1").unwrap();
+        assert_eq!(reparented.depth, 1);
+    }
+
+    #[test]
+    fn test_reparent_updates_dep_references() {
+        let mut track = sample_track();
+        let mut all_tracks: Vec<(String, Track)> = Vec::new();
+
+        // T-002 has dep: T-001. Promote T-003.1 (no deps involved, but let's
+        // reparent T-001 and check that T-002's dep is updated)
+        let result =
+            reparent_task(&mut track, "T-001", Some("T-003"), 0, "T", &mut all_tracks).unwrap();
+
+        let new_id = &result.new_root_id;
+        // T-002's dep should now reference the new ID
+        let t2 = find_task_in_track(&track, "T-002").unwrap();
+        let deps: Vec<&str> = t2
+            .metadata
+            .iter()
+            .filter_map(|m| {
+                if let Metadata::Dep(deps) = m {
+                    Some(deps.iter().map(|s| s.as_str()).collect::<Vec<_>>())
+                } else {
+                    None
+                }
+            })
+            .flatten()
+            .collect();
+        assert!(deps.contains(&new_id.as_str()));
+        assert!(!deps.contains(&"T-001"));
+    }
+
+    #[test]
+    fn test_reparent_depth_limit() {
+        // Create a track with 2-level nesting, then try to go deeper
+        let mut track = parse_track(
+            "\
+# Deep Track
+
+## Backlog
+
+- [ ] `D-001` Root
+  - [ ] `D-001.1` Child
+    - [ ] `D-001.1.1` Grandchild
+- [ ] `D-002` Another root
+",
+        );
+        let mut all_tracks: Vec<(String, Track)> = Vec::new();
+
+        // Try to reparent D-002 under D-001.1.1 (would be depth 3) — should fail
+        let result = reparent_task(
+            &mut track,
+            "D-002",
+            Some("D-001.1.1"),
+            usize::MAX,
+            "D",
+            &mut all_tracks,
+        );
+        assert!(matches!(result, Err(TaskError::DepthExceeded)));
+    }
+
+    #[test]
+    fn test_reparent_depth_limit_with_subtree() {
+        // A task with children can't go as deep
+        let mut track = parse_track(
+            "\
+# Deep Track
+
+## Backlog
+
+- [ ] `D-001` Root
+  - [ ] `D-001.1` Child
+- [ ] `D-002` Has kids
+  - [ ] `D-002.1` Sub
+",
+        );
+        let mut all_tracks: Vec<(String, Track)> = Vec::new();
+
+        // Try to reparent D-002 (which has depth-1 subtree) under D-001.1
+        // That would put D-002 at depth 2 and D-002.1 at depth 3 — exceeds limit
+        let result = reparent_task(
+            &mut track,
+            "D-002",
+            Some("D-001.1"),
+            usize::MAX,
+            "D",
+            &mut all_tracks,
+        );
+        assert!(matches!(result, Err(TaskError::DepthExceeded)));
+    }
+
+    #[test]
+    fn test_reparent_cycle_detection() {
+        let mut track = sample_track();
+        let mut all_tracks: Vec<(String, Track)> = Vec::new();
+
+        // Try to reparent T-003 under its own child T-003.1 — cycle
+        let result = reparent_task(
+            &mut track,
+            "T-003",
+            Some("T-003.1"),
+            usize::MAX,
+            "T",
+            &mut all_tracks,
+        );
+        assert!(matches!(result, Err(TaskError::CycleDetected)));
+    }
+
+    #[test]
+    fn test_reparent_self_cycle() {
+        let mut track = sample_track();
+        let mut all_tracks: Vec<(String, Track)> = Vec::new();
+
+        // Try to reparent T-001 under itself
+        let result = reparent_task(
+            &mut track,
+            "T-001",
+            Some("T-001"),
+            usize::MAX,
+            "T",
+            &mut all_tracks,
+        );
+        assert!(matches!(result, Err(TaskError::CycleDetected)));
+    }
+
+    #[test]
+    fn test_update_dep_references_in_track() {
+        let mut track = sample_track();
+        // T-002 depends on T-001. Rename T-001 to T-099.
+        update_dep_references_in_track(&mut track, "T-001", "T-099");
+
+        let t2 = find_task_in_track(&track, "T-002").unwrap();
+        let has_new_dep = t2.metadata.iter().any(|m| {
+            if let Metadata::Dep(deps) = m {
+                deps.contains(&"T-099".to_string())
+            } else {
+                false
+            }
+        });
+        assert!(has_new_dep);
     }
 }

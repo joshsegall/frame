@@ -1319,9 +1319,107 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut project = load_project_cwd()?;
     let _lock = FileLock::acquire_default(&project.frame_dir)?;
 
+    // Validate flag conflicts
+    if args.promote && args.parent.is_some() {
+        return Err("--promote and --parent are conflicting flags".into());
+    }
+
     let source_track_id = find_task_track(&project, &args.id)
         .ok_or_else(|| format!("task not found: {}", args.id))?
         .to_string();
+
+    // Handle --promote
+    if args.promote {
+        let prefix = track_prefix(&project, &source_track_id)
+            .ok_or_else(|| format!("no ID prefix configured for track '{}'", source_track_id))?
+            .to_string();
+
+        let track_idx = project
+            .tracks
+            .iter()
+            .position(|(id, _)| id == &source_track_id)
+            .ok_or_else(|| format!("track not found: {}", source_track_id))?;
+
+        // Verify the task is not already top-level
+        let location =
+            task_ops::find_task_location_any_section(&project.tracks[track_idx].1, &args.id)
+                .ok_or_else(|| format!("task not found: {}", args.id))?;
+        if location.parent_id.is_none() {
+            return Err("task is already top-level".into());
+        }
+
+        // Determine placement: after the former parent, or use --top/--after/position
+        let sibling_index = if args.top {
+            0
+        } else if let Some(ref after_id) = args.after {
+            let backlog = project.tracks[track_idx].1.backlog();
+            backlog
+                .iter()
+                .position(|t| t.id.as_deref() == Some(after_id.as_str()))
+                .map(|i| i + 1)
+                .ok_or_else(|| format!("after target not found: {}", after_id))?
+        } else {
+            // Default: insert after the former parent
+            let parent_id = location.parent_id.as_ref().unwrap();
+            let parent_loc =
+                task_ops::find_task_location_any_section(&project.tracks[track_idx].1, parent_id)
+                    .ok_or_else(|| format!("parent not found: {}", parent_id))?;
+            parent_loc.sibling_index + 1
+        };
+
+        // Split tracks to get mutable track + other tracks for dep updates
+        let (left, right) = project.tracks.split_at_mut(track_idx);
+        let (track_entry, rest) = right.split_first_mut().unwrap();
+        let mut other_tracks: Vec<(String, Track)> =
+            left.iter().map(|(id, t)| (id.clone(), t.clone())).collect();
+        other_tracks.extend(rest.iter().map(|(id, t)| (id.clone(), t.clone())));
+
+        let result = task_ops::reparent_task(
+            &mut track_entry.1,
+            &args.id,
+            None,
+            sibling_index,
+            &prefix,
+            &mut other_tracks,
+        )?;
+
+        save_track(&project, &source_track_id)?;
+        println!("{} → {} (promoted)", args.id, result.new_root_id);
+        return Ok(());
+    }
+
+    // Handle --parent
+    if let Some(ref parent_id) = args.parent {
+        let prefix = track_prefix(&project, &source_track_id)
+            .ok_or_else(|| format!("no ID prefix configured for track '{}'", source_track_id))?
+            .to_string();
+
+        let track_idx = project
+            .tracks
+            .iter()
+            .position(|(id, _)| id == &source_track_id)
+            .ok_or_else(|| format!("track not found: {}", source_track_id))?;
+
+        // Split tracks to get mutable track + other tracks for dep updates
+        let (left, right) = project.tracks.split_at_mut(track_idx);
+        let (track_entry, rest) = right.split_first_mut().unwrap();
+        let mut other_tracks: Vec<(String, Track)> =
+            left.iter().map(|(id, t)| (id.clone(), t.clone())).collect();
+        other_tracks.extend(rest.iter().map(|(id, t)| (id.clone(), t.clone())));
+
+        let result = task_ops::reparent_task(
+            &mut track_entry.1,
+            &args.id,
+            Some(parent_id),
+            usize::MAX,
+            &prefix,
+            &mut other_tracks,
+        )?;
+
+        save_track(&project, &source_track_id)?;
+        println!("{} → {} (under {})", args.id, result.new_root_id, parent_id);
+        return Ok(());
+    }
 
     if let Some(ref target_track_id) = args.track {
         // Cross-track move

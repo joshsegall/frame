@@ -1114,3 +1114,129 @@ fn test_init_gitignore_partial() {
     // Original entry should still be there
     assert!(gitignore.contains("frame/.lock"));
 }
+
+// ---------------------------------------------------------------------------
+// Reparent tests (fr mv --promote / --parent)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_mv_promote() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    // Promote M-003.1 to top-level
+    let out = run_fr_ok(tmp.path(), &["mv", "M-003.1", "--promote"]);
+    // Output should mention the old and new ID
+    assert!(out.contains("M-003.1"));
+
+    // The promoted task should now be a top-level task with a new ID
+    let list_out = run_fr_ok(tmp.path(), &["list", "main", "--json"]);
+    // M-003 should now have only one subtask
+    assert!(list_out.contains("Sub two"));
+    // The promoted task ("Sub one") should be top-level
+    assert!(list_out.contains("Sub one"));
+}
+
+#[test]
+fn test_mv_parent() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    // Reparent M-001 under M-002
+    let out = run_fr_ok(tmp.path(), &["mv", "M-001", "--parent", "M-002"]);
+    assert!(out.contains("M-001"));
+
+    // M-001 should now be a subtask of M-002
+    let show_out = run_fr_ok(tmp.path(), &["show", "M-002"]);
+    assert!(show_out.contains("First task"));
+}
+
+#[test]
+fn test_mv_promote_top_level_error() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    // M-001 is already top-level — promote should fail
+    let (_, stderr, success) = run_fr(tmp.path(), &["mv", "M-001", "--promote"]);
+    assert!(!success);
+    assert!(stderr.contains("already top-level") || stderr.contains("AlreadyTopLevel"));
+}
+
+#[test]
+fn test_mv_parent_cycle_error() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    // Try to reparent M-003 under its own child M-003.1 — should fail
+    let (_, stderr, success) = run_fr(tmp.path(), &["mv", "M-003", "--parent", "M-003.1"]);
+    assert!(!success);
+    assert!(stderr.contains("cycle") || stderr.contains("CycleDetected"));
+}
+
+#[test]
+fn test_mv_promote_parent_conflict() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    // --promote and --parent together should fail
+    let (_, stderr, success) = run_fr(
+        tmp.path(),
+        &["mv", "M-003.1", "--promote", "--parent", "M-001"],
+    );
+    assert!(!success);
+    assert!(
+        stderr.contains("cannot be used with")
+            || stderr.contains("conflict")
+            || stderr.contains("the argument")
+    );
+}
+
+#[test]
+fn test_mv_parent_depth_exceeded() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let frame_dir = tmp.path().join("frame");
+    fs::create_dir_all(frame_dir.join("tracks")).unwrap();
+
+    fs::write(
+        frame_dir.join("project.toml"),
+        r#"[project]
+name = "depth-test"
+
+[[tracks]]
+id = "deep"
+name = "Deep Track"
+state = "active"
+file = "tracks/deep.md"
+
+[ids.prefixes]
+deep = "D"
+"#,
+    )
+    .unwrap();
+
+    fs::write(
+        frame_dir.join("tracks/deep.md"),
+        "\
+# Deep Track
+
+## Backlog
+
+- [ ] `D-001` Root
+  - [ ] `D-001.1` Child
+    - [ ] `D-001.1.1` Grandchild
+- [ ] `D-002` Another root
+
+## Done
+",
+    )
+    .unwrap();
+
+    fs::write(frame_dir.join("inbox.md"), "# Inbox\n").unwrap();
+
+    // Try to reparent D-002 under D-001.1.1 (would exceed depth 2)
+    let (_, stderr, success) = run_fr(tmp.path(), &["mv", "D-002", "--parent", "D-001.1.1"]);
+    assert!(!success);
+    assert!(
+        stderr.contains("depth") || stderr.contains("DepthExceeded") || stderr.contains("nesting")
+    );
+}

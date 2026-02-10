@@ -5,7 +5,8 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use crate::model::SectionKind;
-use crate::model::task::Metadata;
+use crate::model::task::{Metadata, Task};
+use crate::model::track::Track;
 use crate::ops::search::{search_inbox, search_tasks};
 use crate::ops::task_ops::{self, InsertPosition};
 
@@ -2257,6 +2258,8 @@ fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo: bool) {
                 app.undo_stack.peek_last_undo()
             };
             let mut extra_tracks: Vec<String> = Vec::new();
+            // Collect reparent data before mutably borrowing app for expanded set update
+            let mut reparent_expand_update: Option<(String, Vec<(String, String)>)> = None;
             match op {
                 Some(Operation::CrossTrackMove {
                     source_track_id,
@@ -2269,6 +2272,20 @@ fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo: bool) {
                         source_track_id
                     };
                     extra_tracks.push(other.clone());
+                }
+                Some(Operation::Reparent {
+                    id_mappings,
+                    track_id: reparent_track_id,
+                    ..
+                }) if !id_mappings.is_empty() => {
+                    // Reparent may update dep references across all tracks
+                    for (tid, _) in &app.project.tracks {
+                        if tid != track_id {
+                            extra_tracks.push(tid.clone());
+                        }
+                    }
+                    // Collect data for expanded set update (done after match to avoid borrow conflict)
+                    reparent_expand_update = Some((reparent_track_id.clone(), id_mappings.clone()));
                 }
                 Some(Operation::Bulk(ops)) => {
                     for sub_op in ops {
@@ -2288,6 +2305,21 @@ fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo: bool) {
                     }
                 }
                 _ => {}
+            }
+            // Preserve expand/collapse state through ID rekeying (after match to avoid borrow conflict).
+            // Undo reverses new→old, so replace new_id keys with old_id.
+            // Redo applies old→new, so replace old_id keys with new_id.
+            if let Some((ref reparent_track, ref mappings)) = reparent_expand_update {
+                let state = app.get_track_state(reparent_track);
+                for (old_id, new_id) in mappings {
+                    if is_undo {
+                        if state.expanded.remove(new_id) {
+                            state.expanded.insert(old_id.clone());
+                        }
+                    } else if state.expanded.remove(old_id) {
+                        state.expanded.insert(new_id.clone());
+                    }
+                }
             }
             for other in &extra_tracks {
                 let _ = app.save_track(other);
@@ -2565,6 +2597,8 @@ fn navigate_to_undo_target(app: &mut App, nav: &UndoNavTarget) {
                 let state = app.get_track_state(track_id);
                 state.cursor = clamped;
             } else {
+                // Expand ancestors so the task is visible (e.g. subtask under collapsed parent)
+                auto_expand_for_task(app, track_id, task_id);
                 // Move cursor to the affected task and flash it
                 move_cursor_to_task(app, track_id, task_id);
                 app.flash_task(task_id);
@@ -4293,6 +4327,7 @@ fn confirm_edit(app: &mut App) {
                             track_id: track_id.clone(),
                             parent_id: pid.clone(),
                             task_id: task_id.clone(),
+                            title: title.clone(),
                         });
                     } else {
                         app.undo_stack.push_sync_marker();
@@ -4307,6 +4342,7 @@ fn confirm_edit(app: &mut App) {
                             track_id: track_id.clone(),
                             task_id: task_id.clone(),
                             position_index: pos_idx,
+                            title: title.clone(),
                         });
                     }
                     let _ = app.save_track(&track_id);
@@ -4324,6 +4360,7 @@ fn confirm_edit(app: &mut App) {
                         track_id: track_id.clone(),
                         parent_id: pid.clone(),
                         task_id: task_id.clone(),
+                        title: title.clone(),
                     });
                 } else {
                     let pos_idx = App::find_track_in_project(&app.project, &track_id)
@@ -4338,6 +4375,7 @@ fn confirm_edit(app: &mut App) {
                         track_id: track_id.clone(),
                         task_id: task_id.clone(),
                         position_index: pos_idx,
+                        title: title.clone(),
                     });
                 }
                 let _ = app.save_track(&track_id);
@@ -4484,10 +4522,10 @@ fn confirm_edit(app: &mut App) {
                 // Apply title to the inbox item
                 if let Some(inbox) = &mut app.project.inbox {
                     if let Some(item) = inbox.items.get_mut(index) {
-                        item.title = title;
+                        item.title = title.clone();
                         item.dirty = true;
                     }
-                    app.undo_stack.push(Operation::InboxAdd { index });
+                    app.undo_stack.push(Operation::InboxAdd { index, title });
                 }
                 let _ = app.save_inbox();
             }
@@ -4980,7 +5018,7 @@ fn enter_move_mode(app: &mut App) {
     match &app.view {
         View::Track(_) => {
             if let Some((track_id, task_id, section)) = app.cursor_task_id() {
-                // Only allow moving top-level backlog tasks
+                // Only allow moving backlog tasks
                 if section != SectionKind::Backlog {
                     return;
                 }
@@ -4988,19 +5026,27 @@ fn enter_move_mode(app: &mut App) {
                     Some(t) => t,
                     None => return,
                 };
-                let backlog = track.backlog();
-                let original_index = match backlog
-                    .iter()
-                    .position(|t| t.id.as_deref() == Some(&task_id))
-                {
-                    Some(i) => i,
+
+                // Find the task's location (supports any depth)
+                let location =
+                    match task_ops::find_task_location(track, &task_id, SectionKind::Backlog) {
+                        Some(loc) => loc,
+                        None => return,
+                    };
+                let task = match task_ops::find_task_in_track(track, &task_id) {
+                    Some(t) => t,
                     None => return,
                 };
+                let original_depth = task.depth;
 
                 app.move_state = Some(MoveState::Task {
                     track_id,
                     task_id,
-                    original_index,
+                    original_parent_id: location.parent_id,
+                    original_section: SectionKind::Backlog,
+                    original_sibling_index: location.sibling_index,
+                    original_depth,
+                    force_expanded: HashSet::new(),
                 });
                 app.mode = Mode::Move;
             }
@@ -5042,22 +5088,121 @@ fn handle_move(app: &mut App, key: KeyEvent) {
                     MoveState::Task {
                         track_id,
                         task_id,
-                        original_index,
+                        original_parent_id,
+                        original_section: _,
+                        original_sibling_index,
+                        original_depth,
+                        force_expanded: _,
                     } => {
-                        let new_index = App::find_track_in_project(&app.project, &track_id)
-                            .and_then(|t| {
-                                t.backlog()
-                                    .iter()
-                                    .position(|t| t.id.as_deref() == Some(&task_id))
-                            })
-                            .unwrap_or(0);
-                        if new_index != original_index {
-                            app.undo_stack.push(Operation::TaskMove {
-                                track_id,
-                                task_id,
-                                old_index: original_index,
-                                new_index,
-                            });
+                        // Keep force-expanded ancestors open so the user can
+                        // see where the task landed after confirming.
+                        // Determine current location
+                        let track = App::find_track_in_project(&app.project, &track_id);
+                        let current_location = track.and_then(|t| {
+                            task_ops::find_task_location(t, &task_id, SectionKind::Backlog)
+                        });
+
+                        if let Some(cur_loc) = current_location {
+                            let parent_changed = cur_loc.parent_id != original_parent_id;
+                            let task =
+                                track.and_then(|t| task_ops::find_task_in_track(t, &task_id));
+                            let depth_changed = task.is_some_and(|t| t.depth != original_depth);
+
+                            if parent_changed || depth_changed {
+                                // Reparent occurred — rekey IDs
+                                let prefix = app
+                                    .project
+                                    .config
+                                    .ids
+                                    .prefixes
+                                    .get(&track_id)
+                                    .cloned()
+                                    .unwrap_or_default();
+
+                                let track_mut = app.find_track_mut(&track_id);
+                                if let Some(track_mut) = track_mut {
+                                    // Get task to compute new ID
+                                    let new_id = match &cur_loc.parent_id {
+                                        None => {
+                                            let next = task_ops::next_id_number(track_mut, &prefix);
+                                            format!("{}-{:03}", prefix, next)
+                                        }
+                                        Some(pid) => {
+                                            let parent =
+                                                task_ops::find_task_in_track(track_mut, pid);
+                                            let child_num = parent.map_or(1, |p| p.subtasks.len());
+                                            // The task is already inserted, so the current count includes it
+                                            // We need to find its current position to get the right number
+                                            format!("{}.{}", pid, child_num)
+                                        }
+                                    };
+
+                                    // Rekey the subtree
+                                    let task_ref =
+                                        task_ops::find_task_mut_in_track(track_mut, &task_id);
+                                    if let Some(task_ref) = task_ref {
+                                        let id_mappings =
+                                            task_ops::rekey_subtree(task_ref, &new_id);
+
+                                        // Update dep references across all tracks
+                                        for (old_id, new_mapped_id) in &id_mappings {
+                                            task_ops::update_dep_references(
+                                                &mut app.project.tracks,
+                                                old_id,
+                                                new_mapped_id,
+                                            );
+                                        }
+
+                                        let _ = app.save_track(&track_id);
+                                        // Save other tracks that may have had deps updated
+                                        if !id_mappings.is_empty() {
+                                            let other_track_ids: Vec<String> = app
+                                                .project
+                                                .tracks
+                                                .iter()
+                                                .filter(|(tid, _)| tid != &track_id)
+                                                .map(|(tid, _)| tid.clone())
+                                                .collect();
+                                            for tid in &other_track_ids {
+                                                let _ = app.save_track(tid);
+                                            }
+                                        }
+
+                                        // Preserve expand/collapse state through ID rekeying
+                                        let state = app.get_track_state(&track_id);
+                                        for (old_id, new_mapped_id) in &id_mappings {
+                                            if state.expanded.remove(old_id) {
+                                                state.expanded.insert(new_mapped_id.clone());
+                                            }
+                                        }
+
+                                        app.undo_stack.push(Operation::Reparent {
+                                            track_id: track_id.clone(),
+                                            new_task_id: new_id.clone(),
+                                            old_parent_id: original_parent_id,
+                                            new_parent_id: cur_loc.parent_id,
+                                            old_sibling_index: original_sibling_index,
+                                            new_sibling_index: cur_loc.sibling_index,
+                                            old_depth: original_depth,
+                                            id_mappings,
+                                        });
+
+                                        // Navigate to the new task ID
+                                        move_cursor_to_task(app, &track_id, &new_id);
+                                    }
+                                }
+                            } else {
+                                // Same parent — position-only move
+                                if cur_loc.sibling_index != original_sibling_index {
+                                    app.undo_stack.push(Operation::TaskMove {
+                                        track_id,
+                                        task_id,
+                                        parent_id: original_parent_id,
+                                        old_index: original_sibling_index,
+                                        new_index: cur_loc.sibling_index,
+                                    });
+                                }
+                            }
                         }
                     }
                     MoveState::InboxItem { original_index } => {
@@ -5114,6 +5259,7 @@ fn handle_move(app: &mut App, key: KeyEvent) {
                                 ops.push(Operation::TaskMove {
                                     track_id: track_id.clone(),
                                     task_id: id.clone(),
+                                    parent_id: None,
                                     old_index: *orig_idx,
                                     new_index: insert_pos,
                                 });
@@ -5147,8 +5293,14 @@ fn handle_move(app: &mut App, key: KeyEvent) {
                     MoveState::Task {
                         track_id,
                         task_id,
-                        original_index,
+                        original_parent_id,
+                        original_section,
+                        original_sibling_index,
+                        original_depth,
+                        force_expanded,
                     } => {
+                        // Restore any force-expanded ancestors
+                        restore_force_expanded(app, &track_id, &force_expanded);
                         if app.track_changed_on_disk(&track_id) {
                             // File changed externally — reload from disk instead of
                             // restoring stale in-memory state
@@ -5164,20 +5316,18 @@ fn handle_move(app: &mut App, key: KeyEvent) {
                                     return;
                                 }
                             };
-                            let backlog = match track.section_tasks_mut(SectionKind::Backlog) {
-                                Some(t) => t,
-                                None => {
-                                    app.mode = Mode::Navigate;
-                                    return;
-                                }
-                            };
-                            if let Some(cur_idx) = backlog
-                                .iter()
-                                .position(|t| t.id.as_deref() == Some(&task_id))
+                            // Remove from current position and restore to original
+                            if let Some((mut task, _)) =
+                                task_ops::remove_task_subtree(track, &task_id)
                             {
-                                let task = backlog.remove(cur_idx);
-                                let restore_idx = original_index.min(backlog.len());
-                                backlog.insert(restore_idx, task);
+                                task_ops::set_subtree_depth(&mut task, original_depth);
+                                let _ = task_ops::insert_task_subtree(
+                                    track,
+                                    task,
+                                    original_parent_id.as_deref(),
+                                    original_section,
+                                    original_sibling_index,
+                                );
                             }
                             let _ = app.save_track(&track_id);
                         }
@@ -5329,11 +5479,128 @@ fn handle_move(app: &mut App, key: KeyEvent) {
                 move_task_to_boundary(app, false);
             }
         }
+        // Outdent (decrease depth)
+        (KeyModifiers::NONE, KeyCode::Left | KeyCode::Char('h'))
+            if !is_track_move && !is_inbox_move && !is_bulk_move =>
+        {
+            move_task_outdent(app);
+        }
+        // Indent (increase depth)
+        (KeyModifiers::NONE, KeyCode::Right | KeyCode::Char('l'))
+            if !is_track_move && !is_inbox_move && !is_bulk_move =>
+        {
+            move_task_indent(app);
+        }
         _ => {}
     }
 }
 
-/// Move the task one position up or down in the backlog.
+/// After a move that may change the task's parent, ensure all ancestor nodes
+/// of the task are expanded so it stays visible. Tracks which expand keys
+/// were force-added (vs already expanded) in `MoveState::Task.force_expanded`.
+fn update_move_force_expanded(app: &mut App) {
+    let (track_id, task_id) = match &app.move_state {
+        Some(MoveState::Task {
+            track_id, task_id, ..
+        }) => (track_id.clone(), task_id.clone()),
+        _ => return,
+    };
+
+    // Collect the ancestor expand keys for the task's current position
+    let ancestor_keys = {
+        let track = match App::find_track_in_project(&app.project, &track_id) {
+            Some(t) => t,
+            None => return,
+        };
+        let tasks = track.section_tasks(SectionKind::Backlog);
+        let mut keys = Vec::new();
+        if let Some(path) = find_task_path(tasks, &task_id) {
+            for depth in 0..path.len().saturating_sub(1) {
+                let ancestor_path = &path[..=depth];
+                let mut current = match tasks.get(ancestor_path[0]) {
+                    Some(t) => t,
+                    None => break,
+                };
+                for &pi in &ancestor_path[1..] {
+                    current = match current.subtasks.get(pi) {
+                        Some(t) => t,
+                        None => break,
+                    };
+                }
+                keys.push(crate::tui::app::task_expand_key(
+                    current,
+                    SectionKind::Backlog,
+                    ancestor_path,
+                ));
+            }
+        }
+        keys
+    };
+
+    // Get mutable access to force_expanded and expanded set
+    if let Some(MoveState::Task {
+        force_expanded,
+        track_id,
+        ..
+    }) = &mut app.move_state
+    {
+        let state = app.track_states.entry(track_id.clone()).or_default();
+
+        // Remove old force-expanded keys that are no longer needed as ancestors
+        let old_force: Vec<String> = force_expanded
+            .iter()
+            .filter(|k| !ancestor_keys.contains(k))
+            .cloned()
+            .collect();
+        for key in &old_force {
+            force_expanded.remove(key);
+            state.expanded.remove(key);
+        }
+
+        // Add new ancestor keys that aren't already expanded
+        for key in &ancestor_keys {
+            if !state.expanded.contains(key) {
+                state.expanded.insert(key.clone());
+                force_expanded.insert(key.clone());
+            }
+        }
+    }
+}
+
+/// Remove all force-expanded keys from the expanded set (on confirm/cancel).
+fn restore_force_expanded(app: &mut App, track_id: &str, force_expanded: &HashSet<String>) {
+    if force_expanded.is_empty() {
+        return;
+    }
+    let state = app.track_states.entry(track_id.to_string()).or_default();
+    for key in force_expanded {
+        state.expanded.remove(key);
+    }
+}
+
+/// Check for external track changes and abort move mode if task deleted.
+/// Returns false if move should be aborted.
+fn check_move_external_changes(app: &mut App, track_id: &str, task_id: &str) -> bool {
+    if app.track_changed_on_disk(track_id)
+        && let Some(disk_track) = app.read_track_from_disk(track_id)
+    {
+        if task_ops::find_task_in_track(&disk_track, task_id).is_none() {
+            app.conflict_text = Some(format!("Task {} was deleted externally", task_id));
+            app.mode = Mode::Navigate;
+            app.move_state = None;
+            app.replace_track(track_id, disk_track);
+            drain_pending_for_track(app, track_id);
+            return false;
+        }
+        app.replace_track(track_id, disk_track);
+        drain_pending_for_track(app, track_id);
+    }
+    true
+}
+
+/// Move the task one position up or down among its siblings.
+/// For subtasks, this moves within the parent's children list.
+/// At boundaries, crosses to adjacent parents at the same depth.
 fn move_task_in_list(app: &mut App, direction: i32) {
     let (track_id, task_id) = match &app.move_state {
         Some(MoveState::Task {
@@ -5342,22 +5609,8 @@ fn move_task_in_list(app: &mut App, direction: i32) {
         _ => return,
     };
 
-    // Check for external changes via mtime
-    if app.track_changed_on_disk(&track_id)
-        && let Some(disk_track) = app.read_track_from_disk(&track_id)
-    {
-        if task_ops::find_task_in_track(&disk_track, &task_id).is_none() {
-            // Task deleted externally — abort move mode, show conflict
-            app.conflict_text = Some(format!("Task {} was deleted externally", task_id));
-            app.mode = Mode::Navigate;
-            app.move_state = None;
-            app.replace_track(&track_id, disk_track);
-            drain_pending_for_track(app, &track_id);
-            return;
-        }
-        // Replace in-memory with disk version, then continue with move
-        app.replace_track(&track_id, disk_track);
-        drain_pending_for_track(app, &track_id);
+    if !check_move_external_changes(app, &track_id, &task_id) {
+        return;
     }
 
     let track = match app.find_track_mut(&track_id) {
@@ -5365,29 +5618,137 @@ fn move_task_in_list(app: &mut App, direction: i32) {
         None => return,
     };
 
-    let backlog = match track.section_tasks_mut(SectionKind::Backlog) {
-        Some(t) => t,
+    let location = match task_ops::find_task_location(track, &task_id, SectionKind::Backlog) {
+        Some(loc) => loc,
         None => return,
     };
 
-    let cur_idx = match backlog
-        .iter()
-        .position(|t| t.id.as_deref() == Some(&task_id))
-    {
-        Some(i) => i,
-        None => return,
-    };
+    match &location.parent_id {
+        None => {
+            // Top-level: simple swap in backlog
+            let backlog = match track.section_tasks_mut(SectionKind::Backlog) {
+                Some(t) => t,
+                None => return,
+            };
+            let cur_idx = location.sibling_index;
+            let new_idx = (cur_idx as i32 + direction).clamp(0, backlog.len() as i32 - 1) as usize;
+            if new_idx != cur_idx {
+                let task = backlog.remove(cur_idx);
+                backlog.insert(new_idx, task);
+                let _ = app.save_track(&track_id);
+                move_cursor_to_task(app, &track_id, &task_id);
+            }
+        }
+        Some(parent_id) => {
+            // Subtask: swap within parent's children or cross to adjacent parent
+            let parent_id = parent_id.clone();
+            let cur_idx = location.sibling_index;
+            let parent = match task_ops::find_task_in_track(track, &parent_id) {
+                Some(p) => p,
+                None => return,
+            };
+            let sibling_count = parent.subtasks.len();
 
-    let new_idx = (cur_idx as i32 + direction).clamp(0, backlog.len() as i32 - 1) as usize;
-    if new_idx != cur_idx {
-        let task = backlog.remove(cur_idx);
-        backlog.insert(new_idx, task);
-        let _ = app.save_track(&track_id);
-        move_cursor_to_task(app, &track_id, &task_id);
+            let can_move_within = if direction < 0 {
+                cur_idx > 0
+            } else {
+                cur_idx + 1 < sibling_count
+            };
+
+            if can_move_within {
+                // Simple swap within same parent
+                let new_idx = (cur_idx as i32 + direction) as usize;
+                let parent_mut = match task_ops::find_task_mut_in_track(track, &parent_id) {
+                    Some(p) => p,
+                    None => return,
+                };
+                parent_mut.subtasks.swap(cur_idx, new_idx);
+                parent_mut.mark_dirty();
+                let _ = app.save_track(&track_id);
+                move_cursor_to_task(app, &track_id, &task_id);
+            } else {
+                // At boundary: cross to adjacent parent
+                // Find the task's depth to locate adjacent parents
+                let task_depth = match task_ops::find_task_in_track(track, &task_id) {
+                    Some(t) => t.depth,
+                    None => return,
+                };
+                let parents = collect_potential_parents(track, task_depth, SectionKind::Backlog);
+                let parent_pos = parents.iter().position(|p| p == &parent_id);
+                if let Some(pp) = parent_pos {
+                    let new_parent_pos = if direction < 0 {
+                        if pp == 0 {
+                            return;
+                        }
+                        pp - 1
+                    } else {
+                        if pp + 1 >= parents.len() {
+                            return;
+                        }
+                        pp + 1
+                    };
+                    let new_parent_id = parents[new_parent_pos].clone();
+                    // Remove task from current parent
+                    if let Some((mut task, _)) = task_ops::remove_task_subtree(track, &task_id) {
+                        // Insert as first child (moving up) or last child (moving down)
+                        let insert_idx = if direction < 0 {
+                            let new_parent = task_ops::find_task_in_track(track, &new_parent_id);
+                            new_parent.map_or(0, |p| p.subtasks.len())
+                        } else {
+                            0
+                        };
+                        task.mark_dirty();
+                        let _ = task_ops::insert_task_subtree(
+                            track,
+                            task,
+                            Some(&new_parent_id),
+                            SectionKind::Backlog,
+                            insert_idx,
+                        );
+                        let _ = app.save_track(&track_id);
+                        update_move_force_expanded(app);
+                        move_cursor_to_task(app, &track_id, &task_id);
+                    }
+                }
+            }
+        }
     }
 }
 
-/// Move task to top or bottom of the backlog.
+/// Collect all task IDs at depth-1 that could be parents for a task at the given depth.
+/// Returns them in document order.
+fn collect_potential_parents(
+    track: &Track,
+    child_depth: usize,
+    section: SectionKind,
+) -> Vec<String> {
+    let parent_depth = child_depth.saturating_sub(1);
+    let tasks = track.section_tasks(section);
+    let mut result = Vec::new();
+    for task in tasks {
+        collect_at_depth(task, 0, parent_depth, &mut result);
+    }
+    result
+}
+
+fn collect_at_depth(
+    task: &Task,
+    current_depth: usize,
+    target_depth: usize,
+    result: &mut Vec<String>,
+) {
+    if current_depth == target_depth {
+        if let Some(ref id) = task.id {
+            result.push(id.clone());
+        }
+        return;
+    }
+    for sub in &task.subtasks {
+        collect_at_depth(sub, current_depth + 1, target_depth, result);
+    }
+}
+
+/// Move task to top or bottom among its siblings.
 fn move_task_to_boundary(app: &mut App, to_top: bool) {
     let (track_id, task_id) = match &app.move_state {
         Some(MoveState::Task {
@@ -5396,35 +5757,209 @@ fn move_task_to_boundary(app: &mut App, to_top: bool) {
         _ => return,
     };
 
-    // Check for external changes via mtime
-    if app.track_changed_on_disk(&track_id)
-        && let Some(disk_track) = app.read_track_from_disk(&track_id)
-    {
-        if task_ops::find_task_in_track(&disk_track, &task_id).is_none() {
-            app.conflict_text = Some(format!("Task {} was deleted externally", task_id));
-            app.mode = Mode::Navigate;
-            app.move_state = None;
-            app.replace_track(&track_id, disk_track);
-            drain_pending_for_track(app, &track_id);
-            return;
-        }
-        app.replace_track(&track_id, disk_track);
-        drain_pending_for_track(app, &track_id);
+    if !check_move_external_changes(app, &track_id, &task_id) {
+        return;
     }
-
-    let pos = if to_top {
-        InsertPosition::Top
-    } else {
-        InsertPosition::Bottom
-    };
 
     let track = match app.find_track_mut(&track_id) {
         Some(t) => t,
         None => return,
     };
 
-    let _ = task_ops::move_task(track, &task_id, pos);
+    let location = match task_ops::find_task_location(track, &task_id, SectionKind::Backlog) {
+        Some(loc) => loc,
+        None => return,
+    };
+
+    match &location.parent_id {
+        None => {
+            // Top-level: use existing move_task
+            let pos = if to_top {
+                InsertPosition::Top
+            } else {
+                InsertPosition::Bottom
+            };
+            let _ = task_ops::move_task(track, &task_id, pos);
+        }
+        Some(parent_id) => {
+            // Subtask: move to first/last among parent's children
+            let parent_id = parent_id.clone();
+            if let Some((task, _)) = task_ops::remove_task_subtree(track, &task_id) {
+                let insert_idx = if to_top {
+                    0
+                } else {
+                    let parent = task_ops::find_task_in_track(track, &parent_id);
+                    parent.map_or(0, |p| p.subtasks.len())
+                };
+                let _ = task_ops::insert_task_subtree(
+                    track,
+                    task,
+                    Some(&parent_id),
+                    SectionKind::Backlog,
+                    insert_idx,
+                );
+            }
+        }
+    }
     let _ = app.save_track(&track_id);
+    move_cursor_to_task(app, &track_id, &task_id);
+}
+
+/// Outdent: move task to be a sibling of its current parent (h key).
+fn move_task_outdent(app: &mut App) {
+    let (track_id, task_id) = match &app.move_state {
+        Some(MoveState::Task {
+            track_id, task_id, ..
+        }) => (track_id.clone(), task_id.clone()),
+        _ => return,
+    };
+
+    if !check_move_external_changes(app, &track_id, &task_id) {
+        return;
+    }
+
+    let track = match app.find_track_mut(&track_id) {
+        Some(t) => t,
+        None => return,
+    };
+
+    let location = match task_ops::find_task_location(track, &task_id, SectionKind::Backlog) {
+        Some(loc) => loc,
+        None => return,
+    };
+
+    // If already top-level, no-op
+    let parent_id = match &location.parent_id {
+        None => return,
+        Some(pid) => pid.clone(),
+    };
+
+    // Find parent's location (grandparent context)
+    let parent_location =
+        match task_ops::find_task_location(track, &parent_id, SectionKind::Backlog) {
+            Some(loc) => loc,
+            None => return,
+        };
+
+    // Remove from current position
+    let (mut task, _) = match task_ops::remove_task_subtree(track, &task_id) {
+        Some(result) => result,
+        None => return,
+    };
+
+    // Compute new depth
+    let new_depth = match &parent_location.parent_id {
+        None => 0, // parent is top-level, so we become top-level
+        Some(gp) => {
+            let gp_task = task_ops::find_task_in_track(track, gp);
+            gp_task.map_or(0, |t| t.depth + 1)
+        }
+    };
+
+    task_ops::set_subtree_depth(&mut task, new_depth);
+
+    // Insert after the parent in the grandparent's children
+    let insert_idx = parent_location.sibling_index + 1;
+    let _ = task_ops::insert_task_subtree(
+        track,
+        task,
+        parent_location.parent_id.as_deref(),
+        SectionKind::Backlog,
+        insert_idx,
+    );
+
+    let _ = app.save_track(&track_id);
+    update_move_force_expanded(app);
+    move_cursor_to_task(app, &track_id, &task_id);
+}
+
+/// Indent: make task the last child of the sibling above (l key).
+fn move_task_indent(app: &mut App) {
+    let (track_id, task_id) = match &app.move_state {
+        Some(MoveState::Task {
+            track_id, task_id, ..
+        }) => (track_id.clone(), task_id.clone()),
+        _ => return,
+    };
+
+    if !check_move_external_changes(app, &track_id, &task_id) {
+        return;
+    }
+
+    let track = match app.find_track_mut(&track_id) {
+        Some(t) => t,
+        None => return,
+    };
+
+    let location = match task_ops::find_task_location(track, &task_id, SectionKind::Backlog) {
+        Some(loc) => loc,
+        None => return,
+    };
+
+    // Need a sibling above to indent under
+    if location.sibling_index == 0 {
+        return;
+    }
+
+    // Find the sibling directly above
+    let sibling_above_id = match &location.parent_id {
+        None => {
+            let backlog = track.backlog();
+            backlog[location.sibling_index - 1].id.clone()
+        }
+        Some(pid) => {
+            let parent = match task_ops::find_task_in_track(track, pid) {
+                Some(p) => p,
+                None => return,
+            };
+            parent.subtasks[location.sibling_index - 1].id.clone()
+        }
+    };
+
+    let sibling_id = match sibling_above_id {
+        Some(id) => id,
+        None => return,
+    };
+
+    // Check depth constraint
+    let task = match task_ops::find_task_in_track(track, &task_id) {
+        Some(t) => t,
+        None => return,
+    };
+    let task_max_depth = task_ops::max_subtree_depth(task);
+    let sibling = match task_ops::find_task_in_track(track, &sibling_id) {
+        Some(t) => t,
+        None => return,
+    };
+    let new_depth = sibling.depth + 1;
+    if new_depth + task_max_depth > 2 {
+        return; // Would exceed max depth
+    }
+
+    // Remove from current position
+    let (mut task, _) = match task_ops::remove_task_subtree(track, &task_id) {
+        Some(result) => result,
+        None => return,
+    };
+
+    task_ops::set_subtree_depth(&mut task, new_depth);
+
+    // Insert as last child of the sibling above
+    let insert_idx = {
+        let sib = task_ops::find_task_in_track(track, &sibling_id);
+        sib.map_or(0, |s| s.subtasks.len())
+    };
+
+    let _ = task_ops::insert_task_subtree(
+        track,
+        task,
+        Some(&sibling_id),
+        SectionKind::Backlog,
+        insert_idx,
+    );
+
+    let _ = app.save_track(&track_id);
+    update_move_force_expanded(app);
     move_cursor_to_task(app, &track_id, &task_id);
 }
 
@@ -9980,6 +10515,7 @@ fn palette_move_to_boundary(app: &mut App, to_top: bool) {
     app.undo_stack.push(Operation::TaskMove {
         track_id,
         task_id,
+        parent_id: None,
         old_index: current_idx,
         new_index: new_idx,
     });

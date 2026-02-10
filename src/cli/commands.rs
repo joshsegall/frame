@@ -280,6 +280,12 @@ pub struct MvArgs {
     /// Move to a different track
     #[arg(long)]
     pub track: Option<String>,
+    /// Promote subtask to top-level
+    #[arg(long)]
+    pub promote: bool,
+    /// Reparent under the given task ID
+    #[arg(long)]
+    pub parent: Option<String>,
 }
 
 #[derive(Args)]
