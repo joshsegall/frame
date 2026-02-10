@@ -302,6 +302,12 @@ Run `fr clean` periodically and `fr check` for read-only validation.
 
 ---
 
+## Common Mistakes
+
+- **`fr set` does not exist.** The command is `fr state <id> <state>`. There is no `set` subcommand.
+
+---
+
 ## Example Session
 
 ```bash
