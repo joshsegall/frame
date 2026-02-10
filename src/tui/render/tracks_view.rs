@@ -231,7 +231,10 @@ pub fn render_tracks_view(frame: &mut Frame, app: &mut App, area: Rect) {
         lines.clear();
         let bg = app.theme.background;
         lines.push(Line::from(vec![
-            Span::styled(" No tracks — press ", Style::default().fg(app.theme.text).bg(bg)),
+            Span::styled(
+                " No tracks — press ",
+                Style::default().fg(app.theme.text).bg(bg),
+            ),
             Span::styled("a", Style::default().fg(app.theme.highlight).bg(bg)),
             Span::styled(" to create one", Style::default().fg(app.theme.text).bg(bg)),
         ]));

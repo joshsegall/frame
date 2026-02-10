@@ -537,14 +537,14 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             app.search_zero_confirmed = false;
         }
 
-        // n: note edit in detail/inbox view, or search next
+        // n: search next when search active, otherwise note edit in detail/inbox view
         (KeyModifiers::NONE, KeyCode::Char('n')) => {
-            if matches!(app.view, View::Detail { .. }) {
+            if app.last_search.is_some() {
+                search_next(app, 1);
+            } else if matches!(app.view, View::Detail { .. }) {
                 detail_jump_to_region_and_edit(app, DetailRegion::Note);
             } else if matches!(app.view, View::Inbox) {
                 inbox_edit_note(app);
-            } else if app.last_search.is_some() {
-                search_next(app, 1);
             }
         }
         (KeyModifiers::SHIFT, KeyCode::Char('N')) => {
@@ -8125,7 +8125,9 @@ fn execute_search_dir(app: &mut App, direction: i32) {
 
     match app.view.clone() {
         View::Track(idx) => search_in_track(app, idx, &re, direction),
-        View::Detail { .. } => {} // Search not supported in detail view
+        View::Detail { track_id, task_id } => {
+            search_in_detail(app, &track_id, &task_id, &re, direction)
+        }
         View::Tracks => search_in_tracks_view(app, &re, direction),
         View::Inbox => search_in_inbox(app, &re, direction),
         View::Recent => search_in_recent(app, &re, direction),
@@ -8445,19 +8447,234 @@ fn search_in_recent(app: &mut App, re: &Regex, direction: i32) {
     }
 }
 
+/// Search within the detail view. Cycles the region cursor (and subtask cursor)
+/// through fields/subtasks that match the regex.
+fn search_in_detail(app: &mut App, track_id: &str, task_id: &str, re: &Regex, direction: i32) {
+    let track = match App::find_track_in_project(&app.project, track_id) {
+        Some(t) => t,
+        None => return,
+    };
+    let task = match task_ops::find_task_in_track(track, task_id) {
+        Some(t) => t,
+        None => return,
+    };
+
+    // Build ordered list of match positions: (region, subtask_cursor_index)
+    // Region order follows the detail view layout.
+    let mut positions: Vec<(DetailRegion, Option<usize>)> = Vec::new();
+
+    // Title: check ID and title text
+    let title_matches =
+        task.id.as_ref().is_some_and(|id| re.is_match(id)) || re.is_match(&task.title);
+    if title_matches {
+        positions.push((DetailRegion::Title, None));
+    }
+
+    // Tags
+    if task.tags.iter().any(|tag| re.is_match(tag)) {
+        positions.push((DetailRegion::Tags, None));
+    }
+
+    // Deps
+    let has_dep_match = task.metadata.iter().any(|m| {
+        if let Metadata::Dep(deps) = m {
+            deps.iter().any(|d| re.is_match(d))
+        } else {
+            false
+        }
+    });
+    if has_dep_match {
+        positions.push((DetailRegion::Deps, None));
+    }
+
+    // Spec
+    let has_spec_match = task
+        .metadata
+        .iter()
+        .any(|m| matches!(m, Metadata::Spec(s) if re.is_match(s)));
+    if has_spec_match {
+        positions.push((DetailRegion::Spec, None));
+    }
+
+    // Refs
+    let has_ref_match = task.metadata.iter().any(|m| {
+        if let Metadata::Ref(refs) = m {
+            refs.iter().any(|r| re.is_match(r))
+        } else {
+            false
+        }
+    });
+    if has_ref_match {
+        positions.push((DetailRegion::Refs, None));
+    }
+
+    // Note
+    let has_note_match = task
+        .metadata
+        .iter()
+        .any(|m| matches!(m, Metadata::Note(n) if re.is_match(n)));
+    if has_note_match {
+        positions.push((DetailRegion::Note, None));
+    }
+
+    // Subtasks: each matching subtask is a separate position
+    let ds = match &app.detail_state {
+        Some(ds) => ds,
+        None => return,
+    };
+    for (si, sub_id) in ds.flat_subtask_ids.iter().enumerate() {
+        // Find the subtask by ID and check if it matches
+        if let Some(sub_task) = task_ops::find_task_in_track(track, sub_id) {
+            let sub_matches = sub_task.id.as_ref().is_some_and(|id| re.is_match(id))
+                || re.is_match(&sub_task.title)
+                || sub_task.tags.iter().any(|tag| re.is_match(tag));
+            if sub_matches {
+                positions.push((DetailRegion::Subtasks, Some(si)));
+            }
+        }
+    }
+
+    if positions.is_empty() {
+        return;
+    }
+
+    // Find current position index
+    let current_region = ds.region;
+    let current_subtask = ds.subtask_cursor;
+    let current_pos = positions
+        .iter()
+        .position(|(r, si)| {
+            *r == current_region && (*r != DetailRegion::Subtasks || *si == Some(current_subtask))
+        })
+        .unwrap_or(0);
+
+    // Advance in direction
+    let len = positions.len();
+    let (new_idx, wrapped) = match direction {
+        0 => {
+            // First match at or after current
+            let idx = positions
+                .iter()
+                .enumerate()
+                .position(|(i, _)| i >= current_pos)
+                .unwrap_or(0);
+            (idx, false)
+        }
+        1 => {
+            let next = (current_pos + 1) % len;
+            (next, next <= current_pos)
+        }
+        -1 => {
+            let prev = if current_pos == 0 {
+                len - 1
+            } else {
+                current_pos - 1
+            };
+            (prev, prev >= current_pos)
+        }
+        _ => return,
+    };
+
+    if wrapped {
+        app.search_wrap_message = Some(if direction == 1 {
+            "Search wrapped to top".to_string()
+        } else {
+            "Search wrapped to bottom".to_string()
+        });
+    }
+
+    let (target_region, target_subtask) = positions[new_idx];
+    if let Some(ds) = &mut app.detail_state {
+        // Reset note_view_line when leaving Note
+        if ds.region == DetailRegion::Note && target_region != DetailRegion::Note {
+            ds.note_view_line = None;
+        }
+        ds.region = target_region;
+        if target_region == DetailRegion::Subtasks
+            && let Some(si) = target_subtask
+        {
+            ds.subtask_cursor = si;
+        }
+        // When landing on Note, position the view cursor at the first matching line
+        if target_region == DetailRegion::Note
+            && let Some(note_header) = ds.note_header_line
+        {
+            let note_line_offset = find_first_matching_note_line(task, re);
+            // note_header + 1 is the first content line in body coordinates
+            ds.note_view_line = Some(note_header + 1 + note_line_offset);
+        }
+    }
+}
+
+/// Find the 0-indexed text line within a task's note that contains the first regex match.
+/// Returns 0 if no note or no match found.
+fn find_first_matching_note_line(task: &Task, re: &Regex) -> usize {
+    for meta in &task.metadata {
+        if let Metadata::Note(text) = meta {
+            for (i, line) in text.lines().enumerate() {
+                if re.is_match(line) {
+                    return i;
+                }
+            }
+        }
+    }
+    0
+}
+
 /// Count unique matches for a regex pattern in the current view.
+/// Only counts tasks that are actually visible (respects filters, excludes Done section).
 fn count_matches_for_pattern(app: &App, re: &Regex) -> usize {
     match &app.view {
-        View::Detail { .. } => 0,
+        View::Detail { track_id, task_id } => {
+            // Count matches within this single task's fields
+            let track = match App::find_track_in_project(&app.project, track_id) {
+                Some(t) => t,
+                None => return 0,
+            };
+            let task = match task_ops::find_task_in_track(track, task_id) {
+                Some(t) => t,
+                None => return 0,
+            };
+            count_matches_in_task(task, re)
+        }
         View::Track(idx) => {
             let track_id = match app.active_track_ids.get(*idx) {
                 Some(id) => id.as_str(),
                 None => return 0,
             };
+            // Build flat items (excludes Done, respects filters)
+            let flat_items = app.build_flat_items(track_id);
+            let track = match App::find_track_in_project(&app.project, track_id) {
+                Some(t) => t,
+                None => return 0,
+            };
+            // Collect visible (non-context) task IDs
+            let mut visible_ids: Vec<String> = Vec::new();
+            for item in &flat_items {
+                if let FlatItem::Task {
+                    section,
+                    path,
+                    is_context,
+                    ..
+                } = item
+                {
+                    if *is_context {
+                        continue;
+                    }
+                    if let Some(task) = resolve_task_from_flat(track, *section, path)
+                        && let Some(id) = &task.id
+                    {
+                        visible_ids.push(id.clone());
+                    }
+                }
+            }
+            // Search and filter to visible tasks only
             let hits = search_tasks(&app.project, re, Some(track_id));
             let mut seen: Vec<&str> = Vec::new();
             for hit in &hits {
-                if !seen.contains(&hit.task_id.as_str()) {
+                if visible_ids.iter().any(|id| id == &hit.task_id)
+                    && !seen.contains(&hit.task_id.as_str())
+                {
                     seen.push(&hit.task_id);
                 }
             }
@@ -8506,6 +8723,58 @@ fn count_matches_for_pattern(app: &App, re: &Regex) -> usize {
     }
 }
 
+/// Count matches across all searchable fields of a single task.
+/// Returns 1 if any field matches, 0 otherwise.
+fn count_matches_in_task(task: &Task, re: &Regex) -> usize {
+    // Check ID
+    if let Some(id) = &task.id
+        && re.is_match(id)
+    {
+        return 1;
+    }
+    // Check title
+    if re.is_match(&task.title) {
+        return 1;
+    }
+    // Check tags
+    for tag in &task.tags {
+        if re.is_match(tag) {
+            return 1;
+        }
+    }
+    // Check metadata fields
+    for meta in &task.metadata {
+        match meta {
+            Metadata::Note(text) => {
+                if re.is_match(text) {
+                    return 1;
+                }
+            }
+            Metadata::Dep(deps) => {
+                for dep in deps {
+                    if re.is_match(dep) {
+                        return 1;
+                    }
+                }
+            }
+            Metadata::Ref(refs) => {
+                for r in refs {
+                    if re.is_match(r) {
+                        return 1;
+                    }
+                }
+            }
+            Metadata::Spec(spec) => {
+                if re.is_match(spec) {
+                    return 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    0
+}
+
 /// Update search_match_count based on current search input (for real-time display in Search mode).
 fn update_match_count(app: &mut App) {
     if let Some(re) = app.active_search_re() {
@@ -8548,6 +8817,9 @@ fn switch_tab(app: &mut App, direction: i32) {
             _ => View::Recent,
         }
     };
+
+    // Refresh match count for the new view
+    update_match_count(app);
 }
 
 /// Activate autocomplete for the given detail region

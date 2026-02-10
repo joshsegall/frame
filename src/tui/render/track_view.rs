@@ -81,7 +81,10 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
         } else {
             let bg = app.theme.background;
             let line = Line::from(vec![
-                Span::styled(" No tasks yet — press ", Style::default().fg(app.theme.text).bg(bg)),
+                Span::styled(
+                    " No tasks yet — press ",
+                    Style::default().fg(app.theme.text).bg(bg),
+                ),
                 Span::styled("a", Style::default().fg(app.theme.highlight).bg(bg)),
                 Span::styled(" to add one", Style::default().fg(app.theme.text).bg(bg)),
             ]);

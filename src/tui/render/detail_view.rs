@@ -4,11 +4,15 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use regex::Regex;
+
 use crate::model::{Metadata, Task, TaskState};
 use crate::ops::task_ops;
 use crate::tui::app::{App, DetailRegion, Mode, ReturnView, View, flatten_subtask_ids};
 use crate::tui::input::{multiline_selection_range, selection_cols_for_line};
 use crate::tui::theme::Theme;
+
+use super::push_highlighted_spans;
 
 /// Render the detail view for a single task
 pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -80,6 +84,13 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
     let bright_style = Style::default().fg(app.theme.text_bright).bg(bg);
     let dim_style = Style::default().fg(app.theme.dim).bg(bg);
     let region_indicator_style = Style::default().fg(app.theme.highlight).bg(bg);
+
+    // Search highlighting
+    let search_re = app.active_search_re();
+    let highlight_style = Style::default()
+        .fg(app.theme.search_match_fg)
+        .bg(app.theme.search_match_bg)
+        .add_modifier(Modifier::BOLD);
 
     let width = area.width as usize;
 
@@ -159,7 +170,13 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
         // ID
         if let Some(ref id) = task.id {
-            spans.push(Span::styled(format!("{} ", id), text_style));
+            push_highlighted_spans(
+                &mut spans,
+                &format!("{} ", id),
+                text_style,
+                highlight_style,
+                search_re.as_ref(),
+            );
         }
 
         // Title
@@ -172,10 +189,13 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             title_line_end = title_line_start;
             header_lines.push(Line::from(spans));
         } else {
-            spans.push(Span::styled(
-                task.title.clone(),
+            push_highlighted_spans(
+                &mut spans,
+                &task.title,
                 bright_style.add_modifier(Modifier::BOLD),
-            ));
+                highlight_style,
+                search_re.as_ref(),
+            );
             let wrapped = wrap_styled_spans(spans, width, 3, bg);
             let start = header_lines.len();
             header_lines.extend(wrapped);
@@ -231,7 +251,13 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 if i > 0 {
                     spans.push(Span::styled(" ", Style::default().bg(bg)));
                 }
-                spans.push(Span::styled(format!("#{}", tag), tag_style));
+                push_highlighted_spans(
+                    &mut spans,
+                    &format!("#{}", tag),
+                    tag_style,
+                    highlight_style,
+                    search_re.as_ref(),
+                );
             }
             let wrapped = wrap_styled_spans(spans, width, 9, bg);
             let start = body_lines.len();
@@ -297,7 +323,13 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 } else {
                     text_style
                 };
-                spans.push(Span::styled(dep_id.clone(), text_style));
+                push_highlighted_spans(
+                    &mut spans,
+                    dep_id,
+                    text_style,
+                    highlight_style,
+                    search_re.as_ref(),
+                );
                 if let Some(state) = dep_state {
                     spans.push(Span::styled(
                         format!(" {}", state_symbol_short(state)),
@@ -350,11 +382,18 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             app.edit_h_scroll = hs;
             body_lines.push(Line::from(spans));
         } else if let Some(spec_val) = &spec {
-            let spans: Vec<Span> = vec![
+            let mut spans: Vec<Span> = vec![
                 region_indicator(is_active, region_indicator_style, bg),
                 Span::styled("spec: ", dim_style),
-                Span::styled(spec_val.clone(), Style::default().fg(app.theme.cyan).bg(bg)),
             ];
+            let cyan_style = Style::default().fg(app.theme.cyan).bg(bg);
+            push_highlighted_spans(
+                &mut spans,
+                spec_val,
+                cyan_style,
+                highlight_style,
+                search_re.as_ref(),
+            );
             let wrapped = wrap_styled_spans(spans, width, 9, bg);
             let start = body_lines.len();
             body_lines.extend(wrapped);
@@ -407,10 +446,14 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 } else {
                     spans.push(Span::styled("     ", dim_style));
                 }
-                spans.push(Span::styled(
-                    ref_path.clone(),
-                    Style::default().fg(app.theme.cyan).bg(bg),
-                ));
+                let cyan_style = Style::default().fg(app.theme.cyan).bg(bg);
+                push_highlighted_spans(
+                    &mut spans,
+                    ref_path,
+                    cyan_style,
+                    highlight_style,
+                    search_re.as_ref(),
+                );
                 let wrapped = wrap_styled_spans(spans, width, 8, bg);
                 body_lines.extend(wrapped);
             }
@@ -645,17 +688,26 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
                 let num_str = format!("{:>width$} ", line_num + 1, width = num_display_width);
                 if in_code_block || trimmed.starts_with("```") {
-                    let spans: Vec<Span> = vec![
-                        Span::styled(num_str, line_num_style),
-                        Span::styled(
-                            note_line.to_string(),
-                            Style::default().fg(app.theme.dim).bg(bg),
-                        ),
-                    ];
+                    let code_style = Style::default().fg(app.theme.dim).bg(bg);
+                    let mut spans: Vec<Span> = vec![Span::styled(num_str, line_num_style)];
+                    push_highlighted_spans(
+                        &mut spans,
+                        note_line,
+                        code_style,
+                        highlight_style,
+                        search_re.as_ref(),
+                    );
                     body_lines.push(Line::from(spans));
                 } else {
                     // Wrap content separately to keep line number as a single span
-                    let content_spans = vec![Span::styled(note_line.to_string(), text_style)];
+                    let mut content_spans: Vec<Span> = Vec::new();
+                    push_highlighted_spans(
+                        &mut content_spans,
+                        note_line,
+                        text_style,
+                        highlight_style,
+                        search_re.as_ref(),
+                    );
                     let content_width = width.saturating_sub(gutter_width);
                     let wrapped = wrap_styled_spans(content_spans, content_width, 0, bg);
                     for (i, wrapped_line) in wrapped.into_iter().enumerate() {
@@ -714,6 +766,8 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             width,
             bg,
             selected_subtask_id.as_deref(),
+            search_re.as_ref(),
+            highlight_style,
         );
         // When a subtask is selected, use its line for scroll tracking
         if is_active && let Some(sl) = subtask_selected_line {
@@ -838,7 +892,11 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 for span in line.spans.drain(..) {
                     let content = span.content.into_owned();
                     let is_indicator = content.contains('\u{258E}');
-                    let new_style = if is_indicator {
+                    let is_search_match = span.style.bg == Some(app.theme.search_match_bg);
+                    let new_style = if is_search_match {
+                        // Preserve search highlight styling on the selection line
+                        span.style
+                    } else if is_indicator {
                         Style::default().fg(app.theme.selection_border).bg(sel_bg)
                     } else {
                         // Brighten text on the selection line
@@ -1236,6 +1294,7 @@ fn render_edit_inline_scrolled(
 
 /// Render subtask tree for the detail view.
 /// Returns the line index of the selected subtask (if any).
+#[allow(clippy::too_many_arguments)]
 fn render_subtask_tree(
     lines: &mut Vec<Line<'static>>,
     app: &App,
@@ -1244,6 +1303,8 @@ fn render_subtask_tree(
     width: usize,
     bg: ratatui::style::Color,
     selected_subtask_id: Option<&str>,
+    search_re: Option<&Regex>,
+    highlight_style: Style,
 ) -> Option<usize> {
     let selection_bg = app.theme.selection_bg;
     let mut selected_line: Option<usize> = None;
@@ -1321,7 +1382,13 @@ fn render_subtask_tree(
             } else {
                 Style::default().fg(app.theme.text).bg(row_bg)
             };
-            spans.push(Span::styled(format!("{} ", abbrev), id_style));
+            push_highlighted_spans(
+                &mut spans,
+                &format!("{} ", abbrev),
+                id_style,
+                highlight_style,
+                search_re,
+            );
         }
 
         // Title
@@ -1335,7 +1402,13 @@ fn render_subtask_tree(
         } else {
             Style::default().fg(app.theme.text_bright).bg(row_bg)
         };
-        spans.push(Span::styled(task.title.clone(), title_style));
+        push_highlighted_spans(
+            &mut spans,
+            &task.title,
+            title_style,
+            highlight_style,
+            search_re,
+        );
 
         // Tags
         if !task.tags.is_empty() {
@@ -1350,7 +1423,13 @@ fn render_subtask_tree(
                 if j > 0 {
                     spans.push(Span::styled(" ", Style::default().bg(row_bg)));
                 }
-                spans.push(Span::styled(format!("#{}", tag), tag_style));
+                push_highlighted_spans(
+                    &mut spans,
+                    &format!("#{}", tag),
+                    tag_style,
+                    highlight_style,
+                    search_re,
+                );
             }
         }
 
@@ -1379,6 +1458,8 @@ fn render_subtask_tree(
                 width,
                 bg,
                 selected_subtask_id,
+                search_re,
+                highlight_style,
             );
             if selected_line.is_none() {
                 selected_line = child_result;
