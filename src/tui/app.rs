@@ -934,6 +934,8 @@ pub struct App {
     pub last_edit_available_width: u16,
     /// Tab bar scroll offset: index of first visible track tab when in scroll mode
     pub tab_scroll: usize,
+    /// Show startup hints in status bar until first real keypress
+    pub show_startup_hints: bool,
 }
 
 impl App {
@@ -1057,6 +1059,7 @@ impl App {
             edit_h_scroll: 0,
             last_edit_available_width: 0,
             tab_scroll: 0,
+            show_startup_hints: true,
         }
     }
 

@@ -222,6 +222,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     if matches!(key.code, KeyCode::Modifier(_)) {
         return;
     }
+    app.show_startup_hints = false;
     let key = normalize_key(key);
     match &app.mode {
         Mode::Navigate => handle_navigate(app, key),

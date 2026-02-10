@@ -43,6 +43,16 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
                 let hint = "n/N next/prev  Esc clear";
                 build_right_side(app, &mut spans, hint, width, bg, true);
                 Line::from(spans)
+            } else if app.show_startup_hints {
+                let hint = "? help    > commands    QQ quit";
+                let hint_width = hint.chars().count();
+                let left_pad = width.saturating_sub(hint_width) / 2;
+                let right_pad = width.saturating_sub(hint_width + left_pad);
+                Line::from(vec![
+                    Span::styled(" ".repeat(left_pad), Style::default().bg(bg)),
+                    Span::styled(hint, Style::default().fg(Color::LightMagenta).bg(bg)),
+                    Span::styled(" ".repeat(right_pad), Style::default().bg(bg)),
+                ])
             } else {
                 Line::from(Span::styled(" ".repeat(width), Style::default().bg(bg)))
             }
