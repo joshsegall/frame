@@ -379,11 +379,17 @@ fn cmd_ready(args: ReadyArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
     let mut ready_tasks: Vec<(String, &Task)> = Vec::new();
 
     let target_tracks: Vec<&str> = if args.cc {
-        // cc mode: only cc-focus track, only cc-tagged tasks
-        match &project.config.agent.cc_focus {
-            Some(focus) => vec![focus.as_str()],
-            None => return Err("no cc-focus track configured".into()),
+        // cc mode: all active tracks, focus track first
+        let mut tracks: Vec<&str> = Vec::new();
+        if let Some(ref focus) = project.config.agent.cc_focus {
+            tracks.push(focus.as_str());
         }
+        for tc in &project.config.tracks {
+            if tc.state == "active" && project.config.agent.cc_focus.as_deref() != Some(&tc.id) {
+                tracks.push(tc.id.as_str());
+            }
+        }
+        tracks
     } else if let Some(ref track_id) = args.track {
         vec![track_id.as_str()]
     } else {
@@ -1701,16 +1707,26 @@ fn cmd_track_mv(args: TrackMvArgs) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn cmd_track_cc_focus(args: TrackIdArg) -> Result<(), Box<dyn std::error::Error>> {
-    let project = load_project_cwd()?;
-    let _lock = FileLock::acquire_default(&project.frame_dir)?;
-
-    let (mut config, mut doc) = config_io::read_config(&project.frame_dir)?;
-    track_ops::set_cc_focus(&mut doc, &mut config, &args.id)?;
-    config_io::write_config(&project.frame_dir, &doc)?;
-
-    println!("cc-focus → {}", args.id);
-    Ok(())
+fn cmd_track_cc_focus(args: CcFocusArgs) -> Result<(), Box<dyn std::error::Error>> {
+    if args.clear {
+        let project = load_project_cwd()?;
+        let _lock = FileLock::acquire_default(&project.frame_dir)?;
+        let (mut config, mut doc) = config_io::read_config(&project.frame_dir)?;
+        track_ops::clear_cc_focus(&mut doc, &mut config);
+        config_io::write_config(&project.frame_dir, &doc)?;
+        println!("cc-focus cleared");
+        Ok(())
+    } else if let Some(id) = args.id {
+        let project = load_project_cwd()?;
+        let _lock = FileLock::acquire_default(&project.frame_dir)?;
+        let (mut config, mut doc) = config_io::read_config(&project.frame_dir)?;
+        track_ops::set_cc_focus(&mut doc, &mut config, &id)?;
+        config_io::write_config(&project.frame_dir, &doc)?;
+        println!("cc-focus → {}", id);
+        Ok(())
+    } else {
+        Err("provide a track ID or use --clear".into())
+    }
 }
 
 fn cmd_track_delete(track_id: String) -> Result<(), Box<dyn std::error::Error>> {

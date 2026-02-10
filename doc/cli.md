@@ -69,11 +69,11 @@ fr ready [--cc] [--track TRACK] [--tag TAG]
 
 | Flag | Description |
 |------|-------------|
-| `--cc` | Show only `#cc`-tagged tasks on the cc-focus track |
+| `--cc` | Show `#cc`-tagged tasks across all active tracks (focus track first) |
 | `--track TRACK` | Filter to specific track |
 | `--tag TAG` | Filter by tag |
 
-With `--cc --json`, the output includes `focus_track` and `cc_only` fields so agents can determine whether to broaden their search when no `#cc` tasks are available.
+With `--cc --json`, the output includes `focus_track` (may be `null` if unset) and `cc_only` fields so agents can determine whether to broaden their search when no `#cc` tasks are available.
 
 ### `fr blocked`
 
@@ -324,9 +324,9 @@ Delete an empty track (no tasks, no archive files). Non-empty tracks must be arc
 
 Reorder a track to a new position (0-indexed among active tracks).
 
-### `fr track cc-focus ID`
+### `fr track cc-focus [ID] [--clear]`
 
-Set the cc-focus track (used by `fr ready --cc`).
+Set or clear the cc-focus track. The cc-focus track is optional — when set, its tasks sort first in `fr ready --cc` output. Use `--clear` to remove the setting.
 
 ### `fr track rename ID`
 

@@ -33,8 +33,8 @@ Initialize with `fr init`.
 ### Tracks
 
 Tracks are work streams. States: **active**, **shelved** (paused),
-**archived** (finished). One active track can be **cc-focus** — the
-agent checks here first via `fr ready --cc`.
+**archived** (finished). One active track can be **cc-focus** — tasks
+here sort first in `fr ready --cc`.
 
 ### Task states
 
@@ -83,7 +83,7 @@ being ready.
 ### Pick up work
 
 ```bash
-# Check for agent-tagged tasks on the cc-focus track
+# Check for cc-tagged tasks across all active tracks (focus track first)
 fr ready --cc
 
 # Or see all unblocked tasks across active tracks
@@ -132,8 +132,8 @@ fr sub EFF-014 "Test with nested closures"
     to see if you can unblock a `#cc` task. If not, stop and ask the
     human for direction.
   - If `cc_only` is `false`: Run `fr ready` to see all unblocked tasks
-    across active tracks. Pick up the highest-priority task you can
-    handle. If still nothing, check `fr blocked` or ask the human.
+    across active tracks. Pick up the highest-priority task you can handle.
+    If still nothing, check `fr blocked` or ask the human.
 - **Task is blocked** → Check `fr deps <id>` to see what's blocking it.
   If the blocker is something you can do, pick that up first. If it needs
   human input, tag the blocker `#needs-input` and move on.
@@ -159,7 +159,7 @@ fr sub EFF-014 "Test with nested closures"
 | Command | Description |
 |---------|-------------|
 | `fr ready` | Unblocked todo tasks across active tracks |
-| `fr ready --cc` | cc-tagged tasks on cc-focus track |
+| `fr ready --cc` | cc-tagged tasks across all active tracks (focus track first) |
 | `fr ready --track <id>` | Unblocked tasks on a specific track |
 | `fr ready --tag <tag>` | Unblocked tasks with a specific tag |
 | `fr list [track]` | List tasks (all active tracks, or one track) |
@@ -233,6 +233,7 @@ fr sub EFF-014 "Test with nested closures"
 | `fr track archive <id>` | Archive a finished track |
 | `fr track mv <id> <position>` | Reorder active tracks (0-indexed) |
 | `fr track cc-focus <id>` | Set the cc-focus track |
+| `fr track cc-focus --clear` | Clear the cc-focus setting |
 | `fr track rename <id> --name "name"` | Rename display name |
 | `fr track rename <id> --new-id <new-id>` | Change track ID (moves file) |
 | `fr track rename <id> --prefix <PREFIX> --yes` | Bulk-rewrite task ID prefixes |

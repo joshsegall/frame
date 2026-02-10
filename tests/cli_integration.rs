@@ -260,13 +260,171 @@ fn test_ready_cc() {
     let tmp = tempfile::TempDir::new().unwrap();
     create_test_project(tmp.path());
 
+    // Add a #cc todo task to the side track
+    let frame_dir = tmp.path().join("frame");
+    fs::write(
+        frame_dir.join("tracks/side.md"),
+        "\
+# Side Track
+
+## Backlog
+
+- [ ] `S-001` Side task one
+  - added: 2025-05-01
+- [ ] `S-002` Side task two #cc
+  - added: 2025-05-02
+
+## Done
+",
+    )
+    .unwrap();
+
     let out = run_fr_ok(tmp.path(), &["ready", "--cc"]);
-    // cc-focus is "main", and only cc-tagged ready tasks
+    // S-002 is todo with #cc tag → ready (cross-track scan)
+    assert!(out.contains("S-002"));
     // M-001 is ready but not cc-tagged → excluded
-    // M-002 is cc-tagged but active (not todo) → excluded
-    // M-003 is todo, no cc tag → excluded
-    // So nothing should be ready with --cc in our test data (M-002 has cc but is active)
     assert!(!out.contains("M-001"));
+    // M-002 is cc-tagged but active (not todo) → excluded
+    assert!(!out.contains("M-002"));
+    // S-001 is todo but not cc-tagged → excluded
+    assert!(!out.contains("S-001"));
+}
+
+#[test]
+fn test_ready_cc_no_focus() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let frame_dir = tmp.path().join("frame");
+    fs::create_dir_all(frame_dir.join("tracks")).unwrap();
+
+    // Project without cc_focus set
+    fs::write(
+        frame_dir.join("project.toml"),
+        r#"[project]
+name = "test-project"
+
+[[tracks]]
+id = "main"
+name = "Main Track"
+state = "active"
+file = "tracks/main.md"
+
+[ids.prefixes]
+main = "M"
+"#,
+    )
+    .unwrap();
+
+    fs::write(
+        frame_dir.join("tracks/main.md"),
+        "\
+# Main Track
+
+## Backlog
+
+- [ ] `M-001` Task with cc #cc
+  - added: 2025-05-01
+
+## Done
+",
+    )
+    .unwrap();
+
+    fs::write(frame_dir.join("inbox.md"), "# Inbox\n").unwrap();
+
+    // Should work without cc_focus (no error)
+    let out = run_fr_ok(tmp.path(), &["ready", "--cc"]);
+    assert!(out.contains("M-001"));
+}
+
+#[test]
+fn test_ready_cc_ordering() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let frame_dir = tmp.path().join("frame");
+    fs::create_dir_all(frame_dir.join("tracks")).unwrap();
+
+    fs::write(
+        frame_dir.join("project.toml"),
+        r#"[project]
+name = "test-project"
+
+[agent]
+cc_focus = "main"
+
+[[tracks]]
+id = "main"
+name = "Main Track"
+state = "active"
+file = "tracks/main.md"
+
+[[tracks]]
+id = "side"
+name = "Side Track"
+state = "active"
+file = "tracks/side.md"
+
+[ids.prefixes]
+main = "M"
+side = "S"
+"#,
+    )
+    .unwrap();
+
+    fs::write(
+        frame_dir.join("tracks/main.md"),
+        "\
+# Main Track
+
+## Backlog
+
+- [ ] `M-001` Main cc task #cc
+  - added: 2025-05-01
+
+## Done
+",
+    )
+    .unwrap();
+
+    fs::write(
+        frame_dir.join("tracks/side.md"),
+        "\
+# Side Track
+
+## Backlog
+
+- [ ] `S-001` Side cc task #cc
+  - added: 2025-05-01
+
+## Done
+",
+    )
+    .unwrap();
+
+    fs::write(frame_dir.join("inbox.md"), "# Inbox\n").unwrap();
+
+    let out = run_fr_ok(tmp.path(), &["ready", "--cc", "--json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let tasks = parsed["tasks"].as_array().unwrap();
+    assert_eq!(tasks.len(), 2);
+    // Focus track (main) tasks should appear first
+    assert_eq!(tasks[0]["track"].as_str().unwrap(), "main");
+    assert_eq!(tasks[1]["track"].as_str().unwrap(), "side");
+}
+
+#[test]
+fn test_track_cc_focus_clear() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    // Clear cc-focus
+    let out = run_fr_ok(tmp.path(), &["track", "cc-focus", "--clear"]);
+    assert!(out.contains("cleared"));
+
+    // Verify cc_focus is gone from config
+    let config_text = fs::read_to_string(tmp.path().join("frame/project.toml")).unwrap();
+    assert!(!config_text.contains("cc_focus"));
+
+    // fr ready --cc should still work (no error)
+    let _out = run_fr_ok(tmp.path(), &["ready", "--cc"]);
 }
 
 #[test]

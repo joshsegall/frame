@@ -39,6 +39,13 @@ pub fn set_cc_focus(doc: &mut toml_edit::DocumentMut, track_id: &str) {
     doc["agent"]["cc_focus"] = toml_edit::value(track_id);
 }
 
+/// Clear the cc_focus field from the config document
+pub fn clear_cc_focus(doc: &mut toml_edit::DocumentMut) {
+    if let Some(agent) = doc.get_mut("agent").and_then(|a| a.as_table_mut()) {
+        agent.remove("cc_focus");
+    }
+}
+
 /// Add a new track to the config document
 pub fn add_track_to_config(doc: &mut toml_edit::DocumentMut, track: &TrackConfig) {
     if !doc.contains_key("tracks") {

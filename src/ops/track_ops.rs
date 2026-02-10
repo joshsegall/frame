@@ -218,6 +218,12 @@ pub fn set_cc_focus(
     Ok(())
 }
 
+/// Clear the cc-focus track.
+pub fn clear_cc_focus(doc: &mut toml_edit::DocumentMut, config: &mut ProjectConfig) {
+    config.agent.cc_focus = None;
+    config_io::clear_cc_focus(doc);
+}
+
 /// Generate an uppercase prefix for a track ID.
 ///
 /// Rules:

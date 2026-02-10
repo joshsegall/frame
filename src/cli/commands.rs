@@ -336,8 +336,8 @@ pub enum TrackAction {
     Delete(TrackIdArg),
     /// Move (reorder) a track
     Mv(TrackMvArgs),
-    /// Set the cc-focus track
-    CcFocus(TrackIdArg),
+    /// Set or clear the cc-focus track
+    CcFocus(CcFocusArgs),
     /// Rename a track (name, id, or prefix)
     Rename(TrackRenameArgs),
 }
@@ -354,6 +354,15 @@ pub struct TrackNewArgs {
 pub struct TrackIdArg {
     /// Track ID
     pub id: String,
+}
+
+#[derive(Args)]
+pub struct CcFocusArgs {
+    /// Track ID (omit with --clear)
+    pub id: Option<String>,
+    /// Clear the cc-focus setting
+    #[arg(long)]
+    pub clear: bool,
 }
 
 #[derive(Args)]
