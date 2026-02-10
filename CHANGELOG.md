@@ -8,6 +8,7 @@ All notable changes to frame will be documented in this file.
 - Soft word wrap for notes in Detail view and Inbox (view mode always wraps; edit mode wraps by default, togglable with `w` / `Alt+w`)
 - `fr ready --cc` now scans all active tracks for `#cc`-tagged tasks (focus track tasks sort first); `cc_focus` is no longer required
 - `fr track cc-focus --clear` to remove the cc-focus setting
+- Undo stack is now capped at 500 entries to prevent unbounded memory growth in long TUI sessions
 
 ### Fixed
 - Unicode correctness throughout TUI: CJK, emoji, combining marks, and fullwidth characters now display and edit correctly

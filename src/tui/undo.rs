@@ -5,6 +5,8 @@ use crate::ops::task_ops;
 
 use super::app::DetailRegion;
 
+const UNDO_STACK_LIMIT: usize = 500;
+
 /// Navigation target after undo/redo — tells the UI where to navigate
 #[derive(Debug, Clone)]
 pub enum UndoNavTarget {
@@ -509,12 +511,18 @@ impl UndoStack {
     /// Push a new operation. Clears the redo stack.
     pub fn push(&mut self, op: Operation) {
         self.undo.push(op);
+        if self.undo.len() > UNDO_STACK_LIMIT {
+            self.undo.drain(..self.undo.len() - UNDO_STACK_LIMIT);
+        }
         self.redo.clear();
     }
 
     /// Push a sync marker. Clears the redo stack.
     pub fn push_sync_marker(&mut self) {
         self.undo.push(Operation::SyncMarker);
+        if self.undo.len() > UNDO_STACK_LIMIT {
+            self.undo.drain(..self.undo.len() - UNDO_STACK_LIMIT);
+        }
         self.redo.clear();
     }
 
