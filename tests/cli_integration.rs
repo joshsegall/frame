@@ -557,6 +557,42 @@ fn test_note() {
 }
 
 #[test]
+fn test_note_append() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    run_fr_ok(tmp.path(), &["note", "M-001", "First note."]);
+    run_fr_ok(tmp.path(), &["note", "M-001", "Second note."]);
+    let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    assert!(
+        track.contains("First note."),
+        "first note should be preserved"
+    );
+    assert!(
+        track.contains("Second note."),
+        "second note should be appended"
+    );
+}
+
+#[test]
+fn test_note_replace() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    run_fr_ok(tmp.path(), &["note", "M-001", "First note."]);
+    run_fr_ok(
+        tmp.path(),
+        &["note", "M-001", "Replacement note.", "--replace"],
+    );
+    let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    assert!(
+        !track.contains("First note."),
+        "first note should be replaced"
+    );
+    assert!(track.contains("Replacement note."));
+}
+
+#[test]
 fn test_ref() {
     let tmp = tempfile::TempDir::new().unwrap();
     create_test_project(tmp.path());

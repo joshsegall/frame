@@ -16,6 +16,7 @@ All notable changes to frame will be documented in this file.
 - Agent setup guide (`doc/agent-setup.md`) documenting how to configure frame for AI coding agents
 
 ### Changed
+- **Breaking:** `fr note ID "text"` now appends to existing notes instead of replacing; use `--replace` for the old overwrite behavior
 - Search match count now only counts visible tasks (excludes Done section, respects filters, skips context rows)
 - Search match count refreshes on tab/view switch
 

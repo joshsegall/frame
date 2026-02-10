@@ -242,6 +242,9 @@ pub struct NoteArgs {
     pub id: String,
     /// Note text
     pub text: String,
+    /// Replace existing note instead of appending
+    #[arg(long)]
+    pub replace: bool,
 }
 
 #[derive(Args)]

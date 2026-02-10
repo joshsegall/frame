@@ -313,6 +313,25 @@ pub fn set_note(track: &mut Track, task_id: &str, note_text: String) -> Result<(
     Ok(())
 }
 
+pub fn append_note(track: &mut Track, task_id: &str, note_text: String) -> Result<(), TaskError> {
+    let task = find_task_mut_in_track(track, task_id)
+        .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
+    let existing = task.metadata.iter().find_map(|m| match m {
+        Metadata::Note(n) => Some(n.clone()),
+        _ => None,
+    });
+    let new_note = match existing {
+        Some(old) if !old.is_empty() => format!("{}\n\n{}", old, note_text),
+        _ => note_text,
+    };
+    remove_metadata(task, "note");
+    if !new_note.is_empty() {
+        task.metadata.push(Metadata::Note(new_note));
+    }
+    task.mark_dirty();
+    Ok(())
+}
+
 pub fn add_ref(track: &mut Track, task_id: &str, path: &str) -> Result<(), TaskError> {
     let task = find_task_mut_in_track(track, task_id)
         .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
@@ -1159,6 +1178,31 @@ mod tests {
             task.metadata
                 .iter()
                 .any(|m| matches!(m, Metadata::Note(n) if n == "This is a note."))
+        );
+    }
+
+    #[test]
+    fn test_append_note_no_existing() {
+        let mut track = sample_track();
+        append_note(&mut track, "T-001", "First note.".into()).unwrap();
+        let task = find_task_in_track(&track, "T-001").unwrap();
+        assert!(
+            task.metadata
+                .iter()
+                .any(|m| matches!(m, Metadata::Note(n) if n == "First note."))
+        );
+    }
+
+    #[test]
+    fn test_append_note_with_existing() {
+        let mut track = sample_track();
+        set_note(&mut track, "T-001", "First note.".into()).unwrap();
+        append_note(&mut track, "T-001", "Second note.".into()).unwrap();
+        let task = find_task_in_track(&track, "T-001").unwrap();
+        assert!(
+            task.metadata
+                .iter()
+                .any(|m| matches!(m, Metadata::Note(n) if n == "First note.\n\nSecond note."))
         );
     }
 

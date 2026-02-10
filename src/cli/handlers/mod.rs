@@ -1288,7 +1288,11 @@ fn cmd_note(args: NoteArgs) -> Result<(), Box<dyn std::error::Error>> {
     let track = find_track_mut(&mut project, &track_id)
         .ok_or_else(|| format!("track not found: {}", track_id))?;
 
-    task_ops::set_note(track, &args.id, args.text)?;
+    if args.replace {
+        task_ops::set_note(track, &args.id, args.text)?;
+    } else {
+        task_ops::append_note(track, &args.id, args.text)?;
+    }
 
     save_track(&project, &track_id)?;
     println!("{} note updated", args.id);
