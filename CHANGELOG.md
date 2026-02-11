@@ -4,6 +4,8 @@ All notable changes to frame will be documented in this file.
 
 ## [Unreleased]
 
+## v0.1.2 - 2026-02-10
+
 ### Added
 - `N` key binding to edit note with cursor at the start (both Detail and Inbox views); `n` now consistently places cursor at the end in both views
 - Recovery log (`frame/.recovery.log`) prevents silent data loss: captures parser-dropped lines, write failures, and dismissed TUI edit conflicts
