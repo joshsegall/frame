@@ -148,6 +148,10 @@ changes are detected.
 **Multiple projects** are supported via a global registry — use
 `fr projects` to list, add, or remove projects.
 
+**Personal tool** — designed for one developer (and their agents) 
+managing their own work. It uses advisory file locking, not a 
+database, so it's not built for concurrent team access.
+
 ## Terminal support
 
 Tested on macOS with Ghostty. It should work on any terminal that
