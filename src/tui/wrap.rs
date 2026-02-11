@@ -144,9 +144,23 @@ pub fn wrap_line(line: &str, width: usize, logical_line: usize) -> Vec<VisualLin
             }
             col = placed_dw;
         } else if is_ws {
-            // Whitespace at wrap point — emit current visual line, skip whitespace
+            // Whitespace at wrap point — include as many whitespace chars as
+            // fit on the current line, consume the rest. This keeps trailing
+            // spaces at the end of VL0 so they remain in the byte range for
+            // edit-mode cursor positioning.
+            let remaining = width.saturating_sub(col);
+            let mut j = token_start;
+            let mut placed = 0;
+            while j < i {
+                let gdw = gs[j].display_width;
+                if placed + gdw > remaining {
+                    break;
+                }
+                placed += gdw;
+                j += 1;
+            }
             let bs = byte_at(vl_start);
-            let be = byte_at(token_start);
+            let be = byte_at(j);
             result.push(VisualLine {
                 logical_line,
                 byte_start: bs,
@@ -258,11 +272,13 @@ pub fn wrap_lines(lines: &[&str], width: usize) -> Vec<VisualLine> {
     result
 }
 
-/// Wrap lines for edit mode, adding an extra visual line when the cursor
-/// would be rendered past the right edge of a full-width visual line.
+/// Wrap lines for edit mode with two adjustments over [`wrap_lines`]:
 ///
-/// This prevents the cursor block from going off-screen when positioned at
-/// the end of a line that exactly fills the available width.
+/// 1. Consumed whitespace at wrap points is included at the start of the
+///    next visual line so that trailing spaces are visible and the cursor
+///    can be positioned on them.
+/// 2. An extra empty visual line is inserted when the cursor would be
+///    rendered past the right edge of a full-width visual line.
 pub fn wrap_lines_for_edit(
     lines: &[&str],
     width: usize,
@@ -274,6 +290,21 @@ pub fn wrap_lines_for_edit(
         return vls;
     }
 
+    // Fill gaps between consecutive visual lines of the same logical line.
+    // The wrapping algorithm consumes whitespace at wrap points, leaving a
+    // gap (prev.byte_end < next.byte_start). Extending byte_start backwards
+    // makes the whitespace part of the next visual line.
+    for i in 1..vls.len() {
+        if vls[i].logical_line == vls[i - 1].logical_line && vls[i].byte_start > vls[i - 1].byte_end
+        {
+            vls[i].byte_start = vls[i - 1].byte_end;
+            vls[i].char_start = vls[i - 1].char_end;
+        }
+    }
+
+    // Add an extra visual line when the cursor is at the end of a visual
+    // line whose content fills the full width, so the cursor block doesn't
+    // render off-screen.
     let cursor_vrow = logical_to_visual_row(&vls, cursor_line, cursor_col);
     if let Some(vl) = vls.get(cursor_vrow)
         && cursor_col >= vl.char_end
@@ -572,8 +603,65 @@ mod tests {
         let lines = vec!["abcdefghij k"];
         let vls_no_edit = wrap_lines(&lines, 10);
         let vls = wrap_lines_for_edit(&lines, 10, 0, 10);
-        // No extra VL should be inserted since cursor is in the gap
-        // and logical_to_visual_row places it on VL1
+        // No extra VL should be inserted
         assert_eq!(vls.len(), vls_no_edit.len());
+        // But the gap should be filled: the space is now part of VL1
+        assert_eq!(vls[1].byte_start, 10);
+        let text = &"abcdefghij k"[vls[1].byte_start..vls[1].byte_end];
+        assert_eq!(text, " k");
+    }
+
+    #[test]
+    fn edit_trailing_spaces_visible() {
+        // Trailing spaces at the wrap boundary should be visible in the next VL
+        let lines = vec!["abcdefghij   "];
+        let vls = wrap_lines_for_edit(&lines, 10, 0, 13);
+        assert_eq!(vls.len(), 2);
+        // VL1 should contain the 3 trailing spaces
+        let text = &"abcdefghij   "[vls[1].byte_start..vls[1].byte_end];
+        assert_eq!(text, "   ");
+    }
+
+    #[test]
+    fn edit_space_cursor_advances() {
+        // Typing a space at the wrap boundary should move the cursor forward
+        let lines = vec!["abcdefghij "];
+        let vls = wrap_lines_for_edit(&lines, 10, 0, 11);
+        // Cursor at byte 11 (after the space) should be on VL1
+        let row = logical_to_visual_row(&vls, 0, 11);
+        assert_eq!(row, 1);
+        // Visual column should be 1 (past the space)
+        let vcol = logical_to_visual_col(&vls, 0, 11, &lines);
+        assert_eq!(vcol, 1);
+    }
+
+    #[test]
+    fn edit_space_cursor_no_skip() {
+        // Typing consecutive spaces at the wrap boundary should advance
+        // the cursor by exactly 1 position each time (no column skip).
+        // width=10, line "abcdefghi" (9 chars)
+
+        // After 1st space: "abcdefghi " fills width, cursor wraps to row 1 col 0
+        let lines1 = vec!["abcdefghi "];
+        let vls1 = wrap_lines_for_edit(&lines1, 10, 0, 10);
+        let vcol1 = logical_to_visual_col(&vls1, 0, 10, &lines1);
+        assert_eq!(vcol1, 0); // cursor at start of extra row
+
+        // After 2nd space: "abcdefghi  " wraps, first space stays on line 1
+        let lines2 = vec!["abcdefghi  "];
+        let vls2 = wrap_lines_for_edit(&lines2, 10, 0, 11);
+        let vcol2 = logical_to_visual_col(&vls2, 0, 11, &lines2);
+        assert_eq!(vcol2, 1); // cursor advanced by 1, not 2
+    }
+
+    #[test]
+    fn edit_no_gap_fill_across_logical_lines() {
+        // Gap fill should not cross logical line boundaries
+        let lines = vec!["abcdefghij", "hello"];
+        let vls = wrap_lines_for_edit(&lines, 10, 0, 0);
+        // VL0 is logical line 0, VL1 is logical line 1 — no gap fill
+        assert_eq!(vls[0].logical_line, 0);
+        assert_eq!(vls[1].logical_line, 1);
+        assert_eq!(vls[1].byte_start, 0);
     }
 }
