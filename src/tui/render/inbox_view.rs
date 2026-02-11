@@ -405,7 +405,8 @@ fn render_inline_note_editor(
 
     if app.note_wrap && note_available > 0 {
         // --- Wrap-aware rendering ---
-        let visual_lines = wrap::wrap_lines(&edit_lines, note_available);
+        let visual_lines =
+            wrap::wrap_lines_for_edit(&edit_lines, note_available, cursor_line, cursor_col);
         let total_visual = visual_lines.len();
         let visible_visual = total_visual.clamp(1, MAX_NOTE_LINES);
 

@@ -1225,12 +1225,31 @@ pub(super) fn wrap_styled_spans(
                 current_line.push(Span::styled(chunk.to_string(), style));
                 col += chunk_chars;
             } else if chunk.starts_with(char::is_whitespace) {
-                // Whitespace at wrap point — skip it and start new line
+                // Whitespace at wrap point — include as many chars as fit
+                // on the current line, put the rest on the next line.
+                let remaining_space = max_width.saturating_sub(col);
+                let mut fit_end = 0;
+                let mut fit_width = 0;
+                for grapheme in unicode_segmentation::UnicodeSegmentation::graphemes(chunk, true) {
+                    let gw = unicode::display_width(grapheme);
+                    if fit_width + gw > remaining_space {
+                        break;
+                    }
+                    fit_width += gw;
+                    fit_end += grapheme.len();
+                }
+                if fit_end > 0 {
+                    current_line.push(Span::styled(chunk[..fit_end].to_string(), style));
+                }
                 result_lines.push(std::mem::take(&mut current_line));
                 let indent_str = " ".repeat(continuation_indent);
                 current_line.push(Span::styled(indent_str, Style::default().bg(bg)));
                 col = continuation_indent;
-                // Don't push the whitespace chunk
+                let rest = &chunk[fit_end..];
+                if !rest.is_empty() {
+                    current_line.push(Span::styled(rest.to_string(), style));
+                    col += unicode::display_width(rest);
+                }
             } else {
                 // Word doesn't fit on current line.
                 // Decide whether to break mid-word or wrap to next line.
