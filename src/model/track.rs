@@ -36,6 +36,16 @@ pub enum SectionKind {
     Done,
 }
 
+impl std::fmt::Display for SectionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SectionKind::Backlog => write!(f, "Backlog"),
+            SectionKind::Parked => write!(f, "Parked"),
+            SectionKind::Done => write!(f, "Done"),
+        }
+    }
+}
+
 /// A parsed track file
 #[derive(Debug, Clone)]
 pub struct Track {
@@ -87,5 +97,47 @@ impl Track {
     /// Get all done tasks
     pub fn done(&self) -> &[Task] {
         self.section_tasks(SectionKind::Done)
+    }
+
+    /// Ensure a section exists, creating it if missing.
+    /// New sections are inserted in canonical order: Backlog → Parked → Done.
+    pub fn ensure_section(&mut self, kind: SectionKind) {
+        if self.section_tasks_mut(kind).is_some() {
+            return;
+        }
+        let header = match kind {
+            SectionKind::Backlog => "## Backlog",
+            SectionKind::Parked => "## Parked",
+            SectionKind::Done => "## Done",
+        };
+        let new_node = TrackNode::Section {
+            kind,
+            header_lines: vec![header.to_string()],
+            tasks: Vec::new(),
+            trailing_lines: vec![String::new()],
+        };
+
+        // Find the right position: insert before the first section that should come after.
+        let order = |k: SectionKind| -> u8 {
+            match k {
+                SectionKind::Backlog => 0,
+                SectionKind::Parked => 1,
+                SectionKind::Done => 2,
+            }
+        };
+        let target_order = order(kind);
+        let insert_pos = self
+            .nodes
+            .iter()
+            .position(|n| {
+                if let TrackNode::Section { kind: k, .. } = n {
+                    order(*k) > target_order
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(self.nodes.len());
+
+        self.nodes.insert(insert_pos, new_node);
     }
 }

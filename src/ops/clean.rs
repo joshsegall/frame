@@ -23,6 +23,8 @@ pub struct CleanResult {
     pub dangling_deps: Vec<DanglingDep>,
     /// Broken file references (ref/spec)
     pub broken_refs: Vec<BrokenRef>,
+    /// Top-level tasks moved to the correct section based on state
+    pub sections_reconciled: Vec<SectionReconcile>,
     /// Suggestions (e.g., all subtasks done → suggest parent done)
     pub suggestions: Vec<Suggestion>,
 }
@@ -78,6 +80,14 @@ pub enum RefKind {
 }
 
 #[derive(Debug, Clone)]
+pub struct SectionReconcile {
+    pub track_id: String,
+    pub task_id: String,
+    pub from: SectionKind,
+    pub to: SectionKind,
+}
+
+#[derive(Debug, Clone)]
 pub struct Suggestion {
     pub track_id: String,
     pub task_id: String,
@@ -126,7 +136,84 @@ pub fn ensure_ids_and_dates(project: &mut Project) -> Vec<String> {
         modified.insert(dup.track_id.clone());
     }
 
+    // Reconcile misplaced tasks (e.g., parked task in Backlog section)
+    for (track_id, track) in &mut project.tracks {
+        if reconcile_sections_for_track(track, track_id, &mut result) {
+            modified.insert(track_id.clone());
+        }
+    }
+
     modified.into_iter().collect()
+}
+
+// ---------------------------------------------------------------------------
+// Section reconciliation — move misplaced top-level tasks to correct section
+// ---------------------------------------------------------------------------
+
+/// Returns the canonical section for a task state.
+fn canonical_section(state: TaskState) -> SectionKind {
+    match state {
+        TaskState::Parked => SectionKind::Parked,
+        TaskState::Done => SectionKind::Done,
+        _ => SectionKind::Backlog,
+    }
+}
+
+/// Move top-level tasks that are in the wrong section to the correct one.
+/// For example, a `[~]` parked task sitting in `## Backlog` gets moved to `## Parked`.
+/// Returns true if any tasks were moved (i.e., the track was modified).
+fn reconcile_sections_for_track(
+    track: &mut Track,
+    track_id: &str,
+    result: &mut CleanResult,
+) -> bool {
+    // Collect (task_id, current_section, target_section) for misplaced tasks.
+    // We iterate sections in order, checking only top-level tasks.
+    let mut moves: Vec<(String, SectionKind, SectionKind)> = Vec::new();
+
+    for node in &track.nodes {
+        if let TrackNode::Section { kind, tasks, .. } = node {
+            for task in tasks {
+                let target = canonical_section(task.state);
+                if target != *kind
+                    && let Some(ref id) = task.id
+                {
+                    moves.push((id.clone(), *kind, target));
+                }
+            }
+        }
+    }
+
+    if moves.is_empty() {
+        return false;
+    }
+
+    for (task_id, from, to) in &moves {
+        crate::ops::task_ops::move_task_between_sections(track, task_id, *from, *to);
+        result.sections_reconciled.push(SectionReconcile {
+            track_id: track_id.to_string(),
+            task_id: task_id.clone(),
+            from: *from,
+            to: *to,
+        });
+    }
+
+    true
+}
+
+/// Reconcile sections across all tracks in a project.
+/// Returns the list of track IDs that were modified.
+pub fn reconcile_sections(project: &mut Project) -> Vec<String> {
+    let mut result = CleanResult::default();
+    let mut modified = Vec::new();
+
+    for (track_id, track) in &mut project.tracks {
+        if reconcile_sections_for_track(track, track_id, &mut result) {
+            modified.push(track_id.clone());
+        }
+    }
+
+    modified
 }
 
 // ---------------------------------------------------------------------------
@@ -139,6 +226,7 @@ pub fn ensure_ids_and_dates(project: &mut Project) -> Vec<String> {
 /// 1. Assign IDs to tasks missing them
 /// 2. Assign `added:` dates where missing
 /// 3. Duplicate ID resolution (first by track order keeps ID; duplicates reassigned)
+///    3b. Reconcile sections (move misplaced tasks to correct section by state)
 /// 4. Validate deps (flag dangling)
 /// 5. Validate file refs (flag broken paths)
 /// 6. State suggestions (all subtasks done → suggest parent done)
@@ -162,6 +250,11 @@ pub fn clean_project(project: &mut Project) -> CleanResult {
 
     // 3. Duplicate ID resolution
     resolve_duplicate_ids(project, &mut result);
+
+    // 3b. Reconcile misplaced tasks (e.g., parked task in Backlog section)
+    for (track_id, track) in &mut project.tracks {
+        reconcile_sections_for_track(track, track_id, &mut result);
+    }
 
     // Collect all task IDs across all tracks for dep validation (after duplicate resolution)
     let all_task_ids = collect_all_task_ids(project);
@@ -1752,5 +1845,141 @@ mod tests {
         let backlog = project.tracks[0].1.backlog();
         assert_eq!(backlog[0].id.as_deref(), Some("M-001"));
         assert_eq!(backlog[1].id.as_deref(), Some("M-002"));
+    }
+
+    // --- Section reconciliation ---
+
+    #[test]
+    fn test_reconcile_parked_task_in_backlog() {
+        let mut project = make_project(
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Normal task
+  - added: 2025-05-01
+- [~] `M-002` Should be in Parked
+  - added: 2025-05-02
+
+## Done
+",
+            vec![("main", "M")],
+        );
+
+        let result = clean_project(&mut project);
+        assert_eq!(result.sections_reconciled.len(), 1);
+        assert_eq!(result.sections_reconciled[0].task_id, "M-002");
+        assert_eq!(result.sections_reconciled[0].from, SectionKind::Backlog);
+        assert_eq!(result.sections_reconciled[0].to, SectionKind::Parked);
+
+        // Task should now be in Parked section
+        assert_eq!(project.tracks[0].1.parked().len(), 1);
+        assert_eq!(project.tracks[0].1.parked()[0].id.as_deref(), Some("M-002"));
+        // And removed from Backlog
+        assert_eq!(project.tracks[0].1.backlog().len(), 1);
+    }
+
+    #[test]
+    fn test_reconcile_done_task_in_backlog() {
+        let mut project = make_project(
+            "\
+# Main
+
+## Backlog
+
+- [x] `M-001` Done but stuck in Backlog
+  - added: 2025-05-01
+  - resolved: 2025-05-10
+
+## Done
+",
+            vec![("main", "M")],
+        );
+
+        let result = clean_project(&mut project);
+        assert_eq!(result.sections_reconciled.len(), 1);
+        assert_eq!(result.sections_reconciled[0].to, SectionKind::Done);
+
+        assert_eq!(project.tracks[0].1.done().len(), 1);
+        assert!(project.tracks[0].1.backlog().is_empty());
+    }
+
+    #[test]
+    fn test_reconcile_unparked_task_in_parked() {
+        let mut project = make_project(
+            "\
+# Main
+
+## Backlog
+
+## Parked
+
+- [ ] `M-001` Unparked but stuck in Parked section
+  - added: 2025-05-01
+
+## Done
+",
+            vec![("main", "M")],
+        );
+
+        let result = clean_project(&mut project);
+        assert_eq!(result.sections_reconciled.len(), 1);
+        assert_eq!(result.sections_reconciled[0].from, SectionKind::Parked);
+        assert_eq!(result.sections_reconciled[0].to, SectionKind::Backlog);
+
+        assert_eq!(project.tracks[0].1.backlog().len(), 1);
+        assert!(project.tracks[0].1.parked().is_empty());
+    }
+
+    #[test]
+    fn test_reconcile_no_changes_when_correct() {
+        let mut project = make_project(
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Normal task
+  - added: 2025-05-01
+
+## Parked
+
+- [~] `M-002` Correctly parked
+  - added: 2025-05-02
+
+## Done
+
+- [x] `M-003` Correctly done
+  - added: 2025-05-03
+  - resolved: 2025-05-10
+",
+            vec![("main", "M")],
+        );
+
+        let result = clean_project(&mut project);
+        assert!(result.sections_reconciled.is_empty());
+    }
+
+    #[test]
+    fn test_reconcile_via_ensure_ids_and_dates() {
+        let mut project = make_project(
+            "\
+# Main
+
+## Backlog
+
+- [~] `M-001` Parked in wrong section
+  - added: 2025-05-01
+
+## Done
+",
+            vec![("main", "M")],
+        );
+
+        let modified = ensure_ids_and_dates(&mut project);
+        assert!(modified.contains(&"main".to_string()));
+        assert_eq!(project.tracks[0].1.parked().len(), 1);
+        assert!(project.tracks[0].1.backlog().is_empty());
     }
 }

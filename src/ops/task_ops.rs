@@ -452,7 +452,8 @@ pub fn move_task_between_sections(
     };
     let (source_index, task) = task;
 
-    // Insert at top of destination section
+    // Ensure the destination section exists, then insert at top
+    track.ensure_section(to);
     if let Some(dest) = track.section_tasks_mut(to) {
         dest.insert(0, task);
     }
@@ -1307,6 +1308,52 @@ mod tests {
             SectionKind::Done,
         );
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_move_task_between_sections_creates_missing_section() {
+        // Track with only Backlog and Done (no Parked section)
+        let mut track = parse_track(
+            "\
+# Test Track
+
+## Backlog
+
+- [ ] `T-001` First task
+
+## Done
+",
+        );
+        assert!(track.section_tasks_mut(SectionKind::Parked).is_none());
+
+        let idx = move_task_between_sections(
+            &mut track,
+            "T-001",
+            SectionKind::Backlog,
+            SectionKind::Parked,
+        );
+        assert_eq!(idx, Some(0));
+        // Task should now be in the newly-created Parked section
+        assert_eq!(track.parked().len(), 1);
+        assert_eq!(track.parked()[0].id.as_deref(), Some("T-001"));
+        assert_eq!(track.backlog().len(), 0);
+
+        // Verify Parked section was inserted between Backlog and Done
+        let section_order: Vec<SectionKind> = track
+            .nodes
+            .iter()
+            .filter_map(|n| {
+                if let TrackNode::Section { kind, .. } = n {
+                    Some(*kind)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            section_order,
+            vec![SectionKind::Backlog, SectionKind::Parked, SectionKind::Done]
+        );
     }
 
     #[test]

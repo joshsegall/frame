@@ -1214,17 +1214,58 @@ fn cmd_state(args: StateArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     task_ops::set_state(task, new_state);
 
-    // If setting to Done and task is a top-level Backlog task, move to Done section immediately
-    if new_state == TaskState::Done {
+    // Move top-level tasks between sections based on state change
+    {
         let track = find_track_mut(&mut project, &track_id)
             .ok_or_else(|| format!("track not found: {}", track_id))?;
-        if task_ops::is_top_level_in_section(track, &args.id, SectionKind::Backlog) {
-            task_ops::move_task_between_sections(
-                track,
-                &args.id,
-                SectionKind::Backlog,
-                SectionKind::Done,
-            );
+        match new_state {
+            TaskState::Done => {
+                if task_ops::is_top_level_in_section(track, &args.id, SectionKind::Backlog) {
+                    task_ops::move_task_between_sections(
+                        track,
+                        &args.id,
+                        SectionKind::Backlog,
+                        SectionKind::Done,
+                    );
+                } else if task_ops::is_top_level_in_section(track, &args.id, SectionKind::Parked) {
+                    task_ops::move_task_between_sections(
+                        track,
+                        &args.id,
+                        SectionKind::Parked,
+                        SectionKind::Done,
+                    );
+                }
+            }
+            TaskState::Parked => {
+                if task_ops::is_top_level_in_section(track, &args.id, SectionKind::Backlog) {
+                    task_ops::move_task_between_sections(
+                        track,
+                        &args.id,
+                        SectionKind::Backlog,
+                        SectionKind::Parked,
+                    );
+                }
+            }
+            _ => {
+                // Un-park: move from Parked back to Backlog
+                if task_ops::is_top_level_in_section(track, &args.id, SectionKind::Parked) {
+                    task_ops::move_task_between_sections(
+                        track,
+                        &args.id,
+                        SectionKind::Parked,
+                        SectionKind::Backlog,
+                    );
+                }
+                // Reopen: move from Done back to Backlog
+                if task_ops::is_top_level_in_section(track, &args.id, SectionKind::Done) {
+                    task_ops::move_task_between_sections(
+                        track,
+                        &args.id,
+                        SectionKind::Done,
+                        SectionKind::Backlog,
+                    );
+                }
+            }
         }
     }
 
@@ -1922,6 +1963,15 @@ fn cmd_clean(args: CleanArgs) -> Result<(), Box<dyn std::error::Error>> {
             println!(
                 "  [{}] {} → {} \"{}\"",
                 d.track_id, d.original_id, d.new_id, d.title
+            );
+        }
+    }
+    if !result.sections_reconciled.is_empty() {
+        println!("Sections reconciled:");
+        for s in &result.sections_reconciled {
+            println!(
+                "  [{}] {} moved {} → {}",
+                s.track_id, s.task_id, s.from, s.to
             );
         }
     }

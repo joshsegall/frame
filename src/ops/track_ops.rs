@@ -59,7 +59,7 @@ pub fn new_track(
     if let Some(parent) = full_path.parent() {
         fs::create_dir_all(parent).map_err(ProjectError::IoError)?;
     }
-    let content = format!("# {}\n\n## Backlog\n\n## Done\n", name);
+    let content = format!("# {}\n\n## Backlog\n\n## Parked\n\n## Done\n", name);
     fs::write(&full_path, &content).map_err(ProjectError::IoError)?;
 
     // Generate prefix and update config

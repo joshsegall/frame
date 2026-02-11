@@ -13,6 +13,10 @@ All notable changes to frame will be documented in this file.
 ### Fixed
 - `[ids.prefixes]` and `[ui.tag_colors]` key order in `project.toml` no longer randomizes on each save; order now matches the original file
 - Parking a task with `~` now moves it to the Parked section after the grace period (previously only updated state without moving)
+- Parked tasks no longer disappear when the track has no `## Parked` section; the section is now created automatically on first use
+- Tasks in the wrong section for their state (e.g., parked task in Backlog) are automatically moved to the correct section on TUI load, file reload, and `fr clean`
+- CLI `fr state ID parked` now moves tasks to the Parked section (and un-parking/reopening moves them back to Backlog)
+- New tracks created with `fr track add` now include a `## Parked` section
 - Unicode correctness throughout TUI: CJK, emoji, combining marks, and fullwidth characters now display and edit correctly
 - Cursor movement in edit mode uses grapheme clusters instead of raw bytes, preventing panics on non-ASCII text
 - Display width calculations use terminal cell width instead of character count, fixing column alignment for wide characters
