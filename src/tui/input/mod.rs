@@ -7420,7 +7420,12 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                     let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
                     let note_width = app.last_edit_available_width as usize;
                     if note_width > 0 {
-                        let vls = wrap::wrap_lines(&edit_lines, note_width);
+                        let vls = wrap::wrap_lines_for_edit(
+                            &edit_lines,
+                            note_width,
+                            ds.edit_cursor_line,
+                            ds.edit_cursor_col,
+                        );
                         let row = wrap::logical_to_visual_row(
                             &vls,
                             ds.edit_cursor_line,
@@ -7444,7 +7449,12 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                 if app.note_wrap {
                     let note_width = app.last_edit_available_width as usize;
                     if note_width > 0 {
-                        let vls = wrap::wrap_lines(&edit_lines, note_width);
+                        let vls = wrap::wrap_lines_for_edit(
+                            &edit_lines,
+                            note_width,
+                            ds.edit_cursor_line,
+                            ds.edit_cursor_col,
+                        );
                         let row = wrap::logical_to_visual_row(
                             &vls,
                             ds.edit_cursor_line,
@@ -7655,7 +7665,12 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                 if app.note_wrap {
                     let note_width = app.last_edit_available_width as usize;
                     if note_width > 0 {
-                        let vls = wrap::wrap_lines(&edit_lines, note_width);
+                        let vls = wrap::wrap_lines_for_edit(
+                            &edit_lines,
+                            note_width,
+                            ds.edit_cursor_line,
+                            ds.edit_cursor_col,
+                        );
                         let cur_row = wrap::logical_to_visual_row(
                             &vls,
                             ds.edit_cursor_line,
@@ -7695,7 +7710,12 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                 if app.note_wrap {
                     let note_width = app.last_edit_available_width as usize;
                     if note_width > 0 {
-                        let vls = wrap::wrap_lines(&edit_lines, note_width);
+                        let vls = wrap::wrap_lines_for_edit(
+                            &edit_lines,
+                            note_width,
+                            ds.edit_cursor_line,
+                            ds.edit_cursor_col,
+                        );
                         let cur_row = wrap::logical_to_visual_row(
                             &vls,
                             ds.edit_cursor_line,
@@ -7786,7 +7806,12 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                     let edit_lines: Vec<&str> = ds.edit_buffer.split('\n').collect();
                     let note_width = app.last_edit_available_width as usize;
                     if note_width > 0 {
-                        let vls = wrap::wrap_lines(&edit_lines, note_width);
+                        let vls = wrap::wrap_lines_for_edit(
+                            &edit_lines,
+                            note_width,
+                            ds.edit_cursor_line,
+                            ds.edit_cursor_col,
+                        );
                         let row = wrap::logical_to_visual_row(
                             &vls,
                             ds.edit_cursor_line,
@@ -7809,7 +7834,12 @@ fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
                 if app.note_wrap {
                     let note_width = app.last_edit_available_width as usize;
                     if note_width > 0 {
-                        let vls = wrap::wrap_lines(&edit_lines, note_width);
+                        let vls = wrap::wrap_lines_for_edit(
+                            &edit_lines,
+                            note_width,
+                            ds.edit_cursor_line,
+                            ds.edit_cursor_col,
+                        );
                         let row = wrap::logical_to_visual_row(
                             &vls,
                             ds.edit_cursor_line,

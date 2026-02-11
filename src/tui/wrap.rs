@@ -258,6 +258,45 @@ pub fn wrap_lines(lines: &[&str], width: usize) -> Vec<VisualLine> {
     result
 }
 
+/// Wrap lines for edit mode, adding an extra visual line when the cursor
+/// would be rendered past the right edge of a full-width visual line.
+///
+/// This prevents the cursor block from going off-screen when positioned at
+/// the end of a line that exactly fills the available width.
+pub fn wrap_lines_for_edit(
+    lines: &[&str],
+    width: usize,
+    cursor_line: usize,
+    cursor_col: usize,
+) -> Vec<VisualLine> {
+    let mut vls = wrap_lines(lines, width);
+    if width == 0 {
+        return vls;
+    }
+
+    let cursor_vrow = logical_to_visual_row(&vls, cursor_line, cursor_col);
+    if let Some(vl) = vls.get(cursor_vrow)
+        && cursor_col >= vl.char_end
+    {
+        let line_text = lines.get(vl.logical_line).copied().unwrap_or("");
+        let slice = &line_text[vl.byte_start..vl.byte_end];
+        let slice_width = unicode::display_width(slice);
+        if slice_width >= width {
+            let extra = VisualLine {
+                logical_line: vl.logical_line,
+                byte_start: vl.byte_end,
+                byte_end: vl.byte_end,
+                char_start: vl.byte_end,
+                char_end: vl.byte_end,
+                is_first: false,
+            };
+            vls.insert(cursor_vrow + 1, extra);
+        }
+    }
+
+    vls
+}
+
 /// Compute the gutter width for line numbers: max(1, digits(line_count)) + 1.
 /// Minimum gutter is 3 (2 digits + 1 space).
 pub fn gutter_width(line_count: usize) -> usize {
@@ -483,5 +522,58 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn edit_cursor_at_full_width_line_end() {
+        // Cursor at end of a line that exactly fills the width should get an extra VL
+        let lines = vec!["abcdefghij"];
+        let vls = wrap_lines_for_edit(&lines, 10, 0, 10);
+        assert_eq!(vls.len(), 2);
+        assert_eq!(vls[1].byte_start, 10);
+        assert_eq!(vls[1].byte_end, 10);
+        assert!(!vls[1].is_first);
+        // Cursor should be on the extra visual row
+        let row = logical_to_visual_row(&vls, 0, 10);
+        assert_eq!(row, 1);
+    }
+
+    #[test]
+    fn edit_cursor_mid_line_no_extra_vl() {
+        // Cursor in the middle of a line should not add an extra VL
+        let lines = vec!["abcdefghij"];
+        let vls = wrap_lines_for_edit(&lines, 10, 0, 5);
+        assert_eq!(vls.len(), 1);
+    }
+
+    #[test]
+    fn edit_cursor_at_short_line_end_no_extra_vl() {
+        // Cursor at the end of a line that doesn't fill the width should not add an extra VL
+        let lines = vec!["hello"];
+        let vls = wrap_lines_for_edit(&lines, 10, 0, 5);
+        assert_eq!(vls.len(), 1);
+    }
+
+    #[test]
+    fn edit_cursor_at_end_of_wrapped_full_width_row() {
+        // Cursor at end of second visual row that also fills the width
+        let lines = vec!["abcdefghijklmnopqrst"];
+        let vls = wrap_lines_for_edit(&lines, 10, 0, 20);
+        // Should be 3 VLs: two wrapping rows + one extra for cursor
+        assert_eq!(vls.len(), 3);
+        let row = logical_to_visual_row(&vls, 0, 20);
+        assert_eq!(row, 2);
+    }
+
+    #[test]
+    fn edit_cursor_on_consumed_whitespace() {
+        // Cursor on a space consumed by wrapping should end up on the next VL
+        // without an extra VL being added
+        let lines = vec!["abcdefghij k"];
+        let vls_no_edit = wrap_lines(&lines, 10);
+        let vls = wrap_lines_for_edit(&lines, 10, 0, 10);
+        // No extra VL should be inserted since cursor is in the gap
+        // and logical_to_visual_row places it on VL1
+        assert_eq!(vls.len(), vls_no_edit.len());
     }
 }

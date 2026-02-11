@@ -15,6 +15,7 @@ All notable changes to frame will be documented in this file.
 - Undo stack is now capped at 500 entries to prevent unbounded memory growth in long TUI sessions
 
 ### Fixed
+- Cursor in wrapped edit mode no longer goes off the right side of the window when positioned at the end of a line that fills the available width; it now wraps to the next visual row
 - Triage validates destination (backlog section and after-target) before removing inbox item, preventing data loss if validation fails
 - Triage and cross-track move saves now write new data before deleting old data (track before inbox, target before source), preventing loss if the second write fails
 - `fr clean` archive writes the archive file before extracting done tasks from the track; if the archive write fails, tasks are left in place

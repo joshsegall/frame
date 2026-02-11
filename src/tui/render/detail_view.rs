@@ -556,7 +556,12 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
                 if app.note_wrap && note_available > 0 {
                     // --- Wrap-aware rendering ---
-                    let visual_lines = wrap::wrap_lines(&edit_lines, note_available);
+                    let visual_lines = wrap::wrap_lines_for_edit(
+                        &edit_lines,
+                        note_available,
+                        ds.edit_cursor_line,
+                        cursor_col,
+                    );
                     let cursor_vrow =
                         wrap::logical_to_visual_row(&visual_lines, ds.edit_cursor_line, cursor_col);
 
