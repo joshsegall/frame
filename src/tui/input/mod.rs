@@ -581,19 +581,24 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
             app.search_zero_confirmed = false;
         }
 
-        // n: search next when search active, otherwise note edit in detail/inbox view
+        // n: search next when search active, otherwise note edit (cursor at end) in detail/inbox view
         (KeyModifiers::NONE, KeyCode::Char('n')) => {
             if app.last_search.is_some() {
                 search_next(app, 1);
             } else if matches!(app.view, View::Detail { .. }) {
-                detail_jump_to_region_and_edit(app, DetailRegion::Note);
+                detail_jump_to_region_and_edit(app, DetailRegion::Note, true);
             } else if matches!(app.view, View::Inbox) {
-                inbox_edit_note(app);
+                inbox_edit_note(app, true);
             }
         }
+        // N: search prev when search active, otherwise note edit (cursor at start) in detail/inbox view
         (KeyModifiers::SHIFT, KeyCode::Char('N')) => {
             if app.last_search.is_some() {
                 search_next(app, -1);
+            } else if matches!(app.view, View::Detail { .. }) {
+                detail_jump_to_region_and_edit(app, DetailRegion::Note, false);
+            } else if matches!(app.view, View::Inbox) {
+                inbox_edit_note(app, false);
             }
         }
 
@@ -771,7 +776,7 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
         // Inline title edit (track view), edit (inbox view), edit track name (tracks view), or enter edit mode (detail view)
         (KeyModifiers::NONE, KeyCode::Char('e')) => {
             if matches!(app.view, View::Detail { .. }) {
-                detail_enter_edit(app);
+                detail_enter_edit(app, false);
             } else if matches!(app.view, View::Inbox) {
                 inbox_edit_title(app);
             } else if matches!(app.view, View::Tracks) {
@@ -784,7 +789,7 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
         // Tag edit: t — detail view jump to tags region, inbox tag edit, or inline tag edit in track view
         (KeyModifiers::NONE, KeyCode::Char('t')) => {
             if matches!(app.view, View::Detail { .. }) {
-                detail_jump_to_region_and_edit(app, DetailRegion::Tags);
+                detail_jump_to_region_and_edit(app, DetailRegion::Tags, false);
             } else if matches!(app.view, View::Inbox) {
                 inbox_edit_tags(app);
             } else {
@@ -793,12 +798,12 @@ fn handle_navigate(app: &mut App, key: KeyEvent) {
         }
         (KeyModifiers::NONE, KeyCode::Char('@')) => {
             if matches!(app.view, View::Detail { .. }) {
-                detail_jump_to_region_and_edit(app, DetailRegion::Refs);
+                detail_jump_to_region_and_edit(app, DetailRegion::Refs, false);
             }
         }
         (KeyModifiers::NONE, KeyCode::Char('d')) => {
             if matches!(app.view, View::Detail { .. }) {
-                detail_jump_to_region_and_edit(app, DetailRegion::Deps);
+                detail_jump_to_region_and_edit(app, DetailRegion::Deps, false);
             }
         }
 
@@ -2820,31 +2825,31 @@ fn repeat_last_action(app: &mut App) {
             match region {
                 RepeatEditRegion::Title => {
                     if matches!(app.view, View::Detail { .. }) {
-                        detail_enter_edit(app);
+                        detail_enter_edit(app, false);
                     } else {
                         enter_title_edit(app);
                     }
                 }
                 RepeatEditRegion::Tags => {
                     if matches!(app.view, View::Detail { .. }) {
-                        detail_jump_to_region_and_edit(app, DetailRegion::Tags);
+                        detail_jump_to_region_and_edit(app, DetailRegion::Tags, false);
                     } else {
                         enter_tag_edit(app);
                     }
                 }
                 RepeatEditRegion::Deps => {
                     if matches!(app.view, View::Detail { .. }) {
-                        detail_jump_to_region_and_edit(app, DetailRegion::Deps);
+                        detail_jump_to_region_and_edit(app, DetailRegion::Deps, false);
                     }
                 }
                 RepeatEditRegion::Refs => {
                     if matches!(app.view, View::Detail { .. }) {
-                        detail_jump_to_region_and_edit(app, DetailRegion::Refs);
+                        detail_jump_to_region_and_edit(app, DetailRegion::Refs, false);
                     }
                 }
                 RepeatEditRegion::Note => {
                     if matches!(app.view, View::Detail { .. }) {
-                        detail_jump_to_region_and_edit(app, DetailRegion::Note);
+                        detail_jump_to_region_and_edit(app, DetailRegion::Note, true);
                     }
                 }
             }
@@ -6675,7 +6680,7 @@ fn handle_enter(app: &mut App) {
                     app.open_detail(track_id, sub_id);
                 }
             } else {
-                detail_enter_edit(app);
+                detail_enter_edit(app, false);
             }
         }
         View::Tracks => {
@@ -7240,8 +7245,9 @@ fn detail_jump_editable(app: &mut App, direction: i32) {
     }
 }
 
-/// Enter EDIT mode on the current region in the detail view
-fn detail_enter_edit(app: &mut App) {
+/// Enter EDIT mode on the current region in the detail view.
+/// When `cursor_at_end` is true, the cursor starts at the end of multiline content (notes).
+fn detail_enter_edit(app: &mut App, cursor_at_end: bool) {
     let (track_id, task_id) = match &app.view {
         View::Detail { track_id, task_id } => (track_id.clone(), task_id.clone()),
         _ => return,
@@ -7339,16 +7345,23 @@ fn detail_enter_edit(app: &mut App) {
 
     if is_multiline {
         // Multi-line editing (note): use detail_state's edit fields
+        let (cursor_line, cursor_col) = if cursor_at_end {
+            let line_count = initial_value.split('\n').count();
+            let last_line_len = initial_value.split('\n').next_back().map_or(0, |l| l.len());
+            (line_count.saturating_sub(1), last_line_len)
+        } else {
+            (0, 0)
+        };
         if let Some(ds) = &mut app.detail_state {
             ds.editing = true;
             ds.note_h_scroll = 0;
             ds.note_view_line = None;
             ds.edit_buffer = initial_value.clone();
-            ds.edit_cursor_line = 0;
-            ds.edit_cursor_col = 0;
+            ds.edit_cursor_line = cursor_line;
+            ds.edit_cursor_col = cursor_col;
             ds.edit_original = initial_value.clone();
         }
-        app.edit_history = Some(EditHistory::new(&initial_value, 0, 0));
+        app.edit_history = Some(EditHistory::new(&initial_value, cursor_col, cursor_line));
         app.mode = Mode::Edit;
     } else {
         // Single-line editing: use the existing edit_buffer/edit_cursor on App
@@ -7373,12 +7386,13 @@ fn detail_enter_edit(app: &mut App) {
     }
 }
 
-/// Jump to a specific region and enter EDIT mode (for #, @, d, n shortcuts)
-fn detail_jump_to_region_and_edit(app: &mut App, target_region: DetailRegion) {
+/// Jump to a specific region and enter EDIT mode (for #, @, d, n/N shortcuts).
+/// When `cursor_at_end` is true, the cursor starts at the end of multiline content.
+fn detail_jump_to_region_and_edit(app: &mut App, target_region: DetailRegion, cursor_at_end: bool) {
     if let Some(ds) = &mut app.detail_state {
         ds.region = target_region;
     }
-    detail_enter_edit(app);
+    detail_enter_edit(app, cursor_at_end);
 }
 
 /// Handle multi-line editing (note field) in detail view
@@ -9392,7 +9406,8 @@ fn inbox_edit_tags(app: &mut App) {
 }
 
 /// Edit the note/body of the selected inbox item (multi-line inline editor).
-fn inbox_edit_note(app: &mut App) {
+/// When `cursor_at_end` is true, the cursor starts at the end of the note.
+fn inbox_edit_note(app: &mut App, cursor_at_end: bool) {
     let inbox = match &app.project.inbox {
         Some(inbox) => inbox,
         None => return,
@@ -9403,8 +9418,13 @@ fn inbox_edit_note(app: &mut App) {
     };
 
     let body_text = item.body.as_deref().unwrap_or("").to_string();
-    let line_count = body_text.split('\n').count();
-    let last_line_len = body_text.split('\n').next_back().map_or(0, |l| l.len());
+    let (cursor_line, cursor_col) = if cursor_at_end {
+        let line_count = body_text.split('\n').count();
+        let last_line_len = body_text.split('\n').next_back().map_or(0, |l| l.len());
+        (line_count.saturating_sub(1), last_line_len)
+    } else {
+        (0, 0)
+    };
 
     // Create a DetailState to reuse the multiline edit infrastructure
     let ds = DetailState {
@@ -9414,8 +9434,8 @@ fn inbox_edit_note(app: &mut App) {
         return_view: super::app::ReturnView::Track(0),
         editing: true,
         edit_buffer: body_text.clone(),
-        edit_cursor_line: line_count.saturating_sub(1),
-        edit_cursor_col: last_line_len,
+        edit_cursor_line: cursor_line,
+        edit_cursor_col: cursor_col,
         edit_original: body_text.clone(),
         subtask_cursor: 0,
         flat_subtask_ids: Vec::new(),
@@ -9433,11 +9453,7 @@ fn inbox_edit_note(app: &mut App) {
     app.inbox_note_index = Some(app.inbox_cursor);
     app.inbox_note_editor_scroll = 0;
     app.edit_target = None; // multiline pattern: edit_target is None
-    app.edit_history = Some(EditHistory::new(
-        &body_text,
-        last_line_len,
-        line_count.saturating_sub(1),
-    ));
+    app.edit_history = Some(EditHistory::new(&body_text, cursor_col, cursor_line));
     app.mode = Mode::Edit;
 }
 
@@ -10723,7 +10739,7 @@ fn dispatch_palette_action(app: &mut App, action_id: &str, track_index: Option<u
         }
         "edit_tags" => {
             if matches!(app.view, View::Detail { .. }) {
-                detail_jump_to_region_and_edit(app, DetailRegion::Tags);
+                detail_jump_to_region_and_edit(app, DetailRegion::Tags, false);
             } else if matches!(app.view, View::Inbox) {
                 inbox_edit_tags(app);
             } else {
@@ -10826,19 +10842,26 @@ fn dispatch_palette_action(app: &mut App, action_id: &str, track_index: Option<u
 
         // Detail view
         "edit_region" => {
-            detail_enter_edit(app);
+            detail_enter_edit(app, false);
         }
         "edit_refs" => {
-            detail_jump_to_region_and_edit(app, DetailRegion::Refs);
+            detail_jump_to_region_and_edit(app, DetailRegion::Refs, false);
         }
         "edit_deps" => {
-            detail_jump_to_region_and_edit(app, DetailRegion::Deps);
+            detail_jump_to_region_and_edit(app, DetailRegion::Deps, false);
         }
         "edit_note" => {
             if matches!(app.view, View::Inbox) {
-                inbox_edit_note(app);
+                inbox_edit_note(app, true);
             } else {
-                detail_jump_to_region_and_edit(app, DetailRegion::Note);
+                detail_jump_to_region_and_edit(app, DetailRegion::Note, true);
+            }
+        }
+        "edit_note_from_start" => {
+            if matches!(app.view, View::Inbox) {
+                inbox_edit_note(app, false);
+            } else {
+                detail_jump_to_region_and_edit(app, DetailRegion::Note, false);
             }
         }
         "back_to_track" => {

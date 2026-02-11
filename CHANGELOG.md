@@ -5,6 +5,7 @@ All notable changes to frame will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- `N` key binding to edit note with cursor at the start (both Detail and Inbox views); `n` now consistently places cursor at the end in both views
 - Recovery log (`frame/.recovery.log`) prevents silent data loss: captures parser-dropped lines, write failures, and dismissed TUI edit conflicts
 - `fr recovery` command to view, prune, and manage the recovery log; `fr check` integration reports `#lost` tasks and log summary
 - Recovery log overlay in TUI command palette ("View recovery log")

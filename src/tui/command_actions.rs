@@ -109,6 +109,10 @@ pub fn fuzzy_score(query: &str, target: &str) -> Option<(i32, Vec<usize>)> {
         }
     }
 
+    // Coverage bonus: reward matching a higher fraction of the target string,
+    // so shorter/tighter matches rank above longer ones with equal match quality.
+    score += (query_lower.len() * 80 / target_chars.len()) as i32;
+
     Some((score, matched_indices))
 }
 
@@ -610,6 +614,13 @@ fn static_actions() -> Vec<PaletteAction> {
             id: "edit_note",
             label: "Edit note".into(),
             shortcut: Some("n"),
+            contexts: &[ViewContext::DetailView, ViewContext::InboxView],
+            category: ActionCategory::Edit,
+        },
+        PaletteAction {
+            id: "edit_note_from_start",
+            label: "Edit note from start".into(),
+            shortcut: Some("N"),
             contexts: &[ViewContext::DetailView, ViewContext::InboxView],
             category: ActionCategory::Edit,
         },

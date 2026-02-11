@@ -197,7 +197,8 @@ With selection active (Select mode):
 | `p` | Add new inbox item (top) |
 | `e` | Edit item title |
 | `t` | Edit item tags |
-| `n` | Edit item note (inline multi-line editor) |
+| `n` | Edit item note, cursor at end (inline multi-line editor) |
+| `N` | Edit item note, cursor at start (inline multi-line editor) |
 | `x` | Delete item (with confirmation) |
 | `m` | Reorder item (enter move mode) |
 | `Enter` | Triage item to a track |
@@ -236,7 +237,8 @@ With selection active (Select mode):
 | `t` | Jump to Tags and edit |
 | `@` | Jump to Refs and edit |
 | `d` | Jump to Deps and edit |
-| `n` | Jump to Note and edit |
+| `n` | Jump to Note and edit, cursor at end |
+| `N` | Jump to Note and edit, cursor at start |
 
 **State changes (same as Track view):**
 
