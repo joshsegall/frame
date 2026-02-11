@@ -87,6 +87,9 @@ pub fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // Maintenance
             Commands::Clean(args) => cmd_clean(args),
             Commands::Import(args) => cmd_import(args),
+
+            // Recovery
+            Commands::Recovery(args) => cmd_recovery(args, json),
         },
     }
 }
@@ -1089,6 +1092,37 @@ fn cmd_check(json: bool) -> Result<(), Box<dyn std::error::Error>> {
                             track_id, task_id
                         );
                     }
+                    check::CheckWarning::LostTask { track_id, task_id } => {
+                        println!(
+                            "  [{}] {} has #lost tag (recovery system)",
+                            track_id, task_id
+                        );
+                    }
+                }
+            }
+        }
+        if !result.info.is_empty() {
+            if !result.errors.is_empty() || !result.warnings.is_empty() {
+                println!();
+            }
+            for info in &result.info {
+                match info {
+                    check::CheckInfo::RecoveryLog {
+                        entry_count,
+                        oldest,
+                    } => {
+                        println!(
+                            "Recovery log: {} {} (oldest: {})",
+                            entry_count,
+                            if *entry_count == 1 {
+                                "entry"
+                            } else {
+                                "entries"
+                            },
+                            oldest,
+                        );
+                        println!("  view with: fr recovery");
+                    }
                 }
             }
         }
@@ -1559,9 +1593,36 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
             &mut [], // We don't update deps in other tracks for simplicity
         )?;
 
-        // Save both tracks
+        // Save both tracks — if target save fails, log to recovery
         save_track(&project, &source_track_id)?;
-        save_track(&project, target_track_id)?;
+        if let Err(e) = save_track(&project, target_track_id) {
+            // Source was saved (task removed), target failed (task not written).
+            // The task data is still in-memory on target_track — log it to recovery.
+            let target_file = project
+                .config
+                .tracks
+                .iter()
+                .find(|tc| tc.id == *target_track_id)
+                .map(|tc| tc.file.as_str())
+                .unwrap_or("unknown");
+            let content = crate::parse::serialize_track(&project.tracks[target_idx].1);
+            crate::io::recovery::log_recovery(
+                &project.frame_dir,
+                crate::io::recovery::RecoveryEntry {
+                    timestamp: chrono::Utc::now(),
+                    category: crate::io::recovery::RecoveryCategory::Write,
+                    description: format!("cross-track move: target write failed for {}", new_id),
+                    fields: vec![
+                        ("Source".to_string(), source_track_id.clone()),
+                        ("Target".to_string(), target_file.to_string()),
+                        ("TaskID".to_string(), new_id.clone()),
+                        ("Error".to_string(), e.to_string()),
+                    ],
+                    body: content,
+                },
+            );
+            return Err(e.into());
+        }
         println!("{} → {} ({})", args.id, new_id, target_track_id);
     } else {
         // Same-track reorder
@@ -1648,11 +1709,11 @@ fn cmd_triage(args: TriageArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let task_id = inbox_ops::triage(inbox, index, track, position, &prefix)?;
 
-    // Save both inbox and track
+    // Save track first (new data), then inbox (deletion)
+    save_track(&project, &args.track)?;
     if let Some(ref inbox) = project.inbox {
         project_io::save_inbox(&project.frame_dir, inbox)?;
     }
-    save_track(&project, &args.track)?;
     println!("{}", task_id);
     Ok(())
 }
@@ -2021,7 +2082,7 @@ fn cmd_clean(args: CleanArgs) -> Result<(), Box<dyn std::error::Error>> {
         // Generate ACTIVE.md
         let active_md = clean::generate_active_md(&project);
         let active_path = project.frame_dir.join("ACTIVE.md");
-        std::fs::write(&active_path, active_md)?;
+        crate::io::recovery::atomic_write(&active_path, active_md.as_bytes())?;
 
         let total_changes = result.ids_assigned.len()
             + result.dates_assigned.len()
@@ -2186,4 +2247,72 @@ fn cmd_import(args: ImportArgs) -> Result<(), Box<dyn std::error::Error>> {
         println!("  {}", id);
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Recovery handlers
+// ---------------------------------------------------------------------------
+
+fn cmd_recovery(args: RecoveryCmd, global_json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::io::recovery;
+
+    match args.action {
+        Some(RecoveryAction::Prune(prune_args)) => {
+            let project = load_project_cwd()?;
+            let before = if let Some(ref s) = prune_args.before {
+                Some(
+                    chrono::DateTime::parse_from_rfc3339(s)
+                        .map_err(|e| format!("invalid timestamp '{}': {}", s, e))?
+                        .with_timezone(&chrono::Utc),
+                )
+            } else {
+                None
+            };
+            let count = recovery::prune_recovery(&project.frame_dir, before, prune_args.all)?;
+            println!("pruned {} entries", count);
+            Ok(())
+        }
+        Some(RecoveryAction::Path) => {
+            let project = load_project_cwd()?;
+            let path = recovery::recovery_log_path(&project.frame_dir);
+            println!("{}", path.display());
+            Ok(())
+        }
+        None => {
+            let project = load_project_cwd()?;
+            let json = args.json || global_json;
+            let limit = args.limit.unwrap_or(10);
+            let since = if let Some(ref s) = args.since {
+                Some(
+                    chrono::DateTime::parse_from_rfc3339(s)
+                        .map_err(|e| format!("invalid timestamp '{}': {}", s, e))?
+                        .with_timezone(&chrono::Utc),
+                )
+            } else {
+                None
+            };
+
+            let entries = recovery::read_recovery_entries(&project.frame_dir, Some(limit), since);
+
+            if entries.is_empty() {
+                if json {
+                    println!("[]");
+                } else {
+                    println!("No recovery log entries.");
+                }
+                return Ok(());
+            }
+
+            if json {
+                let json_entries: Vec<serde_json::Value> =
+                    entries.iter().map(|e| e.to_json()).collect();
+                println!("{}", serde_json::to_string_pretty(&json_entries)?);
+            } else {
+                for entry in &entries {
+                    print!("{}", entry.to_display_markdown());
+                }
+            }
+            Ok(())
+        }
+    }
 }

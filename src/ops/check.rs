@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use chrono;
 use serde::Serialize;
 
 use crate::model::project::Project;
@@ -13,6 +14,7 @@ pub struct CheckResult {
     pub valid: bool,
     pub errors: Vec<CheckError>,
     pub warnings: Vec<CheckWarning>,
+    pub info: Vec<CheckInfo>,
 }
 
 /// A validation error (something that should be fixed).
@@ -64,6 +66,18 @@ pub enum CheckWarning {
     /// Done task is in the backlog section (should probably be in Done)
     #[serde(rename = "done_in_backlog")]
     DoneInBacklog { track_id: String, task_id: String },
+    /// Task has the #lost tag (created by recovery system)
+    #[serde(rename = "lost_task")]
+    LostTask { track_id: String, task_id: String },
+}
+
+/// Informational messages (not errors or warnings).
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type")]
+pub enum CheckInfo {
+    /// Recovery log summary
+    #[serde(rename = "recovery_log")]
+    RecoveryLog { entry_count: usize, oldest: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -96,6 +110,18 @@ pub fn check_project(project: &Project) -> CheckResult {
 
     for (track_id, track) in &project.tracks {
         check_track(track, track_id, &all_ids, &project.root, &mut result);
+    }
+
+    // Recovery log summary
+    if let Some(summary) = crate::io::recovery::recovery_summary(&project.frame_dir) {
+        let oldest_str = summary
+            .oldest
+            .map(|ts| ts.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+            .unwrap_or_default();
+        result.info.push(CheckInfo::RecoveryLog {
+            entry_count: summary.entry_count,
+            oldest: oldest_str,
+        });
     }
 
     result.valid = result.errors.is_empty();
@@ -169,6 +195,14 @@ fn check_task(
     // Warning: done task sitting in backlog
     if task.state == TaskState::Done && section == crate::model::track::SectionKind::Backlog {
         result.warnings.push(CheckWarning::DoneInBacklog {
+            track_id: track_id.to_string(),
+            task_id: task_id.to_string(),
+        });
+    }
+
+    // Warning: lost task (from recovery system)
+    if task.tags.iter().any(|t| t == "lost") && task.id.is_some() {
+        result.warnings.push(CheckWarning::LostTask {
             track_id: track_id.to_string(),
             task_id: task_id.to_string(),
         });
@@ -740,6 +774,152 @@ mod tests {
             w,
             CheckWarning::DoneInBacklog { task_id, .. } if task_id == "M-001"
         )));
+    }
+
+    // --- Lost task warning ---
+
+    #[test]
+    fn test_warn_lost_task() {
+        let tmp = TempDir::new().unwrap();
+        let project = make_project_at(
+            tmp.path(),
+            "\
+# Main
+
+## Backlog
+
+- [!] `M-001` Recovered task #lost
+  - added: 2025-05-01
+
+## Done
+",
+        );
+
+        let result = check_project(&project);
+        assert!(result.warnings.iter().any(|w| matches!(
+            w,
+            CheckWarning::LostTask { task_id, .. } if task_id == "M-001"
+        )));
+    }
+
+    #[test]
+    fn test_no_lost_warning_without_tag() {
+        let tmp = TempDir::new().unwrap();
+        let project = make_project_at(
+            tmp.path(),
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Normal task #core
+  - added: 2025-05-01
+
+## Done
+",
+        );
+
+        let result = check_project(&project);
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| matches!(w, CheckWarning::LostTask { .. }))
+        );
+    }
+
+    #[test]
+    fn test_lost_task_no_id_no_warning() {
+        let tmp = TempDir::new().unwrap();
+        let project = make_project_at(
+            tmp.path(),
+            "\
+# Main
+
+## Backlog
+
+- [ ] Task without ID #lost
+
+## Done
+",
+        );
+
+        let result = check_project(&project);
+        // Should have MissingId warning but NOT LostTask (no ID to report)
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| matches!(w, CheckWarning::MissingId { .. }))
+        );
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| matches!(w, CheckWarning::LostTask { .. }))
+        );
+    }
+
+    // --- Recovery log info ---
+
+    #[test]
+    fn test_check_recovery_log_info() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+
+        // Write a recovery log entry
+        crate::io::recovery::log_recovery(
+            &frame_dir,
+            crate::io::recovery::RecoveryEntry {
+                timestamp: chrono::Utc::now(),
+                category: crate::io::recovery::RecoveryCategory::Write,
+                description: "test write failure".to_string(),
+                fields: vec![],
+                body: "lost content".to_string(),
+            },
+        );
+
+        let project = make_project_at(
+            tmp.path(),
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Task
+  - added: 2025-05-01
+
+## Done
+",
+        );
+
+        let result = check_project(&project);
+        assert!(result.info.iter().any(|i| matches!(
+            i,
+            CheckInfo::RecoveryLog { entry_count, .. } if *entry_count == 1
+        )));
+    }
+
+    #[test]
+    fn test_check_no_recovery_log_info() {
+        let tmp = TempDir::new().unwrap();
+        let project = make_project_at(
+            tmp.path(),
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Task
+  - added: 2025-05-01
+
+## Done
+",
+        );
+
+        let result = check_project(&project);
+        assert!(result.info.is_empty());
     }
 
     // --- Clean project ---

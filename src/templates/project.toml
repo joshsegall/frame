@@ -64,6 +64,7 @@ ref_paths = ["doc", "spec", "docs", "design", "papers"]  # directories for ref/s
 # design = "#44DDFF"
 # ready = "#44FF88"
 # cc = "#CC66FF"
+# lost = "#FF8800"
 
 # Color Overrides
 # ---------------

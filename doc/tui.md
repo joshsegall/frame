@@ -372,12 +372,22 @@ Some actions are **palette-only** (no direct key binding):
 | Mark done (#duplicate) | Track | Add `#duplicate` tag and mark task done |
 | Collapse all | Track | Collapse all expanded tasks |
 | Expand all | Track | Expand all tasks with children |
+| View recovery log | Global | Open recovery log overlay showing recent entries |
 
 ## Overlays
 
 ### Help Overlay (`?`)
 
 Context-sensitive keybinding reference. Scrollable with `j`/`k`, `g`/`G` to jump. Close with `?` or `Esc`.
+
+### Recovery Log Overlay
+
+Shows the most recent recovery log entries. Open from the command palette ("View recovery log").
+
+- `j`/`k` or `Up`/`Down` — scroll
+- `g`/`G` — jump to top/bottom
+- `PageUp`/`PageDown` — scroll by page
+- `Esc` or `q` — close
 
 ### Tag Color Editor (`T`)
 

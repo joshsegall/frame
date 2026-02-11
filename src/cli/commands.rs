@@ -73,6 +73,8 @@ pub enum Commands {
     Import(ImportArgs),
     /// Manage project registry
     Projects(ProjectsCmd),
+    /// View or manage the recovery log
+    Recovery(RecoveryCmd),
 }
 
 // ---------------------------------------------------------------------------
@@ -450,4 +452,41 @@ pub struct ProjectsAddArgs {
 pub struct ProjectsRemoveArgs {
     /// Project name or path
     pub name_or_path: String,
+}
+
+// ---------------------------------------------------------------------------
+// Recovery log
+// ---------------------------------------------------------------------------
+
+#[derive(Args)]
+pub struct RecoveryCmd {
+    #[command(subcommand)]
+    pub action: Option<RecoveryAction>,
+    /// Maximum number of entries to show (default: 10)
+    #[arg(long)]
+    pub limit: Option<usize>,
+    /// Show entries after this timestamp (ISO-8601)
+    #[arg(long)]
+    pub since: Option<String>,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Subcommand)]
+pub enum RecoveryAction {
+    /// Remove old entries
+    Prune(RecoveryPruneArgs),
+    /// Print the absolute path to the recovery log
+    Path,
+}
+
+#[derive(Args)]
+pub struct RecoveryPruneArgs {
+    /// Remove entries older than this timestamp (default: 30 days ago)
+    #[arg(long)]
+    pub before: Option<String>,
+    /// Remove all entries
+    #[arg(long)]
+    pub all: bool,
 }

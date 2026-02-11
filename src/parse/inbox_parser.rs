@@ -6,7 +6,10 @@ use crate::parse::has_continuation_at_indent;
 /// Inbox format: items separated by blank lines, each starting with `- `.
 /// The first line is the title (with optional `#tags`).
 /// Subsequent indented lines are the body text.
-pub fn parse_inbox(source: &str) -> Inbox {
+///
+/// Returns the parsed Inbox and a list of lines that were dropped (not recognized
+/// as items, headers, or blank lines). Callers can log these to the recovery log.
+pub fn parse_inbox(source: &str) -> (Inbox, Vec<String>) {
     let lines: Vec<String> = source.lines().map(|l| l.to_string()).collect();
 
     // Parse header lines (everything before the first item)
@@ -24,6 +27,7 @@ pub fn parse_inbox(source: &str) -> Inbox {
 
     // Parse items
     let mut items = Vec::new();
+    let mut dropped_lines = Vec::new();
 
     while idx < lines.len() {
         let line = &lines[idx];
@@ -121,16 +125,20 @@ pub fn parse_inbox(source: &str) -> Inbox {
             // Skip blank lines
             idx += 1;
         } else {
-            // Unexpected non-item line — skip
+            // Unexpected non-item line — record as dropped
+            dropped_lines.push(lines[idx].clone());
             idx += 1;
         }
     }
 
-    Inbox {
-        header_lines,
-        items,
-        source_lines: lines,
-    }
+    (
+        Inbox {
+            header_lines,
+            items,
+            source_lines: lines,
+        },
+        dropped_lines,
+    )
 }
 
 /// Parse an inbox item's title line into title and tags.
@@ -212,7 +220,7 @@ mod tests {
 
 - Read the Koka paper on named handlers #research
 ";
-        let inbox = parse_inbox(source);
+        let (inbox, _) = parse_inbox(source);
         assert_eq!(inbox.header_lines.len(), 2); // "# Inbox" + ""
         assert_eq!(inbox.items.len(), 3);
 
@@ -255,7 +263,7 @@ mod tests {
 
 - Simple item #bug
 ";
-        let inbox = parse_inbox(source);
+        let (inbox, _) = parse_inbox(source);
         assert_eq!(inbox.items.len(), 2);
 
         let body = inbox.items[0].body.as_ref().unwrap();
@@ -280,7 +288,7 @@ mod tests {
 
 - Next item
 ";
-        let inbox = parse_inbox(source);
+        let (inbox, _) = parse_inbox(source);
         assert_eq!(inbox.items.len(), 2);
 
         let body = inbox.items[0].body.as_ref().unwrap();
@@ -296,7 +304,7 @@ mod tests {
     #[test]
     fn test_parse_inbox_empty() {
         let source = "# Inbox\n";
-        let inbox = parse_inbox(source);
+        let (inbox, _) = parse_inbox(source);
         assert!(inbox.items.is_empty());
     }
 
@@ -311,7 +319,7 @@ mod tests {
   Second paragraph of body.
 
 - Next item #bug";
-        let inbox = parse_inbox(source);
+        let (inbox, _) = parse_inbox(source);
         assert_eq!(inbox.items.len(), 2);
 
         let body = inbox.items[0].body.as_ref().unwrap();
@@ -338,7 +346,7 @@ mod tests {
   Para two.
 
 - Next";
-        let inbox = parse_inbox(source);
+        let (inbox, _) = parse_inbox(source);
         assert_eq!(inbox.items.len(), 2);
 
         let body = inbox.items[0].body.as_ref().unwrap();
@@ -361,12 +369,49 @@ mod tests {
   ```
 
 - Next";
-        let inbox = parse_inbox(source);
+        let (inbox, _) = parse_inbox(source);
         assert_eq!(inbox.items.len(), 2);
 
         let body = inbox.items[0].body.as_ref().unwrap();
         assert!(body.contains("Some text."));
         assert!(body.contains("fn main()"));
+    }
+
+    #[test]
+    fn test_parse_inbox_dropped_lines() {
+        // Lines between items that don't start with "- " are dropped.
+        // Note: lines before the first item are collected as header, not dropped.
+        let source = "\
+# Inbox
+
+- First item #bug
+
+Stray line between items
+Another stray line
+- Second item
+";
+        let (inbox, dropped) = parse_inbox(source);
+        assert_eq!(inbox.items.len(), 2);
+        assert_eq!(inbox.items[0].title, "First item");
+        assert_eq!(inbox.items[1].title, "Second item");
+
+        assert_eq!(dropped.len(), 2);
+        assert_eq!(dropped[0], "Stray line between items");
+        assert_eq!(dropped[1], "Another stray line");
+    }
+
+    #[test]
+    fn test_parse_inbox_no_dropped_lines() {
+        let source = "\
+# Inbox
+
+- First item #bug
+
+- Second item #design
+";
+        let (inbox, dropped) = parse_inbox(source);
+        assert_eq!(inbox.items.len(), 2);
+        assert!(dropped.is_empty());
     }
 
     #[test]
@@ -379,7 +424,7 @@ mod tests {
   Body text.
 
 - Second item";
-        let inbox = parse_inbox(source);
+        let (inbox, _) = parse_inbox(source);
         assert_eq!(inbox.items.len(), 2);
 
         let body = inbox.items[0].body.as_ref().unwrap();

@@ -8,6 +8,7 @@ pub mod inbox_view;
 pub mod prefix_confirm;
 pub mod project_picker;
 pub mod recent_view;
+pub mod recovery_overlay;
 pub mod status_row;
 pub mod tab_bar;
 pub mod tag_color_popup;
@@ -93,6 +94,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // Command palette overlay (rendered on top of everything)
     if app.command_palette.is_some() {
         command_palette::render_command_palette(frame, app, chunks[1]);
+    }
+
+    // Recovery log overlay (rendered on top of everything)
+    if app.show_recovery_log {
+        recovery_overlay::render_recovery_overlay(frame, app, frame.area());
     }
 
     // Conflict popup (rendered on top of everything)

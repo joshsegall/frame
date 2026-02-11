@@ -170,3 +170,21 @@ All mutations (rename, create, delete) must update both. Config edits use `toml_
 **File locking**: Unix `flock()` on `frame/.lock` prevents concurrent CLI and TUI writes to the same project. The lock is acquired before any mutation and released on drop. The TUI holds the lock for the duration of each save operation (not the entire session).
 
 **Code**: `src/io/config_io.rs` (TOML mutations), `src/io/lock.rs` (FileLock), `src/model/track.rs` (TrackNode::Literal)
+
+## Recovery Log
+
+Frame includes a recovery system to prevent silent data loss. An append-only markdown log at `frame/.recovery.log` captures data that Frame couldn't save normally.
+
+**What gets logged:**
+- **Parser drops** — unrecognized lines in `inbox.md` that the parser can't parse
+- **Write failures** — when `atomic_write()` fails, the intended content is preserved in the log
+- **Conflict dismissals** — TUI conflict popup text is saved before being cleared
+- **Cross-track move failures** — if the target track write fails after the source was already saved
+
+**Atomic writes**: All file mutations use `NamedTempFile` + rename (`atomic_write()`) to prevent partial writes. The recovery log itself uses `O_APPEND` for concurrent-safe appends.
+
+**Size management**: When the log exceeds 1MB, a non-blocking inline trim removes entries older than 30 days. Users can also run `fr recovery prune` manually.
+
+**`fr check` integration**: Reports `#lost` tagged tasks and recovery log summary (entry count + oldest timestamp).
+
+**Code**: `src/io/recovery.rs` (core module), `src/ops/check.rs` (lost task detection)

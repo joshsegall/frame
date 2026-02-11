@@ -1284,7 +1284,7 @@ fn test_init_gitignore_already_present() {
     fs::create_dir(tmp.path().join(".git")).unwrap();
     fs::write(
         tmp.path().join(".gitignore"),
-        "frame/.state.json\nframe/.lock\n",
+        "frame/.state.json\nframe/.lock\nframe/.recovery.log\n",
     )
     .unwrap();
 
@@ -1508,4 +1508,205 @@ fn test_show_json_top_level_empty_ancestors() {
     let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     // ancestors should be absent (empty vec is skipped) or empty array
     assert!(json.get("ancestors").is_none() || json["ancestors"].as_array().unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Recovery command tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_recovery_empty() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    // No recovery log exists — should succeed with empty output
+    let out = run_fr_ok(tmp.path(), &["recovery"]);
+    assert!(out.contains("No recovery log entries") || out.is_empty() || out.contains("recovery"));
+}
+
+#[test]
+fn test_recovery_path() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    let out = run_fr_ok(tmp.path(), &["recovery", "path"]);
+    assert!(out.contains(".recovery.log"));
+    assert!(out.contains("frame"));
+}
+
+#[test]
+fn test_recovery_prune_all_empty() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    // Prune on empty project should succeed
+    let out = run_fr_ok(tmp.path(), &["recovery", "prune", "--all"]);
+    assert!(out.contains("0") || out.contains("pruned") || out.contains("No"));
+}
+
+#[test]
+fn test_recovery_with_entries() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    // Write a recovery log entry manually
+    let recovery_path = tmp.path().join("frame/.recovery.log");
+    let ts = "2026-02-10T12:00:00Z";
+    let content = format!(
+        "<!-- frame recovery log — append-only error recovery data\n     This file captures data that Frame couldn't save normally.\n     If something went missing, check here.\n     View with: fr recovery\n     Prune old entries: fr recovery prune\n     Safe to delete if empty or stale. -->\n\n---\n## {} — write: test failure\n\nSource: tracks/main.md\n\n```text\nlost content here\n```\n\n---\n",
+        ts
+    );
+    fs::write(&recovery_path, content).unwrap();
+
+    let out = run_fr_ok(tmp.path(), &["recovery"]);
+    assert!(out.contains("write: test failure") || out.contains("test failure"));
+}
+
+#[test]
+fn test_recovery_json() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    // Write a recovery log entry
+    let recovery_path = tmp.path().join("frame/.recovery.log");
+    let ts = "2026-02-10T12:00:00Z";
+    let content = format!(
+        "<!-- frame recovery log — append-only error recovery data\n     This file captures data that Frame couldn't save normally.\n     If something went missing, check here.\n     View with: fr recovery\n     Prune old entries: fr recovery prune\n     Safe to delete if empty or stale. -->\n\n---\n## {} — parser: dropped lines\n\nSource: inbox.md\n\n```text\nstray line\n```\n\n---\n",
+        ts
+    );
+    fs::write(&recovery_path, content).unwrap();
+
+    let out = run_fr_ok(tmp.path(), &["recovery", "--json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(parsed.is_array());
+    let arr = parsed.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["category"], "parser");
+    assert_eq!(arr[0]["description"], "dropped lines");
+}
+
+#[test]
+fn test_recovery_prune_all_with_entries() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    // Write a recovery log entry
+    let recovery_path = tmp.path().join("frame/.recovery.log");
+    let ts = "2026-02-10T12:00:00Z";
+    let content = format!(
+        "<!-- frame recovery log — append-only error recovery data\n     This file captures data that Frame couldn't save normally.\n     If something went missing, check here.\n     View with: fr recovery\n     Prune old entries: fr recovery prune\n     Safe to delete if empty or stale. -->\n\n---\n## {} — write: failure\n\n---\n",
+        ts
+    );
+    fs::write(&recovery_path, content).unwrap();
+
+    let out = run_fr_ok(tmp.path(), &["recovery", "prune", "--all"]);
+    assert!(out.contains("1") || out.contains("pruned"));
+
+    // After prune, recovery should show no entries
+    let out2 = run_fr_ok(tmp.path(), &["recovery"]);
+    assert!(out2.contains("No recovery log entries") || !out2.contains("write: failure"));
+}
+
+#[test]
+fn test_recovery_limit() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    // Write two recovery log entries
+    let recovery_path = tmp.path().join("frame/.recovery.log");
+    let content = "\
+<!-- frame recovery log — append-only error recovery data
+     This file captures data that Frame couldn't save normally.
+     If something went missing, check here.
+     View with: fr recovery
+     Prune old entries: fr recovery prune
+     Safe to delete if empty or stale. -->
+
+---
+## 2026-02-10T11:00:00Z — parser: first entry
+
+---
+## 2026-02-10T12:00:00Z — write: second entry
+
+---
+";
+    fs::write(&recovery_path, content).unwrap();
+
+    let out = run_fr_ok(tmp.path(), &["recovery", "--limit", "1"]);
+    // Should only show the most recent entry
+    assert!(out.contains("second entry"));
+    assert!(!out.contains("first entry"));
+}
+
+#[test]
+fn test_check_with_lost_task() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let frame_dir = tmp.path().join("frame");
+    fs::create_dir_all(frame_dir.join("tracks")).unwrap();
+
+    fs::write(
+        frame_dir.join("project.toml"),
+        r#"[project]
+name = "test-project"
+
+[[tracks]]
+id = "main"
+name = "Main Track"
+state = "active"
+file = "tracks/main.md"
+
+[ids.prefixes]
+main = "M"
+"#,
+    )
+    .unwrap();
+
+    fs::write(
+        frame_dir.join("tracks/main.md"),
+        "\
+# Main Track
+
+## Backlog
+
+- [!] `M-001` Recovered task #lost
+  - added: 2025-05-01
+
+## Done
+",
+    )
+    .unwrap();
+
+    fs::write(frame_dir.join("inbox.md"), "# Inbox\n").unwrap();
+
+    let out = run_fr_ok(tmp.path(), &["check"]);
+    assert!(out.contains("#lost") || out.contains("lost"));
+}
+
+#[test]
+fn test_check_json_with_recovery_log() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    // Create a recovery log entry
+    let recovery_path = tmp.path().join("frame/.recovery.log");
+    let content = "\
+<!-- frame recovery log — append-only error recovery data
+     This file captures data that Frame couldn't save normally.
+     If something went missing, check here.
+     View with: fr recovery
+     Prune old entries: fr recovery prune
+     Safe to delete if empty or stale. -->
+
+---
+## 2026-02-10T12:00:00Z — write: test
+
+---
+";
+    fs::write(&recovery_path, content).unwrap();
+
+    let out = run_fr_ok(tmp.path(), &["check", "--json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(parsed["info"].is_array());
+    let info = parsed["info"].as_array().unwrap();
+    assert!(info.iter().any(|i| i["type"] == "recovery_log"));
 }

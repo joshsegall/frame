@@ -721,6 +721,13 @@ fn static_actions() -> Vec<PaletteAction> {
             contexts: &[ViewContext::TracksView],
             category: ActionCategory::Manage,
         },
+        PaletteAction {
+            id: "view_recovery_log",
+            label: "View recovery log".into(),
+            shortcut: None,
+            contexts: &[ViewContext::Global],
+            category: ActionCategory::Manage,
+        },
     ]
 }
 

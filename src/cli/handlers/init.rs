@@ -102,7 +102,7 @@ fn update_gitignore(cwd: &std::path::Path) -> bool {
     let gitignore_path = cwd.join(".gitignore");
     let existing = fs::read_to_string(&gitignore_path).unwrap_or_default();
 
-    let entries = ["frame/.state.json", "frame/.lock"];
+    let entries = ["frame/.state.json", "frame/.lock", "frame/.recovery.log"];
     let mut to_add = Vec::new();
     for entry in &entries {
         if !existing.lines().any(|line| line.trim() == *entry) {
@@ -365,7 +365,7 @@ mod tests {
         fs::create_dir(tmp.path().join(".git")).unwrap();
         fs::write(
             tmp.path().join(".gitignore"),
-            "frame/.state.json\nframe/.lock\n",
+            "frame/.state.json\nframe/.lock\nframe/.recovery.log\n",
         )
         .unwrap();
 

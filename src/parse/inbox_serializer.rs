@@ -62,7 +62,7 @@ mod tests {
 
 - Read the Koka paper on named handlers #research";
 
-        let inbox = parse_inbox(source);
+        let (inbox, _) = parse_inbox(source);
         let output = serialize_inbox(&inbox);
         assert_eq!(output, source);
     }
@@ -82,7 +82,7 @@ mod tests {
 
 - Simple item #bug";
 
-        let inbox = parse_inbox(source);
+        let (inbox, _) = parse_inbox(source);
         let output = serialize_inbox(&inbox);
         assert_eq!(output, source);
     }
@@ -90,7 +90,7 @@ mod tests {
     #[test]
     fn test_round_trip_inbox_empty() {
         let source = "# Inbox";
-        let inbox = parse_inbox(source);
+        let (inbox, _) = parse_inbox(source);
         let output = serialize_inbox(&inbox);
         assert_eq!(output, source);
     }
@@ -107,7 +107,7 @@ mod tests {
 
 - Simple item #bug";
 
-        let inbox = parse_inbox(source);
+        let (inbox, _) = parse_inbox(source);
         let output = serialize_inbox(&inbox);
         assert_eq!(output, source);
     }

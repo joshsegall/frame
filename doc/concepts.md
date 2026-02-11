@@ -109,6 +109,14 @@ When a top-level task moves between sections (Backlog <-> Done), its entire subt
 
 When the Done section exceeds the configured threshold (default: 250 tasks), `fr clean` archives the oldest tasks to a per-track archive file in `frame/archive/`.
 
+## Recovery
+
+Frame includes a recovery log (`frame/.recovery.log`) that prevents silent data loss. If the parser drops unrecognized lines, a write operation fails, or an edit conflict is dismissed in the TUI, the affected data is captured in the log.
+
+View the log with `fr recovery`, prune old entries with `fr recovery prune`, or open it from the TUI command palette ("View recovery log").
+
+Tasks tagged `#lost` were created by the recovery system after a failed cross-track move or other mutation error. The `fr check` command warns about any `#lost` tasks.
+
 ## Configuration
 
 `project.toml` has these sections:

@@ -77,7 +77,20 @@ pub fn load_project(root: &Path) -> Result<Project, ProjectError> {
             path: inbox_path.clone(),
             source: e,
         })?;
-        Some(parse_inbox(&inbox_text))
+        let (inbox, dropped) = parse_inbox(&inbox_text);
+        if !dropped.is_empty() {
+            crate::io::recovery::log_recovery(
+                &frame_dir,
+                crate::io::recovery::RecoveryEntry {
+                    timestamp: chrono::Utc::now(),
+                    category: crate::io::recovery::RecoveryCategory::Parser,
+                    description: "dropped lines".to_string(),
+                    fields: vec![("Source".to_string(), "inbox.md".to_string())],
+                    body: dropped.join("\n"),
+                },
+            );
+        }
+        Some(inbox)
     } else {
         None
     };
@@ -95,10 +108,25 @@ pub fn load_project(root: &Path) -> Result<Project, ProjectError> {
 pub fn save_track(frame_dir: &Path, file_path: &str, track: &Track) -> Result<(), ProjectError> {
     let full_path = frame_dir.join(file_path);
     let content = crate::parse::serialize_track(track);
-    fs::write(&full_path, content).map_err(|e| ProjectError::ReadError {
-        path: full_path,
-        source: e,
-    })?;
+    if let Err(e) = crate::io::recovery::atomic_write(&full_path, content.as_bytes()) {
+        crate::io::recovery::log_recovery(
+            frame_dir,
+            crate::io::recovery::RecoveryEntry {
+                timestamp: chrono::Utc::now(),
+                category: crate::io::recovery::RecoveryCategory::Write,
+                description: "track write failed".to_string(),
+                fields: vec![
+                    ("Target".to_string(), file_path.to_string()),
+                    ("Error".to_string(), e.to_string()),
+                ],
+                body: content,
+            },
+        );
+        return Err(ProjectError::ReadError {
+            path: full_path,
+            source: e,
+        });
+    }
     Ok(())
 }
 
@@ -106,10 +134,25 @@ pub fn save_track(frame_dir: &Path, file_path: &str, track: &Track) -> Result<()
 pub fn save_inbox(frame_dir: &Path, inbox: &Inbox) -> Result<(), ProjectError> {
     let inbox_path = frame_dir.join("inbox.md");
     let content = crate::parse::serialize_inbox(inbox);
-    fs::write(&inbox_path, content).map_err(|e| ProjectError::ReadError {
-        path: inbox_path,
-        source: e,
-    })?;
+    if let Err(e) = crate::io::recovery::atomic_write(&inbox_path, content.as_bytes()) {
+        crate::io::recovery::log_recovery(
+            frame_dir,
+            crate::io::recovery::RecoveryEntry {
+                timestamp: chrono::Utc::now(),
+                category: crate::io::recovery::RecoveryCategory::Write,
+                description: "inbox write failed".to_string(),
+                fields: vec![
+                    ("Target".to_string(), "inbox.md".to_string()),
+                    ("Error".to_string(), e.to_string()),
+                ],
+                body: content,
+            },
+        );
+        return Err(ProjectError::ReadError {
+            path: inbox_path,
+            source: e,
+        });
+    }
     Ok(())
 }
 

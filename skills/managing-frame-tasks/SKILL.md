@@ -258,7 +258,10 @@ Projects auto-register on `fr init` or first use. Registry:
 |---------|-------------|
 | `fr clean` | Assign IDs/dates, archive done tasks, validate, generate `ACTIVE.md` |
 | `fr clean --dry-run` | Preview what clean would do |
-| `fr check` | Read-only validation (deps, refs, duplicates) |
+| `fr check` | Read-only validation (deps, refs, duplicates, `#lost` tasks, recovery log) |
+| `fr recovery` | View recovery log entries (most recent first) |
+| `fr recovery prune [--all]` | Remove old recovery log entries |
+| `fr recovery path` | Print path to recovery log file |
 
 ---
 

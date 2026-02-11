@@ -944,6 +944,16 @@ pub struct App {
     pub show_startup_hints: bool,
     /// Effective note wrap setting (override > config > true)
     pub note_wrap: bool,
+    /// Recovery notification message (shown in status bar)
+    pub recovery_message: Option<String>,
+    /// When the recovery message was set
+    pub recovery_message_at: Option<Instant>,
+    /// Whether to show the recovery log overlay
+    pub show_recovery_log: bool,
+    /// Scroll offset for recovery log overlay
+    pub recovery_log_scroll: usize,
+    /// Cached recovery log lines for overlay display
+    pub recovery_log_lines: Vec<String>,
 }
 
 impl App {
@@ -1070,6 +1080,11 @@ impl App {
             tab_scroll: 0,
             show_startup_hints: true,
             note_wrap,
+            recovery_message: None,
+            recovery_message_at: None,
+            show_recovery_log: false,
+            recovery_log_scroll: 0,
+            recovery_log_lines: Vec::new(),
         }
     }
 
@@ -1986,6 +2001,42 @@ impl App {
         Ok(())
     }
 
+    /// Save track, logging to recovery on failure and setting status message.
+    pub fn save_track_logged(&mut self, track_id: &str) {
+        if let Err(e) = self.save_track(track_id) {
+            crate::io::recovery::log_recovery(
+                &self.project.frame_dir,
+                crate::io::recovery::RecoveryEntry {
+                    timestamp: chrono::Utc::now(),
+                    category: crate::io::recovery::RecoveryCategory::Write,
+                    description: format!("track save failed: {}", track_id),
+                    fields: vec![("Error".to_string(), e.to_string())],
+                    body: String::new(),
+                },
+            );
+            self.recovery_message = Some(format!("Save failed for {}: {}", track_id, e));
+            self.recovery_message_at = Some(Instant::now());
+        }
+    }
+
+    /// Save inbox, logging to recovery on failure and setting status message.
+    pub fn save_inbox_logged(&mut self) {
+        if let Err(e) = self.save_inbox() {
+            crate::io::recovery::log_recovery(
+                &self.project.frame_dir,
+                crate::io::recovery::RecoveryEntry {
+                    timestamp: chrono::Utc::now(),
+                    category: crate::io::recovery::RecoveryCategory::Write,
+                    description: "inbox save failed".to_string(),
+                    fields: vec![("Error".to_string(), e.to_string())],
+                    body: String::new(),
+                },
+            );
+            self.recovery_message = Some(format!("Inbox save failed: {}", e));
+            self.recovery_message_at = Some(Instant::now());
+        }
+    }
+
     /// Resolve the task ID from the current cursor position in a track view.
     /// Returns (track_id, task_id, section) if the cursor is on a task.
     pub fn cursor_task_id(&self) -> Option<(String, String, SectionKind)> {
@@ -2031,7 +2082,20 @@ impl App {
             if file_name == "inbox.md" {
                 // Reload inbox
                 if let Ok(text) = std::fs::read_to_string(path) {
-                    self.project.inbox = Some(parse_inbox(&text));
+                    let (inbox, dropped) = parse_inbox(&text);
+                    if !dropped.is_empty() {
+                        crate::io::recovery::log_recovery(
+                            &self.project.frame_dir,
+                            crate::io::recovery::RecoveryEntry {
+                                timestamp: chrono::Utc::now(),
+                                category: crate::io::recovery::RecoveryCategory::Parser,
+                                description: "dropped lines".to_string(),
+                                fields: vec![("Source".to_string(), "inbox.md".to_string())],
+                                body: dropped.join("\n"),
+                            },
+                        );
+                    }
+                    self.project.inbox = Some(inbox);
                 }
                 continue;
             }
@@ -3030,7 +3094,7 @@ fn run_event_loop(
         if app.mode == Mode::Navigate && !app.pending_moves.is_empty() {
             let modified = app.flush_expired_pending_moves();
             for tid in &modified {
-                let _ = app.save_track(tid);
+                app.save_track_logged(tid);
             }
         }
 
@@ -3113,7 +3177,7 @@ fn run_event_loop(
                 if app.view != old_view && !app.pending_moves.is_empty() {
                     let modified = app.flush_all_pending_moves();
                     for tid in &modified {
-                        let _ = app.save_track(tid);
+                        app.save_track_logged(tid);
                     }
                 }
 
@@ -3141,7 +3205,7 @@ fn run_event_loop(
             // Flush all pending moves before exit
             let modified = app.flush_all_pending_moves();
             for tid in &modified {
-                let _ = app.save_track(tid);
+                app.save_track_logged(tid);
             }
             break;
         }

@@ -381,6 +381,41 @@ fr import tasks.md --track api [--top] [--after ID]
 
 Parses checkbox tasks from the file, auto-assigns IDs, preserves existing metadata. Supports up to 3-level nesting.
 
+### `fr recovery`
+
+View the recovery log (most recent entries first).
+
+```
+fr recovery [--limit N] [--since ISO-8601] [--json]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--limit N` | Show at most N entries (default: 10) |
+| `--since TIMESTAMP` | Only show entries after this ISO-8601 timestamp |
+| `--json` | Output as JSON array |
+
+### `fr recovery prune`
+
+Remove old entries from the recovery log.
+
+```
+fr recovery prune [--before TIMESTAMP] [--all]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--before TIMESTAMP` | Remove entries older than this timestamp (default: 30 days ago) |
+| `--all` | Remove all entries |
+
+### `fr recovery path`
+
+Print the absolute path to the recovery log file.
+
+```
+fr recovery path
+```
+
 ## Project Registry
 
 Frame maintains a global project registry at `~/.config/frame/projects.toml` (or `$XDG_CONFIG_HOME/frame/projects.toml`). Projects register automatically when you run `fr init`, use `fr` in a project directory, or add them explicitly.

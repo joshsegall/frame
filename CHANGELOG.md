@@ -5,12 +5,20 @@ All notable changes to frame will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Recovery log (`frame/.recovery.log`) prevents silent data loss: captures parser-dropped lines, write failures, and dismissed TUI edit conflicts
+- `fr recovery` command to view, prune, and manage the recovery log; `fr check` integration reports `#lost` tasks and log summary
+- Recovery log overlay in TUI command palette ("View recovery log")
+- Atomic file writes using temp file + rename for all track, inbox, config, and state saves
 - Soft word wrap for notes in Detail view and Inbox (view mode always wraps; edit mode wraps by default, togglable with `w` / `Alt+w`)
 - `fr ready --cc` now scans all active tracks for `#cc`-tagged tasks (focus track tasks sort first); `cc_focus` is no longer required
 - `fr track cc-focus --clear` to remove the cc-focus setting
 - Undo stack is now capped at 500 entries to prevent unbounded memory growth in long TUI sessions
 
 ### Fixed
+- Triage validates destination (backlog section and after-target) before removing inbox item, preventing data loss if validation fails
+- Triage and cross-track move saves now write new data before deleting old data (track before inbox, target before source), preventing loss if the second write fails
+- `fr clean` archive writes the archive file before extracting done tasks from the track; if the archive write fails, tasks are left in place
+- TUI pending move flushes and critical multi-save sites now log to the recovery log on failure instead of silently discarding errors
 - `[ids.prefixes]` and `[ui.tag_colors]` key order in `project.toml` no longer randomizes on each save; order now matches the original file
 - Parking a task with `~` now moves it to the Parked section after the grace period (previously only updated state without moving)
 - Parked tasks no longer disappear when the track has no `## Parked` section; the section is now created automatically on first use

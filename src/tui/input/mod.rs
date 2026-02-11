@@ -226,6 +226,13 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
     app.show_startup_hints = false;
+
+    // Recovery log overlay intercepts all input
+    if app.show_recovery_log {
+        handle_recovery_overlay(app, key);
+        return;
+    }
+
     let key = normalize_key(key);
     match &app.mode {
         Mode::Navigate => handle_navigate(app, key),
@@ -310,9 +317,31 @@ fn drain_pending_for_track(app: &mut App, handled_track_id: &str) {
 }
 
 fn handle_navigate(app: &mut App, key: KeyEvent) {
+    // Clear recovery notification on any keypress (after 3s minimum display)
+    if app.recovery_message.is_some()
+        && let Some(at) = app.recovery_message_at
+        && at.elapsed() >= std::time::Duration::from_secs(3)
+    {
+        app.recovery_message = None;
+        app.recovery_message_at = None;
+    }
+
     // Conflict popup intercepts Esc
     if app.conflict_text.is_some() {
         if matches!(key.code, KeyCode::Esc) {
+            // Log conflict text to recovery log before clearing
+            if let Some(ref text) = app.conflict_text {
+                crate::io::recovery::log_recovery(
+                    &app.project.frame_dir,
+                    crate::io::recovery::RecoveryEntry {
+                        timestamp: chrono::Utc::now(),
+                        category: crate::io::recovery::RecoveryCategory::Conflict,
+                        description: "dismissed conflict".to_string(),
+                        fields: vec![],
+                        body: text.clone(),
+                    },
+                );
+            }
             app.conflict_text = None;
         }
         return;
@@ -1221,6 +1250,18 @@ fn handle_select(app: &mut App, key: KeyEvent) {
     // Conflict popup intercepts Esc
     if app.conflict_text.is_some() {
         if matches!(key.code, KeyCode::Esc) {
+            if let Some(ref text) = app.conflict_text {
+                crate::io::recovery::log_recovery(
+                    &app.project.frame_dir,
+                    crate::io::recovery::RecoveryEntry {
+                        timestamp: chrono::Utc::now(),
+                        category: crate::io::recovery::RecoveryCategory::Conflict,
+                        description: "dismissed conflict".to_string(),
+                        fields: vec![],
+                        body: text.clone(),
+                    },
+                );
+            }
             app.conflict_text = None;
         }
         return;
@@ -2489,7 +2530,10 @@ fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo: bool) {
                             crate::ops::track_ops::generate_prefix(&tid, &existing_prefixes);
                         let track_content = format!("# {}\n\n## Backlog\n\n## Done\n", name);
                         let track_path = app.project.frame_dir.join(&tc.file);
-                        let _ = std::fs::write(&track_path, &track_content);
+                        let _ = crate::io::recovery::atomic_write(
+                            &track_path,
+                            track_content.as_bytes(),
+                        );
                         app.project.config.tracks.push(tc);
                         app.project.config.ids.prefixes.insert(tid.clone(), prefix);
                         if let Ok(text) = std::fs::read_to_string(&track_path) {
@@ -2516,7 +2560,10 @@ fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo: bool) {
                         };
                         let track_content = format!("# {}\n\n## Backlog\n\n## Done\n", track_name);
                         let track_path = app.project.frame_dir.join(&tc.file);
-                        let _ = std::fs::write(&track_path, &track_content);
+                        let _ = crate::io::recovery::atomic_write(
+                            &track_path,
+                            track_content.as_bytes(),
+                        );
                         app.project.config.tracks.push(tc);
                         if let Some(p) = &prefix {
                             app.project
@@ -4681,7 +4728,7 @@ fn confirm_edit(app: &mut App) {
             // Write track file
             let track_content = format!("# {}\n\n## Backlog\n\n## Done\n", name);
             let track_path = app.project.frame_dir.join(&tc.file);
-            let _ = std::fs::write(&track_path, &track_content);
+            let _ = crate::io::recovery::atomic_write(&track_path, track_content.as_bytes());
 
             // Add to config — insert among active tracks at the stored position
             // so that p/- placement is respected (a/= use active_count = end).
@@ -9678,9 +9725,9 @@ fn execute_triage(app: &mut App, track_id: &str, position: InsertPosition) {
         task_id,
     });
 
-    // Save both inbox and track
-    let _ = app.save_inbox();
-    let _ = app.save_track(track_id);
+    // Save track first (new data), then inbox (deletion)
+    app.save_track_logged(track_id);
+    app.save_inbox_logged();
 
     // Advance cursor (or clamp to last item)
     let count = app.inbox_count();
@@ -9920,9 +9967,9 @@ fn execute_cross_track_move(app: &mut App, target_track_id: &str, position: Inse
         old_depth,
     });
 
-    // Save both tracks
-    let _ = app.save_track(&source_track_id);
-    let _ = app.save_track(target_track_id);
+    // Save target first (new data), then source (deletion)
+    app.save_track_logged(target_track_id);
+    app.save_track_logged(&source_track_id);
 
     // Cursor management
     let was_detail = matches!(app.view, View::Detail { .. });
@@ -10087,9 +10134,9 @@ fn execute_bulk_cross_track_move(app: &mut App, target_track_id: &str, position:
     }
 
     if !ops.is_empty() {
-        // Save affected tracks
-        let _ = app.save_track(&source_track_id);
-        let _ = app.save_track(target_track_id);
+        // Save target first (new data), then source (deletion)
+        app.save_track_logged(target_track_id);
+        app.save_track_logged(&source_track_id);
 
         let count = ops.len();
         app.undo_stack.push(Operation::Bulk(ops));
@@ -10828,6 +10875,10 @@ fn dispatch_palette_action(app: &mut App, action_id: &str, track_index: Option<u
         }
         "rename_prefix" => {
             tracks_rename_prefix(app);
+        }
+
+        "view_recovery_log" => {
+            open_recovery_overlay(app);
         }
 
         _ => {}
@@ -11645,6 +11696,59 @@ fn handle_project_picker_key(app: &mut App, key: KeyEvent) {
         }
         (_, KeyCode::Char('s')) => {
             picker.toggle_sort();
+        }
+        _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Recovery log overlay
+// ---------------------------------------------------------------------------
+
+/// Open the recovery log overlay by loading entries and caching lines.
+fn open_recovery_overlay(app: &mut App) {
+    let entries =
+        crate::io::recovery::read_recovery_entries(&app.project.frame_dir, Some(10), None);
+    let mut lines = Vec::new();
+    if entries.is_empty() {
+        // Will be handled by the renderer
+    } else {
+        for entry in &entries {
+            let md = entry.to_display_markdown();
+            for line in md.lines() {
+                lines.push(line.to_string());
+            }
+        }
+    }
+    app.recovery_log_lines = lines;
+    app.recovery_log_scroll = 0;
+    app.show_recovery_log = true;
+}
+
+/// Handle input when the recovery log overlay is showing.
+fn handle_recovery_overlay(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.show_recovery_log = false;
+            app.recovery_log_lines.clear();
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            app.recovery_log_scroll = app.recovery_log_scroll.saturating_add(1);
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.recovery_log_scroll = app.recovery_log_scroll.saturating_sub(1);
+        }
+        KeyCode::Char('g') => {
+            app.recovery_log_scroll = 0;
+        }
+        KeyCode::Char('G') => {
+            app.recovery_log_scroll = app.recovery_log_lines.len();
+        }
+        KeyCode::PageDown => {
+            app.recovery_log_scroll = app.recovery_log_scroll.saturating_add(20);
+        }
+        KeyCode::PageUp => {
+            app.recovery_log_scroll = app.recovery_log_scroll.saturating_sub(20);
         }
         _ => {}
     }

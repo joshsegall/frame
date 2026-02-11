@@ -24,9 +24,12 @@ pub fn read_config(
 /// Write the config document back to disk, preserving formatting.
 pub fn write_config(frame_dir: &Path, doc: &toml_edit::DocumentMut) -> Result<(), ProjectError> {
     let config_path = frame_dir.join("project.toml");
-    fs::write(&config_path, doc.to_string()).map_err(|e| ProjectError::ReadError {
-        path: config_path,
-        source: e,
+    let content = doc.to_string();
+    crate::io::recovery::atomic_write(&config_path, content.as_bytes()).map_err(|e| {
+        ProjectError::ReadError {
+            path: config_path,
+            source: e,
+        }
     })?;
     Ok(())
 }
@@ -40,9 +43,11 @@ pub fn write_config_from_struct(
 ) -> Result<(), ProjectError> {
     let config_path = frame_dir.join("project.toml");
     let text = toml::to_string_pretty(config)?;
-    fs::write(&config_path, &text).map_err(|e| ProjectError::ReadError {
-        path: config_path,
-        source: e,
+    crate::io::recovery::atomic_write(&config_path, text.as_bytes()).map_err(|e| {
+        ProjectError::ReadError {
+            path: config_path,
+            source: e,
+        }
     })?;
     Ok(())
 }

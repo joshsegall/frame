@@ -60,7 +60,8 @@ pub fn new_track(
         fs::create_dir_all(parent).map_err(ProjectError::IoError)?;
     }
     let content = format!("# {}\n\n## Backlog\n\n## Parked\n\n## Done\n", name);
-    fs::write(&full_path, &content).map_err(ProjectError::IoError)?;
+    crate::io::recovery::atomic_write(&full_path, content.as_bytes())
+        .map_err(ProjectError::IoError)?;
 
     // Generate prefix and update config
     let existing_prefixes: Vec<String> = config.ids.prefixes.values().cloned().collect();
@@ -420,7 +421,8 @@ pub fn rename_track_name(
         } else {
             format!("# {}", new_name)
         };
-        fs::write(&track_path, new_content).map_err(ProjectError::IoError)?;
+        crate::io::recovery::atomic_write(&track_path, new_content.as_bytes())
+            .map_err(ProjectError::IoError)?;
     }
 
     Ok(())
@@ -558,7 +560,8 @@ pub fn rename_archive_prefix(
     }
     if count > 0 {
         let serialized = crate::parse::serialize_track(&archive_track);
-        fs::write(&archive_path, serialized).map_err(ProjectError::IoError)?;
+        crate::io::recovery::atomic_write(&archive_path, serialized.as_bytes())
+            .map_err(ProjectError::IoError)?;
     }
     Ok(count)
 }

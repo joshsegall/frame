@@ -2,7 +2,7 @@ use chrono::Local;
 
 use crate::model::inbox::{Inbox, InboxItem};
 use crate::model::task::{Metadata, Task, TaskState};
-use crate::model::track::{SectionKind, Track};
+use crate::model::track::{SectionKind, Track, TrackNode};
 use crate::ops::task_ops::{InsertPosition, TaskError};
 
 /// Error type for inbox operations
@@ -37,6 +37,35 @@ pub fn triage(
         return Err(InboxError::IndexOutOfRange(index));
     }
 
+    // Validate destination exists BEFORE removing from inbox
+    let has_backlog = track.nodes.iter().any(|n| {
+        matches!(
+            n,
+            TrackNode::Section {
+                kind: SectionKind::Backlog,
+                ..
+            }
+        )
+    });
+    if !has_backlog {
+        return Err(InboxError::TaskError(TaskError::InvalidPosition(
+            "no backlog section".into(),
+        )));
+    }
+    if let InsertPosition::After(after_id) = &position {
+        let found = track
+            .section_tasks(SectionKind::Backlog)
+            .iter()
+            .any(|t| t.id.as_deref() == Some(after_id.as_str()));
+        if !found {
+            return Err(InboxError::TaskError(TaskError::NotFound(format!(
+                "after target {}",
+                after_id
+            ))));
+        }
+    }
+
+    // Now safe to remove — destination is validated
     let item = inbox.items.remove(index);
 
     // Build the task from the inbox item
@@ -56,9 +85,7 @@ pub fn triage(
 
     let tasks = track
         .section_tasks_mut(SectionKind::Backlog)
-        .ok_or(InboxError::TaskError(TaskError::InvalidPosition(
-            "no backlog section".into(),
-        )))?;
+        .expect("backlog section validated above");
 
     match &position {
         InsertPosition::Bottom => tasks.push(task),
@@ -67,10 +94,7 @@ pub fn triage(
             let idx = tasks
                 .iter()
                 .position(|t| t.id.as_deref() == Some(after_id.as_str()))
-                .ok_or(InboxError::TaskError(TaskError::NotFound(format!(
-                    "after target {}",
-                    after_id
-                ))))?;
+                .expect("after target validated above");
             tasks.insert(idx + 1, task);
         }
     }
@@ -107,6 +131,7 @@ mod tests {
 - Quick note
 ",
         )
+        .0
     }
 
     fn sample_track() -> Track {
@@ -191,6 +216,53 @@ mod tests {
         let mut track = sample_track();
         let result = triage(&mut inbox, 10, &mut track, InsertPosition::Bottom, "T");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_triage_no_backlog_preserves_inbox() {
+        let mut inbox = sample_inbox();
+        let original_len = inbox.items.len();
+        // Track with no Backlog section
+        let mut track = parse_track(
+            "\
+# Test
+
+## Done
+",
+        );
+        let result = triage(&mut inbox, 0, &mut track, InsertPosition::Bottom, "T");
+        assert!(result.is_err());
+        // Inbox must be unchanged
+        assert_eq!(inbox.items.len(), original_len);
+        assert_eq!(inbox.items[0].title, "Parser crash on empty blocks");
+    }
+
+    #[test]
+    fn test_triage_invalid_after_target_preserves_inbox() {
+        let mut inbox = sample_inbox();
+        let original_len = inbox.items.len();
+        let mut track = sample_track();
+        let result = triage(
+            &mut inbox,
+            0,
+            &mut track,
+            InsertPosition::After("NONEXISTENT".into()),
+            "T",
+        );
+        assert!(result.is_err());
+        // Inbox must be unchanged
+        assert_eq!(inbox.items.len(), original_len);
+        assert_eq!(inbox.items[0].title, "Parser crash on empty blocks");
+    }
+
+    #[test]
+    fn test_triage_out_of_range_preserves_inbox() {
+        let mut inbox = sample_inbox();
+        let original_len = inbox.items.len();
+        let mut track = sample_track();
+        let result = triage(&mut inbox, 10, &mut track, InsertPosition::Bottom, "T");
+        assert!(result.is_err());
+        assert_eq!(inbox.items.len(), original_len);
     }
 
     #[test]

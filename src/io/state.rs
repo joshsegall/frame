@@ -51,7 +51,7 @@ pub fn read_ui_state(frame_dir: &Path) -> Option<UiState> {
 pub fn write_ui_state(frame_dir: &Path, state: &UiState) -> Result<(), std::io::Error> {
     let path = frame_dir.join(".state.json");
     let content = serde_json::to_string_pretty(state)?;
-    fs::write(&path, content)
+    crate::io::recovery::atomic_write(&path, content.as_bytes())
 }
 
 #[cfg(test)]

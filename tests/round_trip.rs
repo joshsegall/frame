@@ -28,7 +28,7 @@ fn assert_inbox_round_trip(fixture_name: &str) {
     let source = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("Could not read fixture {}: {}", fixture_name, e));
 
-    let inbox = parse_inbox(&source);
+    let (inbox, _) = parse_inbox(&source);
     let output = serialize_inbox(&inbox);
 
     assert_eq!(
@@ -279,7 +279,7 @@ fn code_in_notes_parse_correctness() {
 fn inbox_parse_correctness() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/inbox.md");
     let source = fs::read_to_string(&path).unwrap();
-    let inbox = parse_inbox(&source);
+    let (inbox, _) = parse_inbox(&source);
 
     assert_eq!(inbox.items.len(), 5);
 

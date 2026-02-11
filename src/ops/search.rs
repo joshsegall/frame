@@ -359,6 +359,7 @@ mod tests {
 - Quick idea
 ",
         )
+        .0
     }
 
     // --- Title search ---

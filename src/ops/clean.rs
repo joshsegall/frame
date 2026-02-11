@@ -790,7 +790,37 @@ fn archive_done_tasks(project: &mut Project, result: &mut CleanResult) {
             continue;
         }
 
-        // Extract done tasks to archive
+        // 1. Serialize done tasks WITHOUT removing them
+        let archive_content = serialize_archived_tasks(track.section_tasks(SectionKind::Done));
+        if archive_content.is_empty() {
+            continue;
+        }
+
+        // 2. Build archive file content
+        let archive_path = project
+            .frame_dir
+            .join("archive")
+            .join(format!("{}.md", track_id));
+        if let Some(parent) = archive_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let existing = std::fs::read_to_string(&archive_path).unwrap_or_default();
+        let new_content = if existing.is_empty() {
+            format!("# Archive — {}\n\n{}", track_id, archive_content)
+        } else {
+            format!("{}\n{}", existing.trim_end(), archive_content)
+        };
+
+        // 3. Write archive — if this fails, leave tasks in place
+        if crate::io::recovery::atomic_write(&archive_path, new_content.as_bytes()).is_err() {
+            eprintln!(
+                "warning: could not write archive for {}, skipping",
+                track_id
+            );
+            continue;
+        }
+
+        // 4. Only NOW extract tasks from track
         let archived = extract_done_tasks_for_archive(track);
         for task in &archived {
             result.tasks_archived.push(ArchiveRecord {
@@ -798,26 +828,6 @@ fn archive_done_tasks(project: &mut Project, result: &mut CleanResult) {
                 task_id: task.id.clone().unwrap_or_default(),
                 title: task.title.clone(),
             });
-        }
-
-        // Store archived tasks in a temporary track for serialization
-        if !archived.is_empty() {
-            let archive_content = serialize_archived_tasks(&archived);
-            let archive_path = project
-                .frame_dir
-                .join("archive")
-                .join(format!("{}.md", track_id));
-            if let Some(parent) = archive_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            // Append to existing archive or create new
-            let existing = std::fs::read_to_string(&archive_path).unwrap_or_default();
-            let new_content = if existing.is_empty() {
-                format!("# Archive — {}\n\n{}", track_id, archive_content)
-            } else {
-                format!("{}\n{}", existing.trim_end(), archive_content)
-            };
-            let _ = std::fs::write(&archive_path, new_content);
         }
     }
 }
