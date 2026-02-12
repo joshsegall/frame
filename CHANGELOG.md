@@ -4,6 +4,9 @@ All notable changes to frame will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- `Alt+Up`/`Alt+Down` in recovery log overlay to jump between log entries
+
 ## v0.1.2 - 2026-02-10
 
 ### Added

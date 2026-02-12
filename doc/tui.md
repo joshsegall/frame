@@ -387,6 +387,7 @@ Context-sensitive keybinding reference. Scrollable with `j`/`k`, `g`/`G` to jump
 Shows the most recent recovery log entries. Open from the command palette ("View recovery log").
 
 - `j`/`k` or `Up`/`Down` — scroll
+- `Alt+Up`/`Alt+Down` — jump to previous/next log entry
 - `g`/`G` — jump to top/bottom
 - `PageUp`/`PageDown` — scroll by page
 - `Esc` or `q` — close

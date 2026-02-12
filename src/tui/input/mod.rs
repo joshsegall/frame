@@ -11780,29 +11780,70 @@ fn open_recovery_overlay(app: &mut App) {
 
 /// Handle input when the recovery log overlay is showing.
 fn handle_recovery_overlay(app: &mut App, key: KeyEvent) {
-    match key.code {
-        KeyCode::Esc | KeyCode::Char('q') => {
+    match (key.modifiers, key.code) {
+        (_, KeyCode::Esc) | (_, KeyCode::Char('q')) => {
             app.show_recovery_log = false;
             app.recovery_log_lines.clear();
         }
-        KeyCode::Char('j') | KeyCode::Down => {
+
+        // Jump to previous/next log entry (## header)
+        (m, KeyCode::Up) if m.contains(KeyModifiers::ALT) => {
+            recovery_jump_entry(app, -1);
+        }
+        (m, KeyCode::Down) if m.contains(KeyModifiers::ALT) => {
+            recovery_jump_entry(app, 1);
+        }
+
+        (_, KeyCode::Char('j')) | (_, KeyCode::Down) => {
             app.recovery_log_scroll = app.recovery_log_scroll.saturating_add(1);
         }
-        KeyCode::Char('k') | KeyCode::Up => {
+        (_, KeyCode::Char('k')) | (_, KeyCode::Up) => {
             app.recovery_log_scroll = app.recovery_log_scroll.saturating_sub(1);
         }
-        KeyCode::Char('g') => {
+        (_, KeyCode::Char('g')) => {
             app.recovery_log_scroll = 0;
         }
-        KeyCode::Char('G') => {
+        (_, KeyCode::Char('G')) => {
             app.recovery_log_scroll = app.recovery_log_lines.len();
         }
-        KeyCode::PageDown => {
+        (_, KeyCode::PageDown) => {
             app.recovery_log_scroll = app.recovery_log_scroll.saturating_add(20);
         }
-        KeyCode::PageUp => {
+        (_, KeyCode::PageUp) => {
             app.recovery_log_scroll = app.recovery_log_scroll.saturating_sub(20);
         }
         _ => {}
+    }
+}
+
+/// Jump to the next (`direction == 1`) or previous (`direction == -1`) `## `
+/// header line in the recovery log overlay.
+fn recovery_jump_entry(app: &mut App, direction: i32) {
+    let lines = &app.recovery_log_lines;
+    if lines.is_empty() {
+        return;
+    }
+    let cur = app.recovery_log_scroll;
+    if direction < 0 {
+        // Search backwards from the line before current scroll position
+        for i in (0..cur).rev() {
+            if lines[i].starts_with("## ") {
+                app.recovery_log_scroll = i;
+                return;
+            }
+        }
+        // No previous entry found — go to top
+        app.recovery_log_scroll = 0;
+    } else {
+        // Search forwards from the line after current scroll position
+        if let Some(offset) = lines[(cur + 1)..]
+            .iter()
+            .position(|l| l.starts_with("## "))
+        {
+            app.recovery_log_scroll = cur + 1 + offset;
+            return;
+        }
+        // No next entry found — go to bottom
+        app.recovery_log_scroll = lines.len();
     }
 }
