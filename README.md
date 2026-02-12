@@ -87,7 +87,7 @@ reference — the template is self-documenting.
 
 Vim-style modal interface. Four primary modes: **NAVIGATE**, **EDIT**,
 **MOVE**, **SEARCH**, plus **SELECT** for bulk operations.
-Press `?` for the full key binding reference.
+Press `?` for the full key binding reference, or `>` to open the command palette.
 
 The short version: `↑↓`/`jk` to move, `←→`/`hl` to collapse/expand,
 `1`–`9` for track tabs, `Space` to cycle state, `e` to edit,
