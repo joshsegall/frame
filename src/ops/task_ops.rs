@@ -148,7 +148,7 @@ pub fn add_subtask(track: &mut Track, parent_id: &str, title: String) -> Result<
         return Err(TaskError::MaxDepthReached);
     }
 
-    let sub_num = parent.subtasks.len() + 1;
+    let sub_num = next_child_number(parent);
     let sub_id = format!("{}.{}", parent_id, sub_num);
     let (parsed_title, tags) = parse_title_and_tags(&title);
     let mut subtask = Task::new(TaskState::Todo, Some(sub_id.clone()), parsed_title);
@@ -176,7 +176,7 @@ pub fn add_subtask_after(
         return Err(TaskError::MaxDepthReached);
     }
 
-    let sub_num = parent.subtasks.len() + 1;
+    let sub_num = next_child_number(parent);
     let sub_id = format!("{}.{}", parent_id, sub_num);
     let (parsed_title, tags) = parse_title_and_tags(&title);
     let mut subtask = Task::new(TaskState::Todo, Some(sub_id.clone()), parsed_title);
@@ -825,8 +825,30 @@ pub fn is_descendant_of(track: &Track, ancestor_id: &str, candidate_id: &str) ->
 }
 
 /// Compute the next available child number for a parent task.
+/// Scans existing subtask IDs to find the max suffix number, avoiding collisions
+/// when subtasks have been deleted (e.g., deleting .3 from [.1, .2, .3, .4]
+/// should produce .5, not .4).
 fn next_child_number(parent: &Task) -> usize {
-    parent.subtasks.len() + 1
+    let parent_id = match &parent.id {
+        Some(id) => id,
+        None => return parent.subtasks.len() + 1,
+    };
+    let prefix = format!("{}.", parent_id);
+    let max_num = parent
+        .subtasks
+        .iter()
+        .filter_map(|sub| {
+            let id = sub.id.as_ref()?;
+            let suffix = id.strip_prefix(&prefix)?;
+            // Only parse the immediate child number (no dots — skip grandchild IDs)
+            if suffix.contains('.') {
+                return None;
+            }
+            suffix.parse::<usize>().ok()
+        })
+        .max()
+        .unwrap_or(0);
+    max_num + 1
 }
 
 /// Main reparent operation: move a task to a new parent (or promote to top-level).
@@ -919,6 +941,58 @@ pub fn reparent_task(
         id_mappings,
         old_location: actual_old_location,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Hard delete (physical removal, not mark-as-done)
+// ---------------------------------------------------------------------------
+
+/// Information about a deleted task (for undo and recovery logging)
+#[derive(Debug, Clone)]
+pub struct DeletedTask {
+    pub track_id: String,
+    pub section: SectionKind,
+    pub parent_id: Option<String>,
+    pub position: usize,
+    pub task: Task,
+}
+
+/// Physically remove a task (and its entire subtree) from a track.
+/// Returns the deleted task data for undo/recovery, or an error if not found.
+pub fn hard_delete_task(
+    track: &mut Track,
+    task_id: &str,
+    track_id: &str,
+) -> Result<DeletedTask, TaskError> {
+    let location = find_task_location_any_section(track, task_id)
+        .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
+
+    let (task, _) = remove_task_subtree(track, task_id)
+        .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
+
+    Ok(DeletedTask {
+        track_id: track_id.to_string(),
+        section: location.section,
+        parent_id: location.parent_id,
+        position: location.sibling_index,
+        task,
+    })
+}
+
+/// Reinsert a previously deleted task at its original position.
+pub fn reinsert_task(track: &mut Track, deleted: &DeletedTask) -> Result<(), TaskError> {
+    insert_task_subtree(
+        track,
+        deleted.task.clone(),
+        deleted.parent_id.as_deref(),
+        deleted.section,
+        deleted.position,
+    )
+}
+
+/// Count the total number of tasks in a subtree (including the root task itself).
+pub fn count_subtree_size(task: &Task) -> usize {
+    1 + task.subtasks.iter().map(count_subtree_size).sum::<usize>()
 }
 
 // ---------------------------------------------------------------------------
@@ -1731,5 +1805,245 @@ mod tests {
             }
         });
         assert!(has_new_dep);
+    }
+
+    // --- Hard delete ---
+
+    #[test]
+    fn test_hard_delete_top_level() {
+        let mut track = sample_track();
+        let deleted = hard_delete_task(&mut track, "T-001", "test").unwrap();
+        assert_eq!(deleted.section, SectionKind::Backlog);
+        assert!(deleted.parent_id.is_none());
+        assert_eq!(deleted.position, 0);
+        assert_eq!(deleted.task.title, "First task");
+        assert!(find_task_in_track(&track, "T-001").is_none());
+        assert_eq!(track.backlog().len(), 2);
+    }
+
+    #[test]
+    fn test_hard_delete_subtask() {
+        let mut track = sample_track();
+        let deleted = hard_delete_task(&mut track, "T-003.1", "test").unwrap();
+        assert_eq!(deleted.parent_id.as_deref(), Some("T-003"));
+        assert_eq!(deleted.position, 0);
+        let parent = find_task_in_track(&track, "T-003").unwrap();
+        assert_eq!(parent.subtasks.len(), 1);
+    }
+
+    #[test]
+    fn test_hard_delete_with_subtree() {
+        let mut track = sample_track();
+        let deleted = hard_delete_task(&mut track, "T-003", "test").unwrap();
+        assert_eq!(deleted.task.subtasks.len(), 2);
+        assert!(find_task_in_track(&track, "T-003").is_none());
+        assert!(find_task_in_track(&track, "T-003.1").is_none());
+        assert!(find_task_in_track(&track, "T-003.2").is_none());
+    }
+
+    #[test]
+    fn test_reinsert_round_trip() {
+        let mut track = sample_track();
+        let original_count = track.backlog().len();
+        let deleted = hard_delete_task(&mut track, "T-002", "test").unwrap();
+        assert_eq!(track.backlog().len(), original_count - 1);
+
+        reinsert_task(&mut track, &deleted).unwrap();
+        assert_eq!(track.backlog().len(), original_count);
+        assert_eq!(track.backlog()[1].id.as_deref(), Some("T-002"));
+    }
+
+    #[test]
+    fn test_count_subtree_size() {
+        let track = sample_track();
+        let t1 = find_task_in_track(&track, "T-001").unwrap();
+        assert_eq!(count_subtree_size(t1), 1);
+
+        let t3 = find_task_in_track(&track, "T-003").unwrap();
+        assert_eq!(count_subtree_size(t3), 3); // T-003 + T-003.1 + T-003.2
+    }
+
+    #[test]
+    fn test_hard_delete_not_found() {
+        let mut track = sample_track();
+        let result = hard_delete_task(&mut track, "NOPE", "test");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_next_child_number_after_deletion() {
+        use crate::parse::parse_track;
+
+        let track = parse_track(
+            "\
+# Test
+
+## Backlog
+
+- [ ] `T-001` Parent
+  - [ ] `T-001.1` Sub 1
+  - [ ] `T-001.2` Sub 2
+  - [ ] `T-001.3` Sub 3
+  - [ ] `T-001.4` Sub 4
+
+## Done",
+        );
+
+        // With all 4 subtasks, next should be 5
+        let parent = find_task_in_track(&track, "T-001").unwrap();
+        assert_eq!(next_child_number(parent), 5);
+
+        // Delete subtask 3 — next should still be 5, not 4
+        let mut track = track;
+        hard_delete_task(&mut track, "T-001.3", "test").unwrap();
+        let parent = find_task_in_track(&track, "T-001").unwrap();
+        assert_eq!(parent.subtasks.len(), 3);
+        assert_eq!(next_child_number(parent), 5); // must skip over existing .4
+
+        // Delete subtask 4 too — now remaining are [.1, .2], max is 2, so next is 3
+        hard_delete_task(&mut track, "T-001.4", "test").unwrap();
+        let parent = find_task_in_track(&track, "T-001").unwrap();
+        assert_eq!(parent.subtasks.len(), 2);
+        assert_eq!(next_child_number(parent), 3); // .3 and .4 are gone, no collision
+    }
+
+    /// Verify that deleting a subtask from a parent with multiline notes
+    /// produces correct serialization that round-trips through parse.
+    #[test]
+    fn test_delete_subtask_round_trip_with_note() {
+        use crate::parse::{serialize_track, track_parser::parse_track as reparse};
+
+        let source = "\
+# Test Track
+
+## Backlog
+
+- [ ] `P-001` Parent with note
+  - added: 2025-06-01
+  - dep: X-001
+  - note:
+
+    Some note content here
+  - [ ] `P-001.1` First sub
+    - added: 2025-06-01
+  - [ ] `P-001.2` Second sub
+    - added: 2025-06-01
+    - [ ] `P-001.2.1` Deep sub
+      - added: 2025-06-01
+- [ ] `P-002` Sibling task
+  - added: 2025-06-01
+
+## Done";
+
+        let mut track = reparse(source);
+
+        // Delete first subtask
+        let deleted = hard_delete_task(&mut track, "P-001.1", "test").unwrap();
+        assert_eq!(deleted.parent_id.as_deref(), Some("P-001"));
+        assert_eq!(deleted.position, 0);
+
+        // Parent should be marked dirty, siblings unaffected
+        let parent = find_task_in_track(&track, "P-001").unwrap();
+        assert!(parent.dirty);
+        assert_eq!(parent.subtasks.len(), 1);
+        assert_eq!(parent.subtasks[0].id.as_deref(), Some("P-001.2"));
+
+        // Sibling task should still exist and be clean
+        let sibling = find_task_in_track(&track, "P-002").unwrap();
+        assert!(!sibling.dirty);
+
+        // Serialize and re-parse
+        let output = serialize_track(&track);
+        let reparsed = reparse(&output);
+
+        // Verify all expected tasks exist
+        assert!(find_task_in_track(&reparsed, "P-001").is_some());
+        assert!(find_task_in_track(&reparsed, "P-001.1").is_none()); // deleted
+        assert!(find_task_in_track(&reparsed, "P-001.2").is_some());
+        assert!(find_task_in_track(&reparsed, "P-001.2.1").is_some());
+        assert!(find_task_in_track(&reparsed, "P-002").is_some());
+
+        // Verify parent task metadata survived
+        let parent = find_task_in_track(&reparsed, "P-001").unwrap();
+        assert_eq!(parent.subtasks.len(), 1);
+        assert!(parent.metadata.iter().any(|m| m.key() == "note"));
+        assert!(parent.metadata.iter().any(|m| m.key() == "dep"));
+
+        // Verify note content is correct
+        let note = parent
+            .metadata
+            .iter()
+            .find_map(|m| {
+                if let crate::model::task::Metadata::Note(n) = m {
+                    Some(n.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        assert!(note.contains("Some note content here"));
+
+        // Verify second round-trip is stable
+        let output2 = serialize_track(&reparsed);
+        assert_eq!(output, output2);
+    }
+
+    /// Verify that deleting a subtask doesn't affect other tasks in the track.
+    #[test]
+    fn test_delete_subtask_no_collateral_damage() {
+        use crate::parse::{serialize_track, track_parser::parse_track as reparse};
+
+        let source = "\
+# Test Track
+
+## Backlog
+
+- [ ] `A-001` Task A with subtasks
+  - added: 2025-06-01
+  - [ ] `A-001.1` Sub A1
+    - added: 2025-06-01
+  - [ ] `A-001.2` Sub A2
+    - added: 2025-06-01
+  - [ ] `A-001.3` Sub A3
+    - added: 2025-06-01
+- [ ] `A-002` Task B with subtasks
+  - added: 2025-06-01
+  - note:
+    Long note here
+  - [ ] `A-002.1` Sub B1
+    - added: 2025-06-01
+  - [ ] `A-002.2` Sub B2
+    - added: 2025-06-01
+  - [ ] `A-002.3` Sub B3
+    - added: 2025-06-01
+
+## Done";
+
+        let mut track = reparse(source);
+
+        // Delete middle subtask of first task
+        hard_delete_task(&mut track, "A-001.2", "test").unwrap();
+
+        // Serialize and re-parse
+        let output = serialize_track(&track);
+        let reparsed = reparse(&output);
+
+        // A-001 should have 2 subtasks
+        let a001 = find_task_in_track(&reparsed, "A-001").unwrap();
+        assert_eq!(a001.subtasks.len(), 2);
+        assert_eq!(a001.subtasks[0].id.as_deref(), Some("A-001.1"));
+        assert_eq!(a001.subtasks[1].id.as_deref(), Some("A-001.3"));
+
+        // A-002 should be completely untouched — still 3 subtasks
+        let a002 = find_task_in_track(&reparsed, "A-002").unwrap();
+        assert_eq!(a002.subtasks.len(), 3);
+        assert_eq!(a002.subtasks[0].id.as_deref(), Some("A-002.1"));
+        assert_eq!(a002.subtasks[1].id.as_deref(), Some("A-002.2"));
+        assert_eq!(a002.subtasks[2].id.as_deref(), Some("A-002.3"));
+
+        // Verify note on A-002 survived
+        assert!(a002.metadata.iter().any(|m| {
+            matches!(m, crate::model::task::Metadata::Note(n) if n.contains("Long note here"))
+        }));
     }
 }

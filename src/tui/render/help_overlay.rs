@@ -334,10 +334,10 @@ fn build_tracks_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("p".into(), "Push to top".into()),
         HelpEntry::Binding("e".into(), "Edit track name".into()),
         HelpEntry::Binding("s".into(), "Shelve / activate".into()),
-        HelpEntry::Binding("X".into(), "Archive / delete".into()),
-        HelpEntry::Binding("R".into(), "Rename prefix".into()),
         HelpEntry::Binding("m".into(), "Move mode".into()),
         HelpEntry::Binding("C".into(), "Set cc-focus".into()),
+        HelpEntry::Blank,
+        HelpEntry::Binding(">".into(), "More actions...".into()),
     ];
 
     let mut right = views_entries(true);

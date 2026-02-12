@@ -383,9 +383,25 @@ fn assign_subtask_ids(parent: &mut Task, track_id: &str, result: &mut CleanResul
         Some(id) => id.clone(),
         None => return, // Parent must have an ID first
     };
-    for (i, sub) in parent.subtasks.iter_mut().enumerate() {
+
+    // Find the max existing child number to avoid collisions after deletions.
+    // E.g., if subtasks are [.1, .2, .4] (after deleting .3), next should be .5 not .4.
+    let prefix = format!("{}.", parent_id);
+    let mut max_num: usize = 0;
+    for sub in parent.subtasks.iter() {
+        if let Some(ref id) = sub.id
+            && let Some(suffix) = id.strip_prefix(&prefix)
+            && !suffix.contains('.')
+            && let Ok(n) = suffix.parse::<usize>()
+        {
+            max_num = max_num.max(n);
+        }
+    }
+
+    for sub in parent.subtasks.iter_mut() {
         if sub.id.is_none() {
-            let sub_id = format!("{}.{}", parent_id, i + 1);
+            max_num += 1;
+            let sub_id = format!("{}{}", prefix, max_num);
             sub.id = Some(sub_id.clone());
             sub.mark_dirty();
             result.ids_assigned.push(IdAssignment {
@@ -1014,7 +1030,8 @@ mod tests {
             .filter(|a| a.assigned_id.contains('.'))
             .collect();
         assert_eq!(sub_assignments.len(), 1);
-        assert_eq!(sub_assignments[0].assigned_id, "M-001.1");
+        // Max existing child number is 2 (from M-001.2), so next is .3
+        assert_eq!(sub_assignments[0].assigned_id, "M-001.3");
     }
 
     // --- 2. Assign missing dates ---
@@ -1991,5 +2008,44 @@ mod tests {
         assert!(modified.contains(&"main".to_string()));
         assert_eq!(project.tracks[0].1.parked().len(), 1);
         assert!(project.tracks[0].1.backlog().is_empty());
+    }
+
+    #[test]
+    fn test_assign_subtask_ids_after_deletion() {
+        // If subtask .3 was deleted from [.1, .2, .3, .4], and a new subtask
+        // without an ID is added, it should get .5, not .4 (which already exists).
+        let track = parse_track(
+            "\
+# Test
+
+## Backlog
+
+- [ ] `T-001` Parent
+  - [ ] `T-001.1` Sub 1
+  - [ ] `T-001.2` Sub 2
+  - [ ] `T-001.4` Sub 4
+  - [ ] New subtask without ID
+
+## Done",
+        );
+
+        let config = make_config(vec![("main", "T")]);
+        let root = TempDir::new().unwrap();
+        let mut project = Project {
+            config,
+            root: root.path().to_path_buf(),
+            frame_dir: root.path().join("frame"),
+            tracks: vec![("main".to_string(), track)],
+            inbox: None,
+        };
+
+        let modified = ensure_ids_and_dates(&mut project);
+        assert!(modified.contains(&"main".to_string()));
+
+        // The new subtask should get .5 (not .4 which already exists)
+        let parent =
+            crate::ops::task_ops::find_task_in_track(&project.tracks[0].1, "T-001").unwrap();
+        let new_sub = &parent.subtasks[3];
+        assert_eq!(new_sub.id.as_deref(), Some("T-001.5"));
     }
 }

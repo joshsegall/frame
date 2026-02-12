@@ -6,6 +6,21 @@ All notable changes to frame will be documented in this file.
 
 ### Added
 - `Alt+Up`/`Alt+Down` in recovery log overlay to jump between log entries
+- `fr delete <id>...` CLI command for permanently removing tasks (with `--yes` flag to skip confirmation)
+- Task deletion via command palette in Track, Detail, and Recent views (supports bulk deletion with multi-select)
+- Results overlay for displaying structured output from project checks and clean previews
+- "Check project" command palette action — runs `fr check` inline and displays results in the TUI
+- "Preview clean" command palette action — shows what `fr clean` would do without writing changes
+- "Prune recovery" command palette action — prune old recovery log entries with confirmation
+- "Unarchive track" command palette action — restore archived tracks to active state
+- "Import tasks" command palette action — import tasks from a markdown file into the current track
+
+### Fixed
+- Subtask ID collision: adding a new subtask after deleting one could reuse an existing sibling's ID, causing edits/deletions to target the wrong task
+
+### Changed
+- `X` (archive/delete track) and `R` (rename prefix) keybindings removed from Tracks view; these actions are now palette-only ("Archive track", "Delete track", "Rename track prefix" via `>`)
+- Archive and delete are now separate palette actions: "Archive track" appears for non-empty tracks, "Delete track" for empty tracks
 
 ## v0.1.2 - 2026-02-10
 

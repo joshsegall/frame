@@ -71,6 +71,8 @@ pub enum Commands {
     Clean(CleanArgs),
     /// Import tasks from a markdown file
     Import(ImportArgs),
+    /// Permanently delete tasks
+    Delete(DeleteArgs),
     /// Manage project registry
     Projects(ProjectsCmd),
     /// View or manage the recovery log
@@ -312,6 +314,16 @@ pub struct TriageArgs {
     /// Insert after this task ID
     #[arg(long)]
     pub after: Option<String>,
+}
+
+#[derive(Args)]
+pub struct DeleteArgs {
+    /// Task IDs to delete
+    #[arg(required = true)]
+    pub ids: Vec<String>,
+    /// Skip confirmation prompt
+    #[arg(long)]
+    pub yes: bool,
 }
 
 // ---------------------------------------------------------------------------

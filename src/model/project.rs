@@ -5,7 +5,7 @@ use super::inbox::Inbox;
 use super::track::Track;
 
 /// A fully loaded Frame project
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Project {
     /// Root directory of the project (parent of `frame/`)
     pub root: PathBuf,

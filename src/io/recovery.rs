@@ -37,6 +37,7 @@ pub enum RecoveryCategory {
     Parser,
     Conflict,
     Write,
+    Delete,
 }
 
 impl fmt::Display for RecoveryCategory {
@@ -45,6 +46,7 @@ impl fmt::Display for RecoveryCategory {
             RecoveryCategory::Parser => write!(f, "parser"),
             RecoveryCategory::Conflict => write!(f, "conflict"),
             RecoveryCategory::Write => write!(f, "write"),
+            RecoveryCategory::Delete => write!(f, "delete"),
         }
     }
 }
@@ -55,6 +57,7 @@ impl RecoveryCategory {
             "parser" => Some(RecoveryCategory::Parser),
             "conflict" => Some(RecoveryCategory::Conflict),
             "write" => Some(RecoveryCategory::Write),
+            "delete" => Some(RecoveryCategory::Delete),
             _ => None,
         }
     }
@@ -213,6 +216,23 @@ fn try_inline_trim(path: &Path) {
     }
 
     // Lock released on drop
+}
+
+/// Log a task deletion to the recovery log.
+pub fn log_task_deletion(frame_dir: &Path, task_id: &str, track_id: &str, task_source: &str) {
+    log_recovery(
+        frame_dir,
+        RecoveryEntry {
+            timestamp: Utc::now(),
+            category: RecoveryCategory::Delete,
+            description: format!("task {} deleted", task_id),
+            fields: vec![
+                ("Task".to_string(), task_id.to_string()),
+                ("Track".to_string(), track_id.to_string()),
+            ],
+            body: task_source.to_string(),
+        },
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -877,6 +897,10 @@ mod tests {
         assert_eq!(
             RecoveryCategory::parse_category("write"),
             Some(RecoveryCategory::Write)
+        );
+        assert_eq!(
+            RecoveryCategory::parse_category("delete"),
+            Some(RecoveryCategory::Delete)
         );
         assert_eq!(RecoveryCategory::parse_category("unknown"), None);
     }

@@ -13,6 +13,7 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::text::Line;
 
 use regex::Regex;
 
@@ -330,6 +331,11 @@ pub enum ConfirmAction {
     DeleteInboxItem { index: usize },
     ArchiveTrack { track_id: String },
     DeleteTrack { track_id: String },
+    DeleteTask { track_id: String, task_id: String },
+    BulkDeleteTasks { task_ids: Vec<(String, String)> },
+    PruneRecovery,
+    UnarchiveTrack { track_id: String },
+    ImportTasks { track_id: String, file_path: String },
 }
 
 /// The kind of pending section move (grace period)
@@ -710,6 +716,8 @@ pub enum EditTarget {
         track_id: String,
         original_prefix: String,
     },
+    /// Import file path prompt (from palette)
+    ImportFilePath { track_id: String },
 }
 
 /// State for MOVE mode
@@ -954,6 +962,19 @@ pub struct App {
     pub recovery_log_scroll: usize,
     /// Cached recovery log lines for overlay display
     pub recovery_log_lines: Vec<String>,
+    /// Total visual line count after wrapping (set by renderer)
+    pub recovery_log_wrapped_count: usize,
+    /// For each logical line, the visual line offset where it starts (set by renderer)
+    pub recovery_log_line_offsets: Vec<usize>,
+
+    /// Whether the results overlay is visible
+    pub show_results_overlay: bool,
+    /// Title for the results overlay
+    pub results_overlay_title: String,
+    /// Styled lines for the results overlay
+    pub results_overlay_lines: Vec<Line<'static>>,
+    /// Scroll offset for the results overlay
+    pub results_overlay_scroll: usize,
 }
 
 impl App {
@@ -1085,6 +1106,12 @@ impl App {
             show_recovery_log: false,
             recovery_log_scroll: 0,
             recovery_log_lines: Vec::new(),
+            recovery_log_wrapped_count: 0,
+            recovery_log_line_offsets: Vec::new(),
+            show_results_overlay: false,
+            results_overlay_title: String::new(),
+            results_overlay_lines: Vec::new(),
+            results_overlay_scroll: 0,
         }
     }
 

@@ -257,6 +257,21 @@ Change a task's title.
 fr title EFF-014 "New title text"
 ```
 
+### `fr delete ID...`
+
+Permanently delete one or more tasks.
+
+```
+fr delete ID... [--yes]
+```
+
+| Flag | Description |
+|------|-------------|
+| `ID...` | One or more task IDs to delete |
+| `--yes` | Skip confirmation prompt |
+
+Deleted tasks are logged to the recovery log before removal. The entire subtask tree is deleted with the task.
+
 ### `fr mv ID`
 
 Move a task (reorder within track, cross-track, or reparent).

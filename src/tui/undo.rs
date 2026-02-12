@@ -304,6 +304,88 @@ pub fn nav_target_for_op(op: &Operation, is_undo: bool) -> Option<UndoNavTarget>
                 })
             }
         }
+        Operation::TaskDelete {
+            track_id,
+            position,
+            task,
+            ..
+        } => {
+            let task_id = task.id.clone().unwrap_or_default();
+            if is_undo {
+                // Task was restored — navigate to it
+                Some(UndoNavTarget::Task {
+                    track_id: track_id.clone(),
+                    task_id,
+                    detail_region: None,
+                    task_removed: false,
+                    position_hint: None,
+                })
+            } else {
+                // Task was re-deleted
+                Some(UndoNavTarget::Task {
+                    track_id: track_id.clone(),
+                    task_id: String::new(),
+                    detail_region: None,
+                    task_removed: true,
+                    position_hint: Some(*position),
+                })
+            }
+        }
+        Operation::BulkTaskDelete { deletions } => {
+            // Navigate to the first deletion's track/position
+            if let Some((track_id, _section, _parent, position, task)) = deletions.first() {
+                let task_id = task.id.clone().unwrap_or_default();
+                if is_undo {
+                    Some(UndoNavTarget::Task {
+                        track_id: track_id.clone(),
+                        task_id,
+                        detail_region: None,
+                        task_removed: false,
+                        position_hint: None,
+                    })
+                } else {
+                    Some(UndoNavTarget::Task {
+                        track_id: track_id.clone(),
+                        task_id,
+                        detail_region: None,
+                        task_removed: true,
+                        position_hint: Some(*position),
+                    })
+                }
+            } else {
+                None
+            }
+        }
+        Operation::TrackUnarchive { track_id } => Some(UndoNavTarget::TracksView {
+            track_id: track_id.clone(),
+        }),
+        Operation::Import {
+            track_id,
+            position,
+            tasks,
+            ..
+        } => {
+            if is_undo {
+                // Tasks were removed
+                Some(UndoNavTarget::Task {
+                    track_id: track_id.clone(),
+                    task_id: String::new(),
+                    detail_region: None,
+                    task_removed: true,
+                    position_hint: Some(*position),
+                })
+            } else {
+                // Tasks were re-inserted — navigate to first imported task
+                let task_id = tasks.first().and_then(|t| t.id.clone()).unwrap_or_default();
+                Some(UndoNavTarget::Task {
+                    track_id: track_id.clone(),
+                    task_id,
+                    detail_region: None,
+                    task_removed: false,
+                    position_hint: None,
+                })
+            }
+        }
         Operation::Bulk(ops) => {
             // Navigate to the first operation's target
             ops.first().and_then(|op| nav_target_for_op(op, is_undo))
@@ -481,6 +563,27 @@ pub enum Operation {
         new_sibling_index: usize,
         old_depth: usize,
         id_mappings: Vec<(String, String)>, // (old_id, new_id)
+    },
+    /// A task was physically deleted (removed from track)
+    TaskDelete {
+        track_id: String,
+        section: SectionKind,
+        parent_id: Option<String>,
+        position: usize,
+        task: Task,
+    },
+    /// Multiple tasks were physically deleted as a single undo step (positions descending)
+    BulkTaskDelete {
+        deletions: Vec<(String, SectionKind, Option<String>, usize, Task)>,
+    },
+    /// A track was unarchived (moved from archive back to active)
+    TrackUnarchive { track_id: String },
+    /// Tasks were imported from a file
+    Import {
+        track_id: String,
+        position: usize,
+        count: usize,
+        tasks: Vec<Task>,
     },
     /// A batch of operations applied as a single undo step (bulk SELECT mode actions)
     Bulk(Vec<Operation>),
@@ -924,6 +1027,60 @@ fn apply_inverse(
 
             Some(track_id.clone())
         }
+        Operation::TaskDelete {
+            track_id,
+            section,
+            parent_id,
+            position,
+            task,
+        } => {
+            // Undo delete = reinsert the task
+            let track = find_track_mut(tracks, track_id)?;
+            let _ = task_ops::insert_task_subtree(
+                track,
+                task.clone(),
+                parent_id.as_deref(),
+                *section,
+                *position,
+            );
+            Some(track_id.clone())
+        }
+        Operation::BulkTaskDelete { deletions } => {
+            // Undo bulk delete = reinsert all tasks (they're stored in descending position order,
+            // so reinserting in order is correct)
+            let mut result = None;
+            for (track_id, section, parent_id, position, task) in deletions {
+                let track = find_track_mut(tracks, track_id);
+                if let Some(track) = track {
+                    let _ = task_ops::insert_task_subtree(
+                        track,
+                        task.clone(),
+                        parent_id.as_deref(),
+                        *section,
+                        *position,
+                    );
+                    result = Some(track_id.clone());
+                }
+            }
+            result
+        }
+        // TrackUnarchive undo is handled by the caller (needs filesystem access)
+        Operation::TrackUnarchive { .. } => None,
+        Operation::Import {
+            track_id,
+            position,
+            count,
+            ..
+        } => {
+            // Undo import = remove `count` tasks starting at `position` from backlog
+            let track = find_track_mut(tracks, track_id)?;
+            if let Some(tasks) = track.section_tasks_mut(SectionKind::Backlog) {
+                let start = (*position).min(tasks.len());
+                let end = (start + count).min(tasks.len());
+                tasks.drain(start..end);
+            }
+            Some(track_id.clone())
+        }
         Operation::Bulk(ops) => {
             // Apply inverse of each sub-operation in reverse order
             // Bulk operations don't involve inbox, so pass None for each sub-op
@@ -1305,6 +1462,51 @@ fn apply_forward(
                 task_ops::update_dep_references(tracks, old_id, new_id);
             }
 
+            Some(track_id.clone())
+        }
+        Operation::TaskDelete { track_id, task, .. } => {
+            // Redo delete = remove the task again
+            let task_id = match &task.id {
+                Some(id) => id.clone(),
+                None => return None,
+            };
+            let track = find_track_mut(tracks, track_id)?;
+            let _ = task_ops::remove_task_subtree(track, &task_id);
+            Some(track_id.clone())
+        }
+        Operation::BulkTaskDelete { deletions } => {
+            // Redo bulk delete = remove all tasks again (process in order — positions are descending)
+            let mut result = None;
+            for (track_id, _section, _parent, _position, task) in deletions {
+                let task_id = match &task.id {
+                    Some(id) => id.clone(),
+                    None => continue,
+                };
+                let track = find_track_mut(tracks, track_id);
+                if let Some(track) = track {
+                    let _ = task_ops::remove_task_subtree(track, &task_id);
+                    result = Some(track_id.clone());
+                }
+            }
+            result
+        }
+        // TrackUnarchive redo is handled by the caller (needs filesystem access)
+        Operation::TrackUnarchive { .. } => None,
+        Operation::Import {
+            track_id,
+            position,
+            tasks,
+            ..
+        } => {
+            // Redo import = reinsert the imported tasks
+            let track = find_track_mut(tracks, track_id)?;
+            if let Some(backlog) = track.section_tasks_mut(SectionKind::Backlog) {
+                let start = (*position).min(backlog.len());
+                for (i, task) in tasks.iter().enumerate() {
+                    let idx = (start + i).min(backlog.len());
+                    backlog.insert(idx, task.clone());
+                }
+            }
             Some(track_id.clone())
         }
         Operation::Bulk(ops) => {

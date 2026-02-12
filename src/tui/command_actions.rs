@@ -192,9 +192,83 @@ pub fn available_actions(app: &App) -> Vec<PaletteAction> {
     let ctx = current_context(&app.view);
     let mut actions: Vec<PaletteAction> = Vec::new();
 
-    for action in static_actions() {
+    for mut action in static_actions() {
         if action_matches_context(&action, ctx) {
+            // Dynamic label for delete when multiple tasks are selected
+            if action.id == "delete_task" && !app.selection.is_empty() {
+                action.label = format!("Delete {} tasks", app.selection.len());
+            }
             actions.push(action);
+        }
+    }
+
+    // Dynamic: "Unarchive track" only when cursor is on an archived track in TracksView
+    if ctx == ViewContext::TracksView {
+        // Build ordered list same as tracks_view render order
+        let mut ordered: Vec<&str> = Vec::new();
+        for tc in &app.project.config.tracks {
+            if tc.state == "active" {
+                ordered.push(&tc.id);
+            }
+        }
+        for tc in &app.project.config.tracks {
+            if tc.state == "shelved" {
+                ordered.push(&tc.id);
+            }
+        }
+        for tc in &app.project.config.tracks {
+            if tc.state == "archived" {
+                ordered.push(&tc.id);
+            }
+        }
+        if let Some(cursor_track_id) = ordered.get(app.tracks_cursor) {
+            let tc_state = app
+                .project
+                .config
+                .tracks
+                .iter()
+                .find(|tc| tc.id == *cursor_track_id)
+                .map(|tc| tc.state.as_str());
+
+            match tc_state {
+                Some("archived") => {
+                    actions.push(PaletteAction {
+                        id: "unarchive_track",
+                        label: "Unarchive track".into(),
+                        shortcut: None,
+                        contexts: &[ViewContext::TracksView],
+                        category: ActionCategory::Manage,
+                    });
+                }
+                Some("active") | Some("shelved") => {
+                    // Check if track is empty → offer delete, else → offer archive
+                    if let Some(track) = App::find_track_in_project(&app.project, cursor_track_id) {
+                        let is_empty = crate::ops::track_ops::is_track_empty_by_id(
+                            &app.project.frame_dir,
+                            track,
+                            cursor_track_id,
+                        );
+                        if is_empty {
+                            actions.push(PaletteAction {
+                                id: "delete_track",
+                                label: "Delete track".into(),
+                                shortcut: None,
+                                contexts: &[ViewContext::TracksView],
+                                category: ActionCategory::Manage,
+                            });
+                        } else {
+                            actions.push(PaletteAction {
+                                id: "archive_track",
+                                label: "Archive track".into(),
+                                shortcut: None,
+                                contexts: &[ViewContext::TracksView],
+                                category: ActionCategory::Manage,
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -712,13 +786,6 @@ fn static_actions() -> Vec<PaletteAction> {
             category: ActionCategory::Manage,
         },
         PaletteAction {
-            id: "archive_delete",
-            label: "Archive / delete".into(),
-            shortcut: Some("X"),
-            contexts: &[ViewContext::TracksView],
-            category: ActionCategory::Manage,
-        },
-        PaletteAction {
             id: "reorder_track",
             label: "Reorder track".into(),
             shortcut: Some("m"),
@@ -727,14 +794,53 @@ fn static_actions() -> Vec<PaletteAction> {
         },
         PaletteAction {
             id: "rename_prefix",
-            label: "Rename prefix".into(),
-            shortcut: Some("R"),
+            label: "Rename track prefix".into(),
+            shortcut: None,
             contexts: &[ViewContext::TracksView],
             category: ActionCategory::Manage,
         },
         PaletteAction {
             id: "view_recovery_log",
             label: "View recovery log".into(),
+            shortcut: None,
+            contexts: &[ViewContext::Global],
+            category: ActionCategory::Manage,
+        },
+        PaletteAction {
+            id: "delete_task",
+            label: "Delete task".into(),
+            shortcut: None,
+            contexts: &[
+                ViewContext::TrackView,
+                ViewContext::DetailView,
+                ViewContext::RecentView,
+            ],
+            category: ActionCategory::Manage,
+        },
+        PaletteAction {
+            id: "prune_recovery",
+            label: "Prune recovery log".into(),
+            shortcut: None,
+            contexts: &[ViewContext::Global],
+            category: ActionCategory::Manage,
+        },
+        PaletteAction {
+            id: "import_tasks",
+            label: "Import tasks from file".into(),
+            shortcut: None,
+            contexts: &[ViewContext::TrackView],
+            category: ActionCategory::Edit,
+        },
+        PaletteAction {
+            id: "check_project",
+            label: "Check project".into(),
+            shortcut: None,
+            contexts: &[ViewContext::Global],
+            category: ActionCategory::Manage,
+        },
+        PaletteAction {
+            id: "preview_clean",
+            label: "Preview clean".into(),
             shortcut: None,
             contexts: &[ViewContext::Global],
             category: ActionCategory::Manage,

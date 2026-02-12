@@ -179,8 +179,6 @@ With selection active (Select mode):
 | `p` | Add new track (top of active list) |
 | `e` | Edit track name |
 | `s` | Toggle shelve/activate |
-| `X` | Archive or delete track (with confirmation) |
-| `R` | Rename track prefix |
 | `C` | Set cc-focus |
 | `m` | Reorder track (enter move mode) |
 
@@ -374,6 +372,15 @@ Some actions are **palette-only** (no direct key binding):
 | Mark done (#duplicate) | Track | Add `#duplicate` tag and mark task done |
 | Collapse all | Track | Collapse all expanded tasks |
 | Expand all | Track | Expand all tasks with children |
+| Delete task | Track, Detail, Recent | Permanently delete a task (supports bulk with multi-select) |
+| Import tasks | Track | Import tasks from a markdown file into the current track |
+| Archive track | Tracks | Archive a non-empty track |
+| Delete track | Tracks | Delete an empty track |
+| Unarchive track | Tracks | Restore an archived track to active |
+| Rename track prefix | Tracks | Rename a track's ID prefix |
+| Check project | Global | Run project integrity check and display results |
+| Preview clean | Global | Preview what `fr clean` would do |
+| Prune recovery | Global | Remove old entries from the recovery log |
 | View recovery log | Global | Open recovery log overlay showing recent entries |
 
 ## Overlays
@@ -391,6 +398,15 @@ Shows the most recent recovery log entries. Open from the command palette ("View
 - `g`/`G` — jump to top/bottom
 - `PageUp`/`PageDown` — scroll by page
 - `Esc` or `q` — close
+
+### Results Overlay
+
+Displays structured results from "Check project" and "Preview clean" palette actions. Open from the command palette.
+
+- `j`/`k` or `Up`/`Down` — scroll
+- `g`/`G` — jump to top/bottom
+- `PageUp`/`PageDown` — scroll by page
+- `Esc` — close
 
 ### Tag Color Editor (`T`)
 
@@ -433,7 +449,7 @@ Switch between registered frame projects without leaving the TUI. If `fr` is lau
 
 Projects are listed with their name and abbreviated path. The current project is highlighted. Missing projects (directory no longer exists) are shown dimmed with "(not found)".
 
-### Prefix Rename (`R` in Tracks View)
+### Prefix Rename (via Command Palette)
 
 3-step flow for renaming a track's ID prefix (e.g., `EFF` to `FX`):
 

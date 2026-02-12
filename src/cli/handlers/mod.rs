@@ -87,6 +87,7 @@ pub fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // Maintenance
             Commands::Clean(args) => cmd_clean(args),
             Commands::Import(args) => cmd_import(args),
+            Commands::Delete(args) => cmd_delete(args),
 
             // Recovery
             Commands::Recovery(args) => cmd_recovery(args, json),
@@ -2245,6 +2246,79 @@ fn cmd_import(args: ImportArgs) -> Result<(), Box<dyn std::error::Error>> {
     );
     for id in &result.assigned_ids {
         println!("  {}", id);
+    }
+    Ok(())
+}
+
+fn cmd_delete(args: DeleteArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::io::recovery;
+
+    let mut project = load_project_cwd()?;
+    let _lock = FileLock::acquire_default(&project.frame_dir)?;
+
+    // Resolve each ID to its track
+    let mut to_delete: Vec<(String, String)> = Vec::new(); // (track_id, task_id)
+    for task_id in &args.ids {
+        let track_id = find_task_track(&project, task_id)
+            .ok_or_else(|| format!("task not found: {}", task_id))?
+            .to_string();
+        to_delete.push((track_id, task_id.clone()));
+    }
+
+    // Show what will be deleted
+    if !args.yes {
+        for (track_id, task_id) in &to_delete {
+            let track = find_track(&project, track_id)
+                .ok_or_else(|| format!("track not found: {}", track_id))?;
+            let task = task_ops::find_task_in_track(track, task_id)
+                .ok_or_else(|| format!("task not found: {}", task_id))?;
+            let subtree_size = task_ops::count_subtree_size(task);
+            if subtree_size > 1 {
+                eprintln!(
+                    "  [{}] {} {} ({} subtasks)",
+                    track_id,
+                    task_id,
+                    task.title,
+                    subtree_size - 1
+                );
+            } else {
+                eprintln!("  [{}] {} {}", track_id, task_id, task.title);
+            }
+        }
+        eprint!("Delete {} task(s)? [y/n] ", to_delete.len());
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            eprintln!("cancelled");
+            return Ok(());
+        }
+    }
+
+    // Delete each task
+    let mut tracks_to_save = std::collections::HashSet::new();
+    for (track_id, task_id) in &to_delete {
+        // Capture source text for recovery before deletion
+        let track = find_track(&project, track_id)
+            .ok_or_else(|| format!("track not found: {}", track_id))?;
+        let task = task_ops::find_task_in_track(track, task_id)
+            .ok_or_else(|| format!("task not found: {}", task_id))?;
+        let source_text = crate::parse::serialize_tasks(std::slice::from_ref(task), 0).join("\n");
+
+        let track = find_track_mut(&mut project, track_id)
+            .ok_or_else(|| format!("track not found: {}", track_id))?;
+        task_ops::hard_delete_task(track, task_id, track_id)?;
+
+        recovery::log_task_deletion(&project.frame_dir, task_id, track_id, &source_text);
+        tracks_to_save.insert(track_id.clone());
+    }
+
+    // Save affected tracks
+    for track_id in &tracks_to_save {
+        save_track(&project, track_id)?;
+    }
+
+    for (_, task_id) in &to_delete {
+        println!("deleted {}", task_id);
     }
     Ok(())
 }
