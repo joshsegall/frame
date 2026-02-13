@@ -72,6 +72,7 @@ pub fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             Commands::Push(args) => cmd_push(args),
             Commands::Sub(args) => cmd_sub(args),
             Commands::State(args) => cmd_state(args),
+            Commands::Start(args) => cmd_start(args),
             Commands::Tag(args) => cmd_tag(args),
             Commands::Dep(args) => cmd_dep(args),
             Commands::Note(args) => cmd_note(args),
@@ -1227,6 +1228,13 @@ fn cmd_inbox_add(args: InboxCmd) -> Result<(), Box<dyn std::error::Error>> {
     project_io::save_inbox(&project.frame_dir, inbox)?;
     println!("added to inbox");
     Ok(())
+}
+
+fn cmd_start(args: StartArgs) -> Result<(), Box<dyn std::error::Error>> {
+    cmd_state(StateArgs {
+        id: args.id,
+        state: "active".to_string(),
+    })
 }
 
 fn cmd_state(args: StateArgs) -> Result<(), Box<dyn std::error::Error>> {

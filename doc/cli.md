@@ -205,6 +205,14 @@ fr state EFF-014 active
 
 States: `todo`, `active`, `blocked`, `done`, `parked`. Setting a top-level Backlog task to `done` moves it to the Done section immediately.
 
+### `fr start ID`
+
+Start a task (shortcut for `fr state ID active`).
+
+```
+fr start EFF-014
+```
+
 ### `fr tag ID ACTION TAG`
 
 Add or remove a tag.
