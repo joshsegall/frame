@@ -247,6 +247,7 @@ With selection active (Select mode):
 | `x` | Set done |
 | `b` | Toggle blocked |
 | `~` | Toggle parked |
+| `c` | Toggle cc tag |
 | `M` | Cross-track move |
 
 **Other:**

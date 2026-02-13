@@ -3395,9 +3395,22 @@ fn task_state_action(app: &mut App, action: StateAction) {
 
 /// Toggle the `cc` tag on the task under the cursor (track view only).
 fn toggle_cc_tag(app: &mut App) {
-    let (track_id, task_id, _) = match app.cursor_task_id() {
-        Some(info) => info,
-        None => return,
+    let (track_id, task_id) = if let View::Detail { track_id, task_id } = &app.view {
+        let subtask_id = app.detail_state.as_ref().and_then(|ds| {
+            if ds.region == DetailRegion::Subtasks {
+                ds.flat_subtask_ids.get(ds.subtask_cursor).cloned()
+            } else {
+                None
+            }
+        });
+        (
+            track_id.clone(),
+            subtask_id.unwrap_or_else(|| task_id.clone()),
+        )
+    } else if let Some((track_id, task_id, _)) = app.cursor_task_id() {
+        (track_id, task_id)
+    } else {
+        return;
     };
 
     // Check if task already has cc tag (immutable borrow)

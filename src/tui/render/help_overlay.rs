@@ -300,6 +300,7 @@ fn build_detail_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("o".into(), "Set todo".into()),
         HelpEntry::Binding("b".into(), "Set blocked".into()),
         HelpEntry::Binding("~".into(), "Set parked".into()),
+        HelpEntry::Binding("c".into(), "Toggle cc tag".into()),
         HelpEntry::Binding("M".into(), "Move to track".into()),
     ];
     left.push(HelpEntry::Blank);

@@ -16,6 +16,7 @@ All notable changes to frame will be documented in this file.
 - "Prune recovery" command palette action — prune old recovery log entries with confirmation
 - "Unarchive track" command palette action — restore archived tracks to active state
 - "Import tasks" command palette action — import tasks from a markdown file into the current track
+- `c` key binding in Detail view to toggle the `#cc` tag (also works on subtasks when cursor is in the Subtasks region)
 
 ### Fixed
 - Subtask ID collision: adding a new subtask after deleting one could reuse an existing sibling's ID, causing edits/deletions to target the wrong task
