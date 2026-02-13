@@ -1,6 +1,6 @@
 [package]
 name = "frame"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 description = "A markdown task tracker with a terminal UI for humans and a CLI for agents"
 license = "Apache-2.0"

@@ -2,7 +2,7 @@
 
 All notable changes to frame will be documented in this file.
 
-## [Unreleased]
+## v0.1.3 - 2026-02-12
 
 ### Added
 - `fr start <ID>` CLI command as a shortcut for `fr state <ID> active`
