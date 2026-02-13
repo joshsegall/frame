@@ -6,6 +6,7 @@ All notable changes to frame will be documented in this file.
 
 ### Added
 - `fr start <ID>` CLI command as a shortcut for `fr state <ID> active`
+- `fr done <ID>` CLI command as a shortcut for `fr state <ID> done`
 - `Alt+Up`/`Alt+Down` in recovery log overlay to jump between log entries
 - `fr delete <id>...` CLI command for permanently removing tasks (with `--yes` flag to skip confirmation)
 - Task deletion via command palette in Track, Detail, and Recent views (supports bulk deletion with multi-select)

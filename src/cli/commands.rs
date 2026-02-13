@@ -51,6 +51,8 @@ pub enum Commands {
     State(StateArgs),
     /// Start a task (shortcut for state <ID> active)
     Start(StartArgs),
+    /// Mark a task done (shortcut for state <ID> done)
+    Done(DoneArgs),
     /// Add or remove tags
     Tag(TagArgs),
     /// Add or remove dependencies
@@ -224,6 +226,12 @@ pub struct StateArgs {
 
 #[derive(Args)]
 pub struct StartArgs {
+    /// Task ID
+    pub id: String,
+}
+
+#[derive(Args)]
+pub struct DoneArgs {
     /// Task ID
     pub id: String,
 }

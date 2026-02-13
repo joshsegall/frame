@@ -73,6 +73,7 @@ pub fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             Commands::Sub(args) => cmd_sub(args),
             Commands::State(args) => cmd_state(args),
             Commands::Start(args) => cmd_start(args),
+            Commands::Done(args) => cmd_done(args),
             Commands::Tag(args) => cmd_tag(args),
             Commands::Dep(args) => cmd_dep(args),
             Commands::Note(args) => cmd_note(args),
@@ -1234,6 +1235,13 @@ fn cmd_start(args: StartArgs) -> Result<(), Box<dyn std::error::Error>> {
     cmd_state(StateArgs {
         id: args.id,
         state: "active".to_string(),
+    })
+}
+
+fn cmd_done(args: DoneArgs) -> Result<(), Box<dyn std::error::Error>> {
+    cmd_state(StateArgs {
+        id: args.id,
+        state: "done".to_string(),
     })
 }
 

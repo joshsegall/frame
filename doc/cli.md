@@ -213,6 +213,14 @@ Start a task (shortcut for `fr state ID active`).
 fr start EFF-014
 ```
 
+### `fr done ID`
+
+Mark a task done (shortcut for `fr state ID done`).
+
+```
+fr done EFF-014
+```
+
 ### `fr tag ID ACTION TAG`
 
 Add or remove a tag.
