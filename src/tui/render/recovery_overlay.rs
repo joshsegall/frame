@@ -121,3 +121,24 @@ pub fn render_recovery_overlay(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::render::test_helpers::*;
+    use insta::assert_snapshot;
+
+    #[test]
+    fn recovery_log_visible() {
+        let mut app = app_with_track(SIMPLE_TRACK_MD);
+        app.show_recovery_log = true;
+        app.recovery_log_lines = vec![
+            "Recovery entry 1: restored track.md".into(),
+            "Recovery entry 2: restored inbox.md".into(),
+        ];
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_recovery_overlay(frame, &mut app, area);
+        });
+        assert_snapshot!(output);
+    }
+}

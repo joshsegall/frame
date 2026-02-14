@@ -1,0 +1,9 @@
+---
+source: src/tui/render/recent_view.rs
+expression: output
+---
+ 2025-05-14
+▎  [x] T-1 Finished task                                                   Test
+
+ 2025-05-12
+   [x] T-2 Another done                                                    Test

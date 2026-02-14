@@ -1,0 +1,6 @@
+---
+source: src/tui/render/tab_bar.rs
+expression: output
+---
+ ▶  Alpha │ Beta │ ▶ │ * │ ✓ │                                             Test
+──────────┴──────┴───┴───┴───┴──────────────────────────────────────────────────

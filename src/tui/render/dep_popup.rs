@@ -314,3 +314,49 @@ fn pad_to_width<'a>(spans: &mut Vec<Span<'a>>, target_width: usize, pad_style: S
         ));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::app::{DepPopupEntry, DepPopupState};
+    use crate::tui::render::test_helpers::*;
+    use insta::assert_snapshot;
+    use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn dep_popup_visible() {
+        let mut app = app_with_track(SIMPLE_TRACK_MD);
+        app.dep_popup = Some(DepPopupState {
+            root_task_id: "T-1".into(),
+            root_track_id: "test".into(),
+            entries: vec![
+                DepPopupEntry::SectionHeader {
+                    label: "Blocked by",
+                },
+                DepPopupEntry::Nothing,
+                DepPopupEntry::SectionHeader { label: "Blocking" },
+                DepPopupEntry::Task {
+                    task_id: "T-2".into(),
+                    title: "Second task".into(),
+                    state: Some(crate::model::TaskState::Active),
+                    track_id: Some("test".into()),
+                    depth: 0,
+                    has_children: false,
+                    is_expanded: false,
+                    is_circular: false,
+                    is_dangling: false,
+                    is_upstream: false,
+                },
+            ],
+            cursor: 3,
+            scroll_offset: 0,
+            expanded: HashSet::new(),
+            visited: HashSet::new(),
+            inverse_deps: HashMap::new(),
+        });
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_dep_popup(frame, &app, area);
+        });
+        assert_snapshot!(output);
+    }
+}

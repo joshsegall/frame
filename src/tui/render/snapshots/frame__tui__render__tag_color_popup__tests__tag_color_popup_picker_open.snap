@@ -1,0 +1,19 @@
+---
+source: src/tui/render/tag_color_popup.rs
+expression: output
+---
+
+
+
+
+
+
+
+
+                   ┌ Tag Colors ────────────────────────────┐
+                   │                                        │
+                   │ ▶ core    ■ ■ ■ ■ ■ ■ ■ ■ ■ ■  ×       │
+                   │   design    (none)                     │
+                   │                                        │
+                   │←→ pick  Enter ✓  Bksp clear  Esc cancel│
+                   └────────────────────────────────────────┘

@@ -1,0 +1,22 @@
+---
+source: src/tui/render/conflict_popup.rs
+expression: output
+---
+
+
+
+
+
+
+                ┌──────────────────────────────────────────────┐
+                │ External Change Conflict                     │
+                │                                              │
+                │ The task you were editing was modified       │
+                │ externally.                                  │
+                │ Your unsaved text is shown below:            │
+                │                                              │
+                │   “Unsaved edit content here”                │
+                │                                              │
+                │ Press Esc to dismiss. Re-enter edit mode (e) │
+                │ to retype.                                   │
+                └──────────────────────────────────────────────┘

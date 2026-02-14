@@ -1,0 +1,21 @@
+---
+source: src/tui/render/dep_popup.rs
+expression: output
+---
+
+
+
+
+
+
+
+       ┌ Dependencies: T-1 ─────────────────────────────────────────────┐
+       │                                                                │
+       │  Blocked by                                                    │
+       │    (nothing)                                                   │
+       │                                                                │
+       │  Blocking                                                      │
+       │      [>] T-2  Second task                                 Test │
+       │                                                                │
+       │               ←→ expand   Enter jump   Esc close               │
+       └────────────────────────────────────────────────────────────────┘

@@ -939,3 +939,81 @@ fn truncate_spans(spans: &mut Vec<Span<'_>>, max_width: usize) {
 
     spans.truncate(truncate_at);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::render::test_helpers::*;
+    use insta::assert_snapshot;
+
+    #[test]
+    fn empty_track() {
+        let mut app = app_with_track("# Empty\n\n## Backlog\n\n## Done\n");
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_track_view(frame, &mut app, area);
+        });
+        assert_snapshot!(output);
+    }
+
+    #[test]
+    fn simple_backlog() {
+        let mut app = app_with_track(SIMPLE_TRACK_MD);
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_track_view(frame, &mut app, area);
+        });
+        assert_snapshot!(output);
+    }
+
+    #[test]
+    fn track_with_subtasks() {
+        let md = "\
+# Test
+
+## Backlog
+
+- [ ] `T-1` Parent task
+  - [ ] `T-1.1` Child one
+  - [>] `T-1.2` Child two
+- [ ] `T-2` Another task
+
+## Done
+";
+        let mut app = app_with_track(md);
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_track_view(frame, &mut app, area);
+        });
+        assert_snapshot!(output);
+    }
+
+    #[test]
+    fn complex_fixture() {
+        let mut app = app_with_fixture();
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_track_view(frame, &mut app, area);
+        });
+        assert_snapshot!(output);
+    }
+
+    #[test]
+    fn track_with_done_tasks() {
+        let md = "\
+# Test
+
+## Backlog
+
+- [ ] `T-1` A todo task
+
+## Done
+
+- [x] `T-2` Finished task
+  - resolved: 2025-05-14
+- [x] `T-3` Another done
+  - resolved: 2025-05-12
+";
+        let mut app = app_with_track(md);
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_track_view(frame, &mut app, area);
+        });
+        assert_snapshot!(output);
+    }
+}

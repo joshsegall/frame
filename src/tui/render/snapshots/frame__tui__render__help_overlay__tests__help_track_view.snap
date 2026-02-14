@@ -1,0 +1,27 @@
+---
+source: src/tui/render/help_overlay.rs
+expression: output
+---
+
+   ┌───────────────────────────────────────────────────────────────────────┐
+   │ Key Bindings                                                          │
+   │                                                                       │
+   │ Navigation                           Edit                             │
+   │ ▲▼/jk      Move up/down              e          Edit title            │
+   │ ◀/h        Collapse / parent         t          Edit tags             │
+   │ ▶/l        Expand / child            a          Add task (bottom)     │
+   │ g/G        Top / bottom              =          Append to group       │
+   │ Enter      Open detail               -          Insert after cursor   │
+   │ Esc        Back / close              p          Push to top           │
+   │                                      A          Add subtask           │
+   │ Task State                           m          Move mode             │
+   │ Space      Cycle state               M          Move to track         │
+   │ o          Set todo                                                   │
+   │ x          Mark done                 Select (v)                       │
+   │ b          Set blocked               v          Toggle select         │
+   │ ~          Set parked                V          Range select          │
+   │ c          Toggle cc tag             Ctrl+A     Select all            │
+   │                                      N          Select none           │
+   │ Filter (f+key)                       x/b/o/~    Bulk state            │
+   │ fa         Active only               t/d/m/M    Bulk tag/dep/move     │
+   └ ▼ ────────────────────────────────────────────────────────────────────┘

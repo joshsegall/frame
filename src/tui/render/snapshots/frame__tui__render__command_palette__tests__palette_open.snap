@@ -1,0 +1,23 @@
+---
+source: src/tui/render/command_palette.rs
+expression: output
+---
+
+
+
+         ┌────────────────────────────────────────────────────────────┐
+         │ > ▌                                                        │
+         │────────────────────────────────────────────────────────────│
+         │ ▶ Add subtask                                             A│
+         │   Add task (bottom)                                       a│
+         │   Append task to end of group                             =│
+         │   Check project                                            │
+         │   Clear all filters                                      ff│
+         │   Clear state filter                                f Space│
+         │   Collapse all                                             │
+         │   Cycle state                                         Space│
+         │   Delete task                                              │
+         │   Edit tag colors                                         T│
+         │                                                            │
+         │   55 of 55 actions                                         │
+         └────────────────────────────────────────────────────────────┘

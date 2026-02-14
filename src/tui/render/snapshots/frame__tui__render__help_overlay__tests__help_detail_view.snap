@@ -1,0 +1,27 @@
+---
+source: src/tui/render/help_overlay.rs
+expression: output
+---
+
+   ┌───────────────────────────────────────────────────────────────────────┐
+   │ Key Bindings                                                          │
+   │                                                                       │
+   │ Navigation                           Edit                             │
+   │ ▲▼/jk      Move between regions      e/Enter    Edit region / open sub│
+   │ Tab/S-Tab  Next / prev region        t          Edit tags             │
+   │ g/G        Top / bottom              @          Edit refs             │
+   │ Esc        Back / close              d          Edit deps             │
+   │                                      n/N        Edit note             │
+   │ Task State                           w/Alt+w    Toggle note wrap      │
+   │ Space      Cycle state                                                │
+   │ x          Mark done                 Other                            │
+   │ o          Set todo                  /          Search                │
+   │ b          Set blocked               >          Command palette       │
+   │ ~          Set parked                J          Jump to task          │
+   │ c          Toggle cc tag             D          Show deps             │
+   │ M          Move to track             .          Repeat last action    │
+   │                                      T          Tag colors            │
+   │ Views                                P          Projects              │
+   │ 1-9        Track N                   z/u        Undo                  │
+   │ 0/`        Tracks overview           Z          Redo                  │
+   └ ▼ ────────────────────────────────────────────────────────────────────┘

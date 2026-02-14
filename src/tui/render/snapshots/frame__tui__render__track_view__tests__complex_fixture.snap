@@ -1,0 +1,15 @@
+---
+source: src/tui/render/track_view.rs
+expression: output
+---
+▎▼[>] EFF-014 Implement effect inference for closures  #core
+    ├ [ ] .1 Add effect variables to closure types
+    ├▶[>] .2 Unify effect rows during inference  #cc
+    └ [ ] .3 Test with nested closures
+  [ ] EFF-015 Effect handler optimization pass  #core
+  [-] EFF-012 Effect-aware dead code elimination  #core
+  [ ] EFF-016 Error messages for effect mismatches  #core
+  [ ] EFF-017 Research: algebraic effect composition  #research
+  [ ] EFF-018 Design doc: effect aliases  #design
+ ── Parked ────────────────────────────────────────────────────────────────────
+  [~] EFF-020 Higher-order effect handlers  #research

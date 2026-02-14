@@ -1,0 +1,15 @@
+---
+source: src/tui/render/detail_view.rs
+expression: output
+---
+
+   test > T-1
+
+ ▎ [ ] T-1 First task
+
+   tags: #core
+   added: 2025-05-10
+   dep: T-2
+
+   note:
+ 1 Some notes about this task.

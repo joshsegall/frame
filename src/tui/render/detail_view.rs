@@ -1745,3 +1745,79 @@ fn find_task_state_across_tracks(app: &App, task_id: &str) -> Option<TaskState> 
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::render::test_helpers::*;
+    use insta::assert_snapshot;
+
+    #[test]
+    fn basic_task_detail() {
+        let md = "\
+# Test
+
+## Backlog
+
+- [ ] `T-1` First task #core
+  - added: 2025-05-10
+  - dep: T-2
+  - note: Some notes about this task.
+
+## Done
+";
+        let mut app = app_in_detail_view(md, "T-1");
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_detail_view(frame, &mut app, area);
+        });
+        assert_snapshot!(output);
+    }
+
+    #[test]
+    fn minimal_task_detail() {
+        let md = "\
+# Test
+
+## Backlog
+
+- [ ] `T-1` Simple task
+
+## Done
+";
+        let mut app = app_in_detail_view(md, "T-1");
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_detail_view(frame, &mut app, area);
+        });
+        assert_snapshot!(output);
+    }
+
+    #[test]
+    fn task_with_subtasks() {
+        let md = "\
+# Test
+
+## Backlog
+
+- [ ] `T-1` Parent task #core
+  - [ ] `T-1.1` Child one
+  - [>] `T-1.2` Child two
+
+## Done
+";
+        let mut app = app_in_detail_view(md, "T-1");
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_detail_view(frame, &mut app, area);
+        });
+        assert_snapshot!(output);
+    }
+
+    #[test]
+    fn task_not_found() {
+        let md = "# Test\n\n## Backlog\n\n## Done\n";
+        let mut app = app_in_detail_view(md, "NONEXISTENT");
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_detail_view(frame, &mut app, area);
+        });
+        assert_snapshot!(output);
+    }
+}

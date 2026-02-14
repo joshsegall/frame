@@ -1,0 +1,28 @@
+---
+source: src/tui/render/mod.rs
+expression: output
+---
+ ▶  Stub │ ▶ │ *3 │ ✓ │                                                    Test
+─────────┴───┴────┴───┴─────────────────────────────────────────────────────────
+▎ 1  First inbox item  #bug
+      Some body text here.
+
+  2  Second item  #design
+
+  3  Third item
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                        ? help    > commands    QQ quit

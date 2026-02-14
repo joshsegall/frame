@@ -1,0 +1,10 @@
+---
+source: src/tui/render/detail_view.rs
+expression: output
+---
+
+   test > T-1
+
+ ▎ [ ] T-1 Simple task
+
+   tags: (none)

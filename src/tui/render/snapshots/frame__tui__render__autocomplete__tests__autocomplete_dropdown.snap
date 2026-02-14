@@ -1,0 +1,14 @@
+---
+source: src/tui/render/autocomplete.rs
+expression: output
+---
+
+
+
+
+
+
+      ┌──────────┐
+      │ ▶ core   │
+      │   cc     │
+      └──────────┘

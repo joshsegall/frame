@@ -290,3 +290,50 @@ fn pad_to_width<'a>(spans: &mut Vec<Span<'a>>, target_width: usize, pad_style: S
         ));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::app::TagColorPopupState;
+    use crate::tui::render::test_helpers::*;
+    use insta::assert_snapshot;
+
+    #[test]
+    fn tag_color_popup_visible() {
+        let mut app = app_with_track(SIMPLE_TRACK_MD);
+        app.tag_color_popup = Some(TagColorPopupState {
+            tags: vec![
+                ("core".into(), Some("#FF0000".into())),
+                ("design".into(), None),
+                ("bug".into(), Some("#00FF00".into())),
+            ],
+            cursor: 0,
+            scroll_offset: 0,
+            picker_open: false,
+            picker_cursor: 0,
+        });
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_tag_color_popup(frame, &app, area);
+        });
+        assert_snapshot!(output);
+    }
+
+    #[test]
+    fn tag_color_popup_picker_open() {
+        let mut app = app_with_track(SIMPLE_TRACK_MD);
+        app.tag_color_popup = Some(TagColorPopupState {
+            tags: vec![
+                ("core".into(), Some("#FF0000".into())),
+                ("design".into(), None),
+            ],
+            cursor: 0,
+            scroll_offset: 0,
+            picker_open: true,
+            picker_cursor: 2,
+        });
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_tag_color_popup(frame, &app, area);
+        });
+        assert_snapshot!(output);
+    }
+}

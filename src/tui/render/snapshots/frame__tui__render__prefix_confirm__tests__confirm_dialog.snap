@@ -1,0 +1,22 @@
+---
+source: src/tui/render/prefix_confirm.rs
+expression: output
+---
+
+
+
+
+
+               ┌────────────────────────────────────────────────┐
+               │ Rename Prefix                                  │
+               │                                                │
+               │  T → TST                                       │
+               │                                                │
+               │  This will rename:                             │
+               │    4 task IDs in Test Track                    │
+               │    2 dep references across 1 other track       │
+               │                                                │
+               │  This cannot be undone. Use git to revert.     │
+               │                                                │
+               │  Enter confirm  Esc cancel                     │
+               └────────────────────────────────────────────────┘

@@ -266,3 +266,42 @@ fn pad_to_width<'a>(spans: &mut Vec<Span<'a>>, target_width: usize, pad_style: S
         ));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::io::registry::ProjectEntry;
+    use crate::tui::app::ProjectPickerState;
+    use crate::tui::render::test_helpers::*;
+    use insta::assert_snapshot;
+
+    #[test]
+    fn picker_with_entries() {
+        let mut app = app_with_track(SIMPLE_TRACK_MD);
+        app.project_picker = Some(ProjectPickerState {
+            entries: vec![
+                ProjectEntry {
+                    name: "Project Alpha".into(),
+                    path: "/home/user/alpha".into(),
+                    last_accessed_tui: None,
+                    last_accessed_cli: None,
+                },
+                ProjectEntry {
+                    name: "Project Beta".into(),
+                    path: "/home/user/beta".into(),
+                    last_accessed_tui: None,
+                    last_accessed_cli: None,
+                },
+            ],
+            cursor: 0,
+            scroll_offset: 0,
+            sort_alpha: false,
+            current_project_path: Some("/home/user/alpha".into()),
+            confirm_remove: None,
+        });
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_project_picker(frame, &app, area);
+        });
+        assert_snapshot!(output);
+    }
+}

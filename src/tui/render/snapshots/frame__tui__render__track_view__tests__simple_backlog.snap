@@ -1,0 +1,7 @@
+---
+source: src/tui/render/track_view.rs
+expression: output
+---
+▎ [ ] T-1 First task  #core
+  [>] T-2 Second task  #design
+  [-] T-3 Third task (blocked)

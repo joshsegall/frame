@@ -524,3 +524,76 @@ fn render_centered_message<'a>(
         Span::styled(" ".repeat(right_pad), Style::default().bg(bg)),
     ])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::render::test_helpers::*;
+    use insta::assert_snapshot;
+
+    #[test]
+    fn navigate_default() {
+        let mut app = app_with_track(SIMPLE_TRACK_MD);
+        app.show_startup_hints = false;
+        let output = render_to_string(TERM_W, 1, |frame, area| {
+            render_status_row(frame, &app, area);
+        });
+        assert_snapshot!(output);
+    }
+
+    #[test]
+    fn navigate_with_status_message() {
+        let mut app = app_with_track(SIMPLE_TRACK_MD);
+        app.status_message = Some("Task moved to Done".into());
+        let output = render_to_string(TERM_W, 1, |frame, area| {
+            render_status_row(frame, &app, area);
+        });
+        assert_snapshot!(output);
+    }
+
+    #[test]
+    fn search_mode() {
+        let mut app = app_with_track(SIMPLE_TRACK_MD);
+        app.mode = Mode::Search;
+        app.search_input = "effect".into();
+        let output = render_to_string(TERM_W, 1, |frame, area| {
+            render_status_row(frame, &app, area);
+        });
+        assert_snapshot!(output);
+    }
+
+    #[test]
+    fn edit_mode() {
+        let mut app = app_with_track(SIMPLE_TRACK_MD);
+        app.mode = Mode::Edit;
+        app.edit_target = Some(EditTarget::NewTask {
+            task_id: "T-5".into(),
+            track_id: "test".into(),
+            parent_id: None,
+        });
+        let output = render_to_string(TERM_W, 1, |frame, area| {
+            render_status_row(frame, &app, area);
+        });
+        assert_snapshot!(output);
+    }
+
+    #[test]
+    fn move_mode() {
+        let mut app = app_with_track(SIMPLE_TRACK_MD);
+        app.mode = Mode::Move;
+        let output = render_to_string(TERM_W, 1, |frame, area| {
+            render_status_row(frame, &app, area);
+        });
+        assert_snapshot!(output);
+    }
+
+    #[test]
+    fn command_mode() {
+        let mut app = app_with_track(SIMPLE_TRACK_MD);
+        app.mode = Mode::Command;
+        let output = render_to_string(TERM_W, 1, |frame, area| {
+            render_status_row(frame, &app, area);
+        });
+        assert_snapshot!(output);
+    }
+}

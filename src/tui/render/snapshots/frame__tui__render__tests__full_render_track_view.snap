@@ -1,0 +1,28 @@
+---
+source: src/tui/render/mod.rs
+expression: output
+---
+ ▶  Test │ ▶ │ * │ ✓ │                                                     Test
+─────────┴───┴───┴───┴──────────────────────────────────────────────────────────
+▎ [ ] T-1 First task  #core
+  [>] T-2 Second task  #design
+  [-] T-3 Third task (blocked)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                        ? help    > commands    QQ quit

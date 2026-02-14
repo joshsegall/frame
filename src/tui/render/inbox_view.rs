@@ -749,3 +749,43 @@ fn render_inline_note_editor(
         ds_mut.note_h_scroll = h_scroll;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::render::test_helpers::*;
+    use insta::assert_snapshot;
+
+    #[test]
+    fn inbox_with_items() {
+        let mut app = app_with_inbox(INBOX_MD);
+        app.view = crate::tui::app::View::Inbox;
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_inbox_view(frame, &mut app, area);
+        });
+        assert_snapshot!(output);
+    }
+
+    #[test]
+    fn inbox_empty() {
+        let mut app = app_with_inbox(EMPTY_INBOX_MD);
+        app.view = crate::tui::app::View::Inbox;
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_inbox_view(frame, &mut app, area);
+        });
+        assert_snapshot!(output);
+    }
+
+    #[test]
+    fn inbox_in_edit_mode() {
+        let mut app = app_with_inbox(INBOX_MD);
+        app.view = crate::tui::app::View::Inbox;
+        app.mode = Mode::Edit;
+        app.edit_target = Some(EditTarget::NewInboxItem { index: 0 });
+        app.edit_buffer = "New item text".into();
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_inbox_view(frame, &mut app, area);
+        });
+        assert_snapshot!(output);
+    }
+}

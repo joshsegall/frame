@@ -227,3 +227,37 @@ fn push_highlighted_chars<'a>(
         spans.push(Span::styled(segment, base_style));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::command_actions::CommandPaletteState;
+    use crate::tui::render::test_helpers::*;
+    use insta::assert_snapshot;
+
+    #[test]
+    fn palette_open() {
+        let mut app = app_with_track(SIMPLE_TRACK_MD);
+        app.command_palette = Some(CommandPaletteState::new(&app));
+        app.mode = crate::tui::app::Mode::Command;
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_command_palette(frame, &app, area);
+        });
+        assert_snapshot!(output);
+    }
+
+    #[test]
+    fn palette_with_query() {
+        let mut app = app_with_track(SIMPLE_TRACK_MD);
+        let mut state = CommandPaletteState::new(&app);
+        state.input = "done".into();
+        state.cursor = 4;
+        state.update_filter(&app);
+        app.command_palette = Some(state);
+        app.mode = crate::tui::app::Mode::Command;
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_command_palette(frame, &app, area);
+        });
+        assert_snapshot!(output);
+    }
+}

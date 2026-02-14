@@ -33,3 +33,4 @@ tempfile = "3"
 
 [dev-dependencies]
 pretty_assertions = "1"
+insta = "1"

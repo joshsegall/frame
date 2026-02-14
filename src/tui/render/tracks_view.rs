@@ -754,3 +754,58 @@ fn render_prefix_edit_row<'a>(app: &'a App, num_width: usize, width: u16) -> Lin
 
     Line::from(spans)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::render::test_helpers::*;
+    use insta::assert_snapshot;
+
+    #[test]
+    fn overview_multiple_tracks() {
+        let mut project = project_with_track(
+            "alpha",
+            "Alpha",
+            "# Alpha\n\n## Backlog\n\n- [ ] `A-1` Task one\n- [>] `A-2` Task two\n\n## Done\n\n- [x] `A-3` Done task\n",
+        );
+        let track2 = crate::parse::parse_track(
+            "# Beta\n\n## Backlog\n\n- [-] `B-1` Blocked task\n\n## Done\n",
+        );
+        project.config.tracks.push(crate::model::TrackConfig {
+            id: "beta".into(),
+            name: "Beta".into(),
+            state: "active".into(),
+            file: "tracks/beta.md".into(),
+        });
+        project.tracks.push(("beta".into(), track2));
+        let mut app = App::new(project);
+        app.view = crate::tui::app::View::Tracks;
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_tracks_view(frame, &mut app, area);
+        });
+        assert_snapshot!(output);
+    }
+
+    #[test]
+    fn overview_single_track() {
+        let mut app = app_with_track(SIMPLE_TRACK_MD);
+        app.view = crate::tui::app::View::Tracks;
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_tracks_view(frame, &mut app, area);
+        });
+        assert_snapshot!(output);
+    }
+
+    #[test]
+    fn overview_edit_mode() {
+        let mut app = app_with_track(SIMPLE_TRACK_MD);
+        app.view = crate::tui::app::View::Tracks;
+        app.mode = Mode::Edit;
+        app.edit_target = Some(EditTarget::NewTrackName);
+        app.edit_buffer = "New Track".into();
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_tracks_view(frame, &mut app, area);
+        });
+        assert_snapshot!(output);
+    }
+}

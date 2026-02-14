@@ -1,0 +1,9 @@
+---
+source: src/tui/render/tracks_view.rs
+expression: output
+---
+ Project: Test
+           pfx   todo  act  blk done park
+ Active           [ ]  [>]  [-]  [x]  [~]
+▎1  Alpha  ALPHA    1    1    0    1    0
+ 2  Beta   BETA     0    0    1    0    0

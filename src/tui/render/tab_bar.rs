@@ -942,4 +942,48 @@ mod tests {
         assert_eq!(digit_count(99), 2);
         assert_eq!(digit_count(100), 3);
     }
+
+    mod snapshots {
+        use super::super::*;
+        use crate::tui::render::test_helpers::*;
+        use insta::assert_snapshot;
+
+        #[test]
+        fn single_track_tab() {
+            let mut app = app_with_track(SIMPLE_TRACK_MD);
+            let output = render_to_string(TERM_W, 2, |frame, area| {
+                render_tab_bar(frame, &mut app, area);
+            });
+            assert_snapshot!(output);
+        }
+
+        #[test]
+        fn multiple_tracks() {
+            let mut project =
+                project_with_track("alpha", "Alpha", "# Alpha\n\n## Backlog\n\n## Done\n");
+            let track2 = crate::parse::parse_track("# Beta\n\n## Backlog\n\n## Done\n");
+            project.config.tracks.push(crate::model::TrackConfig {
+                id: "beta".into(),
+                name: "Beta".into(),
+                state: "active".into(),
+                file: "tracks/beta.md".into(),
+            });
+            project.tracks.push(("beta".into(), track2));
+            let mut app = App::new(project);
+            let output = render_to_string(TERM_W, 2, |frame, area| {
+                render_tab_bar(frame, &mut app, area);
+            });
+            assert_snapshot!(output);
+        }
+
+        #[test]
+        fn inbox_tab_selected() {
+            let mut app = app_with_inbox(INBOX_MD);
+            app.view = crate::tui::app::View::Inbox;
+            let output = render_to_string(TERM_W, 2, |frame, area| {
+                render_tab_bar(frame, &mut app, area);
+            });
+            assert_snapshot!(output);
+        }
+    }
 }

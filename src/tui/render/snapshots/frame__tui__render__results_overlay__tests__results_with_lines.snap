@@ -1,0 +1,26 @@
+---
+source: src/tui/render/results_overlay.rs
+expression: output
+---
+
+
+    ┌ Search Results ──────────────────────────────────────────────────────┐
+    │Result line one                                                       │
+    │Result line two                                                       │
+    │Result line three                                                     │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    └──────────────────────────────────────────────────────────────────────┘

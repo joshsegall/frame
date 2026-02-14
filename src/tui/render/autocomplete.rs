@@ -121,3 +121,29 @@ pub fn render_autocomplete(frame: &mut Frame, app: &App, content_area: Rect) {
         .style(Style::default().bg(bg));
     frame.render_widget(paragraph, popup_area);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::app::{AutocompleteKind, AutocompleteState};
+    use crate::tui::render::test_helpers::*;
+    use insta::assert_snapshot;
+
+    #[test]
+    fn autocomplete_dropdown() {
+        let mut app = app_with_track(SIMPLE_TRACK_MD);
+        let mut ac = AutocompleteState::new(
+            AutocompleteKind::Tag,
+            vec!["core".into(), "design".into(), "bug".into(), "cc".into()],
+        );
+        ac.visible = true;
+        ac.filtered = vec!["core".into(), "cc".into()];
+        ac.selected = 0;
+        app.autocomplete = Some(ac);
+        app.autocomplete_anchor = Some((10, 5));
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_autocomplete(frame, &app, area);
+        });
+        assert_snapshot!(output);
+    }
+}

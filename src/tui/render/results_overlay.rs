@@ -89,3 +89,27 @@ pub fn render_results_overlay(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::render::test_helpers::*;
+    use insta::assert_snapshot;
+    use ratatui::text::Line;
+
+    #[test]
+    fn results_with_lines() {
+        let mut app = app_with_track(SIMPLE_TRACK_MD);
+        app.show_results_overlay = true;
+        app.results_overlay_title = "Search Results".into();
+        app.results_overlay_lines = vec![
+            Line::from("Result line one"),
+            Line::from("Result line two"),
+            Line::from("Result line three"),
+        ];
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_results_overlay(frame, &app, area);
+        });
+        assert_snapshot!(output);
+    }
+}

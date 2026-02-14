@@ -1,0 +1,27 @@
+---
+source: src/tui/render/help_overlay.rs
+expression: output
+---
+
+   ┌───────────────────────────────────────────────────────────────────────┐
+   │ Key Bindings                                                          │
+   │                                                                       │
+   │ Navigation                           Edit                             │
+   │ ▲▼/jk      Move cursor               a/=        Add item (bottom)     │
+   │ g/G        Top / bottom              -          Insert after cursor   │
+   │ Esc        Back / close              p          Push to top           │
+   │                                      e          Edit title            │
+   │ Triage                               t          Edit tags             │
+   │ Enter      Triage to track           n/N        Edit note             │
+   │                                      w/Alt+w    Toggle note wrap      │
+   │ Views                                x          Delete item           │
+   │ 1-9        Track N                   m          Move mode             │
+   │ Tab/S-Tab  Prev / next view                                           │
+   │ 0/`        Tracks overview           Other                            │
+   │ i          Inbox                     /          Search                │
+   │ r          Recent                    >          Command palette       │
+   │                                      J          Jump to task          │
+   │                                      T          Tag colors            │
+   │                                      P          Projects              │
+   │                                      z/u        Undo                  │
+   └ ▼ ────────────────────────────────────────────────────────────────────┘

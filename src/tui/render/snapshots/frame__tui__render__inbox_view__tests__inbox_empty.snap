@@ -1,0 +1,5 @@
+---
+source: src/tui/render/inbox_view.rs
+expression: output
+---
+ Inbox is empty

@@ -121,3 +121,31 @@ fn centered_rect_fixed(width: u16, height: u16, area: Rect) -> Rect {
     let y = area.y + area.height.saturating_sub(height) / 2;
     Rect::new(x, y, width, height)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::app::PrefixRenameState;
+    use crate::tui::render::test_helpers::*;
+    use insta::assert_snapshot;
+
+    #[test]
+    fn confirm_dialog() {
+        let mut app = app_with_track(SIMPLE_TRACK_MD);
+        app.prefix_rename = Some(PrefixRenameState {
+            track_id: "test".into(),
+            track_name: "Test Track".into(),
+            old_prefix: "T".into(),
+            new_prefix: "TST".into(),
+            confirming: true,
+            task_id_count: 4,
+            dep_ref_count: 2,
+            affected_track_count: 1,
+            validation_error: String::new(),
+        });
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_prefix_confirm(frame, &app, area);
+        });
+        assert_snapshot!(output);
+    }
+}

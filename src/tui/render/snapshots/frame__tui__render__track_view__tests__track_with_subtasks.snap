@@ -1,0 +1,8 @@
+---
+source: src/tui/render/track_view.rs
+expression: output
+---
+▎▼[ ] T-1 Parent task
+    ├ [ ] .1 Child one
+    └ [>] .2 Child two
+  [ ] T-2 Another task

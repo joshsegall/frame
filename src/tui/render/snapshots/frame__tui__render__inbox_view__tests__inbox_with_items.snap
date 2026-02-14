@@ -1,0 +1,10 @@
+---
+source: src/tui/render/inbox_view.rs
+expression: output
+---
+▎ 1  First inbox item  #bug
+      Some body text here.
+
+  2  Second item  #design
+
+  3  Third item

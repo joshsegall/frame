@@ -341,3 +341,42 @@ fn render_subtask_tree<'a>(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::render::test_helpers::*;
+    use insta::assert_snapshot;
+
+    #[test]
+    fn recent_empty() {
+        let mut app = app_with_track("# Test\n\n## Backlog\n\n- [ ] `T-1` A task\n\n## Done\n");
+        app.view = crate::tui::app::View::Recent;
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_recent_view(frame, &mut app, area);
+        });
+        assert_snapshot!(output);
+    }
+
+    #[test]
+    fn recent_with_done_tasks() {
+        let md = "\
+# Test
+
+## Backlog
+
+## Done
+
+- [x] `T-1` Finished task
+  - resolved: 2025-05-14
+- [x] `T-2` Another done
+  - resolved: 2025-05-12
+";
+        let mut app = app_with_track(md);
+        app.view = crate::tui::app::View::Recent;
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_recent_view(frame, &mut app, area);
+        });
+        assert_snapshot!(output);
+    }
+}

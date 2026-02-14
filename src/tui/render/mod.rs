@@ -230,6 +230,9 @@ fn render_triage_position_popup(frame: &mut Frame, app: &App) {
     frame.render_widget(paragraph, popup_area);
 }
 
+#[cfg(test)]
+pub(crate) mod test_helpers;
+
 /// Truncate a string to fit within `max_cells` terminal cells, adding "…" if truncated.
 pub(super) fn truncate_with_ellipsis(s: &str, max_cells: usize) -> String {
     unicode::truncate_to_width(s, max_cells)
@@ -272,5 +275,80 @@ pub(super) fn push_highlighted_spans<'a>(
         spans.push(Span::styled(text.to_string(), base_style));
     } else if last_end < text.len() {
         spans.push(Span::styled(text[last_end..].to_string(), base_style));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use insta::assert_snapshot;
+    use test_helpers::*;
+
+    #[test]
+    fn full_render_track_view() {
+        let mut app = app_with_track(SIMPLE_TRACK_MD);
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render(frame, &mut app);
+            let _ = area; // full-frame render ignores passed area
+        });
+        assert_snapshot!(output);
+    }
+
+    #[test]
+    fn full_render_inbox_view() {
+        let mut app = app_with_inbox(INBOX_MD);
+        app.view = View::Inbox;
+        let output = render_to_string(TERM_W, TERM_H, |frame, _area| {
+            render(frame, &mut app);
+        });
+        assert_snapshot!(output);
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_short() {
+        assert_eq!(truncate_with_ellipsis("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_exact() {
+        assert_eq!(truncate_with_ellipsis("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_long() {
+        let result = truncate_with_ellipsis("hello world this is long", 10);
+        assert!(result.len() <= 13); // 10 cells max, ellipsis is multi-byte
+        assert!(result.ends_with('…'));
+    }
+
+    #[test]
+    fn push_highlighted_spans_no_regex() {
+        let mut spans = Vec::new();
+        push_highlighted_spans(
+            &mut spans,
+            "hello world",
+            Style::default(),
+            Style::default(),
+            None,
+        );
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content.as_ref(), "hello world");
+    }
+
+    #[test]
+    fn push_highlighted_spans_with_match() {
+        let re = Regex::new("world").unwrap();
+        let mut spans = Vec::new();
+        push_highlighted_spans(
+            &mut spans,
+            "hello world!",
+            Style::default(),
+            Style::default().add_modifier(Modifier::BOLD),
+            Some(&re),
+        );
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content.as_ref(), "hello ");
+        assert_eq!(spans[1].content.as_ref(), "world");
+        assert_eq!(spans[2].content.as_ref(), "!");
     }
 }

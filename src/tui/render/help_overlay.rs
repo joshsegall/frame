@@ -407,3 +407,41 @@ fn centered_rect_fixed(width: u16, height: u16, area: Rect) -> Rect {
     let y = area.y + area.height.saturating_sub(height) / 2;
     Rect::new(x, y, width, height)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::render::test_helpers::*;
+    use insta::assert_snapshot;
+
+    #[test]
+    fn help_track_view() {
+        let mut app = app_with_track(SIMPLE_TRACK_MD);
+        app.show_help = true;
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_help_overlay(frame, &mut app, area);
+        });
+        assert_snapshot!(output);
+    }
+
+    #[test]
+    fn help_detail_view() {
+        let mut app = app_in_detail_view(SIMPLE_TRACK_MD, "T-1");
+        app.show_help = true;
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_help_overlay(frame, &mut app, area);
+        });
+        assert_snapshot!(output);
+    }
+
+    #[test]
+    fn help_inbox_view() {
+        let mut app = app_with_inbox(INBOX_MD);
+        app.view = View::Inbox;
+        app.show_help = true;
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_help_overlay(frame, &mut app, area);
+        });
+        assert_snapshot!(output);
+    }
+}

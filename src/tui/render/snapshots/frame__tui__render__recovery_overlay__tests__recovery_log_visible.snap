@@ -1,0 +1,26 @@
+---
+source: src/tui/render/recovery_overlay.rs
+expression: output
+---
+
+
+    ┌ Recovery Log ────────────────────────────────────────────────────────┐
+    │Recovery entry 1: restored track.md                                   │
+    │Recovery entry 2: restored inbox.md                                   │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    │                                                                      │
+    └──────────────────────────────────────────────────────────────────────┘

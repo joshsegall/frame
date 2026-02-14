@@ -108,3 +108,20 @@ fn centered_rect_fixed(width: u16, height: u16, area: Rect) -> Rect {
     let y = area.y + area.height.saturating_sub(height) / 2;
     Rect::new(x, y, width, height)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::render::test_helpers::*;
+    use insta::assert_snapshot;
+
+    #[test]
+    fn conflict_visible() {
+        let mut app = app_with_track(SIMPLE_TRACK_MD);
+        app.conflict_text = Some("Unsaved edit content here".into());
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_conflict_popup(frame, &app, area);
+        });
+        assert_snapshot!(output);
+    }
+}
