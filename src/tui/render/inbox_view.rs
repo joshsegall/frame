@@ -106,23 +106,115 @@ pub fn render_inbox_view(frame: &mut Frame, app: &mut App, area: Rect) {
             && matches!(&app.edit_target, Some(EditTarget::ExistingInboxTags { .. }));
 
         if editing_title {
-            // Show edit buffer with cursor
+            // Wrap-aware title editing
+            let prefix_width: usize = 5; // cursor indicator (1) + number column (4)
+            let edit_available = (area.width as usize).saturating_sub(prefix_width);
             let cursor_pos = app.edit_cursor.min(app.edit_buffer.len());
-            let before = &app.edit_buffer[..cursor_pos];
-            let after = &app.edit_buffer[cursor_pos..];
-            let edit_style = Style::default()
-                .fg(app.theme.text_bright)
-                .bg(bg)
-                .add_modifier(Modifier::BOLD);
-            spans.push(Span::styled(before.to_string(), edit_style));
-            spans.push(Span::styled(
-                "\u{258C}",
-                Style::default().fg(app.theme.highlight).bg(bg),
-            ));
-            if !after.is_empty() {
-                spans.push(Span::styled(after.to_string(), edit_style));
+
+            if edit_available > 0 {
+                let edit_text = [app.edit_buffer.as_str()];
+                let visual_lines =
+                    wrap::wrap_lines_for_edit(&edit_text, edit_available, 0, cursor_pos);
+                let total_visual = visual_lines.len();
+                let visible_visual = total_visual.clamp(1, MAX_NOTE_LINES);
+                let cursor_vrow = wrap::logical_to_visual_row(&visual_lines, 0, cursor_pos);
+
+                // Scroll to keep cursor visible
+                let mut title_scroll = 0usize;
+                if cursor_vrow >= visible_visual {
+                    title_scroll = cursor_vrow.saturating_sub(visible_visual - 1);
+                }
+
+                let edit_style = Style::default()
+                    .fg(app.theme.text_bright)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD);
+                let cursor_block_style = Style::default()
+                    .fg(app.theme.background)
+                    .bg(app.theme.text_bright);
+
+                for view_row in 0..visible_visual {
+                    let vrow_idx = title_scroll + view_row;
+                    if vrow_idx >= total_visual {
+                        break;
+                    }
+                    let vl = &visual_lines[vrow_idx];
+                    let slice = &app.edit_buffer[vl.byte_start..vl.byte_end];
+                    let has_cursor = vrow_idx == cursor_vrow;
+
+                    if has_cursor {
+                        editor_active_line = Some(display_lines.len());
+                    }
+
+                    let mut line_spans: Vec<Span> = Vec::new();
+
+                    if view_row == 0 {
+                        // First visual line: reuse existing prefix spans
+                        line_spans.append(&mut spans);
+                    } else {
+                        // Continuation lines: indent to match prefix
+                        line_spans.push(Span::styled(
+                            " ".repeat(prefix_width),
+                            Style::default().bg(bg),
+                        ));
+                    }
+
+                    // Render text with cursor
+                    let graphemes: Vec<(usize, &str)> =
+                        unicode_segmentation::UnicodeSegmentation::grapheme_indices(slice, true)
+                            .collect();
+
+                    if has_cursor {
+                        let cursor_byte_in_row =
+                            cursor_pos.min(vl.byte_end).saturating_sub(vl.byte_start);
+                        let mut cursor_rendered = false;
+                        for &(gi, g) in &graphemes {
+                            if gi == cursor_byte_in_row && !cursor_rendered {
+                                line_spans.push(Span::styled(g.to_string(), cursor_block_style));
+                                cursor_rendered = true;
+                            } else {
+                                line_spans.push(Span::styled(g.to_string(), edit_style));
+                            }
+                        }
+                        if !cursor_rendered {
+                            line_spans.push(Span::styled(" ", cursor_block_style));
+                        }
+                    } else if !slice.is_empty() {
+                        line_spans.push(Span::styled(slice.to_string(), edit_style));
+                    }
+
+                    // Pad to full width
+                    let content_width: usize = line_spans
+                        .iter()
+                        .map(|s| unicode::display_width(&s.content))
+                        .sum();
+                    let w = area.width as usize;
+                    if content_width < w {
+                        line_spans.push(Span::styled(
+                            " ".repeat(w - content_width),
+                            Style::default().bg(bg),
+                        ));
+                    }
+
+                    display_lines.push((Some(i), Line::from(line_spans)));
+                }
+
+                // Scroll indicator
+                if total_visual > visible_visual {
+                    let dim_style = Style::default().fg(app.theme.dim).bg(app.theme.background);
+                    let indicator = format!(
+                        "{}[{}/{}]",
+                        " ".repeat(prefix_width),
+                        title_scroll + visible_visual,
+                        total_visual,
+                    );
+                    display_lines.push((Some(i), Line::from(Span::styled(indicator, dim_style))));
+                }
+            } else {
+                display_lines.push((Some(i), Line::from(spans)));
             }
         } else {
+            // View mode: title + tags, wrapped
             let title_style = if is_cursor {
                 Style::default()
                     .fg(app.theme.text_bright)
@@ -135,78 +227,66 @@ pub fn render_inbox_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 .fg(app.theme.search_match_fg)
                 .bg(app.theme.search_match_bg)
                 .add_modifier(Modifier::BOLD);
-            // Truncate title at available width
-            let prefix_width: usize = spans
-                .iter()
-                .map(|s| unicode::display_width(&s.content))
-                .sum();
-            let tag_width: usize = tags.iter().map(|t| t.len() + 2).sum::<usize>()
-                + if tags.is_empty() { 0 } else { 2 };
-            let available = (area.width as usize).saturating_sub(prefix_width + tag_width + 1);
-            let display_title = super::truncate_with_ellipsis(title, available);
-            push_highlighted_spans(
-                &mut spans,
-                &display_title,
-                title_style,
-                hl_style,
-                search_re.as_ref(),
-            );
-        }
+            push_highlighted_spans(&mut spans, title, title_style, hl_style, search_re.as_ref());
 
-        // Tags
-        if editing_tags {
-            // Show tag edit buffer with cursor
-            spans.push(Span::styled("  ", Style::default().bg(bg)));
-            let cursor_pos = app.edit_cursor.min(app.edit_buffer.len());
-            let before = &app.edit_buffer[..cursor_pos];
-            let after = &app.edit_buffer[cursor_pos..];
-            let edit_style = Style::default().fg(app.theme.highlight).bg(bg);
-            spans.push(Span::styled(before.to_string(), edit_style));
-            spans.push(Span::styled(
-                "\u{258C}",
-                Style::default().fg(app.theme.highlight).bg(bg),
-            ));
-            if !after.is_empty() {
-                spans.push(Span::styled(after.to_string(), edit_style));
-            }
-        } else if !tags.is_empty() {
-            spans.push(Span::styled("  ", Style::default().bg(bg)));
-            let tag_hl_style = Style::default()
-                .fg(app.theme.search_match_fg)
-                .bg(app.theme.search_match_bg)
-                .add_modifier(Modifier::BOLD);
-            for (j, tag) in tags.iter().enumerate() {
-                if j > 0 {
-                    spans.push(Span::styled(" ", Style::default().bg(bg)));
-                }
-                let tag_color = app.theme.tag_color(tag);
-                let tag_style = Style::default().fg(tag_color).bg(bg);
-                push_highlighted_spans(
-                    &mut spans,
-                    &format!("#{}", tag),
-                    tag_style,
-                    tag_hl_style,
-                    search_re.as_ref(),
-                );
-            }
-        }
-
-        // Pad cursor line
-        if is_cursor {
-            let content_width: usize = spans
-                .iter()
-                .map(|s| unicode::display_width(&s.content))
-                .sum();
-            let w = area.width as usize;
-            if content_width < w {
+            // Tags
+            if editing_tags {
+                spans.push(Span::styled("  ", Style::default().bg(bg)));
+                let cursor_pos = app.edit_cursor.min(app.edit_buffer.len());
+                let before = &app.edit_buffer[..cursor_pos];
+                let after = &app.edit_buffer[cursor_pos..];
+                let edit_style = Style::default().fg(app.theme.highlight).bg(bg);
+                spans.push(Span::styled(before.to_string(), edit_style));
                 spans.push(Span::styled(
-                    " ".repeat(w - content_width),
-                    Style::default().bg(bg),
+                    "\u{258C}",
+                    Style::default().fg(app.theme.highlight).bg(bg),
                 ));
+                if !after.is_empty() {
+                    spans.push(Span::styled(after.to_string(), edit_style));
+                }
+            } else if !tags.is_empty() {
+                spans.push(Span::styled("  ", Style::default().bg(bg)));
+                let tag_hl_style = Style::default()
+                    .fg(app.theme.search_match_fg)
+                    .bg(app.theme.search_match_bg)
+                    .add_modifier(Modifier::BOLD);
+                for (j, tag) in tags.iter().enumerate() {
+                    if j > 0 {
+                        spans.push(Span::styled(" ", Style::default().bg(bg)));
+                    }
+                    let tag_color = app.theme.tag_color(tag);
+                    let tag_style = Style::default().fg(tag_color).bg(bg);
+                    push_highlighted_spans(
+                        &mut spans,
+                        &format!("#{}", tag),
+                        tag_style,
+                        tag_hl_style,
+                        search_re.as_ref(),
+                    );
+                }
+            }
+
+            // Wrap and push
+            let indent: usize = 5; // cursor indicator (1) + number column (4)
+            let wrapped = wrap_styled_spans(spans, area.width as usize, indent, bg);
+            for mut wrapped_line in wrapped {
+                if is_cursor {
+                    let content_width: usize = wrapped_line
+                        .spans
+                        .iter()
+                        .map(|s| unicode::display_width(&s.content))
+                        .sum();
+                    let w = area.width as usize;
+                    if content_width < w {
+                        wrapped_line.spans.push(Span::styled(
+                            " ".repeat(w - content_width),
+                            Style::default().bg(bg),
+                        ));
+                    }
+                }
+                display_lines.push((Some(i), wrapped_line));
             }
         }
-
-        display_lines.push((Some(i), Line::from(spans)));
 
         // Inline note editor or body text
         if editing_note_for == Some(i) {
