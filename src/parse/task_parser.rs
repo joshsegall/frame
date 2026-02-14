@@ -1,5 +1,5 @@
 use crate::model::task::{Metadata, Task, TaskState};
-use crate::parse::has_continuation_at_indent;
+use crate::parse::{count_indent, has_continuation_at_indent};
 
 /// Maximum nesting depth (3 levels: top, sub, sub-sub)
 const MAX_DEPTH: usize = 3;
@@ -237,11 +237,6 @@ fn task_indent(line: &str) -> Option<usize> {
     } else {
         None
     }
-}
-
-/// Count leading spaces
-fn count_indent(line: &str) -> usize {
-    line.len() - line.trim_start_matches(' ').len()
 }
 
 /// Look ahead through blank lines and deeper-indent content to check if

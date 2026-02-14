@@ -4,6 +4,7 @@ pub mod conflict_popup;
 pub mod dep_popup;
 pub mod detail_view;
 pub mod help_overlay;
+mod helpers;
 pub mod inbox_view;
 pub mod prefix_confirm;
 pub mod project_picker;

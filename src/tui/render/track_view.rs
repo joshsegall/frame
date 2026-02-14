@@ -10,18 +10,8 @@ use crate::tui::app::{App, EditTarget, FlatItem, Mode, MoveState};
 use crate::util::unicode;
 
 use super::detail_view::{UNDO_FLASH_COLORS, state_flash_colors};
+use super::helpers::{abbreviated_id, spans_width, state_symbol};
 use super::push_highlighted_spans;
-
-/// State symbols for each task state (markdown checkbox style)
-fn state_symbol(state: TaskState) -> &'static str {
-    match state {
-        TaskState::Todo => "[ ]",
-        TaskState::Active => "[>]",
-        TaskState::Blocked => "[-]",
-        TaskState::Done => "[x]",
-        TaskState::Parked => "[~]",
-    }
-}
 
 /// Render the track view content area
 pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -393,7 +383,10 @@ fn render_task_line<'a>(
             .map(|id| format!("{} ", id))
             .unwrap_or_default()
     } else {
-        abbreviated_id(task).map_or(String::new(), |s| format!("{} ", s))
+        task.id
+            .as_deref()
+            .map(|id| format!("{} ", abbreviated_id(id)))
+            .unwrap_or_default()
     };
     if !id_text.is_empty() {
         let id_style = if is_context || task.state == TaskState::Done {
@@ -439,12 +432,7 @@ fn render_task_line<'a>(
 
     if is_editing && !is_editing_tags {
         // Record prefix width for autocomplete anchor
-        edit_col = Some(
-            spans
-                .iter()
-                .map(|s| unicode::display_width(&s.content) as u16)
-                .sum(),
-        );
+        edit_col = Some(spans_width(&spans) as u16);
         // Render edit buffer with cursor/selection highlighting
         let buf = &app.edit_buffer;
         let cursor_pos = app.edit_cursor.min(buf.len());
@@ -509,10 +497,7 @@ fn render_task_line<'a>(
             .bg(app.theme.search_match_bg)
             .add_modifier(Modifier::BOLD);
         // Truncate title if it would overflow the available width
-        let prefix_width: usize = spans
-            .iter()
-            .map(|s| unicode::display_width(&s.content))
-            .sum();
+        let prefix_width = spans_width(&spans);
         let tag_width: usize = task.tags.iter().map(|t| t.len() + 2).sum::<usize>()
             + if task.tags.is_empty() { 0 } else { 2 };
         let available = width.saturating_sub(prefix_width + tag_width + 1);
@@ -530,12 +515,7 @@ fn render_task_line<'a>(
     if is_editing_tags {
         spans.push(Span::styled("  ", Style::default().bg(bg)));
         // Record prefix width for autocomplete anchor (after the "  " spacer)
-        edit_col = Some(
-            spans
-                .iter()
-                .map(|s| unicode::display_width(&s.content) as u16)
-                .sum(),
-        );
+        edit_col = Some(spans_width(&spans) as u16);
         let buf = &app.edit_buffer;
         let cursor_pos = app.edit_cursor.min(buf.len());
         let cursor_style = Style::default()
@@ -622,10 +602,7 @@ fn render_task_line<'a>(
     // Hidden match indicator for non-visible field matches
     if let Some(indicator) = hidden_match_indicator(task, search_re) {
         let indicator_width = unicode::display_width(&indicator) + 2; // "  " + indicator
-        let content_width: usize = spans
-            .iter()
-            .map(|s| unicode::display_width(&s.content))
-            .sum();
+        let content_width = spans_width(&spans);
 
         // Truncate line content if needed to make room for indicator
         if content_width + indicator_width > width {
@@ -646,10 +623,7 @@ fn render_task_line<'a>(
 
     // Highlight cursor line, flash line, or selected line
     if is_cursor || is_flash || is_selected {
-        let content_width: usize = spans
-            .iter()
-            .map(|s| unicode::display_width(&s.content))
-            .sum();
+        let content_width = spans_width(&spans);
         if content_width < width {
             spans.push(Span::styled(
                 " ".repeat(width - content_width),
@@ -676,16 +650,6 @@ fn render_task_line<'a>(
     (Line::from(spans), edit_col)
 }
 
-/// Get the abbreviated ID for a subtask (e.g., ".1", ".2.1")
-fn abbreviated_id(task: &Task) -> Option<String> {
-    let id = task.id.as_deref()?;
-    // Find the last segment after the prefix-NUM, e.g., "EFF-014.2.1" → ".2.1"
-    let dash_pos = id.find('-')?;
-    let after_prefix = &id[dash_pos + 1..];
-    let dot_pos = after_prefix.find('.')?;
-    Some(after_prefix[dot_pos..].to_string())
-}
-
 /// Render the bulk inline editor line (tags:/deps: label + edit buffer + cursor).
 /// Returns the line and the column offset of the edit text start (for autocomplete anchor).
 fn render_bulk_editor_line<'a>(app: &'a App, label: &str, width: usize) -> (Line<'a>, u16) {
@@ -699,11 +663,7 @@ fn render_bulk_editor_line<'a>(app: &'a App, label: &str, width: usize) -> (Line
         Style::default().fg(app.theme.dim).bg(bg),
     ));
 
-    let prefix_width: usize = spans
-        .iter()
-        .map(|s| unicode::display_width(&s.content))
-        .sum();
-    let edit_col = prefix_width as u16;
+    let edit_col = spans_width(&spans) as u16;
 
     // Edit buffer with cursor
     let buf = &app.edit_buffer;
@@ -729,10 +689,7 @@ fn render_bulk_editor_line<'a>(app: &'a App, label: &str, width: usize) -> (Line
     }
 
     // Fill remaining width
-    let content_width: usize = spans
-        .iter()
-        .map(|s| unicode::display_width(&s.content))
-        .sum();
+    let content_width = spans_width(&spans);
     if content_width < width {
         spans.push(Span::styled(
             " ".repeat(width - content_width),

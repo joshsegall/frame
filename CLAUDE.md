@@ -26,6 +26,8 @@ Frame is a markdown-based task tracker (TUI + CLI) where `.md` files are the sou
 - **`src/ops/`** — Business logic: task CRUD, track management, inbox, search, clean, check, import
 - **`src/cli/`** — CLI interface (clap commands, handlers, JSON/human output)
 - **`src/tui/`** — TUI interface: app state, undo, input handling, rendering
+  - `input/` — Key handling, split into submodules: `common`, `navigate`, `select`, `search`, `edit`, `move_mode`, `triage`, `confirm`, `command`, `popups`, `tracks`, `recent`
+  - `render/` — UI rendering, with shared utilities in `helpers.rs`
 
 See `doc/architecture.md` for detailed design decisions and invariants.
 

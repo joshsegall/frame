@@ -18,10 +18,14 @@ pub(crate) fn has_continuation_at_indent(
         if line.trim().is_empty() {
             continue;
         }
-        let indent = line.len() - line.trim_start_matches(' ').len();
-        return indent >= min_indent;
+        return count_indent(line) >= min_indent;
     }
     false
+}
+
+/// Count leading spaces
+pub(crate) fn count_indent(line: &str) -> usize {
+    line.len() - line.trim_start_matches(' ').len()
 }
 
 pub use inbox_parser::parse_inbox;

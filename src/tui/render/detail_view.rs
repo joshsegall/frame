@@ -16,6 +16,7 @@ use crate::tui::theme::Theme;
 use crate::tui::wrap;
 use crate::util::unicode;
 
+use super::helpers::{abbreviated_id, collect_metadata_list, state_symbol};
 use super::push_highlighted_spans;
 
 /// Render the detail view for a single task
@@ -304,7 +305,13 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
         if is_active {
             body_active_line = Some(body_lines.len());
         }
-        let deps = collect_deps(task);
+        let deps = collect_metadata_list(task, |m| {
+            if let Metadata::Dep(d) = m {
+                Some(d)
+            } else {
+                None
+            }
+        });
 
         if is_active && editing && app.mode == Mode::Edit {
             let mut spans: Vec<Span> = Vec::new();
@@ -345,10 +352,7 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                     search_re.as_ref(),
                 );
                 if let Some(state) = dep_state {
-                    spans.push(Span::styled(
-                        format!(" {}", state_symbol_short(state)),
-                        dep_style,
-                    ));
+                    spans.push(Span::styled(format!(" {}", state_symbol(state)), dep_style));
                 }
             }
             let wrapped = wrap_styled_spans(spans, width, 8, bg);
@@ -439,7 +443,13 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
         if is_active {
             body_active_line = Some(body_lines.len());
         }
-        let refs = collect_refs(task);
+        let refs = collect_metadata_list(task, |m| {
+            if let Metadata::Ref(r) = m {
+                Some(r)
+            } else {
+                None
+            }
+        });
 
         if is_active && editing && app.mode == Mode::Edit {
             let mut spans: Vec<Span> = Vec::new();
@@ -1618,61 +1628,6 @@ fn region_indicator(
     } else {
         Span::styled("   ", Style::default().bg(bg))
     }
-}
-
-/// State symbols for task states (markdown checkbox style, matching track view)
-fn state_symbol(state: TaskState) -> &'static str {
-    match state {
-        TaskState::Todo => "[ ]",
-        TaskState::Active => "[>]",
-        TaskState::Blocked => "[-]",
-        TaskState::Done => "[x]",
-        TaskState::Parked => "[~]",
-    }
-}
-
-/// Short state symbol for dep display
-fn state_symbol_short(state: TaskState) -> &'static str {
-    match state {
-        TaskState::Todo => "[ ]",
-        TaskState::Active => "[>]",
-        TaskState::Blocked => "[-]",
-        TaskState::Done => "[x]",
-        TaskState::Parked => "[~]",
-    }
-}
-
-/// Get abbreviated ID (e.g., "EFF-014.2" -> ".2")
-fn abbreviated_id(id: &str) -> &str {
-    if let Some(dash_pos) = id.find('-') {
-        let after_prefix = &id[dash_pos + 1..];
-        if let Some(dot_pos) = after_prefix.find('.') {
-            return &after_prefix[dot_pos..];
-        }
-    }
-    id
-}
-
-/// Collect dep IDs from a task
-fn collect_deps(task: &Task) -> Vec<String> {
-    let mut deps = Vec::new();
-    for meta in &task.metadata {
-        if let Metadata::Dep(d) = meta {
-            deps.extend(d.clone());
-        }
-    }
-    deps
-}
-
-/// Collect ref paths from a task
-fn collect_refs(task: &Task) -> Vec<String> {
-    let mut refs = Vec::new();
-    for meta in &task.metadata {
-        if let Metadata::Ref(r) = meta {
-            refs.extend(r.clone());
-        }
-    }
-    refs
 }
 
 /// Undo flash colors: bright orange bg + orange border (distinct from parked yellow)

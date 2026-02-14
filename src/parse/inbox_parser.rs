@@ -1,5 +1,6 @@
 use crate::model::inbox::{Inbox, InboxItem};
 use crate::parse::has_continuation_at_indent;
+use crate::parse::task_parser::parse_title_and_tags;
 
 /// Parse an inbox file from its source text.
 ///
@@ -36,7 +37,7 @@ pub fn parse_inbox(source: &str) -> (Inbox, Vec<String>) {
         if let Some(title_content) = trimmed.strip_prefix("- ") {
             let item_start = idx;
             // Skip "- "
-            let (title, mut tags) = parse_inbox_title_and_tags(title_content);
+            let (title, mut tags) = parse_title_and_tags(title_content);
 
             idx += 1;
 
@@ -139,48 +140,6 @@ pub fn parse_inbox(source: &str) -> (Inbox, Vec<String>) {
         },
         dropped_lines,
     )
-}
-
-/// Parse an inbox item's title line into title and tags.
-/// Tags are `#word` tokens at the end of the line.
-fn parse_inbox_title_and_tags(s: &str) -> (String, Vec<String>) {
-    let s = s.trim_end();
-    if s.is_empty() {
-        return (String::new(), Vec::new());
-    }
-
-    let mut tags = Vec::new();
-    let mut remaining = s;
-
-    loop {
-        let trimmed = remaining.trim_end();
-        if trimmed.is_empty() {
-            break;
-        }
-
-        if let Some(last_space) = trimmed.rfind(' ') {
-            let last_word = &trimmed[last_space + 1..];
-            if let Some(tag) = last_word.strip_prefix('#')
-                && !tag.is_empty()
-                && !tag.contains('#')
-            {
-                tags.push(tag.to_string());
-                remaining = &trimmed[..last_space];
-                continue;
-            }
-        } else if let Some(tag) = trimmed.strip_prefix('#')
-            && !tag.is_empty()
-            && !tag.contains('#')
-        {
-            tags.push(tag.to_string());
-            remaining = "";
-            continue;
-        }
-        break;
-    }
-
-    tags.reverse();
-    (remaining.trim_end().to_string(), tags)
 }
 
 /// Check if a line consists entirely of `#tag` words
