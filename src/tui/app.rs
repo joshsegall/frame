@@ -2106,8 +2106,15 @@ impl App {
                 None => continue,
             };
 
-            if file_name == "inbox.md" {
-                // Reload inbox
+            // Compute relative path from frame_dir to distinguish files in
+            // subdirectories (e.g., archive/main.md vs tracks/main.md).
+            let rel_path = path
+                .strip_prefix(&self.project.frame_dir)
+                .ok()
+                .and_then(|p| p.to_str())
+                .map(|s| s.to_string());
+
+            if is_inbox_path(&file_name, rel_path.as_deref()) {
                 if let Ok(text) = std::fs::read_to_string(path) {
                     let (inbox, dropped) = parse_inbox(&text);
                     if !dropped.is_empty() {
@@ -2131,15 +2138,8 @@ impl App {
                 // Config changes — skip for now (would need full re-init)
                 continue;
             }
-
-            // It's a track file — find which track it belongs to
-            if let Some((track_id, _track_file)) = self
-                .project
-                .config
-                .tracks
-                .iter()
-                .find(|tc| tc.file == file_name || tc.file.ends_with(&format!("/{}", file_name)))
-                .map(|tc| (tc.id.clone(), tc.file.clone()))
+            if let Some((track_id, _track_file)) =
+                resolve_track_for_path(&self.project.config.tracks, &file_name, rel_path.as_deref())
                 && let Ok(text) = std::fs::read_to_string(path)
             {
                 let new_track = parse_track(&text);
@@ -3273,12 +3273,11 @@ fn handle_external_reload(app: &mut App, paths: &[std::path::PathBuf]) {
         .iter()
         .filter_map(|p| {
             let file_name = p.file_name()?.to_str()?;
-            app.project
-                .config
-                .tracks
-                .iter()
-                .find(|tc| tc.file == file_name || tc.file.ends_with(&format!("/{}", file_name)))
-                .map(|tc| tc.id.clone())
+            let rel = p
+                .strip_prefix(&app.project.frame_dir)
+                .ok()
+                .and_then(|r| r.to_str());
+            resolve_track_for_path(&app.project.config.tracks, file_name, rel).map(|(id, _)| id)
         })
         .collect();
     app.pending_subtask_hides
@@ -3324,7 +3323,9 @@ fn run_auto_clean(app: &mut App) {
 
     let has_changes = !result.ids_assigned.is_empty()
         || !result.dates_assigned.is_empty()
-        || !result.duplicates_resolved.is_empty();
+        || !result.duplicates_resolved.is_empty()
+        || !result.sections_reconciled.is_empty()
+        || !result.tasks_archived.is_empty();
 
     if has_changes {
         // Collect affected track IDs
@@ -3339,6 +3340,12 @@ fn run_auto_clean(app: &mut App) {
         for dup in &result.duplicates_resolved {
             affected_tracks.insert(dup.track_id.clone());
         }
+        for rec in &result.sections_reconciled {
+            affected_tracks.insert(rec.track_id.clone());
+        }
+        for arc in &result.tasks_archived {
+            affected_tracks.insert(arc.track_id.clone());
+        }
 
         // Save affected tracks
         for track_id in &affected_tracks {
@@ -3351,11 +3358,174 @@ fn run_auto_clean(app: &mut App) {
         // Show subtle status message
         let count = result.ids_assigned.len()
             + result.dates_assigned.len()
-            + result.duplicates_resolved.len();
+            + result.duplicates_resolved.len()
+            + result.sections_reconciled.len()
+            + result.tasks_archived.len();
         app.status_message = Some(format!(
             "Auto-cleaned: {} fix{}",
             count,
             if count == 1 { "" } else { "es" }
         ));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// File-watcher path resolution helpers
+// ---------------------------------------------------------------------------
+
+/// Check whether a changed file is the real top-level inbox.md (not archive/inbox.md).
+fn is_inbox_path(file_name: &str, rel_path: Option<&str>) -> bool {
+    file_name == "inbox.md" && rel_path.is_none_or(|r| r == "inbox.md")
+}
+
+/// Resolve a changed file path to a track config entry.
+/// Uses the relative path from frame_dir when available (preferred — exact match).
+/// Falls back to filename-only matching when the path can't be relativized.
+fn resolve_track_for_path(
+    tracks: &[crate::model::config::TrackConfig],
+    file_name: &str,
+    rel_path: Option<&str>,
+) -> Option<(String, String)> {
+    tracks
+        .iter()
+        .find(|tc| {
+            if let Some(rel) = rel_path {
+                tc.file == rel
+            } else {
+                tc.file == file_name || tc.file.ends_with(&format!("/{}", file_name))
+            }
+        })
+        .map(|tc| (tc.id.clone(), tc.file.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::config::TrackConfig;
+
+    fn sample_tracks() -> Vec<TrackConfig> {
+        vec![
+            TrackConfig {
+                id: "main".to_string(),
+                name: "Main".to_string(),
+                state: "active".to_string(),
+                file: "tracks/main.md".to_string(),
+            },
+            TrackConfig {
+                id: "research".to_string(),
+                name: "Research".to_string(),
+                state: "active".to_string(),
+                file: "tracks/research.md".to_string(),
+            },
+        ]
+    }
+
+    // --- is_inbox_path ---
+
+    #[test]
+    fn inbox_top_level_matches() {
+        assert!(is_inbox_path("inbox.md", Some("inbox.md")));
+    }
+
+    #[test]
+    fn inbox_archive_does_not_match() {
+        assert!(!is_inbox_path("inbox.md", Some("archive/inbox.md")));
+    }
+
+    #[test]
+    fn inbox_no_rel_path_matches() {
+        // Fallback when strip_prefix fails — accept it
+        assert!(is_inbox_path("inbox.md", None));
+    }
+
+    #[test]
+    fn non_inbox_does_not_match() {
+        assert!(!is_inbox_path("main.md", Some("tracks/main.md")));
+    }
+
+    // --- resolve_track_for_path ---
+
+    #[test]
+    fn track_file_matches_by_rel_path() {
+        let tracks = sample_tracks();
+        let result = resolve_track_for_path(&tracks, "main.md", Some("tracks/main.md"));
+        assert_eq!(
+            result,
+            Some(("main".to_string(), "tracks/main.md".to_string()))
+        );
+    }
+
+    #[test]
+    fn archive_file_does_not_match_track() {
+        let tracks = sample_tracks();
+        let result = resolve_track_for_path(&tracks, "main.md", Some("archive/main.md"));
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn archive_tracks_subdir_does_not_match() {
+        let tracks = sample_tracks();
+        let result = resolve_track_for_path(&tracks, "main.md", Some("archive/_tracks/main.md"));
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn different_track_name_in_archive() {
+        let tracks = sample_tracks();
+        let result = resolve_track_for_path(&tracks, "research.md", Some("archive/research.md"));
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn correct_track_file_matches() {
+        let tracks = sample_tracks();
+        let result = resolve_track_for_path(&tracks, "research.md", Some("tracks/research.md"));
+        assert_eq!(
+            result,
+            Some(("research".to_string(), "tracks/research.md".to_string()))
+        );
+    }
+
+    #[test]
+    fn fallback_filename_matching_when_no_rel_path() {
+        let tracks = sample_tracks();
+        // When rel_path is None, falls back to filename suffix matching
+        let result = resolve_track_for_path(&tracks, "main.md", None);
+        assert_eq!(
+            result,
+            Some(("main".to_string(), "tracks/main.md".to_string()))
+        );
+    }
+
+    #[test]
+    fn unrelated_md_file_does_not_match() {
+        let tracks = sample_tracks();
+        let result = resolve_track_for_path(&tracks, "notes.md", Some("notes.md"));
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn flat_track_config_matches_exactly() {
+        // Track config with file directly in frame_dir (no subdirectory)
+        let tracks = vec![TrackConfig {
+            id: "main".to_string(),
+            name: "Main".to_string(),
+            state: "active".to_string(),
+            file: "main.md".to_string(),
+        }];
+        let result = resolve_track_for_path(&tracks, "main.md", Some("main.md"));
+        assert_eq!(result, Some(("main".to_string(), "main.md".to_string())));
+    }
+
+    #[test]
+    fn flat_config_archive_does_not_match() {
+        let tracks = vec![TrackConfig {
+            id: "main".to_string(),
+            name: "Main".to_string(),
+            state: "active".to_string(),
+            file: "main.md".to_string(),
+        }];
+        let result = resolve_track_for_path(&tracks, "main.md", Some("archive/main.md"));
+        assert_eq!(result, None);
     }
 }

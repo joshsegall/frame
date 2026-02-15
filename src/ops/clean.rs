@@ -801,8 +801,8 @@ fn archive_done_tasks(project: &mut Project, result: &mut CleanResult) {
     let threshold = project.config.clean.done_threshold;
 
     for (track_id, track) in &mut project.tracks {
-        let done_line_count = count_done_section_lines(track);
-        if done_line_count <= threshold {
+        let done_task_count = count_done_tasks(track);
+        if done_task_count <= threshold {
             continue;
         }
 
@@ -848,10 +848,8 @@ fn archive_done_tasks(project: &mut Project, result: &mut CleanResult) {
     }
 }
 
-fn count_done_section_lines(track: &Track) -> usize {
-    let done_tasks = track.section_tasks(SectionKind::Done);
-    let lines = crate::parse::serialize_tasks(done_tasks, 0);
-    lines.len()
+fn count_done_tasks(track: &Track) -> usize {
+    track.section_tasks(SectionKind::Done).len()
 }
 
 fn extract_done_tasks_for_archive(track: &mut Track) -> Vec<Task> {
@@ -1387,6 +1385,113 @@ mod tests {
 
         let result = clean_project(&mut project);
         assert!(result.tasks_archived.is_empty());
+    }
+
+    #[test]
+    fn test_archive_threshold_counts_tasks_not_lines() {
+        // 5 tasks with verbose metadata = many lines but only 5 tasks.
+        // With threshold of 5, should NOT archive (5 <= 5).
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("frame/tracks")).unwrap();
+
+        let src = "\
+# Main
+
+## Backlog
+
+- [ ] `M-100` Active task
+
+## Done
+
+- [x] `M-001` Task one
+  - added: 2025-01-01
+  - resolved: 2025-05-01
+  - note:
+    A long multi-line note that spans
+    several lines to inflate the line count
+    well beyond what a simple task would use.
+- [x] `M-002` Task two
+  - added: 2025-01-02
+  - resolved: 2025-05-02
+  - note:
+    Another verbose note here
+    with multiple lines
+- [x] `M-003` Task three
+  - added: 2025-01-03
+  - resolved: 2025-05-03
+  - spec: doc/spec.md
+  - ref: doc/ref1.md, doc/ref2.md
+  - note: Short note
+- [x] `M-004` Task four
+  - added: 2025-01-04
+  - resolved: 2025-05-04
+- [x] `M-005` Task five
+  - added: 2025-01-05
+  - resolved: 2025-05-05
+";
+
+        let track = parse_track(src);
+
+        let mut config = make_config(vec![("main", "M")]);
+        config.clean.done_threshold = 5; // exactly 5 tasks
+
+        let mut project = Project {
+            root: root.to_path_buf(),
+            frame_dir: root.join("frame"),
+            config,
+            tracks: vec![("main".to_string(), track)],
+            inbox: None,
+        };
+
+        let result = clean_project(&mut project);
+        // 5 tasks <= threshold of 5, so nothing should be archived
+        assert!(result.tasks_archived.is_empty());
+        assert_eq!(project.tracks[0].1.done().len(), 5);
+    }
+
+    #[test]
+    fn test_archive_triggers_above_task_threshold() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("frame/tracks")).unwrap();
+
+        let src = "\
+# Main
+
+## Backlog
+
+- [ ] `M-100` Active task
+
+## Done
+
+- [x] `M-001` Task one
+  - added: 2025-01-01
+  - resolved: 2025-05-01
+- [x] `M-002` Task two
+  - added: 2025-01-02
+  - resolved: 2025-05-02
+- [x] `M-003` Task three
+  - added: 2025-01-03
+  - resolved: 2025-05-03
+";
+
+        let track = parse_track(src);
+
+        let mut config = make_config(vec![("main", "M")]);
+        config.clean.done_threshold = 2; // 3 tasks > 2
+
+        let mut project = Project {
+            root: root.to_path_buf(),
+            frame_dir: root.join("frame"),
+            config,
+            tracks: vec![("main".to_string(), track)],
+            inbox: None,
+        };
+
+        let result = clean_project(&mut project);
+        assert_eq!(result.tasks_archived.len(), 3);
+        assert!(project.tracks[0].1.done().is_empty());
     }
 
     // --- Generate ACTIVE.md ---

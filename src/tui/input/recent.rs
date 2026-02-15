@@ -21,26 +21,7 @@ pub fn build_recent_entries(app: &App) -> Vec<RecentEntry> {
     for (track_id, track) in &app.project.tracks {
         let track_name = app.track_name(track_id).to_string();
         for task in track.section_tasks(SectionKind::Done) {
-            let resolved = task
-                .metadata
-                .iter()
-                .find_map(|m| {
-                    if let crate::model::task::Metadata::Resolved(d) = m {
-                        Some(d.clone())
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_default();
-            entries.push(RecentEntry {
-                track_id: track_id.clone(),
-                id: task.id.clone().unwrap_or_default(),
-                title: task.title.clone(),
-                resolved,
-                track_name: track_name.clone(),
-                task: task.clone(),
-                is_archived: false,
-            });
+            push_done_entry(&mut entries, task, track_id, &track_name, false);
         }
     }
 
@@ -61,27 +42,8 @@ pub fn build_recent_entries(app: &App) -> Vec<RecentEntry> {
                     .unwrap_or(lines.len());
                 let (tasks, _) = crate::parse::parse_tasks(&lines, start, 0, 0);
                 let track_name = app.track_name(&tc.id).to_string();
-                for task in tasks {
-                    let resolved = task
-                        .metadata
-                        .iter()
-                        .find_map(|m| {
-                            if let crate::model::task::Metadata::Resolved(d) = m {
-                                Some(d.clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or_default();
-                    entries.push(RecentEntry {
-                        track_id: tc.id.clone(),
-                        id: task.id.clone().unwrap_or_default(),
-                        title: task.title.clone(),
-                        resolved,
-                        track_name: track_name.clone(),
-                        task,
-                        is_archived: true,
-                    });
+                for task in &tasks {
+                    push_done_entry(&mut entries, task, &tc.id, &track_name, true);
                 }
             }
         }
@@ -90,6 +52,37 @@ pub fn build_recent_entries(app: &App) -> Vec<RecentEntry> {
     // Sort by resolved date, most recent first
     entries.sort_by(|a, b| b.resolved.cmp(&a.resolved));
     entries
+}
+
+fn resolved_date(task: &crate::model::task::Task) -> String {
+    task.metadata
+        .iter()
+        .find_map(|m| {
+            if let crate::model::task::Metadata::Resolved(d) = m {
+                Some(d.clone())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default()
+}
+
+fn push_done_entry(
+    entries: &mut Vec<RecentEntry>,
+    task: &crate::model::task::Task,
+    track_id: &str,
+    track_name: &str,
+    is_archived: bool,
+) {
+    entries.push(RecentEntry {
+        track_id: track_id.to_string(),
+        id: task.id.clone().unwrap_or_default(),
+        title: task.title.clone(),
+        resolved: resolved_date(task),
+        track_name: track_name.to_string(),
+        task: task.clone(),
+        is_archived,
+    });
 }
 
 // ---------------------------------------------------------------------------

@@ -55,7 +55,7 @@ impl Default for CleanConfig {
     fn default() -> Self {
         CleanConfig {
             auto_clean: true,
-            done_threshold: 250,
+            done_threshold: 100,
             archive_per_track: true,
         }
     }
@@ -68,7 +68,7 @@ fn default_true() -> bool {
 
 /// Default: see src/templates/project.toml
 fn default_done_threshold() -> usize {
-    250
+    100
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -113,7 +113,7 @@ mod tests {
     fn clean_config_default() {
         let c = CleanConfig::default();
         assert!(c.auto_clean);
-        assert_eq!(c.done_threshold, 250);
+        assert_eq!(c.done_threshold, 100);
         assert!(c.archive_per_track);
     }
 

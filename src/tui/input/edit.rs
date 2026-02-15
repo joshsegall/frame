@@ -1493,8 +1493,14 @@ pub(super) fn confirm_edit(app: &mut App) {
             // If the buffer looks like "ID  title" (from autocomplete), extract just the ID
             let task_id = task_id.split_whitespace().next().unwrap_or("").to_string();
             if !task_id.is_empty() && !app.jump_to_task(&task_id) {
-                app.status_message = Some(format!("task {} not found", task_id));
-                app.status_is_error = true;
+                // jump_to_task fails for done subtasks (hidden from flat items).
+                // Fall back to detail view if the task exists in any track.
+                if let Some(track_id) = app.find_task_track_id(&task_id) {
+                    app.open_detail(track_id, task_id);
+                } else {
+                    app.status_message = Some(format!("task {} not found", task_id));
+                    app.status_is_error = true;
+                }
             }
         }
         EditTarget::ExistingPrefix {

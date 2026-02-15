@@ -6,8 +6,13 @@ All notable changes to frame will be documented in this file.
 
 ### Fixed
 - Archived tasks not appearing in Recent view — archive file header caused parser to return zero tasks
+- File watcher incorrectly matching archive files (e.g., `archive/main.md`) as track files — caused track to display "No tasks yet" after auto-clean archived done tasks; also fixed same bug for `archive/inbox.md`
+- Auto-clean not saving track file after archiving done tasks or reconciling sections
+- Right arrow on expanded task with done subtasks caused cursor to disappear (landed on non-selectable DoneSummary item)
+- Jump-to (`J`) on done subtasks showed "not found" instead of opening detail view
 
 ### Changed
+- `done_threshold` now counts top-level done tasks instead of serialized lines (default changed from 250 to 100)
 - Refactored TUI input handling: split 12,679-line `input/mod.rs` into 13 focused submodules (common, navigate, select, search, edit, move_mode, triage, confirm, command, popups, tracks, recent)
 - Extracted shared render utilities (`state_symbol`, `abbreviated_id`, `collect_metadata_list`, `spans_width`) into `render/helpers.rs`
 - Deduplicated parse utilities: shared `parse_title_and_tags` and `count_indent` across task and inbox parsers

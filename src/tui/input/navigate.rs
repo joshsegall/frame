@@ -763,9 +763,10 @@ pub(super) fn expand_or_enter(app: &mut App) {
                     state.expanded.insert(key);
                 }
             } else if *has_children && *is_expanded && cursor + 1 < flat_items.len() {
-                // Already expanded: move to first child
+                // Already expanded: move to first child, skipping non-selectable items
+                let target = super::common::skip_non_selectable(&flat_items, cursor + 1, 1);
                 let state = app.get_track_state(&track_id);
-                state.cursor = cursor + 1;
+                state.cursor = target;
             }
         }
     }
