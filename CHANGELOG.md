@@ -4,6 +4,9 @@ All notable changes to frame will be documented in this file.
 
 ## v0.1.4 (unreleased)
 
+### Fixed
+- Archived tasks not appearing in Recent view — archive file header caused parser to return zero tasks
+
 ### Changed
 - Refactored TUI input handling: split 12,679-line `input/mod.rs` into 13 focused submodules (common, navigate, select, search, edit, move_mode, triage, confirm, command, popups, tracks, recent)
 - Extracted shared render utilities (`state_symbol`, `abbreviated_id`, `collect_metadata_list`, `spans_width`) into `render/helpers.rs`
