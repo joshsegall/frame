@@ -842,11 +842,7 @@ pub(super) fn count_tracks(app: &App) -> usize {
     app.project.config.tracks.len()
 }
 
-/// Count total done tasks across all tracks
+/// Count total recent entries (done tasks + archived tasks) across all tracks
 pub(super) fn count_recent_tasks(app: &App) -> usize {
-    app.project
-        .tracks
-        .iter()
-        .map(|(_, track)| track.section_tasks(crate::model::SectionKind::Done).len())
-        .sum()
+    super::build_recent_entries(app).len()
 }
