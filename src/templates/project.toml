@@ -43,6 +43,7 @@ cc_only = true               # true: agent only works on #cc tasks
 [clean]
 auto_clean = true            # run clean after file reload in TUI
 done_threshold = 100         # max done tasks per track before archiving
+done_retain = 10             # number of recent done tasks to keep in track after archiving
 archive_per_track = true     # separate archive file per track
 
 # UI

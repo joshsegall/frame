@@ -7,6 +7,7 @@ All notable changes to frame will be documented in this file.
 ### Added
 - Soft word wrap for inbox item titles in both view and edit modes
 - Soft word wrap for track view task titles in both view and edit modes
+- `done_retain` config option: number of recent done tasks to keep in track after archiving (default: 10)
 
 ### Fixed
 - Archived tasks not appearing in Recent view — archive file header caused parser to return zero tasks

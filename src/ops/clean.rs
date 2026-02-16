@@ -799,20 +799,68 @@ fn archive_done_tasks(project: &mut Project, result: &mut CleanResult) {
         return;
     }
     let threshold = project.config.clean.done_threshold;
+    let retain = project.config.clean.done_retain;
 
     for (track_id, track) in &mut project.tracks {
-        let done_task_count = count_done_tasks(track);
+        let done_tasks = track.section_tasks(SectionKind::Done);
+        let done_task_count = done_tasks.len();
         if done_task_count <= threshold {
             continue;
         }
 
-        // 1. Serialize done tasks WITHOUT removing them
-        let archive_content = serialize_archived_tasks(track.section_tasks(SectionKind::Done));
+        // If we'd retain everything, skip archiving entirely
+        if retain >= done_task_count {
+            continue;
+        }
+
+        // Build (index, resolved_date) pairs, sort by resolved date descending.
+        // Tasks without a resolved date get "" so they sort as oldest.
+        let mut indexed: Vec<(usize, String)> = done_tasks
+            .iter()
+            .enumerate()
+            .map(|(i, task)| {
+                let resolved = task
+                    .metadata
+                    .iter()
+                    .find_map(|m| {
+                        if let Metadata::Resolved(d) = m {
+                            Some(d.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
+                (i, resolved)
+            })
+            .collect();
+        indexed.sort_by(|a, b| b.1.cmp(&a.1)); // most recent first
+
+        // The top `retain` entries stay; the rest get archived
+        let retain_indices: HashSet<usize> = indexed.iter().take(retain).map(|(i, _)| *i).collect();
+
+        // Serialize only the non-retained tasks for the archive file
+        let tasks_to_archive: Vec<&Task> = done_tasks
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !retain_indices.contains(i))
+            .map(|(_, t)| t)
+            .collect();
+        let archive_content = {
+            let lines = crate::parse::serialize_tasks(
+                &tasks_to_archive
+                    .iter()
+                    .copied()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                0,
+            );
+            lines.join("\n")
+        };
         if archive_content.is_empty() {
             continue;
         }
 
-        // 2. Build archive file content
+        // Build archive file content
         let archive_path = project
             .frame_dir
             .join("archive")
@@ -827,7 +875,7 @@ fn archive_done_tasks(project: &mut Project, result: &mut CleanResult) {
             format!("{}\n{}", existing.trim_end(), archive_content)
         };
 
-        // 3. Write archive — if this fails, leave tasks in place
+        // Write archive — if this fails, leave tasks in place
         if crate::io::recovery::atomic_write(&archive_path, new_content.as_bytes()).is_err() {
             eprintln!(
                 "warning: could not write archive for {}, skipping",
@@ -836,8 +884,8 @@ fn archive_done_tasks(project: &mut Project, result: &mut CleanResult) {
             continue;
         }
 
-        // 4. Only NOW extract tasks from track
-        let archived = extract_done_tasks_for_archive(track);
+        // Only NOW extract non-retained tasks from the Done section
+        let archived = extract_done_tasks_except(track, &retain_indices);
         for task in &archived {
             result.tasks_archived.push(ArchiveRecord {
                 track_id: track_id.clone(),
@@ -848,11 +896,9 @@ fn archive_done_tasks(project: &mut Project, result: &mut CleanResult) {
     }
 }
 
-fn count_done_tasks(track: &Track) -> usize {
-    track.section_tasks(SectionKind::Done).len()
-}
-
-fn extract_done_tasks_for_archive(track: &mut Track) -> Vec<Task> {
+/// Remove done tasks from the track EXCEPT those at the given indices.
+/// Returns the removed tasks.
+fn extract_done_tasks_except(track: &mut Track, retain_indices: &HashSet<usize>) -> Vec<Task> {
     for node in &mut track.nodes {
         if let TrackNode::Section {
             kind: SectionKind::Done,
@@ -860,15 +906,20 @@ fn extract_done_tasks_for_archive(track: &mut Track) -> Vec<Task> {
             ..
         } = node
         {
-            return std::mem::take(tasks);
+            let mut archived = Vec::new();
+            let mut retained = Vec::new();
+            for (i, task) in std::mem::take(tasks).into_iter().enumerate() {
+                if retain_indices.contains(&i) {
+                    retained.push(task);
+                } else {
+                    archived.push(task);
+                }
+            }
+            *tasks = retained;
+            return archived;
         }
     }
     Vec::new()
-}
-
-fn serialize_archived_tasks(tasks: &[Task]) -> String {
-    let lines = crate::parse::serialize_tasks(tasks, 0);
-    lines.join("\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -1346,6 +1397,7 @@ mod tests {
 
         let mut config = make_config(vec![("main", "M")]);
         config.clean.done_threshold = 10; // low threshold to trigger archive
+        config.clean.done_retain = 0; // retain none so all 100 are archived
 
         let mut project = Project {
             root: root.to_path_buf(),
@@ -1480,6 +1532,7 @@ mod tests {
 
         let mut config = make_config(vec![("main", "M")]);
         config.clean.done_threshold = 2; // 3 tasks > 2
+        config.clean.done_retain = 0; // retain none so all 3 are archived
 
         let mut project = Project {
             root: root.to_path_buf(),
@@ -1492,6 +1545,126 @@ mod tests {
         let result = clean_project(&mut project);
         assert_eq!(result.tasks_archived.len(), 3);
         assert!(project.tracks[0].1.done().is_empty());
+    }
+
+    #[test]
+    fn test_archive_retains_most_recent() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("frame/tracks")).unwrap();
+
+        let src = "\
+# Main
+
+## Backlog
+
+- [ ] `M-100` Active task
+
+## Done
+
+- [x] `M-001` Oldest task
+  - added: 2025-01-01
+  - resolved: 2025-05-01
+- [x] `M-002` No resolved date
+  - added: 2025-01-02
+- [x] `M-003` Middle task
+  - added: 2025-01-03
+  - resolved: 2025-05-10
+- [x] `M-004` Most recent
+  - added: 2025-01-04
+  - resolved: 2025-05-20
+- [x] `M-005` Second most recent
+  - added: 2025-01-05
+  - resolved: 2025-05-15
+";
+
+        let track = parse_track(src);
+
+        let mut config = make_config(vec![("main", "M")]);
+        config.clean.done_threshold = 2; // 5 tasks > 2, triggers archive
+        config.clean.done_retain = 2; // keep the 2 most recent
+
+        let mut project = Project {
+            root: root.to_path_buf(),
+            frame_dir: root.join("frame"),
+            config,
+            tracks: vec![("main".to_string(), track)],
+            inbox: None,
+        };
+
+        let result = clean_project(&mut project);
+
+        // 5 tasks - 2 retained = 3 archived
+        assert_eq!(result.tasks_archived.len(), 3);
+
+        // The 2 most recent (by resolved date) should remain
+        let done = project.tracks[0].1.done();
+        assert_eq!(done.len(), 2);
+        let retained_ids: Vec<&str> = done.iter().filter_map(|t| t.id.as_deref()).collect();
+        // M-004 (2025-05-20) and M-005 (2025-05-15) are most recent
+        assert!(retained_ids.contains(&"M-004"));
+        assert!(retained_ids.contains(&"M-005"));
+
+        // The archived tasks should include M-001, M-002 (no date), and M-003
+        let archived_ids: Vec<&str> = result
+            .tasks_archived
+            .iter()
+            .map(|a| a.task_id.as_str())
+            .collect();
+        assert!(archived_ids.contains(&"M-001"));
+        assert!(archived_ids.contains(&"M-002"));
+        assert!(archived_ids.contains(&"M-003"));
+    }
+
+    #[test]
+    fn test_archive_retain_exceeds_count() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("frame/tracks")).unwrap();
+
+        let src = "\
+# Main
+
+## Backlog
+
+- [ ] `M-100` Active task
+
+## Done
+
+- [x] `M-001` Task one
+  - added: 2025-01-01
+  - resolved: 2025-05-01
+- [x] `M-002` Task two
+  - added: 2025-01-02
+  - resolved: 2025-05-02
+- [x] `M-003` Task three
+  - added: 2025-01-03
+  - resolved: 2025-05-03
+";
+
+        let track = parse_track(src);
+
+        let mut config = make_config(vec![("main", "M")]);
+        config.clean.done_threshold = 2; // 3 > 2, would normally trigger
+        config.clean.done_retain = 5; // but retain 5 > count of 3
+
+        let mut project = Project {
+            root: root.to_path_buf(),
+            frame_dir: root.join("frame"),
+            config,
+            tracks: vec![("main".to_string(), track)],
+            inbox: None,
+        };
+
+        let result = clean_project(&mut project);
+
+        // Nothing should be archived since retain >= count
+        assert!(result.tasks_archived.is_empty());
+        assert_eq!(project.tracks[0].1.done().len(), 3);
+
+        // No archive file should have been created
+        let archive_path = root.join("frame/archive/main.md");
+        assert!(!archive_path.exists());
     }
 
     // --- Generate ACTIVE.md ---

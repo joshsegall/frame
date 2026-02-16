@@ -47,6 +47,9 @@ pub struct CleanConfig {
     #[serde(default = "default_done_threshold")]
     pub done_threshold: usize,
     /// Default: see src/templates/project.toml
+    #[serde(default = "default_done_retain")]
+    pub done_retain: usize,
+    /// Default: see src/templates/project.toml
     #[serde(default = "default_true")]
     pub archive_per_track: bool,
 }
@@ -56,6 +59,7 @@ impl Default for CleanConfig {
         CleanConfig {
             auto_clean: true,
             done_threshold: 100,
+            done_retain: 10,
             archive_per_track: true,
         }
     }
@@ -69,6 +73,11 @@ fn default_true() -> bool {
 /// Default: see src/templates/project.toml
 fn default_done_threshold() -> usize {
     100
+}
+
+/// Default: see src/templates/project.toml
+fn default_done_retain() -> usize {
+    10
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -114,6 +123,7 @@ mod tests {
         let c = CleanConfig::default();
         assert!(c.auto_clean);
         assert_eq!(c.done_threshold, 100);
+        assert_eq!(c.done_retain, 10);
         assert!(c.archive_per_track);
     }
 

@@ -107,7 +107,7 @@ When a task is marked done:
 
 When a top-level task moves between sections (Backlog <-> Done), its entire subtask tree moves with it. Subtasks cannot be moved between sections independently — only top-level tasks trigger section moves.
 
-When the Done section exceeds the configured threshold (default: 250 tasks), `fr clean` archives the oldest tasks to a per-track archive file in `frame/archive/`.
+When the Done section exceeds the configured threshold (default: 100 tasks), `fr clean` archives the oldest tasks to a per-track archive file in `frame/archive/`, retaining the most recently resolved tasks (default: 10) so they remain visible in the Recent view.
 
 ## Recovery
 
@@ -172,7 +172,8 @@ Auto-clean and archival settings:
 ```toml
 [clean]
 auto_clean = true          # run clean after file reload in TUI (default: true)
-done_threshold = 250       # max done tasks per track before archiving (default: 250)
+done_threshold = 100       # max done tasks per track before archiving (default: 100)
+done_retain = 10           # number of recent done tasks to keep in track after archiving (default: 10)
 archive_per_track = true   # separate archive file per track (default: true)
 ```
 
