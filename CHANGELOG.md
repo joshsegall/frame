@@ -2,7 +2,10 @@
 
 All notable changes to frame will be documented in this file.
 
-## v0.1.4 (unreleased)
+## v0.1.4 - 2026-02-15
+
+### Added
+- Soft word wrap for inbox item titles in both view and edit modes
 
 ### Fixed
 - Archived tasks not appearing in Recent view — archive file header caused parser to return zero tasks
@@ -10,6 +13,7 @@ All notable changes to frame will be documented in this file.
 - Auto-clean not saving track file after archiving done tasks or reconciling sections
 - Right arrow on expanded task with done subtasks caused cursor to disappear (landed on non-selectable DoneSummary item)
 - Jump-to (`J`) on done subtasks showed "not found" instead of opening detail view
+- `G` key not jumping to bottom in Recent view
 
 ### Changed
 - `done_threshold` now counts top-level done tasks instead of serialized lines (default changed from 250 to 100)
