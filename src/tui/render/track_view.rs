@@ -7,11 +7,15 @@ use regex::Regex;
 
 use crate::model::{Metadata, SectionKind, Task, TaskState};
 use crate::tui::app::{App, EditTarget, FlatItem, Mode, MoveState};
+use crate::tui::wrap;
 use crate::util::unicode;
 
-use super::detail_view::{UNDO_FLASH_COLORS, state_flash_colors};
+use super::detail_view::{UNDO_FLASH_COLORS, state_flash_colors, wrap_styled_spans};
 use super::helpers::{abbreviated_id, spans_width, state_symbol};
 use super::push_highlighted_spans;
+
+/// Maximum visible lines for wrap-aware title editing
+const MAX_EDIT_LINES: usize = 8;
 
 /// Render the track view content area
 pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -87,19 +91,18 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Now reborrow immutably for rendering
     let cursor = app.track_states.get(&track_id).map_or(0, |s| s.cursor);
-    let scroll = app
-        .track_states
-        .get(&track_id)
-        .map_or(0, |s| s.scroll_offset);
     let track = match app.current_track() {
         Some(t) => t,
         None => return,
     };
 
     let search_re = app.active_search_re();
-    let end = flat_items.len().min(scroll + visible_height);
-    let mut lines: Vec<Line> = Vec::with_capacity(visible_height);
-    let mut edit_anchor: Option<(u16, u16)> = None;
+
+    // Build all display lines, tracking cursor's display-line index
+    let mut display_lines: Vec<Line> = Vec::new();
+    let mut cursor_display_line: Option<usize> = None;
+    let mut edit_anchor_info: Option<(u16, usize)> = None; // (prefix_w, display_line_index)
+    let mut bulk_editor_anchor: Option<(u16, usize)> = None;
 
     // Compute range preview bounds for V-select
     let range_preview: Option<(usize, usize)> = app.range_anchor.map(|anchor| {
@@ -110,7 +113,7 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     });
 
-    for (item, row) in flat_items[scroll..end].iter().zip(scroll..end) {
+    for (row, item) in flat_items.iter().enumerate() {
         let is_cursor = row == cursor;
 
         match item {
@@ -137,7 +140,12 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
                                 .id
                                 .as_deref()
                                 .is_some_and(|id| app.selection.contains(id)));
-                    let (line, col) = render_task_line(
+
+                    if is_cursor {
+                        cursor_display_line = Some(display_lines.len());
+                    }
+
+                    let (task_lines, col) = render_task_line(
                         app,
                         task,
                         &TaskLineInfo {
@@ -155,22 +163,13 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
                         search_re.as_ref(),
                     );
                     if let Some(prefix_w) = col {
-                        let word_offset = app
-                            .autocomplete
-                            .as_ref()
-                            .map(|ac| ac.word_start_in_buffer(&app.edit_buffer) as u16)
-                            .unwrap_or(0);
-                        let screen_y = area.y + (row - scroll) as u16;
-                        let screen_x = area.x + prefix_w + word_offset;
-                        edit_anchor = Some((screen_x, screen_y));
+                        edit_anchor_info =
+                            Some((prefix_w, cursor_display_line.unwrap_or(display_lines.len())));
                     }
-                    lines.push(line);
+                    display_lines.extend(task_lines);
 
                     // Insert bulk inline editor below cursor row
-                    if is_cursor
-                        && lines.len() < visible_height
-                        && let Some(ref et) = app.edit_target
-                    {
+                    if is_cursor && let Some(ref et) = app.edit_target {
                         let label = match et {
                             EditTarget::BulkTags => Some("tags:"),
                             EditTarget::BulkDeps => Some("deps:"),
@@ -179,19 +178,20 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
                         if let Some(label) = label {
                             let (editor_line, ec) =
                                 render_bulk_editor_line(app, label, area.width as usize);
-                            let screen_y = area.y + lines.len() as u16;
-                            let screen_x = area.x + ec;
-                            edit_anchor = Some((screen_x, screen_y));
-                            lines.push(editor_line);
+                            bulk_editor_anchor = Some((ec, display_lines.len()));
+                            display_lines.push(editor_line);
                         }
                     }
                 }
             }
             FlatItem::ParkedSeparator => {
-                lines.push(render_parked_separator(app, area.width as usize, is_cursor));
+                if is_cursor {
+                    cursor_display_line = Some(display_lines.len());
+                }
+                display_lines.push(render_parked_separator(app, area.width as usize, is_cursor));
             }
             FlatItem::BulkMoveStandin { count } => {
-                lines.push(render_bulk_standin(app, *count, area.width as usize));
+                display_lines.push(render_bulk_standin(app, *count, area.width as usize));
             }
             FlatItem::DoneSummary {
                 depth,
@@ -199,7 +199,7 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 total_count,
                 ancestor_last,
             } => {
-                lines.push(render_done_summary(
+                display_lines.push(render_done_summary(
                     app,
                     *depth,
                     *done_count,
@@ -211,20 +211,55 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
+    // Adjust scroll in display-line space
+    let cdl = cursor_display_line.unwrap_or(0);
+    let mut scroll = app
+        .track_states
+        .get(&track_id)
+        .map_or(0, |s| s.scroll_offset);
+    if cdl < scroll {
+        scroll = cdl;
+    } else if cdl >= scroll + visible_height {
+        scroll = cdl.saturating_sub(visible_height - 1);
+    }
+    // Persist scroll back (display-line space)
+    {
+        let state = app.get_track_state(&track_id);
+        state.scroll_offset = scroll;
+    }
+
+    // Slice visible display lines
+    let lines: Vec<Line> = display_lines
+        .into_iter()
+        .skip(scroll)
+        .take(visible_height)
+        .collect();
+
     let paragraph = Paragraph::new(lines).style(Style::default().bg(app.theme.background));
     frame.render_widget(paragraph, area);
 
     // Set autocomplete anchor now that immutable borrows are released
-    if let Some(anchor) = edit_anchor {
-        app.autocomplete_anchor = Some(anchor);
+    if let Some((ec, dl_idx)) = bulk_editor_anchor {
+        let screen_y = area.y + dl_idx.saturating_sub(scroll) as u16;
+        let screen_x = area.x + ec;
+        app.autocomplete_anchor = Some((screen_x, screen_y));
+    } else if let Some((prefix_w, dl_idx)) = edit_anchor_info {
+        let word_offset = app
+            .autocomplete
+            .as_ref()
+            .map(|ac| ac.word_start_in_buffer(&app.edit_buffer) as u16)
+            .unwrap_or(0);
+        let screen_y = area.y + dl_idx.saturating_sub(scroll) as u16;
+        let screen_x = area.x + prefix_w + word_offset;
+        app.autocomplete_anchor = Some((screen_x, screen_y));
     } else if app.mode == Mode::Triage {
         // Cross-track move: anchor autocomplete to the cursor row
-        let screen_y = area.y + cursor.saturating_sub(scroll) as u16;
+        let screen_y = area.y + cdl.saturating_sub(scroll) as u16;
         let screen_x = area.x + 4;
         app.autocomplete_anchor = Some((screen_x, screen_y));
     } else if app.mode == Mode::Edit && matches!(app.edit_target, Some(EditTarget::FilterTag)) {
         // Filter tag selection: anchor autocomplete to the cursor row
-        let screen_y = area.y + cursor.saturating_sub(scroll) as u16;
+        let screen_y = area.y + cdl.saturating_sub(scroll) as u16;
         let screen_x = area.x + 4;
         app.autocomplete_anchor = Some((screen_x, screen_y));
     }
@@ -257,12 +292,12 @@ struct TaskLineInfo<'a> {
     ancestor_last: &'a [bool],
 }
 
-/// Render a single task line with all decorations.
-/// Returns the line and optionally the column offset where an edit buffer starts
+/// Render a single task as one or more display lines with all decorations.
+/// Returns the lines and optionally the column offset where an edit buffer starts
 /// (used for autocomplete anchor positioning).
 #[allow(clippy::too_many_arguments)]
-fn render_task_line<'a>(
-    app: &'a App,
+fn render_task_line(
+    app: &App,
     task: &Task,
     info: &TaskLineInfo<'_>,
     is_cursor: bool,
@@ -271,7 +306,7 @@ fn render_task_line<'a>(
     is_context: bool,
     width: usize,
     search_re: Option<&Regex>,
-) -> (Line<'a>, Option<u16>) {
+) -> (Vec<Line<'static>>, Option<u16>) {
     let mut spans: Vec<Span> = Vec::new();
     let mut edit_col: Option<u16> = None;
     let bg = app.theme.background;
@@ -403,6 +438,9 @@ fn render_task_line<'a>(
         push_highlighted_spans(&mut spans, &id_text, id_style, highlight_style, search_re);
     }
 
+    // Snapshot prefix spans (for wrap continuation indent calculation)
+    let prefix_spans_snapshot = spans.clone();
+
     // Check if this task is being edited inline (title or tags)
     let is_editing = is_cursor
         && app.mode == Mode::Edit
@@ -431,80 +469,149 @@ fn render_task_line<'a>(
     };
 
     if is_editing && !is_editing_tags {
-        // Record prefix width for autocomplete anchor
-        edit_col = Some(spans_width(&spans) as u16);
-        // Render edit buffer with cursor/selection highlighting
+        // Wrap-aware title editing
+        let prefix_width = spans_width(&spans);
+        edit_col = Some(prefix_width as u16);
+        let edit_available = width.saturating_sub(prefix_width);
         let buf = &app.edit_buffer;
         let cursor_pos = app.edit_cursor.min(buf.len());
-        let cursor_style = Style::default()
-            .fg(app.theme.background)
-            .bg(app.theme.text_bright);
-        let selection_style = Style::default()
-            .fg(app.theme.text_bright)
-            .bg(app.theme.blue);
 
-        if let Some((sel_start, sel_end)) = app.edit_selection_range() {
-            if sel_start != sel_end {
-                if sel_start > 0 {
-                    spans.push(Span::styled(buf[..sel_start].to_string(), title_style));
+        if edit_available > 0 {
+            let edit_text = [buf.as_str()];
+            let visual_lines = wrap::wrap_lines_for_edit(&edit_text, edit_available, 0, cursor_pos);
+            let total_visual = visual_lines.len();
+            let visible_visual = total_visual.clamp(1, MAX_EDIT_LINES);
+            let cursor_vrow = wrap::logical_to_visual_row(&visual_lines, 0, cursor_pos);
+
+            // Scroll to keep cursor visible
+            let mut title_scroll = 0usize;
+            if cursor_vrow >= visible_visual {
+                title_scroll = cursor_vrow.saturating_sub(visible_visual - 1);
+            }
+
+            let edit_style = title_style;
+            let cursor_block_style = Style::default()
+                .fg(app.theme.background)
+                .bg(app.theme.text_bright);
+            let selection_style = Style::default()
+                .fg(app.theme.text_bright)
+                .bg(app.theme.blue);
+            let sel_range = app.edit_selection_range();
+
+            let mut edit_lines: Vec<Line<'static>> = Vec::new();
+
+            for view_row in 0..visible_visual {
+                let vrow_idx = title_scroll + view_row;
+                if vrow_idx >= total_visual {
+                    break;
                 }
-                spans.push(Span::styled(
-                    buf[sel_start..sel_end].to_string(),
-                    selection_style,
-                ));
-                if sel_end < buf.len() {
-                    spans.push(Span::styled(buf[sel_end..].to_string(), title_style));
+                let vl = &visual_lines[vrow_idx];
+                let slice = &buf[vl.byte_start..vl.byte_end];
+                let has_cursor = vrow_idx == cursor_vrow;
+
+                let mut line_spans: Vec<Span<'static>> = Vec::new();
+
+                if view_row == 0 {
+                    // First visual line: reuse existing prefix spans
+                    line_spans.append(&mut spans);
+                } else {
+                    // Continuation lines: indent to match prefix
+                    line_spans.push(Span::styled(
+                        " ".repeat(prefix_width),
+                        Style::default().bg(row_bg),
+                    ));
                 }
-                if cursor_pos >= buf.len() {
-                    spans.push(Span::styled(" ".to_string(), cursor_style));
-                }
-            } else {
-                // Empty selection, render normally with cursor
-                let before = &buf[..cursor_pos];
-                if !before.is_empty() {
-                    spans.push(Span::styled(before.to_string(), title_style));
-                }
-                if cursor_pos < buf.len() {
-                    let grapheme = unicode::grapheme_at(buf, cursor_pos);
-                    spans.push(Span::styled(grapheme.to_string(), cursor_style));
-                    let after = &buf[cursor_pos + grapheme.len()..];
-                    if !after.is_empty() {
-                        spans.push(Span::styled(after.to_string(), title_style));
+
+                // Render text with cursor and selection
+                let graphemes: Vec<(usize, &str)> =
+                    unicode_segmentation::UnicodeSegmentation::grapheme_indices(slice, true)
+                        .collect();
+
+                if let Some((sel_start, sel_end)) = sel_range {
+                    if sel_start != sel_end {
+                        // Active selection: highlight selected range
+                        for &(gi, g) in &graphemes {
+                            let abs_byte = vl.byte_start + gi;
+                            if abs_byte >= sel_start && abs_byte < sel_end {
+                                line_spans.push(Span::styled(g.to_string(), selection_style));
+                            } else if has_cursor
+                                && gi == cursor_pos.saturating_sub(vl.byte_start)
+                                && cursor_pos < buf.len()
+                            {
+                                line_spans.push(Span::styled(g.to_string(), cursor_block_style));
+                            } else {
+                                line_spans.push(Span::styled(g.to_string(), edit_style));
+                            }
+                        }
+                        if has_cursor && cursor_pos >= vl.byte_end {
+                            line_spans.push(Span::styled(" ".to_string(), cursor_block_style));
+                        }
+                    } else {
+                        // Empty selection, render with cursor
+                        render_edit_graphemes_with_cursor(
+                            &mut line_spans,
+                            &graphemes,
+                            vl,
+                            cursor_pos,
+                            has_cursor,
+                            edit_style,
+                            cursor_block_style,
+                            buf.len(),
+                        );
                     }
                 } else {
-                    spans.push(Span::styled(" ".to_string(), cursor_style));
+                    render_edit_graphemes_with_cursor(
+                        &mut line_spans,
+                        &graphemes,
+                        vl,
+                        cursor_pos,
+                        has_cursor,
+                        edit_style,
+                        cursor_block_style,
+                        buf.len(),
+                    );
                 }
-            }
-        } else {
-            let before = &buf[..cursor_pos];
-            if !before.is_empty() {
-                spans.push(Span::styled(before.to_string(), title_style));
-            }
-            if cursor_pos < buf.len() {
-                let grapheme = unicode::grapheme_at(buf, cursor_pos);
-                spans.push(Span::styled(grapheme.to_string(), cursor_style));
-                let after = &buf[cursor_pos + grapheme.len()..];
-                if !after.is_empty() {
-                    spans.push(Span::styled(after.to_string(), title_style));
+
+                // Pad to full width with row background
+                let content_width: usize = line_spans
+                    .iter()
+                    .map(|s| unicode::display_width(&s.content))
+                    .sum();
+                if content_width < width {
+                    line_spans.push(Span::styled(
+                        " ".repeat(width - content_width),
+                        Style::default().bg(row_bg),
+                    ));
                 }
-            } else {
-                spans.push(Span::styled(" ".to_string(), cursor_style));
+
+                edit_lines.push(Line::from(line_spans));
             }
+
+            // Scroll indicator when total visual lines exceed visible
+            if total_visual > visible_visual {
+                let dim_style = Style::default().fg(app.theme.dim).bg(app.theme.background);
+                let indicator = format!(
+                    "{}[{}/{}]",
+                    " ".repeat(prefix_width),
+                    title_scroll + visible_visual,
+                    total_visual,
+                );
+                edit_lines.push(Line::from(Span::styled(indicator, dim_style)));
+            }
+
+            return (edit_lines, edit_col);
         }
+        // Fallback: edit_available == 0, just push buffer as-is
+        spans.push(Span::styled(buf.to_string(), title_style));
     } else {
         let highlight_style = Style::default()
             .fg(app.theme.search_match_fg)
             .bg(app.theme.search_match_bg)
             .add_modifier(Modifier::BOLD);
-        // Truncate title if it would overflow the available width
-        let prefix_width = spans_width(&spans);
-        let tag_width: usize = task.tags.iter().map(|t| t.len() + 2).sum::<usize>()
-            + if task.tags.is_empty() { 0 } else { 2 };
-        let available = width.saturating_sub(prefix_width + tag_width + 1);
-        let display_title = super::truncate_with_ellipsis(&task.title, available);
+        // Push full title (wrapping will handle overflow)
         push_highlighted_spans(
             &mut spans,
-            &display_title,
+            &task.title,
             title_style,
             highlight_style,
             search_re,
@@ -601,18 +708,6 @@ fn render_task_line<'a>(
 
     // Hidden match indicator for non-visible field matches
     if let Some(indicator) = hidden_match_indicator(task, search_re) {
-        let indicator_width = unicode::display_width(&indicator) + 2; // "  " + indicator
-        let content_width = spans_width(&spans);
-
-        // Truncate line content if needed to make room for indicator
-        if content_width + indicator_width > width {
-            truncate_spans(&mut spans, width.saturating_sub(indicator_width + 1));
-            spans.push(Span::styled(
-                "\u{2026}", // …
-                Style::default().fg(app.theme.dim).bg(bg),
-            ));
-        }
-
         let hl_style = Style::default()
             .fg(app.theme.search_match_fg)
             .bg(app.theme.search_match_bg)
@@ -621,38 +716,85 @@ fn render_task_line<'a>(
         spans.push(Span::styled(indicator, hl_style));
     }
 
-    // Highlight cursor line, flash line, or selected line
-    if is_cursor || is_flash || is_selected {
-        let content_width = spans_width(&spans);
-        if content_width < width {
-            spans.push(Span::styled(
-                " ".repeat(width - content_width),
-                Style::default().bg(row_bg),
-            ));
-        }
-        // Re-style all spans with row background
-        // Skip column 0 border (already styled), search match spans (keep teal bg),
-        // text selection spans (keep blue bg), and cursor spans (keep text_bright bg)
-        let search_bg = app.theme.search_match_bg;
-        let selection_blue = app.theme.blue;
-        let cursor_bg = app.theme.text_bright;
-        for span in spans.iter_mut().skip(1) {
-            let bg_color = span.style.bg;
-            if bg_color != Some(search_bg)
-                && bg_color != Some(selection_blue)
-                && bg_color != Some(cursor_bg)
-            {
-                span.style = span.style.bg(row_bg);
+    // Wrap spans into multiple display lines
+    let prefix_width = spans_width(&prefix_spans_snapshot);
+    let wrapped = wrap_styled_spans(spans, width, prefix_width, bg);
+
+    let mut result_lines: Vec<Line<'static>> = Vec::new();
+    for mut wrapped_line in wrapped {
+        // Apply row background + padding for cursor/flash/selected lines
+        if is_cursor || is_flash || is_selected {
+            let content_width: usize = wrapped_line
+                .spans
+                .iter()
+                .map(|s| unicode::display_width(&s.content))
+                .sum();
+            if content_width < width {
+                wrapped_line.spans.push(Span::styled(
+                    " ".repeat(width - content_width),
+                    Style::default().bg(row_bg),
+                ));
+            }
+            // Re-style all spans with row background
+            // Skip column 0 border (first line only), search match spans,
+            // text selection spans, and cursor spans
+            let search_bg = app.theme.search_match_bg;
+            let selection_blue = app.theme.blue;
+            let cursor_bg = app.theme.text_bright;
+            let skip = if result_lines.is_empty() { 1 } else { 0 };
+            for span in wrapped_line.spans.iter_mut().skip(skip) {
+                let bg_color = span.style.bg;
+                if bg_color != Some(search_bg)
+                    && bg_color != Some(selection_blue)
+                    && bg_color != Some(cursor_bg)
+                {
+                    span.style = span.style.bg(row_bg);
+                }
             }
         }
+        result_lines.push(wrapped_line);
     }
 
-    (Line::from(spans), edit_col)
+    (result_lines, edit_col)
+}
+
+/// Helper: render graphemes for an edit visual line, placing cursor block at the right position.
+#[allow(clippy::too_many_arguments)]
+fn render_edit_graphemes_with_cursor(
+    line_spans: &mut Vec<Span<'static>>,
+    graphemes: &[(usize, &str)],
+    vl: &wrap::VisualLine,
+    cursor_pos: usize,
+    has_cursor: bool,
+    edit_style: Style,
+    cursor_block_style: Style,
+    buf_len: usize,
+) {
+    if has_cursor {
+        let cursor_byte_in_row = cursor_pos.min(vl.byte_end).saturating_sub(vl.byte_start);
+        let mut cursor_rendered = false;
+        for &(gi, g) in graphemes {
+            if gi == cursor_byte_in_row && !cursor_rendered {
+                line_spans.push(Span::styled(g.to_string(), cursor_block_style));
+                cursor_rendered = true;
+            } else {
+                line_spans.push(Span::styled(g.to_string(), edit_style));
+            }
+        }
+        if !cursor_rendered {
+            line_spans.push(Span::styled(" ".to_string(), cursor_block_style));
+        }
+    } else if !graphemes.is_empty() {
+        // Non-cursor line: emit as single span
+        let text: String = graphemes.iter().map(|(_, g)| *g).collect();
+        line_spans.push(Span::styled(text, edit_style));
+    }
+    let _ = (vl, buf_len); // suppress unused warnings
 }
 
 /// Render the bulk inline editor line (tags:/deps: label + edit buffer + cursor).
 /// Returns the line and the column offset of the edit text start (for autocomplete anchor).
-fn render_bulk_editor_line<'a>(app: &'a App, label: &str, width: usize) -> (Line<'a>, u16) {
+fn render_bulk_editor_line(app: &App, label: &str, width: usize) -> (Line<'static>, u16) {
     let bg = app.theme.background;
     let mut spans: Vec<Span> = Vec::new();
 
@@ -701,7 +843,7 @@ fn render_bulk_editor_line<'a>(app: &'a App, label: &str, width: usize) -> (Line
 }
 
 /// Render the parked section separator
-fn render_parked_separator<'a>(app: &'a App, width: usize, is_cursor: bool) -> Line<'a> {
+fn render_parked_separator(app: &App, width: usize, is_cursor: bool) -> Line<'static> {
     let bg = if is_cursor {
         app.theme.selection_bg
     } else {
@@ -739,7 +881,7 @@ fn render_parked_separator<'a>(app: &'a App, width: usize, is_cursor: bool) -> L
 }
 
 /// Render the bulk move stand-in row: "━━━ N tasks ━━━"
-fn render_bulk_standin<'a>(app: &'a App, count: usize, width: usize) -> Line<'a> {
+fn render_bulk_standin(app: &App, count: usize, width: usize) -> Line<'static> {
     let bg = app.theme.selection_bg;
     let style = Style::default()
         .fg(app.theme.highlight)
@@ -768,14 +910,14 @@ fn render_bulk_standin<'a>(app: &'a App, count: usize, width: usize) -> Line<'a>
 }
 
 /// Render the "X/Y done" summary row for hidden done subtasks
-fn render_done_summary<'a>(
-    app: &'a App,
+fn render_done_summary(
+    app: &App,
     _depth: usize,
     done_count: usize,
     total_count: usize,
     ancestor_last: &[bool],
     width: usize,
-) -> Line<'a> {
+) -> Line<'static> {
     let bg = app.theme.background;
     let dim_style = Style::default().fg(app.theme.dim).bg(bg);
 
@@ -871,30 +1013,6 @@ fn hidden_match_indicator(task: &Task, search_re: Option<&Regex>) -> Option<Stri
     };
 
     Some(format!("[{} {}: {}]", total, match_word, field_str))
-}
-
-/// Truncate spans to fit within `max_width` characters.
-fn truncate_spans(spans: &mut Vec<Span<'_>>, max_width: usize) {
-    let mut total = 0usize;
-    let mut truncate_at = spans.len();
-
-    for (i, span) in spans.iter().enumerate() {
-        let span_width = unicode::display_width(&span.content);
-        if total + span_width > max_width {
-            truncate_at = i;
-            // Truncate this span's content to fit
-            let remaining = max_width.saturating_sub(total);
-            if remaining > 0 {
-                let truncated: String = span.content.chars().take(remaining).collect();
-                spans[i] = Span::styled(truncated, span.style);
-                truncate_at = i + 1;
-            }
-            break;
-        }
-        total += span_width;
-    }
-
-    spans.truncate(truncate_at);
 }
 
 #[cfg(test)]
