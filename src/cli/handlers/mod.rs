@@ -567,6 +567,33 @@ fn cmd_search(args: SearchArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Search archives if --archive flag is set
+    if args.archive {
+        let archives = project_io::load_archives(&project.frame_dir)?;
+        let archive_hits = search::search_archive_tasks(&archives, &re, args.track.as_deref());
+        let mut seen_archive = HashSet::new();
+        for hit in &archive_hits {
+            if seen_archive.insert((&hit.track_id, &hit.task_id)) {
+                // Find the task in the archive data to get its title
+                let task = archives
+                    .iter()
+                    .find(|(tid, _)| tid == &hit.track_id)
+                    .and_then(|(_, tasks)| find_task_by_id(tasks, &hit.task_id));
+                if let Some(task) = task {
+                    let line = format_task_line(task);
+                    println!("[archive:{}] {}", hit.track_id, line);
+                } else {
+                    println!(
+                        "[archive:{}] {} (in {})",
+                        hit.track_id,
+                        hit.task_id,
+                        hit.field_name()
+                    );
+                }
+            }
+        }
+    }
+
     // Search inbox too if no track filter
     if args.track.is_none()
         && let Some(ref inbox) = project.inbox
@@ -595,6 +622,19 @@ fn cmd_search(args: SearchArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Recursively find a task by ID in a flat list of tasks (with subtasks).
+fn find_task_by_id<'a>(tasks: &'a [Task], id: &str) -> Option<&'a Task> {
+    for task in tasks {
+        if task.id.as_deref() == Some(id) {
+            return Some(task);
+        }
+        if let Some(found) = find_task_by_id(&task.subtasks, id) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 /// Extension trait to get field name for search hits

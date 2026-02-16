@@ -190,6 +190,29 @@ fn search_task(re: &Regex, task: &Task, track_id: &str, hits: &mut Vec<SearchHit
     }
 }
 
+/// Search tasks from archive files.
+///
+/// Takes a list of `(track_id, tasks)` pairs (as returned by `load_archives`)
+/// and applies the same `search_task` logic used for active tracks.
+pub fn search_archive_tasks(
+    archives: &[(String, Vec<Task>)],
+    re: &Regex,
+    track_filter: Option<&str>,
+) -> Vec<SearchHit> {
+    let mut hits = Vec::new();
+    for (track_id, tasks) in archives {
+        if let Some(filter) = track_filter
+            && track_id != filter
+        {
+            continue;
+        }
+        for task in tasks {
+            search_task(re, task, track_id, &mut hits);
+        }
+    }
+    hits
+}
+
 // ---------------------------------------------------------------------------
 // Inbox search
 // ---------------------------------------------------------------------------

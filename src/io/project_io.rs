@@ -104,6 +104,66 @@ pub fn load_project(root: &Path) -> Result<Project, ProjectError> {
     })
 }
 
+/// Load archived tasks from `frame/archive/*.md` files.
+///
+/// Returns a list of `(track_id, tasks)` pairs. The track ID is derived from
+/// the archive filename stem (e.g., `archive/main.md` → `"main"`).
+/// Skips the `_tracks/` subdirectory (which holds archived whole-track files).
+pub fn load_archives(
+    frame_dir: &Path,
+) -> Result<Vec<(String, Vec<crate::model::task::Task>)>, ProjectError> {
+    let archive_dir = frame_dir.join("archive");
+    if !archive_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut archives = Vec::new();
+    let entries = fs::read_dir(&archive_dir).map_err(|e| ProjectError::ReadError {
+        path: archive_dir.clone(),
+        source: e,
+    })?;
+
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+
+        // Skip directories (e.g., _tracks/)
+        if path.is_dir() {
+            continue;
+        }
+
+        // Only process .md files
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+
+        let track_id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+
+        let content = fs::read_to_string(&path).map_err(|e| ProjectError::ReadError {
+            path: path.clone(),
+            source: e,
+        })?;
+
+        // Parse task lines, skipping the "# Archive — ..." header
+        let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+        let start = lines
+            .iter()
+            .position(|l| l.starts_with("- ["))
+            .unwrap_or(lines.len());
+        let (tasks, _) = crate::parse::parse_tasks(&lines, start, 0, 0);
+
+        if !tasks.is_empty() {
+            archives.push((track_id, tasks));
+        }
+    }
+
+    Ok(archives)
+}
+
 /// Save a track file back to disk
 pub fn save_track(frame_dir: &Path, file_path: &str, track: &Track) -> Result<(), ProjectError> {
     let full_path = frame_dir.join(file_path);

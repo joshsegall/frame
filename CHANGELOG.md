@@ -2,6 +2,11 @@
 
 All notable changes to frame will be documented in this file.
 
+## Unreleased
+
+### Added
+- `fr search --archive` flag to include archived tasks in search results
+
 ## v0.1.4 - 2026-02-15
 
 ### Added

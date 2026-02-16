@@ -170,6 +170,7 @@ fr sub EFF-014 "Test with nested closures"
 | `fr show <id> --context` | Task details with ancestor context |
 | `fr search <pattern>` | Regex search across tasks and inbox |
 | `fr search <pattern> --track <id>` | Search within one track |
+| `fr search <pattern> --archive` | Include archived tasks in search |
 | `fr deps <id>` | Dependency tree for a task |
 | `fr blocked` | Blocked tasks and their blockers |
 | `fr tracks` | All tracks with stats |
