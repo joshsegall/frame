@@ -168,9 +168,8 @@ fr sub EFF-014 "Test with nested closures"
 | `fr list --all` | Include shelved and archived tracks |
 | `fr show <id>` | Full task details |
 | `fr show <id> --context` | Task details with ancestor context |
-| `fr search <pattern>` | Regex search across tasks and inbox |
+| `fr search <pattern>` | Regex search across tasks, inbox, and archives |
 | `fr search <pattern> --track <id>` | Search within one track |
-| `fr search <pattern> --archive` | Include archived tasks in search |
 | `fr deps <id>` | Dependency tree for a task |
 | `fr blocked` | Blocked tasks and their blockers |
 | `fr tracks` | All tracks with stats |

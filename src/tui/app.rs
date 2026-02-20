@@ -41,6 +41,8 @@ pub enum View {
     Recent,
     /// Detail view for a single task
     Detail { track_id: String, task_id: String },
+    /// Project-wide search results
+    Search,
 }
 
 /// Regions in the detail view that can be navigated
@@ -61,6 +63,47 @@ impl DetailRegion {
     pub fn is_editable(self) -> bool {
         !matches!(self, DetailRegion::Added | DetailRegion::Subtasks)
     }
+}
+
+/// Source of a search result (which collection it came from)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SearchResultKind {
+    Track { track_idx: usize, track_id: String },
+    Inbox { item_index: usize },
+    Archive { track_id: String },
+}
+
+/// A field annotation line shown below a search result when the match is in a non-title field
+#[derive(Debug, Clone)]
+pub struct MatchAnnotation {
+    pub field: crate::ops::search::MatchField,
+    pub snippet: String,
+}
+
+/// A single search result item displayed in the Search view
+#[derive(Debug, Clone)]
+pub struct SearchResultItem {
+    pub kind: SearchResultKind,
+    pub task_id: String,
+    pub title: String,
+    pub state: Option<TaskState>,
+    pub tags: Vec<String>,
+    pub annotations: Vec<MatchAnnotation>,
+    pub title_matches: bool,
+    pub id_matches: bool,
+}
+
+/// Grouped project search results
+#[derive(Debug, Clone)]
+pub struct SearchResults {
+    pub query: String,
+    pub regex: Regex,
+    pub items: Vec<SearchResultItem>,
+    /// (start_index, label, match_count) for group headers
+    pub groups: Vec<(usize, String, usize)>,
+    pub cursor: usize,
+    pub scroll_offset: usize,
+    pub return_view: View,
 }
 
 /// Inline edit history for undo/redo within an editing session
@@ -975,6 +1018,19 @@ pub struct App {
     pub results_overlay_lines: Vec<Line<'static>>,
     /// Scroll offset for the results overlay
     pub results_overlay_scroll: usize,
+
+    /// Project-wide search results (active when in View::Search or after jumping from it)
+    pub project_search_results: Option<SearchResults>,
+    /// History of project search queries (most recent first, max 200)
+    pub project_search_history: Vec<String>,
+    /// Current project search input text
+    pub project_search_input: String,
+    /// Position in project search history (None = new/draft)
+    pub project_search_history_index: Option<usize>,
+    /// Draft project search text (preserved while browsing history)
+    pub project_search_draft: String,
+    /// When true, Mode::Search is routed to project search handler instead of view search
+    pub project_search_active: bool,
 }
 
 impl App {
@@ -1112,6 +1168,12 @@ impl App {
             results_overlay_title: String::new(),
             results_overlay_lines: Vec::new(),
             results_overlay_scroll: 0,
+            project_search_results: None,
+            project_search_history: Vec::new(),
+            project_search_input: String::new(),
+            project_search_history_index: None,
+            project_search_draft: String::new(),
+            project_search_active: false,
         }
     }
 
@@ -2800,6 +2862,9 @@ pub fn restore_ui_state(app: &mut App) {
     // Restore search history
     app.search_history = ui_state.search_history;
 
+    // Restore project search history
+    app.project_search_history = ui_state.project_search_history;
+
     // Restore note wrap override
     if let Some(wrap_override) = ui_state.note_wrap_override {
         app.note_wrap = wrap_override;
@@ -2810,7 +2875,16 @@ pub fn restore_ui_state(app: &mut App) {
 pub fn save_ui_state(app: &App) {
     use crate::io::state::{TrackUiState, UiState, write_ui_state};
 
-    let (view_str, active_track) = match &app.view {
+    let view_to_save = if app.view == View::Search {
+        // On quit from Search view, save the return_view instead
+        app.project_search_results
+            .as_ref()
+            .map(|sr| sr.return_view.clone())
+            .unwrap_or(View::Recent)
+    } else {
+        app.view.clone()
+    };
+    let (view_str, active_track) = match &view_to_save {
         View::Track(idx) => (
             "track".to_string(),
             app.active_track_ids.get(*idx).cloned().unwrap_or_default(),
@@ -2819,6 +2893,7 @@ pub fn save_ui_state(app: &App) {
         View::Tracks => ("tracks".to_string(), String::new()),
         View::Inbox => ("inbox".to_string(), String::new()),
         View::Recent => ("recent".to_string(), String::new()),
+        View::Search => ("recent".to_string(), String::new()),
     };
 
     let mut tracks = HashMap::new();
@@ -2846,6 +2921,7 @@ pub fn save_ui_state(app: &App) {
         last_search: app.last_search.clone(),
         search_history: app.search_history.clone(),
         note_wrap_override,
+        project_search_history: app.project_search_history.clone(),
     };
 
     let _ = write_ui_state(&app.project.frame_dir, &ui_state);

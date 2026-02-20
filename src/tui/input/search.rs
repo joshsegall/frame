@@ -1,20 +1,30 @@
+use std::collections::HashSet;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use regex::Regex;
 
+use crate::io::project_io;
 use crate::model::SectionKind;
 use crate::model::task::{Metadata, Task};
-use crate::ops::search::{search_inbox, search_tasks};
+use crate::ops::search::{self as search_ops, MatchField, search_inbox, search_tasks};
 use crate::ops::task_ops::{self};
 
 use crate::tui::app::{
-    App, DetailRegion, FlatItem, Mode, PendingMove, PendingMoveKind, RepeatEditRegion,
-    RepeatableAction, View, resolve_task_from_flat,
+    App, DetailRegion, FlatItem, MatchAnnotation, Mode, PendingMove, PendingMoveKind,
+    RepeatEditRegion, RepeatableAction, SearchResultItem, SearchResultKind, SearchResults, View,
+    resolve_task_from_flat,
 };
 use crate::tui::undo::Operation;
 
 use super::*;
 
 pub(super) fn handle_search(app: &mut App, key: KeyEvent) {
+    // Route to project search prompt handler if active
+    if app.project_search_active {
+        handle_project_search_prompt(app, key);
+        return;
+    }
+
     match (key.modifiers, key.code) {
         // Cancel search
         (_, KeyCode::Esc) => {
@@ -119,6 +129,446 @@ pub(super) fn handle_search(app: &mut App, key: KeyEvent) {
         }
 
         _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Project-wide search prompt handling
+// ---------------------------------------------------------------------------
+
+fn handle_project_search_prompt(app: &mut App, key: KeyEvent) {
+    match (key.modifiers, key.code) {
+        // Cancel
+        (_, KeyCode::Esc) => {
+            app.project_search_active = false;
+            app.mode = Mode::Navigate;
+        }
+
+        // Execute search
+        (_, KeyCode::Enter) => {
+            if !app.project_search_input.is_empty() {
+                execute_project_search(app);
+            } else {
+                app.project_search_active = false;
+                app.mode = Mode::Navigate;
+            }
+        }
+
+        // History: Up = older
+        (_, KeyCode::Up) => {
+            if !app.project_search_history.is_empty() {
+                match app.project_search_history_index {
+                    None => {
+                        app.project_search_draft = app.project_search_input.clone();
+                        app.project_search_history_index = Some(0);
+                        app.project_search_input = app.project_search_history[0].clone();
+                    }
+                    Some(idx) => {
+                        let next = idx + 1;
+                        if next < app.project_search_history.len() {
+                            app.project_search_history_index = Some(next);
+                            app.project_search_input = app.project_search_history[next].clone();
+                        }
+                    }
+                }
+            }
+        }
+
+        // History: Down = newer
+        (_, KeyCode::Down) => match app.project_search_history_index {
+            None => {}
+            Some(0) => {
+                app.project_search_history_index = None;
+                app.project_search_input = app.project_search_draft.clone();
+            }
+            Some(idx) => {
+                let prev = idx - 1;
+                app.project_search_history_index = Some(prev);
+                app.project_search_input = app.project_search_history[prev].clone();
+            }
+        },
+
+        // Backspace
+        (_, KeyCode::Backspace) => {
+            app.project_search_input.pop();
+            if app.project_search_history_index.is_some() {
+                app.project_search_history_index = None;
+                app.project_search_draft.clear();
+            }
+        }
+
+        // Type character
+        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+            app.project_search_input.push(c);
+            if app.project_search_history_index.is_some() {
+                app.project_search_history_index = None;
+                app.project_search_draft.clear();
+            }
+        }
+
+        _ => {}
+    }
+}
+
+/// Execute project-wide search and populate search results
+fn execute_project_search(app: &mut App) {
+    let query = app.project_search_input.clone();
+
+    // Compile regex (case-insensitive, fall back to escaped literal)
+    let re = match Regex::new(&format!("(?i){}", &query)) {
+        Ok(r) => r,
+        Err(_) => match Regex::new(&format!("(?i){}", regex::escape(&query))) {
+            Ok(r) => r,
+            Err(_) => {
+                app.project_search_active = false;
+                app.mode = Mode::Navigate;
+                return;
+            }
+        },
+    };
+
+    // Remember return view — if already in Search view, preserve the original return_view
+    let return_view = if matches!(app.view, View::Search) {
+        app.project_search_results
+            .as_ref()
+            .map(|sr| sr.return_view.clone())
+            .unwrap_or_else(|| app.view.clone())
+    } else {
+        app.view.clone()
+    };
+
+    let mut items: Vec<SearchResultItem> = Vec::new();
+    let mut groups: Vec<(usize, String, usize)> = Vec::new();
+
+    // Search active tracks in tab order
+    for (track_idx, track_id) in app.active_track_ids.iter().enumerate() {
+        let hits = search_tasks(&app.project, &re, Some(track_id));
+        if hits.is_empty() {
+            continue;
+        }
+
+        // Deduplicate by task_id, collect all matching fields
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut track_items: Vec<SearchResultItem> = Vec::new();
+
+        for hit in &hits {
+            if !seen.insert(hit.task_id.clone()) {
+                continue;
+            }
+            let track = App::find_track_in_project(&app.project, track_id);
+            let task = track.and_then(|t| task_ops::find_task_in_track(t, &hit.task_id));
+
+            let (title, state, tags) = if let Some(task) = task {
+                (task.title.clone(), Some(task.state), task.tags.clone())
+            } else {
+                (hit.task_id.clone(), None, Vec::new())
+            };
+
+            let task_hits: Vec<_> = hits.iter().filter(|h| h.task_id == hit.task_id).collect();
+            let (annotations, title_matches, id_matches) = build_annotations(&task_hits, task, &re);
+
+            track_items.push(SearchResultItem {
+                kind: SearchResultKind::Track {
+                    track_idx,
+                    track_id: track_id.clone(),
+                },
+                task_id: hit.task_id.clone(),
+                title,
+                state,
+                tags,
+                annotations,
+                title_matches,
+                id_matches,
+            });
+        }
+
+        if !track_items.is_empty() {
+            let track_name = app.track_name(track_id).to_string();
+            let prefix = app
+                .project
+                .config
+                .ids
+                .prefixes
+                .get(track_id.as_str())
+                .cloned();
+            let label = if let Some(pfx) = prefix {
+                format!("{} ({})", track_name, pfx)
+            } else {
+                track_name
+            };
+            groups.push((items.len(), label, track_items.len()));
+            items.extend(track_items);
+        }
+    }
+
+    // Search inbox
+    if let Some(ref inbox) = app.project.inbox {
+        let inbox_hits = search_ops::search_inbox(inbox, &re);
+        if !inbox_hits.is_empty() {
+            let mut seen_indices: HashSet<usize> = HashSet::new();
+            let mut inbox_items: Vec<SearchResultItem> = Vec::new();
+
+            for hit in &inbox_hits {
+                if !seen_indices.insert(hit.item_index) {
+                    continue;
+                }
+                if let Some(item) = inbox.items.get(hit.item_index) {
+                    let item_hits: Vec<_> = inbox_hits
+                        .iter()
+                        .filter(|h| h.item_index == hit.item_index)
+                        .collect();
+                    let title_matches = item_hits.iter().any(|h| h.field == MatchField::Title);
+
+                    // Build annotations for non-title fields
+                    let mut seen_fields: HashSet<String> = HashSet::new();
+                    let mut annotations: Vec<MatchAnnotation> = Vec::new();
+                    for ih in &item_hits {
+                        if ih.field == MatchField::Title {
+                            continue;
+                        }
+                        let key = format!("{:?}", ih.field);
+                        if !seen_fields.insert(key) {
+                            continue;
+                        }
+                        let snippet = match &ih.field {
+                            MatchField::Body => {
+                                item.body.as_ref().map(|b| snippet_around_match(b, 80, &re))
+                            }
+                            MatchField::Tag => Some(
+                                item.tags
+                                    .iter()
+                                    .map(|t| format!("#{}", t))
+                                    .collect::<Vec<_>>()
+                                    .join(" "),
+                            ),
+                            _ => None,
+                        };
+                        if let Some(s) = snippet {
+                            annotations.push(MatchAnnotation {
+                                field: ih.field.clone(),
+                                snippet: s,
+                            });
+                        }
+                    }
+
+                    inbox_items.push(SearchResultItem {
+                        kind: SearchResultKind::Inbox {
+                            item_index: hit.item_index,
+                        },
+                        task_id: String::new(),
+                        title: item.title.clone(),
+                        state: None,
+                        tags: item.tags.clone(),
+                        annotations,
+                        title_matches,
+                        id_matches: false,
+                    });
+                }
+            }
+
+            if !inbox_items.is_empty() {
+                groups.push((items.len(), "Inbox".to_string(), inbox_items.len()));
+                items.extend(inbox_items);
+            }
+        }
+    }
+
+    // Search archives
+    if let Ok(archives) = project_io::load_archives(&app.project.frame_dir) {
+        let archive_hits = search_ops::search_archive_tasks(&archives, &re, None);
+        if !archive_hits.is_empty() {
+            let mut seen: HashSet<(String, String)> = HashSet::new();
+            let mut archive_items: Vec<SearchResultItem> = Vec::new();
+
+            for hit in &archive_hits {
+                if !seen.insert((hit.track_id.clone(), hit.task_id.clone())) {
+                    continue;
+                }
+                let task = archives
+                    .iter()
+                    .find(|(tid, _)| tid == &hit.track_id)
+                    .and_then(|(_, tasks)| find_task_by_id_recursive(tasks, &hit.task_id));
+
+                let (title, state, tags) = if let Some(task) = task {
+                    (task.title.clone(), Some(task.state), task.tags.clone())
+                } else {
+                    (hit.task_id.clone(), None, Vec::new())
+                };
+
+                let task_hits: Vec<_> = archive_hits
+                    .iter()
+                    .filter(|h| h.task_id == hit.task_id && h.track_id == hit.track_id)
+                    .collect();
+                let (annotations, title_matches, id_matches) =
+                    build_annotations(&task_hits, task, &re);
+
+                archive_items.push(SearchResultItem {
+                    kind: SearchResultKind::Archive {
+                        track_id: hit.track_id.clone(),
+                    },
+                    task_id: hit.task_id.clone(),
+                    title,
+                    state,
+                    tags,
+                    annotations,
+                    title_matches,
+                    id_matches,
+                });
+            }
+
+            if !archive_items.is_empty() {
+                groups.push((items.len(), "Archive".to_string(), archive_items.len()));
+                items.extend(archive_items);
+            }
+        }
+    }
+
+    // Add query to history (dedup, cap at 200)
+    app.project_search_history.retain(|s| s != &query);
+    app.project_search_history.insert(0, query.clone());
+    app.project_search_history.truncate(200);
+
+    // Set results and switch to search view
+    app.project_search_results = Some(SearchResults {
+        query,
+        regex: re,
+        items,
+        groups,
+        cursor: 0,
+        scroll_offset: 0,
+        return_view,
+    });
+    app.view = View::Search;
+    app.project_search_active = false;
+    app.mode = Mode::Navigate;
+}
+
+/// Build annotations for all matching non-title/non-ID fields.
+/// Returns (annotations, title_matches, id_matches).
+fn build_annotations(
+    task_hits: &[&search_ops::SearchHit],
+    task: Option<&Task>,
+    re: &Regex,
+) -> (Vec<MatchAnnotation>, bool, bool) {
+    let title_matches = task_hits.iter().any(|h| h.field == MatchField::Title);
+    let id_matches = task_hits.iter().any(|h| h.field == MatchField::Id);
+
+    let mut annotations: Vec<MatchAnnotation> = Vec::new();
+    let mut seen_fields: HashSet<String> = HashSet::new();
+
+    // Collect unique non-title, non-ID fields in hit order
+    for hit in task_hits {
+        if hit.field == MatchField::Title || hit.field == MatchField::Id {
+            continue;
+        }
+        let key = format!("{:?}", hit.field);
+        if !seen_fields.insert(key) {
+            continue;
+        }
+        if let Some(snippet) = build_snippet_for_field(&hit.field, task, re) {
+            annotations.push(MatchAnnotation {
+                field: hit.field.clone(),
+                snippet,
+            });
+        }
+    }
+
+    (annotations, title_matches, id_matches)
+}
+
+/// Build a snippet window centered around the first regex match.
+/// For multi-line text, finds the first line containing a match and windows within it.
+fn snippet_around_match(text: &str, max_chars: usize, re: &Regex) -> String {
+    // For multi-line text, find the first line with a match
+    let target_line = text
+        .lines()
+        .find(|line| re.is_match(line))
+        .unwrap_or_else(|| text.lines().next().unwrap_or(text));
+
+    let chars: Vec<char> = target_line.chars().collect();
+    let total = chars.len();
+
+    if total <= max_chars {
+        return target_line.to_string();
+    }
+
+    // Find the char offset of the first match in this line
+    let match_start_byte = re.find(target_line).map_or(0, |m| m.start());
+    // Convert byte offset to char offset
+    let match_char = target_line[..match_start_byte].chars().count();
+
+    // Center the window around the match
+    let half = max_chars / 2;
+    let window_start = if match_char <= half {
+        0
+    } else if match_char + half >= total {
+        total.saturating_sub(max_chars)
+    } else {
+        match_char - half
+    };
+    let window_end = (window_start + max_chars).min(total);
+
+    let content: String = chars[window_start..window_end].iter().collect();
+    let prefix = if window_start > 0 { "..." } else { "" };
+    let suffix = if window_end < total { "..." } else { "" };
+    format!("{}{}{}", prefix, content, suffix)
+}
+
+fn find_task_by_id_recursive<'a>(tasks: &'a [Task], id: &str) -> Option<&'a Task> {
+    for task in tasks {
+        if task.id.as_deref() == Some(id) {
+            return Some(task);
+        }
+        if let Some(found) = find_task_by_id_recursive(&task.subtasks, id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn build_snippet_for_field(field: &MatchField, task: Option<&Task>, re: &Regex) -> Option<String> {
+    let task = task?;
+    match field {
+        MatchField::Note => {
+            for meta in &task.metadata {
+                if let Metadata::Note(text) = meta {
+                    return Some(snippet_around_match(text, 80, re));
+                }
+            }
+            None
+        }
+        MatchField::Tag => Some(
+            task.tags
+                .iter()
+                .map(|t| format!("#{}", t))
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        MatchField::Dep => {
+            for meta in &task.metadata {
+                if let Metadata::Dep(deps) = meta {
+                    return Some(deps.join(", "));
+                }
+            }
+            None
+        }
+        MatchField::Ref => {
+            for meta in &task.metadata {
+                if let Metadata::Ref(refs) = meta {
+                    return Some(refs.join(", "));
+                }
+            }
+            None
+        }
+        MatchField::Spec => {
+            for meta in &task.metadata {
+                if let Metadata::Spec(spec) = meta {
+                    return Some(spec.clone());
+                }
+            }
+            None
+        }
+        _ => None,
     }
 }
 
@@ -596,6 +1046,7 @@ pub(super) fn execute_search_dir(app: &mut App, direction: i32) {
         View::Tracks => search_in_tracks_view(app, &re, direction),
         View::Inbox => search_in_inbox(app, &re, direction),
         View::Recent => search_in_recent(app, &re, direction),
+        View::Search => {} // View search not applicable in project search results
     }
 }
 
@@ -1191,6 +1642,7 @@ pub(super) fn count_matches_for_pattern(app: &App, re: &Regex) -> usize {
             }
             matched_done_ids.len()
         }
+        View::Search => 0,
     }
 }
 

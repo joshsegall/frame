@@ -167,7 +167,7 @@ pub(super) fn handle_navigate(app: &mut App, key: KeyEvent) {
             app.status_message = Some("press Q again to quit".to_string());
         }
 
-        // Esc: pop detail stack, close detail view, or clear search
+        // Esc: pop detail stack, close detail view, return to search, or clear search
         (_, KeyCode::Esc) => {
             if let View::Detail { .. } = &app.view {
                 if let Some((parent_track, parent_task)) = app.detail_stack.pop() {
@@ -235,6 +235,14 @@ pub(super) fn handle_navigate(app: &mut App, key: KeyEvent) {
                     }
                     app.close_detail_fully();
                 }
+            } else if app.view == View::Search {
+                // Esc from search view: restore return_view, clear results
+                if let Some(sr) = app.project_search_results.take() {
+                    app.view = sr.return_view;
+                }
+            } else if app.project_search_results.is_some() {
+                // Esc from a jumped-to view with active search: return to Search view
+                app.view = View::Search;
             } else if app.last_search.is_some() {
                 app.last_search = None;
                 app.search_match_idx = 0;
@@ -261,8 +269,8 @@ pub(super) fn handle_navigate(app: &mut App, key: KeyEvent) {
             app.help_scroll = 0;
         }
 
-        // Search: /
-        (KeyModifiers::NONE, KeyCode::Char('/')) => {
+        // Search: / (not available in project search results view)
+        (KeyModifiers::NONE, KeyCode::Char('/')) if !matches!(app.view, View::Search) => {
             app.mode = Mode::Search;
             app.search_input.clear();
             app.search_draft.clear();
@@ -274,7 +282,9 @@ pub(super) fn handle_navigate(app: &mut App, key: KeyEvent) {
 
         // n: search next when search active, otherwise note edit (cursor at end) in detail/inbox view
         (KeyModifiers::NONE, KeyCode::Char('n')) => {
-            if app.last_search.is_some() {
+            if matches!(app.view, View::Search) {
+                move_cursor(app, 1);
+            } else if app.last_search.is_some() {
                 search_next(app, 1);
             } else if matches!(app.view, View::Detail { .. }) {
                 detail_jump_to_region_and_edit(app, DetailRegion::Note, true);
@@ -284,7 +294,9 @@ pub(super) fn handle_navigate(app: &mut App, key: KeyEvent) {
         }
         // N: search prev when search active, otherwise note edit (cursor at start) in detail/inbox view
         (KeyModifiers::SHIFT, KeyCode::Char('N')) => {
-            if app.last_search.is_some() {
+            if matches!(app.view, View::Search) {
+                move_cursor(app, -1);
+            } else if app.last_search.is_some() {
                 search_next(app, -1);
             } else if matches!(app.view, View::Detail { .. }) {
                 detail_jump_to_region_and_edit(app, DetailRegion::Note, false);
@@ -298,6 +310,7 @@ pub(super) fn handle_navigate(app: &mut App, key: KeyEvent) {
             let idx = (c as usize) - ('1' as usize);
             if idx < app.active_track_ids.len() {
                 app.close_detail_fully();
+                app.project_search_results = None;
                 app.view = View::Track(idx);
             }
         }
@@ -321,16 +334,28 @@ pub(super) fn handle_navigate(app: &mut App, key: KeyEvent) {
         // View switching
         (KeyModifiers::NONE, KeyCode::Char('i')) => {
             app.close_detail_fully();
+            app.project_search_results = None;
             app.view = View::Inbox;
         }
         (KeyModifiers::NONE, KeyCode::Char('r')) => {
             app.close_detail_fully();
+            app.project_search_results = None;
             app.view = View::Recent;
         }
         (KeyModifiers::NONE, KeyCode::Char('0') | KeyCode::Char('`')) => {
             app.close_detail_fully();
+            app.project_search_results = None;
             app.tracks_name_col_min = 0;
             app.view = View::Tracks;
+        }
+
+        // Project-wide search
+        (KeyModifiers::SHIFT, KeyCode::Char('S')) => {
+            app.project_search_active = true;
+            app.project_search_input.clear();
+            app.project_search_draft.clear();
+            app.project_search_history_index = None;
+            app.mode = Mode::Search;
         }
 
         // Cursor movement: up/down
@@ -373,7 +398,9 @@ pub(super) fn handle_navigate(app: &mut App, key: KeyEvent) {
 
         // Enter: open detail view (track/recent view), triage (inbox), or edit region (detail view)
         (KeyModifiers::NONE, KeyCode::Enter) => {
-            if matches!(app.view, View::Inbox) {
+            if matches!(app.view, View::Search) {
+                search_result_jump(app);
+            } else if matches!(app.view, View::Inbox) {
                 inbox_begin_triage(app);
             } else if matches!(app.view, View::Recent) {
                 open_recent_detail(app);
@@ -634,6 +661,34 @@ pub(super) fn handle_navigate(app: &mut App, key: KeyEvent) {
         }
 
         _ => {}
+    }
+}
+
+/// Jump from search results to the selected task/inbox item
+fn search_result_jump(app: &mut App) {
+    let item = match &app.project_search_results {
+        Some(sr) => match sr.items.get(sr.cursor) {
+            Some(item) => item.clone(),
+            None => return,
+        },
+        None => return,
+    };
+
+    match &item.kind {
+        crate::tui::app::SearchResultKind::Track { .. } => {
+            if !item.task_id.is_empty() {
+                app.jump_to_task(&item.task_id);
+            }
+        }
+        crate::tui::app::SearchResultKind::Inbox { item_index } => {
+            let idx = *item_index;
+            app.view = View::Inbox;
+            let count = app.inbox_count();
+            app.inbox_cursor = idx.min(count.saturating_sub(1));
+        }
+        crate::tui::app::SearchResultKind::Archive { track_id } => {
+            app.status_message = Some(format!("Archive task: {} (read-only)", track_id));
+        }
     }
 }
 

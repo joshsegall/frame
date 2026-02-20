@@ -183,6 +183,7 @@ pub fn current_context(view: &View) -> ViewContext {
         View::Inbox => ViewContext::InboxView,
         View::Recent => ViewContext::RecentView,
         View::Tracks => ViewContext::TracksView,
+        View::Search => ViewContext::Global,
     }
 }
 
@@ -345,6 +346,13 @@ fn static_actions() -> Vec<PaletteAction> {
             id: "search",
             label: "Search".into(),
             shortcut: Some("/"),
+            contexts: &[ViewContext::Global],
+            category: ActionCategory::Search,
+        },
+        PaletteAction {
+            id: "project_search",
+            label: "Project search".into(),
+            shortcut: Some("S"),
             contexts: &[ViewContext::Global],
             category: ActionCategory::Search,
         },

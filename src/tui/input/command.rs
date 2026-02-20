@@ -123,6 +123,13 @@ pub(super) fn dispatch_palette_action(app: &mut App, action_id: &str, track_inde
             app.search_match_count = None;
             app.search_zero_confirmed = false;
         }
+        "project_search" => {
+            app.project_search_active = true;
+            app.project_search_input.clear();
+            app.project_search_draft.clear();
+            app.project_search_history_index = None;
+            app.mode = Mode::Search;
+        }
         "jump_to_task" => {
             begin_jump_to(app);
         }

@@ -1205,6 +1205,17 @@ pub(super) fn move_cursor(app: &mut App, delta: i32) {
             new_cursor = new_cursor.clamp(0, count as i32 - 1);
             app.recent_cursor = new_cursor as usize;
         }
+        View::Search => {
+            if let Some(ref mut sr) = app.project_search_results {
+                let count = sr.items.len();
+                if count == 0 {
+                    return;
+                }
+                let mut new_cursor = sr.cursor as i32 + delta;
+                new_cursor = new_cursor.clamp(0, count as i32 - 1);
+                sr.cursor = new_cursor as usize;
+            }
+        }
     }
 }
 
@@ -1281,6 +1292,44 @@ pub(super) fn move_paragraph(app: &mut App, direction: i32) {
                 // Reset subtask cursor when entering Subtasks from above
                 if ds.region == DetailRegion::Subtasks && direction > 0 {
                     ds.subtask_cursor = 0;
+                }
+            }
+        }
+        View::Search => {
+            // Jump between group headers in search results
+            if let Some(ref mut sr) = app.project_search_results {
+                if sr.groups.is_empty() || sr.items.is_empty() {
+                    return;
+                }
+                // Find which group the cursor is currently in
+                let cur_group = sr
+                    .groups
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find(|(_, (start, _, _))| sr.cursor >= *start)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                let target = if direction > 0 {
+                    // Next group
+                    if cur_group + 1 < sr.groups.len() {
+                        Some(sr.groups[cur_group + 1].0)
+                    } else {
+                        None
+                    }
+                } else {
+                    // Previous group: jump to start of current if not at start, else previous
+                    let cur_start = sr.groups[cur_group].0;
+                    if sr.cursor > cur_start {
+                        Some(cur_start)
+                    } else if cur_group > 0 {
+                        Some(sr.groups[cur_group - 1].0)
+                    } else {
+                        None
+                    }
+                };
+                if let Some(t) = target {
+                    sr.cursor = t;
                 }
             }
         }
@@ -1381,6 +1430,12 @@ pub(super) fn jump_to_top(app: &mut App) {
             app.recent_cursor = 0;
             app.recent_scroll = 0;
         }
+        View::Search => {
+            if let Some(ref mut sr) = app.project_search_results {
+                sr.cursor = 0;
+                sr.scroll_offset = 0;
+            }
+        }
     }
 }
 
@@ -1436,6 +1491,13 @@ pub(super) fn jump_to_bottom(app: &mut App) {
             let count = count_recent_tasks(app);
             if count > 0 {
                 app.recent_cursor = count - 1;
+            }
+        }
+        View::Search => {
+            if let Some(ref mut sr) = app.project_search_results
+                && !sr.items.is_empty()
+            {
+                sr.cursor = sr.items.len() - 1;
             }
         }
     }

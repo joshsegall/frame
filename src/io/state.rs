@@ -24,6 +24,9 @@ pub struct UiState {
     /// Search history (most recent first, max 200)
     #[serde(default)]
     pub search_history: Vec<String>,
+    /// Project search history (most recent first, max 200)
+    #[serde(default)]
+    pub project_search_history: Vec<String>,
 }
 
 /// Per-track UI state

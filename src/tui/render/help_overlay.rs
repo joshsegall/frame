@@ -180,6 +180,7 @@ fn build_columns(view: &View) -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         View::Tracks => build_tracks_columns(),
         View::Inbox => build_inbox_columns(),
         View::Recent => build_recent_columns(),
+        View::Search => build_search_columns(),
     }
 }
 
@@ -199,6 +200,7 @@ fn views_entries(include_tab: bool) -> Vec<HelpEntry> {
     entries.push(HelpEntry::Binding("0/`".into(), "Tracks overview".into()));
     entries.push(HelpEntry::Binding("i".into(), "Inbox".into()));
     entries.push(HelpEntry::Binding("r".into(), "Recent".into()));
+    entries.push(HelpEntry::Binding("S".into(), "Project search".into()));
     entries
 }
 
@@ -398,6 +400,27 @@ fn build_recent_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Blank,
     ];
     right.extend(other_entries(false, false, false));
+
+    (left, right)
+}
+
+fn build_search_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
+    let mut left = vec![
+        HelpEntry::Header("Navigation".into()),
+        HelpEntry::Binding("\u{25B2}\u{25BC}/jk".into(), "Move cursor".into()),
+        HelpEntry::Binding("Alt+\u{25B2}\u{25BC}".into(), "Jump section".into()),
+        HelpEntry::Binding("g/G".into(), "Top / bottom".into()),
+        HelpEntry::Binding("Enter".into(), "Jump to task".into()),
+        HelpEntry::Binding("Esc".into(), "Close search".into()),
+        HelpEntry::Binding("S".into(), "New search".into()),
+        HelpEntry::Blank,
+    ];
+    left.extend(views_entries(true));
+
+    let right = vec![
+        HelpEntry::Header("Search".into()),
+        HelpEntry::Binding("n/N".into(), "Next / prev result".into()),
+    ];
 
     (left, right)
 }

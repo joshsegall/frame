@@ -2949,10 +2949,12 @@ pub(super) fn switch_tab(app: &mut App, direction: i32) {
         }
         View::Tracks => total_tracks,
         View::Inbox => total_tracks + 1,
-        View::Recent => total_tracks + 2,
+        View::Recent | View::Search => total_tracks + 2,
     };
     // Close detail view if open
     app.close_detail_fully();
+    // Clear project search results when switching away
+    app.project_search_results = None;
 
     let new_idx = (current_idx as i32 + direction).rem_euclid(total_views as i32) as usize;
 

@@ -211,8 +211,80 @@ pub fn render_tab_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         ])
         .split(area);
 
-    let sep_cols = render_tabs(frame, app, chunks[0]);
-    render_separator(frame, app, chunks[1], &sep_cols);
+    if app.view == View::Search {
+        render_search_tab_bar(frame, app, chunks[0]);
+        // Simple separator for search view (no tab columns)
+        render_separator(frame, app, chunks[1], &[]);
+    } else {
+        let sep_cols = render_tabs(frame, app, chunks[0]);
+        render_separator(frame, app, chunks[1], &sep_cols);
+    }
+}
+
+/// Render a special tab bar header for the search results view
+fn render_search_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
+    let bg = app.theme.background;
+    let total_width = area.width as usize;
+    let mut spans: Vec<Span> = vec![
+        // Leading icon
+        Span::styled(" ", Style::default().bg(bg)),
+        Span::styled("\u{25B6}", Style::default().fg(app.theme.purple).bg(bg)),
+        Span::styled(" ", Style::default().bg(bg)),
+        // "Search:" label
+        Span::styled(
+            "Search: ",
+            Style::default()
+                .fg(app.theme.text_bright)
+                .bg(app.theme.selection_bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+
+    // Pattern
+    if let Some(ref sr) = app.project_search_results {
+        spans.push(Span::styled(
+            sr.query.clone(),
+            Style::default()
+                .fg(app.theme.highlight)
+                .bg(app.theme.selection_bg),
+        ));
+
+        // Match count
+        let total = sr.items.len();
+        let group_count = sr.groups.len();
+        let source_summary = if group_count == 1 {
+            "1 source".to_string()
+        } else {
+            format!("{} sources", group_count)
+        };
+        spans.push(Span::styled(
+            format!(
+                "  {} match{}  \u{2500}  {}",
+                total,
+                if total == 1 { "" } else { "es" },
+                source_summary
+            ),
+            Style::default()
+                .fg(app.theme.text)
+                .bg(app.theme.selection_bg),
+        ));
+    }
+
+    // Pad to full width
+    let used: usize = spans
+        .iter()
+        .map(|s| unicode::display_width(&s.content))
+        .sum();
+    if used < total_width {
+        spans.push(Span::styled(
+            " ".repeat(total_width - used),
+            Style::default().bg(app.theme.selection_bg),
+        ));
+    }
+
+    let line = Line::from(spans);
+    let widget = Paragraph::new(line).style(Style::default().bg(bg));
+    frame.render_widget(widget, area);
 }
 
 /// Render tabs and return the column positions of each separator character.

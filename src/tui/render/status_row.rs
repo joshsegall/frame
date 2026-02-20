@@ -36,7 +36,8 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
             Line::from(spans)
         }
         Mode::Navigate => {
-            if let Some(ref pattern) = app.last_search {
+            if app.last_search.is_some() && !matches!(app.view, View::Search) {
+                let pattern = app.last_search.as_ref().unwrap();
                 let mut spans = vec![Span::styled(
                     format!("/{}", pattern),
                     Style::default().fg(app.theme.text_bright).bg(bg),
@@ -63,16 +64,36 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
             }
         }
         Mode::Search => {
-            let mut spans = vec![
-                Span::styled(
-                    format!("/{}", app.search_input),
-                    Style::default().fg(app.theme.text_bright).bg(bg),
-                ),
-                Span::styled("\u{258C}", Style::default().fg(app.theme.highlight).bg(bg)),
-            ];
-            let hint = "Enter search  Esc cancel";
-            build_right_side(app, &mut spans, hint, width, bg, false);
-            Line::from(spans)
+            if app.project_search_active {
+                let mut spans = vec![
+                    Span::styled(
+                        " Search all: ",
+                        Style::default()
+                            .fg(app.theme.highlight)
+                            .bg(bg)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        app.project_search_input.clone(),
+                        Style::default().fg(app.theme.text_bright).bg(bg),
+                    ),
+                    Span::styled("\u{258C}", Style::default().fg(app.theme.highlight).bg(bg)),
+                ];
+                let hint = "Enter search  Esc cancel";
+                build_right_side(app, &mut spans, hint, width, bg, false);
+                Line::from(spans)
+            } else {
+                let mut spans = vec![
+                    Span::styled(
+                        format!("/{}", app.search_input),
+                        Style::default().fg(app.theme.text_bright).bg(bg),
+                    ),
+                    Span::styled("\u{258C}", Style::default().fg(app.theme.highlight).bg(bg)),
+                ];
+                let hint = "Enter search  Esc cancel";
+                build_right_side(app, &mut spans, hint, width, bg, false);
+                Line::from(spans)
+            }
         }
         Mode::Edit => {
             let is_filter_tag = matches!(

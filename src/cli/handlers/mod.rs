@@ -567,8 +567,8 @@ fn cmd_search(args: SearchArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Search archives if --archive flag is set
-    if args.archive {
+    // Search archives
+    {
         let archives = project_io::load_archives(&project.frame_dir)?;
         let archive_hits = search::search_archive_tasks(&archives, &re, args.track.as_deref());
         let mut seen_archive = HashSet::new();
@@ -594,7 +594,7 @@ fn cmd_search(args: SearchArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Search inbox too if no track filter
+    // Search inbox if no track filter
     if args.track.is_none()
         && let Some(ref inbox) = project.inbox
     {

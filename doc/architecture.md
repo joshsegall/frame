@@ -56,9 +56,11 @@ The TUI has two orthogonal state axes:
 Only one mode is active at a time. Each mode captures different keys and renders different UI chrome (status row, overlays). Mode transitions are explicit — entering Edit stores the edit target, exiting Edit commits or discards.
 
 **View** — what the user is looking at:
-`Track(index)` | `Tracks` | `Inbox` | `Recent` | `Detail { track_id, task_id }`
+`Track(index)` | `Tracks` | `Inbox` | `Recent` | `Detail { track_id, task_id }` | `Search`
 
 View determines which renderer draws the main area and which input handler processes keys (in Navigate mode). Views are independent of modes — you can be in Search mode while on any view.
+
+**Project Search**: The `Search` view displays project-wide search results grouped by source (active tracks in tab order, inbox, archives). Results are stored in `SearchResults` (items, groups, cursor, scroll) and rendered by `render/search_view.rs`. The search prompt reuses `Mode::Search` with a `project_search_active` flag to distinguish from view search. After jumping to a result with Enter, Esc returns to the search results; pressing Esc again restores the pre-search view.
 
 **FlatItem flattening**: The task tree is flattened into a `Vec<FlatItem>` for rendering. Each `FlatItem::Task` carries depth, tree-line ancestry info (`ancestor_last: Vec<bool>`), expand/collapse state, and an `is_context` flag for filtered ancestor rows. This flat list is the single source of truth for cursor position, scroll offset, and rendering.
 

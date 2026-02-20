@@ -5,7 +5,11 @@ All notable changes to frame will be documented in this file.
 ## Unreleased
 
 ### Added
-- `fr search --archive` flag to include archived tasks in search results
+- Project-wide search (`S` key in TUI): search across all active tracks, inbox, and archives with grouped results, section jumping, and jump-to-task navigation
+- "Project search" command palette action
+
+### Changed
+- `fr search` now includes archived tasks by default (previously required `--archive` flag; flag still accepted for backward compatibility)
 
 ## v0.1.4 - 2026-02-15
 

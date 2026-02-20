@@ -11,6 +11,7 @@ pub mod project_picker;
 pub mod recent_view;
 pub mod recovery_overlay;
 pub mod results_overlay;
+pub mod search_view;
 pub mod status_row;
 pub mod tab_bar;
 pub mod tag_color_popup;
@@ -65,6 +66,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         }
         View::Recent => {
             recent_view::render_recent_view(frame, app, chunks[1]);
+        }
+        View::Search => {
+            search_view::render_search_view(frame, app, chunks[1]);
         }
     }
 

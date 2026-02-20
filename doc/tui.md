@@ -20,6 +20,10 @@ Shows inbox items with numbered indices and tags. Switch to it with `i`.
 
 Done tasks grouped by resolved date, with a tree structure for subtasks. Switch to it with `r`.
 
+### Search View
+
+Project-wide search results grouped by source (active tracks, inbox, archive). Open with `S` from any view. Supports cursor navigation, section jumping with `Alt+Up/Down`, and `Enter` to jump to a result in its original view. `Esc` returns to the search results; pressing `Esc` again restores the pre-search view.
+
 ### Detail View
 
 Full view of a single task showing all fields as navigable regions: Title, Tags, Added, Deps, Spec, Refs, Note, Subtasks. Open with `Enter` on a task in Track view or Recent view. A breadcrumb trail always shows the origin (track prefix or "Recent") and any parent tasks when drilling into subtasks.
@@ -59,6 +63,7 @@ Full view of a single task showing all fields as navigable regions: Title, Tags,
 | `T` | Open tag color editor |
 | `P` | Open project picker |
 | `J` | Jump to task by ID |
+| `S` | Project-wide search (across all tracks, inbox, and archives) |
 | `z`, `u`, `Ctrl+Z`, `Super+Z` | Undo |
 | `Z`, `Ctrl+Y`, `Ctrl+Shift+Z`, `Super+Shift+Z` | Redo |
 
@@ -213,6 +218,28 @@ With selection active (Select mode):
 | `l`, `Right` | Expand subtask tree |
 | `h`, `Left` | Collapse subtask tree |
 | `Space` | Reopen task (5s grace period, press again to cancel) |
+
+### Search View — Navigate Mode
+
+| Key | Action |
+|-----|--------|
+| `j`, `Down` | Move cursor down |
+| `k`, `Up` | Move cursor up |
+| `g` | Jump to top |
+| `G` | Jump to bottom |
+| `Alt+Up` | Jump to previous group |
+| `Alt+Down` | Jump to next group |
+| `n` | Next result |
+| `N` | Previous result |
+| `Enter` | Jump to task in its original view |
+| `Esc` | Close search results and return to pre-search view |
+| `S` | Start a new project search |
+
+**Notes:**
+- View search (`/`) is independent from project search (`S`). They do not interact.
+- After jumping to a task with `Enter`, pressing `Esc` returns to the search results.
+- View-switching keys (`1`-`9`, `Tab`, `i`, `r`, `0`) dismiss search results.
+- Archive results are displayed dimmed; `Enter` on an archive result shows a status message.
 
 ### Detail View — Navigate Mode
 
