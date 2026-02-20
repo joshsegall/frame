@@ -2993,6 +2993,7 @@ pub(super) fn activate_autocomplete_for_region(app: &mut App, region: DetailRegi
     // Filter with current edit buffer content
     let filter_text = autocomplete_filter_text(&app.edit_buffer, kind);
     ac.filter(&filter_text);
+    ac.visible = !filter_text.is_empty() && !ac.filtered.is_empty();
     app.autocomplete = Some(ac);
 }
 
@@ -3043,7 +3044,7 @@ pub(super) fn update_autocomplete_filter(app: &mut App) {
         let filter_text = autocomplete_filter_text(&app.edit_buffer, kind);
         ac.filter(&filter_text);
         // Hide if no matches
-        ac.visible = !ac.filtered.is_empty();
+        ac.visible = !filter_text.is_empty() && !ac.filtered.is_empty();
     }
 }
 
