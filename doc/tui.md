@@ -542,6 +542,8 @@ When a filter removes the task under the cursor, the cursor moves to the nearest
 
 The active filter indicator appears right-aligned in the tab separator (e.g., "filter: ready #bug"). Filters have no undo — they are view-only, not mutations.
 
+Project search (`S`) ignores view filters — it always searches all tasks regardless of any active state or tag filter.
+
 ### Multi-Select
 
 `v` toggles individual task selection, `V` range-selects, `Ctrl+A` selects all. With tasks selected, bulk operations apply to all selected: state changes, tag/dep edits, move, cross-track move.
