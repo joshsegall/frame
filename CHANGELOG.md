@@ -5,6 +5,9 @@ All notable changes to frame will be documented in this file.
 ## Unreleased
 
 ### Added
+- Board view (`K` key in TUI): kanban-style cross-track view with Ready, In Progress, and Done columns. Features CC/All mode toggle (`c`), independent column navigation (`h`/`l`), tag filtering (`ft`), and all standard task actions (state changes, edit, deps, cross-track move). Layout adapts to terminal width (3-column, 2-column, single-column).
+- `board_done_days` config option: number of days of completed tasks to show in the Board Done column (default: 7, 0 = hide Done column)
+- "Open Board" command palette action
 - Project-wide search (`S` key in TUI): search across all active tracks, inbox, and archives with grouped results, section jumping, and jump-to-task navigation
 - "Project search" command palette action
 

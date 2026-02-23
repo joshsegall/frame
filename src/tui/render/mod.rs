@@ -1,4 +1,5 @@
 pub mod autocomplete;
+pub mod board_view;
 pub mod command_palette;
 pub mod conflict_popup;
 pub mod dep_popup;
@@ -58,6 +59,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     match &view {
         View::Track(_) => track_view::render_track_view(frame, app, chunks[1]),
         View::Detail { .. } => detail_view::render_detail_view(frame, app, chunks[1]),
+        View::Board => board_view::render_board_view(frame, app, chunks[1]),
         View::Tracks => {
             tracks_view::render_tracks_view(frame, app, chunks[1]);
         }

@@ -1,6 +1,5 @@
 ---
 source: src/tui/render/command_palette.rs
-assertion_line: 246
 expression: output
 ---
 
@@ -20,5 +19,5 @@ expression: output
          │   Delete task                                              │
          │   Edit tag colors                                         T│
          │                                                            │
-         │   56 of 56 actions                                         │
+         │   57 of 57 actions                                         │
          └────────────────────────────────────────────────────────────┘

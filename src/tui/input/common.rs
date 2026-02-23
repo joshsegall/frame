@@ -908,6 +908,11 @@ pub(super) fn task_state_action(app: &mut App, action: StateAction) {
             track_id.clone(),
             subtask_id.unwrap_or_else(|| task_id.clone()),
         )
+    } else if matches!(app.view, View::Board) {
+        match app.board_cursor_task_id() {
+            Some((tid, task_id)) => (tid, task_id),
+            None => return,
+        }
     } else if let Some((track_id, task_id, _section)) = app.cursor_task_id() {
         (track_id, task_id)
     } else {
@@ -956,11 +961,66 @@ pub(super) fn task_state_action(app: &mut App, action: StateAction) {
         app.flash_state = Some(new_state);
         app.flash_task(&task_id);
 
+        // Board-specific grace period handling
+        if matches!(app.view, View::Board) {
+            if old_state == crate::model::task::TaskState::Done
+                && new_state != crate::model::task::TaskState::Done
+            {
+                // Done→non-Done on board: mirror the reopen flow from confirm.rs.
+                // set_state() already stripped the resolved date, but we need it
+                // during the grace period so the task stays visible in Done column.
+                if let Some(ref resolved) = old_resolved {
+                    let track =
+                        app.find_track_mut(&track_id).expect("track exists");
+                    let task =
+                        task_ops::find_task_mut_in_track(track, &task_id).expect("task exists");
+                    task.metadata
+                        .push(Metadata::Resolved(resolved.clone()));
+                    task.mark_dirty();
+                }
+                // Schedule section move Done→Backlog after grace period.
+                // execute_pending_move(ToBacklog) will move the task and strip resolved.
+                app.pending_moves.push(PendingMove {
+                    kind: PendingMoveKind::ToBacklog,
+                    track_id: track_id.clone(),
+                    task_id: task_id.clone(),
+                    deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+                    old_state: Some(old_state),
+                });
+                // No column pin — PendingMove::ToBacklog keeps the task in Done section
+            } else {
+                // For non-Done→Done: cancel any stale ToBacklog move from a prior reopen
+                if new_state == crate::model::task::TaskState::Done {
+                    app.cancel_pending_move(&track_id, &task_id);
+                }
+                // Pin task to its current board column during grace period so it
+                // doesn't immediately jump columns (e.g. Ready → In Progress).
+                app.board_state
+                    .column_pins
+                    .retain(|p| !(p.track_id == track_id && p.task_id == task_id));
+                app.board_state
+                    .column_pins
+                    .push(crate::tui::app::BoardColumnPin {
+                        track_id: track_id.clone(),
+                        task_id: task_id.clone(),
+                        pinned_state: old_state,
+                        deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+                    });
+            }
+        }
+
         // If transitioning away from Done or Parked, cancel any pending move and subtask hide
+        // (For board Done→non-Done this is a no-op since we just created a ToBacklog above,
+        //  but cancel_pending_move only cancels moves matching the task, not by kind.)
         if old_state == crate::model::task::TaskState::Done
             || old_state == crate::model::task::TaskState::Parked
         {
-            app.cancel_pending_move(&track_id, &task_id);
+            // Don't cancel the ToBacklog we just created for board Done→non-Done
+            if !(matches!(app.view, View::Board)
+                && old_state == crate::model::task::TaskState::Done)
+            {
+                app.cancel_pending_move(&track_id, &task_id);
+            }
             app.cancel_pending_subtask_hide(&track_id, &task_id);
         }
 
@@ -997,6 +1057,7 @@ pub(super) fn task_state_action(app: &mut App, action: StateAction) {
                     track_id: track_id.clone(),
                     task_id: task_id.clone(),
                     deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+                    old_state: Some(old_state),
                 });
             } else {
                 // Subtask (not top-level in any section): schedule hide grace period
@@ -1024,6 +1085,7 @@ pub(super) fn task_state_action(app: &mut App, action: StateAction) {
                     track_id: track_id.clone(),
                     task_id: task_id.clone(),
                     deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+                    old_state: Some(old_state),
                 });
             }
         }
@@ -1042,6 +1104,7 @@ pub(super) fn task_state_action(app: &mut App, action: StateAction) {
                     track_id: track_id.clone(),
                     task_id: task_id.clone(),
                     deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+                    old_state: Some(old_state),
                 });
             }
         }
@@ -1216,7 +1279,55 @@ pub(super) fn move_cursor(app: &mut App, delta: i32) {
                 sr.cursor = new_cursor as usize;
             }
         }
+        View::Board => {
+            board_move_cursor(app, delta);
+        }
     }
+}
+
+/// Move cursor within the focused board column, skipping TrackHeader items.
+pub(super) fn board_move_cursor(app: &mut App, delta: i32) {
+    use crate::tui::app::BoardItem;
+    let col = app.board_state.focus_column.index();
+    let columns = app.build_board_columns();
+    let column = &columns[col];
+    if column.is_empty() {
+        return;
+    }
+    let count = column.len();
+    let mut pos = app.board_state.cursor[col] as i32 + delta;
+    pos = pos.clamp(0, count as i32 - 1);
+    let mut pos = pos as usize;
+
+    // Skip non-selectable headers
+    if delta > 0 {
+        while pos < count && matches!(column[pos], BoardItem::TrackHeader { .. }) {
+            pos += 1;
+        }
+        if pos >= count {
+            // Find the last selectable item
+            pos = count.saturating_sub(1);
+            while pos > 0 && matches!(column[pos], BoardItem::TrackHeader { .. }) {
+                pos -= 1;
+            }
+        }
+    } else if delta < 0 {
+        while pos > 0 && matches!(column[pos], BoardItem::TrackHeader { .. }) {
+            pos -= 1;
+        }
+        // If landed on header at position 0, try moving forward
+        if matches!(column[pos], BoardItem::TrackHeader { .. }) {
+            pos += 1;
+            while pos < count && matches!(column[pos], BoardItem::TrackHeader { .. }) {
+                pos += 1;
+            }
+            if pos >= count {
+                pos = 0; // give up, everything is headers
+            }
+        }
+    }
+
+    app.board_state.cursor[col] = pos;
 }
 
 /// Move cursor to the next/previous top-level task (depth 0) in the current view.
@@ -1436,7 +1547,24 @@ pub(super) fn jump_to_top(app: &mut App) {
                 sr.scroll_offset = 0;
             }
         }
+        View::Board => {
+            board_jump_top(app);
+        }
     }
+}
+
+/// Jump to the first selectable item in the focused board column
+pub(super) fn board_jump_top(app: &mut App) {
+    use crate::tui::app::BoardItem;
+    let col = app.board_state.focus_column.index();
+    let columns = app.build_board_columns();
+    let column = &columns[col];
+    let first = column
+        .iter()
+        .position(|item| matches!(item, BoardItem::Task { .. }))
+        .unwrap_or(0);
+    app.board_state.cursor[col] = first;
+    app.board_state.scroll[col] = 0;
 }
 
 pub(super) fn jump_to_bottom(app: &mut App) {
@@ -1500,7 +1628,26 @@ pub(super) fn jump_to_bottom(app: &mut App) {
                 sr.cursor = sr.items.len() - 1;
             }
         }
+        View::Board => {
+            board_jump_bottom(app);
+        }
     }
+}
+
+/// Jump to the last selectable item in the focused board column
+pub(super) fn board_jump_bottom(app: &mut App) {
+    use crate::tui::app::BoardItem;
+    let col = app.board_state.focus_column.index();
+    let columns = app.build_board_columns();
+    let column = &columns[col];
+    if column.is_empty() {
+        return;
+    }
+    let last = column
+        .iter()
+        .rposition(|item| matches!(item, BoardItem::Task { .. }))
+        .unwrap_or(0);
+    app.board_state.cursor[col] = last;
 }
 
 /// Rebuild active_track_ids from config and clamp tracks_cursor

@@ -272,6 +272,7 @@ pub(super) fn handle_select(app: &mut App, key: KeyEvent) {
                     match return_view {
                         crate::tui::app::ReturnView::Track(idx) => app.view = View::Track(idx),
                         crate::tui::app::ReturnView::Recent => app.view = View::Recent,
+                        crate::tui::app::ReturnView::Board => app.view = View::Board,
                     }
                     app.close_detail_fully();
                 }
@@ -581,6 +582,7 @@ pub(super) fn bulk_state_change(app: &mut App, target_state: crate::model::TaskS
                     track_id: track_id.clone(),
                     task_id: task_id.clone(),
                     deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+                    old_state: Some(old_state),
                 });
             }
 

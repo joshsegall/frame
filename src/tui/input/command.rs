@@ -114,6 +114,11 @@ pub(super) fn dispatch_palette_action(app: &mut App, action_id: &str, track_inde
             app.tracks_name_col_min = 0;
             app.view = View::Tracks;
         }
+        "open_board" => {
+            app.close_detail_fully();
+            app.project_search_results = None;
+            app.view = View::Board;
+        }
         "search" => {
             app.mode = Mode::Search;
             app.search_input.clear();
@@ -395,6 +400,7 @@ pub(super) fn dispatch_palette_action(app: &mut App, action_id: &str, track_inde
                     match return_view {
                         crate::tui::app::ReturnView::Track(idx) => app.view = View::Track(idx),
                         crate::tui::app::ReturnView::Recent => app.view = View::Recent,
+                        crate::tui::app::ReturnView::Board => app.view = View::Board,
                     }
                     app.close_detail_fully();
                 }
@@ -563,6 +569,7 @@ pub(super) fn compound_done_with_tag(app: &mut App, tag: &str) {
                     track_id: track_id.clone(),
                     task_id: task_id.clone(),
                     deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+                    old_state: Some(old_state),
                 });
             }
         }
@@ -1277,6 +1284,7 @@ pub(super) fn confirm_delete_task(app: &mut App, track_id: &str, task_id: &str) 
             match return_view {
                 crate::tui::app::ReturnView::Track(idx) => app.view = View::Track(idx),
                 crate::tui::app::ReturnView::Recent => app.view = View::Recent,
+                crate::tui::app::ReturnView::Board => app.view = View::Board,
             }
             app.close_detail_fully();
         }

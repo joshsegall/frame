@@ -232,6 +232,7 @@ pub(super) fn handle_navigate(app: &mut App, key: KeyEvent) {
                     match return_view {
                         crate::tui::app::ReturnView::Track(idx) => app.view = View::Track(idx),
                         crate::tui::app::ReturnView::Recent => app.view = View::Recent,
+                        crate::tui::app::ReturnView::Board => app.view = View::Board,
                     }
                     app.close_detail_fully();
                 }
@@ -349,6 +350,13 @@ pub(super) fn handle_navigate(app: &mut App, key: KeyEvent) {
             app.view = View::Tracks;
         }
 
+        // Board view
+        (KeyModifiers::SHIFT, KeyCode::Char('K')) => {
+            app.close_detail_fully();
+            app.project_search_results = None;
+            app.view = View::Board;
+        }
+
         // Project-wide search
         (KeyModifiers::SHIFT, KeyCode::Char('S')) => {
             app.project_search_active = true;
@@ -396,10 +404,12 @@ pub(super) fn handle_navigate(app: &mut App, key: KeyEvent) {
             jump_to_bottom(app);
         }
 
-        // Enter: open detail view (track/recent view), triage (inbox), or edit region (detail view)
+        // Enter: open detail view (track/recent/board view), triage (inbox), or edit region (detail view)
         (KeyModifiers::NONE, KeyCode::Enter) => {
             if matches!(app.view, View::Search) {
                 search_result_jump(app);
+            } else if matches!(app.view, View::Board) {
+                board_open_detail(app);
             } else if matches!(app.view, View::Inbox) {
                 inbox_begin_triage(app);
             } else if matches!(app.view, View::Recent) {
@@ -411,14 +421,18 @@ pub(super) fn handle_navigate(app: &mut App, key: KeyEvent) {
 
         // Expand/collapse (track view) or recent view
         (KeyModifiers::NONE, KeyCode::Right | KeyCode::Char('l')) => {
-            if matches!(app.view, View::Recent) {
+            if matches!(app.view, View::Board) {
+                board_switch_column(app, 1);
+            } else if matches!(app.view, View::Recent) {
                 expand_recent(app);
             } else {
                 expand_or_enter(app);
             }
         }
         (KeyModifiers::NONE, KeyCode::Left | KeyCode::Char('h')) => {
-            if matches!(app.view, View::Recent) {
+            if matches!(app.view, View::Board) {
+                board_switch_column(app, -1);
+            } else if matches!(app.view, View::Recent) {
                 collapse_recent(app);
             } else {
                 collapse_or_parent(app);
@@ -491,10 +505,12 @@ pub(super) fn handle_navigate(app: &mut App, key: KeyEvent) {
             }
         }
 
-        // Inline title edit (track view), edit (inbox view), edit track name (tracks view), or enter edit mode (detail view)
+        // Inline title edit (track/board view), edit (inbox view), edit track name (tracks view), or enter edit mode (detail view)
         (KeyModifiers::NONE, KeyCode::Char('e')) => {
             if matches!(app.view, View::Detail { .. }) {
                 detail_enter_edit(app, false);
+            } else if matches!(app.view, View::Board) {
+                board_enter_title_edit(app);
             } else if matches!(app.view, View::Inbox) {
                 inbox_edit_title(app);
             } else if matches!(app.view, View::Tracks) {
@@ -504,10 +520,12 @@ pub(super) fn handle_navigate(app: &mut App, key: KeyEvent) {
             }
         }
 
-        // Tag edit: t — detail view jump to tags region, inbox tag edit, or inline tag edit in track view
+        // Tag edit: t — detail view jump to tags region, inbox tag edit, or inline tag edit in track/board view
         (KeyModifiers::NONE, KeyCode::Char('t')) => {
             if matches!(app.view, View::Detail { .. }) {
                 detail_jump_to_region_and_edit(app, DetailRegion::Tags, false);
+            } else if matches!(app.view, View::Board) {
+                board_enter_tag_edit(app);
             } else if matches!(app.view, View::Inbox) {
                 inbox_edit_tags(app);
             } else {
@@ -532,18 +550,24 @@ pub(super) fn handle_navigate(app: &mut App, key: KeyEvent) {
             }
         }
 
-        // Dep popup (track/detail view)
+        // Dep popup (track/detail/board view)
         (KeyModifiers::SHIFT, KeyCode::Char('D')) => {
             if matches!(app.view, View::Track(_)) {
                 open_dep_popup_from_track_view(app);
+            } else if matches!(app.view, View::Board) {
+                board_open_dep_popup(app);
             } else if matches!(app.view, View::Detail { .. }) {
                 open_dep_popup_from_detail_view(app);
             }
         }
 
-        // Toggle cc tag on task
+        // Toggle cc tag on task (track/detail), or toggle cc/all mode (board)
         (KeyModifiers::NONE, KeyCode::Char('c')) => {
-            toggle_cc_tag(app);
+            if matches!(app.view, View::Board) {
+                board_toggle_mode(app);
+            } else {
+                toggle_cc_tag(app);
+            }
         }
 
         // Set cc-focus to current track
@@ -573,9 +597,23 @@ pub(super) fn handle_navigate(app: &mut App, key: KeyEvent) {
             }
         }
 
-        // Cross-track move (track view or detail view)
+        // Cross-track move (track/board/detail view)
         (KeyModifiers::SHIFT, KeyCode::Char('M')) => {
-            begin_cross_track_move(app);
+            if matches!(app.view, View::Board) {
+                // Resolve board cursor task, then begin cross-track move
+                if let Some((track_id, task_id)) = app.board_cursor_task_id() {
+                    app.view = View::Track(
+                        app.active_track_ids
+                            .iter()
+                            .position(|id| id == &track_id)
+                            .unwrap_or(0),
+                    );
+                    app.jump_to_task(&task_id);
+                    begin_cross_track_move(app);
+                }
+            } else {
+                begin_cross_track_move(app);
+            }
         }
 
         // Redo: Z, Ctrl+Y, Ctrl+Shift+Z, or Super+Shift+Z (must be checked BEFORE undo)
@@ -607,9 +645,9 @@ pub(super) fn handle_navigate(app: &mut App, key: KeyEvent) {
             perform_undo(app);
         }
 
-        // Filter prefix key (track view only)
+        // Filter prefix key (track view and board view)
         (KeyModifiers::NONE, KeyCode::Char('f')) => {
-            if matches!(app.view, View::Track(_)) {
+            if matches!(app.view, View::Track(_) | View::Board) {
                 app.filter_pending = true;
             }
         }
@@ -694,32 +732,38 @@ fn search_result_jump(app: &mut App) {
 
 /// Handle the second key after 'f' prefix for filtering
 pub(super) fn handle_filter_key(app: &mut App, key: KeyEvent) {
-    // Only applies to track view
-    if !matches!(app.view, View::Track(_)) {
+    let is_board = matches!(app.view, View::Board);
+    // Only applies to track view and board view
+    if !matches!(app.view, View::Track(_)) && !is_board {
         return;
     }
 
     // Capture current task ID before changing filter so we can try to stay on it
-    let prev_task_id = get_cursor_task_id(app);
+    let prev_task_id = if is_board {
+        None
+    } else {
+        get_cursor_task_id(app)
+    };
 
     match key.code {
-        KeyCode::Char('a') => {
+        // State filters: not available in board view (columns are the state filter)
+        KeyCode::Char('a') if !is_board => {
             app.filter_state.state_filter = Some(StateFilter::Active);
             reset_cursor_for_filter(app, prev_task_id.as_deref());
         }
-        KeyCode::Char('o') => {
+        KeyCode::Char('o') if !is_board => {
             app.filter_state.state_filter = Some(StateFilter::Todo);
             reset_cursor_for_filter(app, prev_task_id.as_deref());
         }
-        KeyCode::Char('b') => {
+        KeyCode::Char('b') if !is_board => {
             app.filter_state.state_filter = Some(StateFilter::Blocked);
             reset_cursor_for_filter(app, prev_task_id.as_deref());
         }
-        KeyCode::Char('p') => {
+        KeyCode::Char('p') if !is_board => {
             app.filter_state.state_filter = Some(StateFilter::Parked);
             reset_cursor_for_filter(app, prev_task_id.as_deref());
         }
-        KeyCode::Char('r') => {
+        KeyCode::Char('r') if !is_board => {
             app.filter_state.state_filter = Some(StateFilter::Ready);
             reset_cursor_for_filter(app, prev_task_id.as_deref());
         }
@@ -727,7 +771,7 @@ pub(super) fn handle_filter_key(app: &mut App, key: KeyEvent) {
             // Open tag autocomplete for filter tag selection
             begin_filter_tag_select(app);
         }
-        KeyCode::Char(' ') => {
+        KeyCode::Char(' ') if !is_board => {
             // Clear state filter only, keep tag filter
             app.filter_state.clear_state();
             reset_cursor_for_filter(app, prev_task_id.as_deref());
@@ -735,7 +779,9 @@ pub(super) fn handle_filter_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('f') => {
             // Clear all filters
             app.filter_state.clear_all();
-            reset_cursor_for_filter(app, prev_task_id.as_deref());
+            if !is_board {
+                reset_cursor_for_filter(app, prev_task_id.as_deref());
+            }
         }
         _ => {
             // Unknown second key — ignore silently
@@ -901,4 +947,77 @@ pub(super) fn count_tracks(app: &App) -> usize {
 /// Count total recent entries (done tasks + archived tasks) across all tracks
 pub(super) fn count_recent_tasks(app: &App) -> usize {
     super::build_recent_entries(app).len()
+}
+
+// ---------------------------------------------------------------------------
+// Board view helpers
+// ---------------------------------------------------------------------------
+
+/// Switch to adjacent board column (direction: -1 = left, 1 = right)
+fn board_switch_column(app: &mut App, direction: i32) {
+    use crate::tui::app::BoardColumn;
+
+    let max_col = (app.board_state.visible_columns as i32 - 1).max(0);
+    let cur = app.board_state.focus_column.index() as i32;
+    let new = (cur + direction).clamp(0, max_col);
+    app.board_state.focus_column = BoardColumn::from_index(new as usize);
+}
+
+/// Toggle board mode between CC and All
+fn board_toggle_mode(app: &mut App) {
+    use crate::tui::app::BoardMode;
+    app.board_state.mode = match app.board_state.mode {
+        BoardMode::Cc => BoardMode::All,
+        BoardMode::All => BoardMode::Cc,
+    };
+    // Reset cursors since the lists change
+    app.board_state.cursor = [0; 3];
+    app.board_state.scroll = [0; 3];
+}
+
+/// Open detail view from board cursor
+fn board_open_detail(app: &mut App) {
+    if let Some((track_id, task_id)) = app.board_cursor_task_id() {
+        app.open_detail(track_id, task_id);
+    }
+}
+
+/// Open dep popup from board cursor
+fn board_open_dep_popup(app: &mut App) {
+    if let Some((track_id, task_id)) = app.board_cursor_task_id() {
+        // Jump to track view, navigate to task, then open popup
+        if let Some(idx) = app.active_track_ids.iter().position(|id| id == &track_id) {
+            let prev_view = app.view.clone();
+            app.view = View::Track(idx);
+            app.jump_to_task(&task_id);
+            open_dep_popup_from_track_view(app);
+            // If popup didn't open (task not found), restore view
+            if app.dep_popup.is_none() {
+                app.view = prev_view;
+            }
+        }
+    }
+}
+
+/// Enter title edit mode from board cursor
+fn board_enter_title_edit(app: &mut App) {
+    if let Some((track_id, task_id)) = app.board_cursor_task_id() {
+        // Jump to track view and enter edit mode
+        if let Some(idx) = app.active_track_ids.iter().position(|id| id == &track_id) {
+            app.view = View::Track(idx);
+            app.jump_to_task(&task_id);
+            enter_title_edit(app);
+        }
+    }
+}
+
+/// Enter tag edit mode from board cursor
+fn board_enter_tag_edit(app: &mut App) {
+    if let Some((track_id, task_id)) = app.board_cursor_task_id()
+        && let Some(idx) = app.active_track_ids.iter().position(|id| id == &track_id)
+    {
+        app.view = View::Track(idx);
+        app.jump_to_task(&task_id);
+        enter_tag_edit(app);
+    }
 }

@@ -30,6 +30,7 @@ fn track_tab_width(label: &str, is_cc: bool) -> usize {
 fn fixed_width(inbox_count: usize) -> usize {
     let leading = 3; // " ▶ "
     let tracks_tab = 4; // " ▶ " + "|"
+    let board_tab = 4; // " ≡ " + "|"
     let inbox_tab = if inbox_count > 0 {
         // " *N " + "|"
         3 + digit_count(inbox_count) + 1
@@ -38,7 +39,7 @@ fn fixed_width(inbox_count: usize) -> usize {
         4
     };
     let recent_tab = 4; // " ✓ " + "|"
-    leading + tracks_tab + inbox_tab + recent_tab
+    leading + tracks_tab + board_tab + inbox_tab + recent_tab
 }
 
 fn digit_count(n: usize) -> usize {
@@ -531,6 +532,17 @@ fn render_tabs(frame: &mut Frame, app: &mut App, area: Rect) -> Vec<usize> {
     );
     spans.push(sep.clone());
 
+    // Board view tab (≡)
+    let is_board = app.view == View::Board;
+    spans.push(Span::styled(" \u{2261} ", tab_style(app, is_board)));
+    sep_cols.push(
+        spans
+            .iter()
+            .map(|s| unicode::display_width(&s.content))
+            .sum(),
+    );
+    spans.push(sep.clone());
+
     // Inbox tab with count (*N)
     let is_inbox = app.view == View::Inbox;
     let tab_bg = if is_inbox {
@@ -662,11 +674,12 @@ fn render_separator(frame: &mut Frame, app: &App, area: Rect, sep_cols: &[usize]
     let bg = app.theme.background;
     let dim = app.theme.dim;
 
-    // Build filter indicator text if filter is active and in track view
+    // Build filter indicator text if filter is active and in track/board view
     let is_track_view = matches!(app.view, View::Track(_));
+    let is_board_view = app.view == View::Board;
     let filter = &app.filter_state;
 
-    if is_track_view && filter.is_active() {
+    if (is_track_view || is_board_view) && filter.is_active() {
         // Build indicator spans: "filter: " + state + " " + #tag
         let mut indicator_spans: Vec<Span> = Vec::new();
         indicator_spans.push(Span::styled(
@@ -800,9 +813,9 @@ mod tests {
             "Frontend".to_string(),       // 8
         ];
         let prefixes = vec![None, None, None];
-        // Full: 17+10+11 = 38, + fixed 15 = 53
-        // Width 45: need to shrink 8 chars of tab width
-        let layout = compute_tab_layout(&names, &prefixes, None, 45, 0, 0);
+        // Full: 17+10+11 = 38, + fixed 19 = 57
+        // Width 49: need to shrink 8 chars of tab width
+        let layout = compute_tab_layout(&names, &prefixes, None, 49, 0, 0);
         assert!(!layout.scroll_mode);
         // Longest (Infrastructure) should absorb most shrinking; shorter labels preserved
         let lens: Vec<usize> = layout
@@ -827,8 +840,8 @@ mod tests {
             .iter()
             .map(|l| unicode::display_width(l) + 2 + 1)
             .sum::<usize>()
-            + 15;
-        assert!(total <= 45);
+            + 19;
+        assert!(total <= 49);
     }
 
     #[test]
@@ -844,16 +857,16 @@ mod tests {
             Some("BE".to_string()),  // 2 chars
             Some("FE".to_string()),  // 2 chars
         ];
-        // Width 32: shrinks all to 3, then FE swaps at 2 → fits at 32.
+        // Width 36: shrinks all to 3, then FE swaps at 2 → fits at 36.
         // INF swaps at 3 (same-size swap), but Bac(3) stays since BE is 2 chars.
-        let layout = compute_tab_layout(&names, &prefixes, None, 32, 0, 0);
+        let layout = compute_tab_layout(&names, &prefixes, None, 36, 0, 0);
         assert!(!layout.scroll_mode);
         // INF swapped at 3, FE swapped at 2, Backend truncated to "Bac"
         assert_eq!(layout.labels[0], "INF");
         assert_eq!(layout.labels[2], "FE");
 
-        // At width 31: Backend also reaches prefix (INF+BE+FE = 6+5+5+15=31)
-        let layout2 = compute_tab_layout(&names, &prefixes, None, 31, 0, 0);
+        // At width 35: Backend also reaches prefix (INF+BE+FE = 6+5+5+19=35)
+        let layout2 = compute_tab_layout(&names, &prefixes, None, 35, 0, 0);
         assert!(!layout2.scroll_mode);
         assert_eq!(layout2.labels, vec!["INF", "BE", "FE"]);
     }
@@ -863,10 +876,10 @@ mod tests {
         // Prefix swap doesn't cause extra shrinking — rightmost shrinks first
         let names = vec!["Alpha".to_string(), "Bravo".to_string()];
         let prefixes = vec![Some("ALP".to_string()), Some("BRV".to_string())];
-        // Full: 8+8+15=31. Width 28: need 3 chars removed.
-        // Bravo(rightmost) 5→4, Alpha 5→4, Bravo 4→3 (swap BRV) → 7+6+15=28 fits.
+        // Full: 8+8+19=35. Width 32: need 3 chars removed.
+        // Bravo(rightmost) 5→4, Alpha 5→4, Bravo 4→3 (swap BRV) → 7+6+19=32 fits.
         // Alpha stays at "Alph"(4), not over-shrunk.
-        let layout = compute_tab_layout(&names, &prefixes, None, 28, 0, 0);
+        let layout = compute_tab_layout(&names, &prefixes, None, 32, 0, 0);
         assert!(!layout.scroll_mode);
         assert_eq!(layout.labels[0], "Alph"); // not shrunk past 4
         assert_eq!(layout.labels[1], "BRV"); // prefix at 3
@@ -887,8 +900,8 @@ mod tests {
             Some("CCCC".to_string()),
             Some("DDDD".to_string()),
         ];
-        // At 4 chars: 7*4=28, +15=43. Width 39: need all at 3 (6*4=24, +15=39).
-        let layout = compute_tab_layout(&names, &prefixes, None, 39, 0, 0);
+        // At 4 chars: 7*4=28, +19=47. Width 43: need all at 3 (6*4=24, +19=43).
+        let layout = compute_tab_layout(&names, &prefixes, None, 43, 0, 0);
         assert!(!layout.scroll_mode);
         for label in &layout.labels {
             assert_eq!(unicode::display_width(label), 3);
@@ -917,18 +930,18 @@ mod tests {
             "Further".to_string(),  // 7
         ];
         let prefixes: Vec<Option<String>> = vec![None; 8];
-        // Full tab widths: 10+6+10+11+9+9+7+10 = 72, + fixed 15 = 87
-        let layout = compute_tab_layout(&names, &prefixes, None, 75, 0, 0);
+        // Full tab widths: 10+6+10+11+9+9+7+10 = 72, + fixed 19 = 91
+        let layout = compute_tab_layout(&names, &prefixes, None, 79, 0, 0);
         assert!(!layout.scroll_mode);
         let total: usize = layout
             .labels
             .iter()
             .map(|l| unicode::display_width(l) + 2 + 1)
             .sum::<usize>()
-            + 15;
-        assert!(total <= 75, "total {} should be <= 75", total);
+            + 19;
+        assert!(total <= 79, "total {} should be <= 79", total);
         // Should be tight: at most 1 char of slack
-        assert!(total >= 74, "total {} shouldn't leave much slack", total);
+        assert!(total >= 78, "total {} shouldn't leave much slack", total);
         // Short labels like "CLI"(3) shouldn't be shrunk when longer ones can absorb
         assert_eq!(layout.labels[1], "CLI");
     }
@@ -942,8 +955,8 @@ mod tests {
             "Delta".to_string(),
         ];
         let prefixes = vec![None, None, None];
-        // Full: 8*3 = 24, +15 = 39. Width 37: need 2 chars removed.
-        let layout = compute_tab_layout(&names, &prefixes, None, 37, 0, 0);
+        // Full: 8*3 = 24, +19 = 43. Width 41: need 2 chars removed.
+        let layout = compute_tab_layout(&names, &prefixes, None, 41, 0, 0);
         assert!(!layout.scroll_mode);
         let lens: Vec<usize> = layout
             .labels
@@ -959,13 +972,13 @@ mod tests {
     fn test_cc_focus_width_accounting() {
         let names = vec!["Alpha".to_string(), "Beta".to_string()];
         let prefixes = vec![None, None];
-        // Without cc: 8+7+15 = 30
-        // With cc on Alpha: 8+2+7+15 = 32
-        // Width 31: fits without cc, doesn't fit with cc
-        let layout_no_cc = compute_tab_layout(&names, &prefixes, None, 31, 0, 0);
+        // Without cc: 8+7+19 = 34
+        // With cc on Alpha: 8+2+7+19 = 36
+        // Width 35: fits without cc, doesn't fit with cc
+        let layout_no_cc = compute_tab_layout(&names, &prefixes, None, 35, 0, 0);
         assert!(!layout_no_cc.scroll_mode);
 
-        let layout_cc = compute_tab_layout(&names, &prefixes, Some(0), 31, 0, 0);
+        let layout_cc = compute_tab_layout(&names, &prefixes, Some(0), 35, 0, 0);
         // Should trigger shrinking (project name already hidden)
         assert!(!layout_cc.show_project_name);
     }
@@ -975,7 +988,7 @@ mod tests {
         let layout = compute_tab_layout(&[], &[], None, 80, 10, 0);
         assert!(layout.labels.is_empty());
         assert!(!layout.scroll_mode);
-        assert!(layout.show_project_name); // fixed 15 + project 12 = 27 < 80
+        assert!(layout.show_project_name); // fixed 19 + project 12 = 31 < 80
     }
 
     #[test]
@@ -990,18 +1003,18 @@ mod tests {
     #[test]
     fn test_inbox_count_affects_fixed_width() {
         assert!(fixed_width(99) > fixed_width(0));
-        assert_eq!(fixed_width(0), 15); // 3+4+4+4
-        assert_eq!(fixed_width(99), 17); // 3+4+6+4
+        assert_eq!(fixed_width(0), 19); // 3+4+4+4+4
+        assert_eq!(fixed_width(99), 21); // 3+4+4+6+4
 
         let names = vec!["A".to_string()];
         let prefixes = vec![None];
         // Track "A" = 1+2+1 = 4
-        // fixed(0)=15 + 4 = 19 fits in 20
-        let layout_0 = compute_tab_layout(&names, &prefixes, None, 20, 0, 0);
+        // fixed(0)=19 + 4 = 23 fits in 24
+        let layout_0 = compute_tab_layout(&names, &prefixes, None, 24, 0, 0);
         assert!(!layout_0.scroll_mode);
-        // fixed(99)=17 + 4 = 21, doesn't fit in 20 without shrinking
+        // fixed(99)=21 + 4 = 25, doesn't fit in 24 without shrinking
         // But "A" is already 1 char, can't shrink further → scroll
-        let layout_99 = compute_tab_layout(&names, &prefixes, None, 21, 0, 99);
+        let layout_99 = compute_tab_layout(&names, &prefixes, None, 25, 0, 99);
         assert!(!layout_99.scroll_mode);
     }
 

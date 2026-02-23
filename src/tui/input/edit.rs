@@ -2935,8 +2935,8 @@ pub(super) fn cancel_detail_edit(app: &mut App) {
 /// Switch to the next/prev tab. Direction: 1 = forward, -1 = backward.
 pub(super) fn switch_tab(app: &mut App, direction: i32) {
     let total_tracks = app.active_track_ids.len();
-    // All views in order: Track(0)..Track(N-1), Tracks, Inbox, Recent
-    let total_views = total_tracks + 3;
+    // Visual tab order: Track(0)..Track(N-1), Tracks, Board, Inbox, Recent
+    let total_views = total_tracks + 4;
 
     let current_idx = match &app.view {
         View::Track(i) => *i,
@@ -2948,8 +2948,9 @@ pub(super) fn switch_tab(app: &mut App, direction: i32) {
                 .unwrap_or(0)
         }
         View::Tracks => total_tracks,
-        View::Inbox => total_tracks + 1,
-        View::Recent | View::Search => total_tracks + 2,
+        View::Board => total_tracks + 1,
+        View::Inbox => total_tracks + 2,
+        View::Recent | View::Search => total_tracks + 3,
     };
     // Close detail view if open
     app.close_detail_fully();
@@ -2958,14 +2959,12 @@ pub(super) fn switch_tab(app: &mut App, direction: i32) {
 
     let new_idx = (current_idx as i32 + direction).rem_euclid(total_views as i32) as usize;
 
-    app.view = if new_idx < total_tracks {
-        View::Track(new_idx)
-    } else {
-        match new_idx - total_tracks {
-            0 => View::Tracks,
-            1 => View::Inbox,
-            _ => View::Recent,
-        }
+    app.view = match new_idx {
+        i if i < total_tracks => View::Track(i),
+        i if i == total_tracks => View::Tracks,
+        i if i == total_tracks + 1 => View::Board,
+        i if i == total_tracks + 2 => View::Inbox,
+        _ => View::Recent,
     };
 
     // Refresh match count for the new view

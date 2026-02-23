@@ -259,6 +259,7 @@ pub(super) fn reopen_recent_task(app: &mut App) {
         track_id: track_id.clone(),
         task_id: task_id.clone(),
         deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+        old_state: Some(old_state),
     });
 
     let _ = app.save_track(&track_id);

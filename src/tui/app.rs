@@ -35,6 +35,8 @@ pub enum View {
     Track(usize),
     /// All tracks overview
     Tracks,
+    /// Board view (kanban-style cross-track view)
+    Board,
     /// Inbox
     Inbox,
     /// Recently completed tasks
@@ -43,6 +45,82 @@ pub enum View {
     Detail { track_id: String, task_id: String },
     /// Project-wide search results
     Search,
+}
+
+/// Which column the cursor is in on the board view
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoardColumn {
+    Ready,
+    InProgress,
+    Done,
+}
+
+impl BoardColumn {
+    pub fn index(self) -> usize {
+        match self {
+            BoardColumn::Ready => 0,
+            BoardColumn::InProgress => 1,
+            BoardColumn::Done => 2,
+        }
+    }
+
+    pub fn from_index(i: usize) -> Self {
+        match i {
+            0 => BoardColumn::Ready,
+            1 => BoardColumn::InProgress,
+            _ => BoardColumn::Done,
+        }
+    }
+}
+
+/// Board filtering mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoardMode {
+    Cc,
+    All,
+}
+
+/// A single item in a board column's flat list
+#[derive(Debug, Clone)]
+pub enum BoardItem {
+    TrackHeader {
+        track_name: String,
+    },
+    Task {
+        track_id: String,
+        task_id: String,
+        title: String,
+        id_display: String,
+        state: TaskState,
+        tags: Vec<String>,
+    },
+}
+
+/// Board view state
+#[derive(Debug, Clone)]
+pub struct BoardState {
+    pub focus_column: BoardColumn,
+    /// Cursor index within each column (independent)
+    pub cursor: [usize; 3],
+    /// Scroll offset for each column (independent)
+    pub scroll: [usize; 3],
+    pub mode: BoardMode,
+    /// Number of visible columns in the current layout (set by renderer)
+    pub visible_columns: usize,
+    /// Tasks pinned to a column during grace period after state change.
+    /// Maps (track_id, task_id) → (original effective state, deadline).
+    pub column_pins: Vec<BoardColumnPin>,
+}
+
+/// Keeps a task visually pinned to its current board column during the grace period
+/// after a state change (e.g. Todo→Active stays in Ready column briefly).
+#[derive(Debug, Clone)]
+pub struct BoardColumnPin {
+    pub track_id: String,
+    pub task_id: String,
+    /// The state to use for column placement during the grace period
+    pub pinned_state: TaskState,
+    pub deadline: std::time::Instant,
 }
 
 /// Regions in the detail view that can be navigated
@@ -281,6 +359,7 @@ impl AutocompleteState {
 pub enum ReturnView {
     Track(usize),
     Recent,
+    Board,
 }
 
 /// State for the detail view
@@ -401,6 +480,8 @@ pub struct PendingMove {
     pub track_id: String,
     pub task_id: String,
     pub deadline: Instant,
+    /// The task state before this pending move was created (for board view grace period)
+    pub old_state: Option<TaskState>,
 }
 
 /// A pending subtask hide with a grace period (subtask stays visible briefly after being marked done)
@@ -1031,6 +1112,8 @@ pub struct App {
     pub project_search_draft: String,
     /// When true, Mode::Search is routed to project search handler instead of view search
     pub project_search_active: bool,
+    /// Board view state
+    pub board_state: BoardState,
 }
 
 impl App {
@@ -1174,6 +1257,14 @@ impl App {
             project_search_history_index: None,
             project_search_draft: String::new(),
             project_search_active: false,
+            board_state: BoardState {
+                focus_column: BoardColumn::Ready,
+                cursor: [0; 3],
+                scroll: [0; 3],
+                mode: BoardMode::Cc,
+                visible_columns: 3,
+                column_pins: Vec::new(),
+            },
         }
     }
 
@@ -1202,6 +1293,268 @@ impl App {
             .inbox
             .as_ref()
             .map_or(0, |inbox| inbox.items.len())
+    }
+
+    /// Build the three board columns: [Ready, InProgress, Done]
+    pub fn build_board_columns(&self) -> [Vec<BoardItem>; 3] {
+        let cc_mode = self.board_state.mode == BoardMode::Cc;
+        let tag_filter = self.filter_state.tag_filter.as_deref();
+        let done_days = self.project.config.ui.board_done_days;
+
+        let mut ready: Vec<BoardItem> = Vec::new();
+        let mut in_progress: Vec<BoardItem> = Vec::new();
+        let mut done_items: Vec<(String, BoardItem)> = Vec::new(); // (resolved_date, item)
+
+        for track_id in &self.active_track_ids {
+            let track = match Self::find_track_in_project(&self.project, track_id) {
+                Some(t) => t,
+                None => continue,
+            };
+            let track_name = self.track_name(track_id).to_string();
+            let prefix = self
+                .project
+                .config
+                .ids
+                .prefixes
+                .get(track_id.as_str())
+                .cloned()
+                .unwrap_or_default();
+
+            let mut has_ready = false;
+            let mut has_active = false;
+
+            for task in track.backlog() {
+                // Skip subtasks — board shows top-level only
+                let task_id = match &task.id {
+                    Some(id) => id.clone(),
+                    None => continue,
+                };
+
+                let id_display = if prefix.is_empty() {
+                    task_id.clone()
+                } else {
+                    format!("{}-{}", prefix, task_id)
+                };
+
+                // Apply tag filter
+                if let Some(tf) = tag_filter
+                    && !task.tags.iter().any(|t| t == tf)
+                {
+                    continue;
+                }
+
+                // Check if this task has a column pin (board grace period) or
+                // a pending section move. Either keeps the task in its original column.
+                let pin = self
+                    .board_state
+                    .column_pins
+                    .iter()
+                    .find(|p| p.track_id == *track_id && p.task_id == task_id);
+
+                let pending_move = self
+                    .pending_moves
+                    .iter()
+                    .find(|pm| pm.track_id == *track_id && pm.task_id == task_id);
+
+                let effective_state = if let Some(p) = pin {
+                    p.pinned_state
+                } else {
+                    match pending_move {
+                        Some(pm)
+                            if matches!(
+                                pm.kind,
+                                PendingMoveKind::ToDone | PendingMoveKind::ToParked
+                            ) =>
+                        {
+                            pm.old_state.unwrap_or(task.state)
+                        }
+                        _ => task.state,
+                    }
+                };
+
+                match effective_state {
+                    TaskState::Todo => {
+                        // Check all deps resolved (skip for pending-move tasks, they were already shown)
+                        if pin.is_none() && pending_move.is_none() && !self.all_deps_resolved(task) {
+                            continue;
+                        }
+                        // CC mode filter
+                        if cc_mode && !task.tags.iter().any(|t| t == "cc") {
+                            continue;
+                        }
+                        if !has_ready {
+                            ready.push(BoardItem::TrackHeader {
+                                track_name: track_name.clone(),
+                            });
+                            has_ready = true;
+                        }
+                        ready.push(BoardItem::Task {
+                            track_id: track_id.clone(),
+                            task_id: task_id.clone(),
+                            title: task.title.clone(),
+                            id_display,
+                            state: task.state,
+                            tags: task.tags.clone(),
+                        });
+                    }
+                    TaskState::Active => {
+                        if cc_mode && !task.tags.iter().any(|t| t == "cc") {
+                            continue;
+                        }
+                        if !has_active {
+                            in_progress.push(BoardItem::TrackHeader {
+                                track_name: track_name.clone(),
+                            });
+                            has_active = true;
+                        }
+                        in_progress.push(BoardItem::Task {
+                            track_id: track_id.clone(),
+                            task_id: task_id.clone(),
+                            title: task.title.clone(),
+                            id_display,
+                            state: task.state,
+                            tags: task.tags.clone(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+
+            // Collect done tasks from the Done section
+            if done_days > 0 {
+                for task in track.section_tasks(SectionKind::Done) {
+                    let task_id = match &task.id {
+                        Some(id) => id.clone(),
+                        None => continue,
+                    };
+
+                    // Check for a pending reopen (PendingMove::ToBacklog) — task was
+                    // reopened but the section move hasn't fired yet (grace period).
+                    let pending_reopen = self.pending_moves.iter().any(|pm| {
+                        pm.kind == PendingMoveKind::ToBacklog
+                            && pm.track_id == *track_id
+                            && pm.task_id == task_id
+                    });
+
+                    if task.state != TaskState::Done && !pending_reopen {
+                        continue;
+                    }
+
+                    // Apply tag filter
+                    if let Some(tf) = tag_filter
+                        && !task.tags.iter().any(|t| t == tf)
+                    {
+                        continue;
+                    }
+
+                    // CC mode: require #cc or #cc-added
+                    if cc_mode && !task.tags.iter().any(|t| t == "cc" || t == "cc-added") {
+                        continue;
+                    }
+
+                    // Check resolved date within done_days
+                    let resolved_date = task.metadata.iter().find_map(|m| {
+                        if let Metadata::Resolved(d) = m {
+                            Some(d.clone())
+                        } else {
+                            None
+                        }
+                    });
+
+                    let resolved_str = match &resolved_date {
+                        Some(d) => d.clone(),
+                        None => continue,
+                    };
+
+                    if !self.is_within_done_days(&resolved_str, done_days) {
+                        continue;
+                    }
+
+                    let id_display = if prefix.is_empty() {
+                        task_id.clone()
+                    } else {
+                        format!("{}-{}", prefix, task_id)
+                    };
+
+                    done_items.push((
+                        resolved_str,
+                        BoardItem::Task {
+                            track_id: track_id.clone(),
+                            task_id,
+                            title: task.title.clone(),
+                            id_display,
+                            state: task.state,
+                            tags: task.tags.clone(),
+                        },
+                    ));
+                }
+            }
+        }
+
+        // Sort done items by resolved date descending
+        done_items.sort_by(|a, b| b.0.cmp(&a.0));
+        let done: Vec<BoardItem> = done_items.into_iter().map(|(_, item)| item).collect();
+
+        [ready, in_progress, done]
+    }
+
+    /// Check if all dependency targets of a task are done
+    fn all_deps_resolved(&self, task: &Task) -> bool {
+        for meta in &task.metadata {
+            if let Metadata::Dep(deps) = meta {
+                for dep_id in deps {
+                    // Search all tracks for this dep
+                    let mut found_done = false;
+                    for (_, track) in &self.project.tracks {
+                        if let Some(dep_task) =
+                            crate::ops::task_ops::find_task_in_track(track, dep_id)
+                        {
+                            if dep_task.state == TaskState::Done {
+                                found_done = true;
+                            }
+                            break;
+                        }
+                    }
+                    if !found_done {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// Check if a resolved date string is within the last N days
+    fn is_within_done_days(&self, date_str: &str, days: u32) -> bool {
+        let resolved = match chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+            Ok(d) => d,
+            Err(_) => return false,
+        };
+        let today = chrono::Local::now().date_naive();
+        let cutoff = today - chrono::Duration::days(i64::from(days));
+        resolved >= cutoff
+    }
+
+    /// Get the (track_id, task_id) at the current board cursor position
+    pub fn board_cursor_task_id(&self) -> Option<(String, String)> {
+        let col_idx = self.board_state.focus_column.index();
+        let columns = self.build_board_columns();
+        let column = &columns[col_idx];
+        let cursor = self.board_state.cursor[col_idx];
+        match column.get(cursor) {
+            Some(BoardItem::Task {
+                track_id, task_id, ..
+            }) => Some((track_id.clone(), task_id.clone())),
+            _ => None,
+        }
+    }
+
+    /// Count selectable tasks (excludes headers) in a board column
+    pub fn board_task_count(&self, columns: &[Vec<BoardItem>], col: BoardColumn) -> usize {
+        columns[col.index()]
+            .iter()
+            .filter(|item| matches!(item, BoardItem::Task { .. }))
+            .count()
     }
 
     /// Get the selection range (start, end) for the single-line edit buffer, if any.
@@ -1428,6 +1781,26 @@ impl App {
             .cloned()
             .collect();
         self.pending_moves.retain(|pm| now < pm.deadline);
+        // Collect expiring column pins so we can flash tasks that move columns
+        let expiring_pins: Vec<String> = self
+            .board_state
+            .column_pins
+            .iter()
+            .filter(|p| now >= p.deadline)
+            .map(|p| p.task_id.clone())
+            .collect();
+        self.board_state.column_pins.retain(|p| now < p.deadline);
+        if !expiring_pins.is_empty() {
+            let ids: std::collections::HashSet<String> = expiring_pins.into_iter().collect();
+            self.flash_tasks(ids);
+        }
+
+        // Flash tasks that are about to move columns via pending moves
+        let moving_task_ids: std::collections::HashSet<String> = expired
+            .iter()
+            .filter(|pm| matches!(pm.kind, PendingMoveKind::ToBacklog))
+            .map(|pm| pm.task_id.clone())
+            .collect();
 
         let mut modified = Vec::new();
         for pm in &expired {
@@ -1437,12 +1810,18 @@ impl App {
                 modified.push(tid);
             }
         }
+
+        if !moving_task_ids.is_empty() {
+            self.flash_tasks(moving_task_ids);
+        }
+
         modified
     }
 
     /// Flush all pending moves immediately (used on view change, quit). Returns modified track IDs.
     pub fn flush_all_pending_moves(&mut self) -> Vec<String> {
         let all: Vec<PendingMove> = std::mem::take(&mut self.pending_moves);
+        self.board_state.column_pins.clear();
         let mut modified = Vec::new();
         for pm in &all {
             if let Some(tid) = self.execute_pending_move(pm)
@@ -2344,6 +2723,7 @@ impl App {
             match &self.view {
                 View::Track(idx) => ReturnView::Track(*idx),
                 View::Recent => ReturnView::Recent,
+                View::Board => ReturnView::Board,
                 _ => ReturnView::Track(0),
             }
         };
@@ -2834,6 +3214,7 @@ pub fn restore_ui_state(app: &mut App) {
     // Restore view
     match ui_state.view.as_str() {
         "tracks" => app.view = View::Tracks,
+        "board" => app.view = View::Board,
         "inbox" => app.view = View::Inbox,
         "recent" => app.view = View::Recent,
         "track" => {
@@ -2846,6 +3227,17 @@ pub fn restore_ui_state(app: &mut App) {
             }
         }
         _ => {}
+    }
+
+    // Restore board state
+    if let Some(mode_str) = &ui_state.board_mode {
+        app.board_state.mode = match mode_str.as_str() {
+            "all" => BoardMode::All,
+            _ => BoardMode::Cc,
+        };
+    }
+    if let Some(col) = ui_state.board_focus_column {
+        app.board_state.focus_column = BoardColumn::from_index(col);
     }
 
     // Restore per-track state
@@ -2891,6 +3283,7 @@ pub fn save_ui_state(app: &App) {
         ),
         View::Detail { track_id, .. } => ("track".to_string(), track_id.clone()),
         View::Tracks => ("tracks".to_string(), String::new()),
+        View::Board => ("board".to_string(), String::new()),
         View::Inbox => ("inbox".to_string(), String::new()),
         View::Recent => ("recent".to_string(), String::new()),
         View::Search => ("recent".to_string(), String::new()),
@@ -2914,6 +3307,11 @@ pub fn save_ui_state(app: &App) {
         None
     };
 
+    let board_mode = Some(match app.board_state.mode {
+        BoardMode::Cc => "cc".to_string(),
+        BoardMode::All => "all".to_string(),
+    });
+
     let ui_state = UiState {
         view: view_str,
         active_track,
@@ -2922,6 +3320,8 @@ pub fn save_ui_state(app: &App) {
         search_history: app.search_history.clone(),
         note_wrap_override,
         project_search_history: app.project_search_history.clone(),
+        board_mode,
+        board_focus_column: Some(app.board_state.focus_column.index()),
     };
 
     let _ = write_ui_state(&app.project.frame_dir, &ui_state);
@@ -3193,8 +3593,10 @@ fn run_event_loop(
         }
         app.clear_expired_flash();
 
-        // Flush expired pending moves (only in Navigate mode, like pending_reload)
-        if app.mode == Mode::Navigate && !app.pending_moves.is_empty() {
+        // Flush expired pending moves and column pins (only in Navigate mode)
+        if app.mode == Mode::Navigate
+            && (!app.pending_moves.is_empty() || !app.board_state.column_pins.is_empty())
+        {
             let modified = app.flush_expired_pending_moves();
             for tid in &modified {
                 app.save_track_logged(tid);

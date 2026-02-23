@@ -1,6 +1,5 @@
 ---
 source: src/tui/render/command_palette.rs
-assertion_line: 261
 expression: output
 ---
 
@@ -13,5 +12,5 @@ expression: output
          │   Mark done (#wontdo)                                      │
          │   Mark done (#duplicate)                                   │
          │                                                            │
-         │   3 of 56 actions                                          │
+         │   3 of 57 actions                                          │
          └────────────────────────────────────────────────────────────┘

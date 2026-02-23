@@ -12,6 +12,19 @@ The default view. Shows a single track's tasks as an indented tree with expand/c
 
 Overview of all tracks grouped by state (active, shelved, archived) with task count statistics. Switch to it with `0` or `` ` ``.
 
+### Board View
+
+A kanban-style cross-track view showing tasks in three columns: Ready, In Progress, and Done. Switch to it with `K`.
+
+**Columns:**
+- **Ready**: Todo tasks that are not blocked and have all deps resolved
+- **In Progress**: Active tasks
+- **Done**: Tasks completed within the last N days (configured by `board_done_days`, default 7)
+
+**CC/All mode:** By default the board shows only `#cc`-tagged tasks. Press `c` to toggle between CC mode and All mode. The mode is shown in the Ready column header and persists across sessions.
+
+**Layout:** Three equal columns when width >= 80. Below 80 columns, the Done column is hidden. Below 50 columns, single-column mode shows only the focused column.
+
 ### Inbox View
 
 Shows inbox items with numbered indices and tags. Switch to it with `i`.
@@ -49,6 +62,7 @@ Full view of a single task showing all fields as navigable regions: Title, Tags,
 |-----|--------|
 | `1`-`9` | Switch to track by number |
 | `0`, `` ` `` | Switch to Tracks view |
+| `K` | Switch to Board view |
 | `i` | Switch to Inbox view |
 | `r` | Switch to Recent view |
 | `Tab` | Next view |
@@ -169,6 +183,32 @@ With selection active (Select mode):
 | `M` | Bulk cross-track move |
 | `N` | Clear selection |
 | `Esc` | Clear selection, return to Navigate |
+
+### Board View — Navigate Mode
+
+| Key | Action |
+|-----|--------|
+| `h`, `Left` | Move to previous column |
+| `l`, `Right` | Move to next column |
+| `j`, `Down` | Move cursor down within column |
+| `k`, `Up` | Move cursor up within column |
+| `g`, `Home` | Jump to top of column |
+| `G`, `End` | Jump to bottom of column |
+| `Enter` | Open detail view for selected task |
+| `Esc` | Back / close |
+| `c` | Toggle CC/All mode |
+| `Space` | Cycle task state |
+| `o` | Set todo |
+| `x` | Mark done |
+| `b` | Toggle blocked |
+| `~` | Toggle parked |
+| `e` | Edit task title |
+| `t` | Edit task tags |
+| `M` | Cross-track move |
+| `D` | Show dependency graph |
+| `ft` | Filter by tag |
+| `ff` | Clear all filters |
+| `.` | Repeat last action |
 
 ### Tracks View — Navigate Mode
 
@@ -584,6 +624,7 @@ UI-relevant settings in `project.toml`:
 [ui]
 kitty_keyboard = true      # enhanced keyboard protocol (disable if terminal has issues)
 note_wrap = true           # soft word wrap for note editing (toggle with w / Alt+w)
+board_done_days = 7        # days of done tasks to show on board (0 = hide done column)
 ref_extensions = ["md"]    # file types for ref/spec autocomplete
 ref_paths = ["doc"]        # directories for ref/spec autocomplete
 

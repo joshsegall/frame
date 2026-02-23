@@ -80,6 +80,10 @@ fn default_done_retain() -> usize {
     10
 }
 
+fn default_board_done_days() -> u32 {
+    7
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IdConfig {
     #[serde(default)]
@@ -112,6 +116,9 @@ pub struct UiConfig {
     /// Whether note editing uses soft word wrap (default: true).
     #[serde(default = "default_true")]
     pub note_wrap: bool,
+    /// Days of done tasks to show on the board view (default: 7, 0 = hide done column).
+    #[serde(default = "default_board_done_days")]
+    pub board_done_days: u32,
 }
 
 #[cfg(test)]

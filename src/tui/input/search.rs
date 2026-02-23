@@ -994,6 +994,7 @@ pub(super) fn repeat_bulk_cycle(app: &mut App) {
                     track_id: track_id.clone(),
                     task_id: task_id.clone(),
                     deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+                    old_state: Some(old_state),
                 });
             }
 
@@ -1046,7 +1047,7 @@ pub(super) fn execute_search_dir(app: &mut App, direction: i32) {
         View::Tracks => search_in_tracks_view(app, &re, direction),
         View::Inbox => search_in_inbox(app, &re, direction),
         View::Recent => search_in_recent(app, &re, direction),
-        View::Search => {} // View search not applicable in project search results
+        View::Board | View::Search => {} // View search not applicable
     }
 }
 
@@ -1642,7 +1643,7 @@ pub(super) fn count_matches_for_pattern(app: &App, re: &Regex) -> usize {
             }
             matched_done_ids.len()
         }
-        View::Search => 0,
+        View::Board | View::Search => 0,
     }
 }
 

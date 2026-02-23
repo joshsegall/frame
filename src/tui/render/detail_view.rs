@@ -126,6 +126,7 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             .unwrap_or(&ReturnView::Track(0))
         {
             ReturnView::Recent => "Recent".to_string(),
+            ReturnView::Board => "Board".to_string(),
             ReturnView::Track(idx) => {
                 let tid = app.active_track_ids.get(*idx).cloned().unwrap_or_default();
                 app.track_prefix(&tid).unwrap_or(&tid).to_string()

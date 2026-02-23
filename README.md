@@ -90,7 +90,7 @@ Vim-style modal interface. Four primary modes: **NAVIGATE**, **EDIT**,
 Press `?` for the full key binding reference, or `>` to open the command palette.
 
 The short version: `↑↓`/`jk` to move, `←→`/`hl` to collapse/expand,
-`1`–`9` for track tabs, `Space` to cycle state, `e` to edit,
+`1`–`9` for track tabs, `K` for board view, `Space` to cycle state, `e` to edit,
 `a` to add, `m` to move, `/` to search, `Enter` for detail view.
 `QQ` or `Ctrl-Q` to quit.
 

@@ -27,6 +27,12 @@ pub struct UiState {
     /// Project search history (most recent first, max 200)
     #[serde(default)]
     pub project_search_history: Vec<String>,
+    /// Board mode ("cc" or "all")
+    #[serde(default)]
+    pub board_mode: Option<String>,
+    /// Board focus column index (0=Ready, 1=InProgress, 2=Done)
+    #[serde(default)]
+    pub board_focus_column: Option<usize>,
 }
 
 /// Per-track UI state

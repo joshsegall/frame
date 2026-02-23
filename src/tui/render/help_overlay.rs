@@ -180,6 +180,7 @@ fn build_columns(view: &View) -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         View::Tracks => build_tracks_columns(),
         View::Inbox => build_inbox_columns(),
         View::Recent => build_recent_columns(),
+        View::Board => build_board_columns(),
         View::Search => build_search_columns(),
     }
 }
@@ -421,6 +422,41 @@ fn build_search_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Header("Search".into()),
         HelpEntry::Binding("n/N".into(), "Next / prev result".into()),
     ];
+
+    (left, right)
+}
+
+fn build_board_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
+    let mut left = vec![
+        HelpEntry::Header("Navigation".into()),
+        HelpEntry::Binding("h/l".into(), "Prev / next column".into()),
+        HelpEntry::Binding("\u{25B2}\u{25BC}/jk".into(), "Move up/down".into()),
+        HelpEntry::Binding("g/G".into(), "Top / bottom".into()),
+        HelpEntry::Binding("Enter".into(), "Open detail".into()),
+        HelpEntry::Binding("Esc".into(), "Back / close".into()),
+        HelpEntry::Blank,
+        HelpEntry::Header("Task State".into()),
+        HelpEntry::Binding("Space".into(), "Cycle state".into()),
+        HelpEntry::Binding("o".into(), "Set todo".into()),
+        HelpEntry::Binding("x".into(), "Mark done".into()),
+        HelpEntry::Binding("b".into(), "Set blocked".into()),
+        HelpEntry::Binding("~".into(), "Set parked".into()),
+        HelpEntry::Blank,
+    ];
+    left.extend(views_entries(true));
+
+    let mut right = vec![
+        HelpEntry::Header("Board".into()),
+        HelpEntry::Binding("c".into(), "Toggle CC/All mode".into()),
+        HelpEntry::Binding("e".into(), "Edit title".into()),
+        HelpEntry::Binding("t".into(), "Edit tags".into()),
+        HelpEntry::Binding("M".into(), "Cross-track move".into()),
+        HelpEntry::Binding("D".into(), "Show deps".into()),
+        HelpEntry::Binding("ft".into(), "Filter by tag".into()),
+        HelpEntry::Binding("ff".into(), "Clear filter".into()),
+        HelpEntry::Blank,
+    ];
+    right.extend(other_entries(false, false, true));
 
     (left, right)
 }
