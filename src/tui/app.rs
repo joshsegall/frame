@@ -1375,7 +1375,8 @@ impl App {
                 match effective_state {
                     TaskState::Todo => {
                         // Check all deps resolved (skip for pending-move tasks, they were already shown)
-                        if pin.is_none() && pending_move.is_none() && !self.all_deps_resolved(task) {
+                        if pin.is_none() && pending_move.is_none() && !self.all_deps_resolved(task)
+                        {
                             continue;
                         }
                         // CC mode filter

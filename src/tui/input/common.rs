@@ -970,12 +970,10 @@ pub(super) fn task_state_action(app: &mut App, action: StateAction) {
                 // set_state() already stripped the resolved date, but we need it
                 // during the grace period so the task stays visible in Done column.
                 if let Some(ref resolved) = old_resolved {
-                    let track =
-                        app.find_track_mut(&track_id).expect("track exists");
+                    let track = app.find_track_mut(&track_id).expect("track exists");
                     let task =
                         task_ops::find_task_mut_in_track(track, &task_id).expect("task exists");
-                    task.metadata
-                        .push(Metadata::Resolved(resolved.clone()));
+                    task.metadata.push(Metadata::Resolved(resolved.clone()));
                     task.mark_dirty();
                 }
                 // Schedule section move Done→Backlog after grace period.
