@@ -36,8 +36,9 @@ pub fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
             Line::from(spans)
         }
         Mode::Navigate => {
-            if app.last_search.is_some() && !matches!(app.view, View::Search) {
-                let pattern = app.last_search.as_ref().unwrap();
+            if let Some(pattern) = app.last_search.as_ref()
+                && !matches!(app.view, View::Search)
+            {
                 let mut spans = vec![Span::styled(
                     format!("/{}", pattern),
                     Style::default().fg(app.theme.text_bright).bg(bg),
