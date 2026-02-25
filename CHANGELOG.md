@@ -2,7 +2,7 @@
 
 All notable changes to frame will be documented in this file.
 
-## Unreleased
+## v0.1.5 - 2026-02-24
 
 ### Added
 - Board view (`K` key in TUI): kanban-style cross-track view with Ready, In Progress, and Done columns. Features CC/All mode toggle (`c`), independent column navigation (`h`/`l`), tag filtering (`ft`), and all standard task actions (state changes, edit, deps, cross-track move). Layout adapts to terminal width (3-column, 2-column, single-column).
