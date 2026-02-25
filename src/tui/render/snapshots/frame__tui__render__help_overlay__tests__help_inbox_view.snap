@@ -1,6 +1,5 @@
 ---
 source: src/tui/render/help_overlay.rs
-assertion_line: 468
 expression: output
 ---
 
@@ -21,8 +20,8 @@ expression: output
    │ 0/`        Tracks overview           Other                            │
    │ i          Inbox                     /          Search                │
    │ r          Recent                    >          Command palette       │
-   │ S          Project search            J          Jump to task          │
-   │                                      T          Tag colors            │
+   │ K          Board                     J          Jump to task          │
+   │ S          Project search            T          Tag colors            │
    │                                      P          Projects              │
    │                                      z/u        Undo                  │
    └ ▼ ────────────────────────────────────────────────────────────────────┘

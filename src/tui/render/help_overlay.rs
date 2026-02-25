@@ -201,6 +201,7 @@ fn views_entries(include_tab: bool) -> Vec<HelpEntry> {
     entries.push(HelpEntry::Binding("0/`".into(), "Tracks overview".into()));
     entries.push(HelpEntry::Binding("i".into(), "Inbox".into()));
     entries.push(HelpEntry::Binding("r".into(), "Recent".into()));
+    entries.push(HelpEntry::Binding("K".into(), "Board".into()));
     entries.push(HelpEntry::Binding("S".into(), "Project search".into()));
     entries
 }
