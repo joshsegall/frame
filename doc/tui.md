@@ -366,6 +366,7 @@ With selection active (Select mode):
 | `Up`, `Down` | Move between lines |
 | `Alt+Up`, `Alt+Down` | Jump between paragraphs |
 | `Alt+w` | Toggle note wrap |
+| `Cmd+J`, `Ctrl+J` | Join current line with next (vim-style) |
 | `Esc` | Save and exit edit |
 
 ### Move Mode

@@ -10,6 +10,7 @@ All notable changes to frame will be documented in this file.
 - "Open Board" command palette action
 - Project-wide search (`S` key in TUI): search across all active tracks, inbox, and archives with grouped results, section jumping, and jump-to-task navigation
 - "Project search" command palette action
+- `Cmd+J` / `Ctrl+J` in multi-line note editing: vim-style join lines (appends next line to current with space, trims leading whitespace)
 
 ### Changed
 - `fr search` now includes archived tasks by default (previously required `--archive` flag; flag still accepted for backward compatibility)

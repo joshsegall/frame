@@ -2563,6 +2563,32 @@ pub(super) fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
             }
             snapshot_multiline(app);
         }
+        // Join lines (Cmd+J / Ctrl+J) — vim-style J
+        (m, KeyCode::Char('j'))
+            if m.contains(KeyModifiers::SUPER) || m.contains(KeyModifiers::CONTROL) =>
+        {
+            if let Some(ds) = &mut app.detail_state {
+                ds.sticky_col = None;
+                delete_multiline_selection(ds);
+                let mut edit_lines: Vec<String> =
+                    ds.edit_buffer.split('\n').map(String::from).collect();
+                let line = ds.edit_cursor_line.min(edit_lines.len().saturating_sub(1));
+                if line + 1 < edit_lines.len() {
+                    let next_line = edit_lines.remove(line + 1);
+                    let join_col = edit_lines[line].len();
+                    let trimmed = next_line.trim_start();
+                    if !edit_lines[line].is_empty() && !trimmed.is_empty() {
+                        edit_lines[line].push(' ');
+                        ds.edit_cursor_col = join_col + 1;
+                    } else {
+                        ds.edit_cursor_col = join_col;
+                    }
+                    edit_lines[line].push_str(trimmed);
+                    ds.edit_buffer = edit_lines.join("\n");
+                }
+            }
+            snapshot_multiline(app);
+        }
         // Toggle note wrap (Alt+w)
         (m, KeyCode::Char('w')) if m.contains(KeyModifiers::ALT) => {
             app.toggle_note_wrap();
