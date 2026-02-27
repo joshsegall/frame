@@ -1295,6 +1295,15 @@ impl App {
             .map_or(0, |inbox| inbox.items.len())
     }
 
+    /// Recursively collect a task and all its subtasks into a flat list.
+    fn flatten_board_tasks(task: &Task) -> Vec<&Task> {
+        let mut result = vec![task];
+        for sub in &task.subtasks {
+            result.extend(Self::flatten_board_tasks(sub));
+        }
+        result
+    }
+
     /// Build the three board columns: [Ready, InProgress, Done]
     pub fn build_board_columns(&self) -> [Vec<BoardItem>; 3] {
         let cc_mode = self.board_state.mode == BoardMode::Cc;
@@ -1323,123 +1332,18 @@ impl App {
             let mut has_ready = false;
             let mut has_active = false;
 
-            for task in track.backlog() {
-                // Skip subtasks — board shows top-level only
-                let task_id = match &task.id {
-                    Some(id) => id.clone(),
-                    None => continue,
-                };
-
-                let id_display = if prefix.is_empty() {
-                    task_id.clone()
-                } else {
-                    format!("{}-{}", prefix, task_id)
-                };
-
-                // Apply tag filter
-                if let Some(tf) = tag_filter
-                    && !task.tags.iter().any(|t| t == tf)
-                {
-                    continue;
-                }
-
-                // Check if this task has a column pin (board grace period) or
-                // a pending section move. Either keeps the task in its original column.
-                let pin = self
-                    .board_state
-                    .column_pins
-                    .iter()
-                    .find(|p| p.track_id == *track_id && p.task_id == task_id);
-
-                let pending_move = self
-                    .pending_moves
-                    .iter()
-                    .find(|pm| pm.track_id == *track_id && pm.task_id == task_id);
-
-                let effective_state = if let Some(p) = pin {
-                    p.pinned_state
-                } else {
-                    match pending_move {
-                        Some(pm)
-                            if matches!(
-                                pm.kind,
-                                PendingMoveKind::ToDone | PendingMoveKind::ToParked
-                            ) =>
-                        {
-                            pm.old_state.unwrap_or(task.state)
-                        }
-                        _ => task.state,
-                    }
-                };
-
-                match effective_state {
-                    TaskState::Todo => {
-                        // Check all deps resolved (skip for pending-move tasks, they were already shown)
-                        if pin.is_none() && pending_move.is_none() && !self.all_deps_resolved(task)
-                        {
-                            continue;
-                        }
-                        // CC mode filter
-                        if cc_mode && !task.tags.iter().any(|t| t == "cc") {
-                            continue;
-                        }
-                        if !has_ready {
-                            ready.push(BoardItem::TrackHeader {
-                                track_name: track_name.clone(),
-                            });
-                            has_ready = true;
-                        }
-                        ready.push(BoardItem::Task {
-                            track_id: track_id.clone(),
-                            task_id: task_id.clone(),
-                            title: task.title.clone(),
-                            id_display,
-                            state: task.state,
-                            tags: task.tags.clone(),
-                        });
-                    }
-                    TaskState::Active => {
-                        if cc_mode && !task.tags.iter().any(|t| t == "cc") {
-                            continue;
-                        }
-                        if !has_active {
-                            in_progress.push(BoardItem::TrackHeader {
-                                track_name: track_name.clone(),
-                            });
-                            has_active = true;
-                        }
-                        in_progress.push(BoardItem::Task {
-                            track_id: track_id.clone(),
-                            task_id: task_id.clone(),
-                            title: task.title.clone(),
-                            id_display,
-                            state: task.state,
-                            tags: task.tags.clone(),
-                        });
-                    }
-                    _ => {}
-                }
-            }
-
-            // Collect done tasks from the Done section
-            if done_days > 0 {
-                for task in track.section_tasks(SectionKind::Done) {
+            for top_task in track.backlog() {
+                for task in Self::flatten_board_tasks(top_task) {
                     let task_id = match &task.id {
                         Some(id) => id.clone(),
                         None => continue,
                     };
 
-                    // Check for a pending reopen (PendingMove::ToBacklog) — task was
-                    // reopened but the section move hasn't fired yet (grace period).
-                    let pending_reopen = self.pending_moves.iter().any(|pm| {
-                        pm.kind == PendingMoveKind::ToBacklog
-                            && pm.track_id == *track_id
-                            && pm.task_id == task_id
-                    });
-
-                    if task.state != TaskState::Done && !pending_reopen {
-                        continue;
-                    }
+                    let id_display = if prefix.is_empty() {
+                        task_id.clone()
+                    } else {
+                        format!("{}-{}", prefix, task_id)
+                    };
 
                     // Apply tag filter
                     if let Some(tf) = tag_filter
@@ -1448,46 +1352,156 @@ impl App {
                         continue;
                     }
 
-                    // CC mode: require #cc or #cc-added
-                    if cc_mode && !task.tags.iter().any(|t| t == "cc" || t == "cc-added") {
-                        continue;
-                    }
+                    // Check if this task has a column pin (board grace period) or
+                    // a pending section move. Either keeps the task in its original column.
+                    let pin = self
+                        .board_state
+                        .column_pins
+                        .iter()
+                        .find(|p| p.track_id == *track_id && p.task_id == task_id);
 
-                    // Check resolved date within done_days
-                    let resolved_date = task.metadata.iter().find_map(|m| {
-                        if let Metadata::Resolved(d) = m {
-                            Some(d.clone())
-                        } else {
-                            None
-                        }
-                    });
+                    let pending_move = self
+                        .pending_moves
+                        .iter()
+                        .find(|pm| pm.track_id == *track_id && pm.task_id == task_id);
 
-                    let resolved_str = match &resolved_date {
-                        Some(d) => d.clone(),
-                        None => continue,
-                    };
-
-                    if !self.is_within_done_days(&resolved_str, done_days) {
-                        continue;
-                    }
-
-                    let id_display = if prefix.is_empty() {
-                        task_id.clone()
+                    let effective_state = if let Some(p) = pin {
+                        p.pinned_state
                     } else {
-                        format!("{}-{}", prefix, task_id)
+                        match pending_move {
+                            Some(pm)
+                                if matches!(
+                                    pm.kind,
+                                    PendingMoveKind::ToDone | PendingMoveKind::ToParked
+                                ) =>
+                            {
+                                pm.old_state.unwrap_or(task.state)
+                            }
+                            _ => task.state,
+                        }
                     };
 
-                    done_items.push((
-                        resolved_str,
-                        BoardItem::Task {
-                            track_id: track_id.clone(),
-                            task_id,
-                            title: task.title.clone(),
-                            id_display,
-                            state: task.state,
-                            tags: task.tags.clone(),
-                        },
-                    ));
+                    match effective_state {
+                        TaskState::Todo => {
+                            // Check all deps resolved (skip for pending-move tasks, they were already shown)
+                            if pin.is_none()
+                                && pending_move.is_none()
+                                && !self.all_deps_resolved(task)
+                            {
+                                continue;
+                            }
+                            // CC mode filter
+                            if cc_mode && !task.tags.iter().any(|t| t == "cc") {
+                                continue;
+                            }
+                            if !has_ready {
+                                ready.push(BoardItem::TrackHeader {
+                                    track_name: track_name.clone(),
+                                });
+                                has_ready = true;
+                            }
+                            ready.push(BoardItem::Task {
+                                track_id: track_id.clone(),
+                                task_id: task_id.clone(),
+                                title: task.title.clone(),
+                                id_display,
+                                state: task.state,
+                                tags: task.tags.clone(),
+                            });
+                        }
+                        TaskState::Active => {
+                            if cc_mode && !task.tags.iter().any(|t| t == "cc") {
+                                continue;
+                            }
+                            if !has_active {
+                                in_progress.push(BoardItem::TrackHeader {
+                                    track_name: track_name.clone(),
+                                });
+                                has_active = true;
+                            }
+                            in_progress.push(BoardItem::Task {
+                                track_id: track_id.clone(),
+                                task_id: task_id.clone(),
+                                title: task.title.clone(),
+                                id_display,
+                                state: task.state,
+                                tags: task.tags.clone(),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // Collect done tasks from the Done section
+            if done_days > 0 {
+                for top_task in track.section_tasks(SectionKind::Done) {
+                    for task in Self::flatten_board_tasks(top_task) {
+                        let task_id = match &task.id {
+                            Some(id) => id.clone(),
+                            None => continue,
+                        };
+
+                        // Check for a pending reopen (PendingMove::ToBacklog) — task was
+                        // reopened but the section move hasn't fired yet (grace period).
+                        let pending_reopen = self.pending_moves.iter().any(|pm| {
+                            pm.kind == PendingMoveKind::ToBacklog
+                                && pm.track_id == *track_id
+                                && pm.task_id == task_id
+                        });
+
+                        if task.state != TaskState::Done && !pending_reopen {
+                            continue;
+                        }
+
+                        // Apply tag filter
+                        if let Some(tf) = tag_filter
+                            && !task.tags.iter().any(|t| t == tf)
+                        {
+                            continue;
+                        }
+
+                        // CC mode: require #cc or #cc-added
+                        if cc_mode && !task.tags.iter().any(|t| t == "cc" || t == "cc-added") {
+                            continue;
+                        }
+
+                        // Check resolved date within done_days
+                        let resolved_date = task.metadata.iter().find_map(|m| {
+                            if let Metadata::Resolved(d) = m {
+                                Some(d.clone())
+                            } else {
+                                None
+                            }
+                        });
+
+                        let resolved_str = match &resolved_date {
+                            Some(d) => d.clone(),
+                            None => continue,
+                        };
+
+                        if !self.is_within_done_days(&resolved_str, done_days) {
+                            continue;
+                        }
+
+                        let id_display = if prefix.is_empty() {
+                            task_id.clone()
+                        } else {
+                            format!("{}-{}", prefix, task_id)
+                        };
+
+                        done_items.push((
+                            resolved_str,
+                            BoardItem::Task {
+                                track_id: track_id.clone(),
+                                task_id,
+                                title: task.title.clone(),
+                                id_display,
+                                state: task.state,
+                                tags: task.tags.clone(),
+                            },
+                        ));
+                    }
                 }
             }
         }
@@ -4006,5 +4020,126 @@ mod tests {
         }];
         let result = resolve_track_for_path(&tracks, "main.md", Some("archive/main.md"));
         assert_eq!(result, None);
+    }
+
+    // --- flatten_board_tasks ---
+
+    #[test]
+    fn flatten_board_tasks_includes_subtasks() {
+        use crate::model::TaskState;
+
+        let mut parent = Task::new(TaskState::Todo, Some("EFF-001".into()), "Parent".into());
+        let child1 = Task::new(
+            TaskState::Active,
+            Some("EFF-001.1".into()),
+            "Child 1".into(),
+        );
+        let mut child2 = Task::new(TaskState::Todo, Some("EFF-001.2".into()), "Child 2".into());
+        let grandchild = Task::new(
+            TaskState::Active,
+            Some("EFF-001.2.1".into()),
+            "Grandchild".into(),
+        );
+        child2.subtasks.push(grandchild);
+        parent.subtasks.push(child1);
+        parent.subtasks.push(child2);
+
+        let flat = App::flatten_board_tasks(&parent);
+        let ids: Vec<&str> = flat.iter().filter_map(|t| t.id.as_deref()).collect();
+        assert_eq!(ids, ["EFF-001", "EFF-001.1", "EFF-001.2", "EFF-001.2.1"]);
+        assert_eq!(flat[1].state, TaskState::Active);
+        assert_eq!(flat[3].state, TaskState::Active);
+    }
+
+    // --- build_board_columns with subtasks ---
+
+    #[test]
+    fn board_columns_include_active_subtasks() {
+        use crate::model::config::{CleanConfig, IdConfig, ProjectConfig, ProjectInfo, UiConfig};
+        use crate::model::project::Project;
+        use crate::parse::parse_track;
+
+        let track_md = "\
+# Test Track
+
+## Backlog
+
+- [ ] `T-001` Parent task
+  - [>] `T-001.1` Active subtask
+  - [ ] `T-001.2` Todo subtask
+- [>] `T-002` Top-level active
+
+## Done
+";
+        let track = parse_track(track_md);
+        let config = ProjectConfig {
+            project: ProjectInfo {
+                name: "test".into(),
+            },
+            agent: Default::default(),
+            tracks: vec![TrackConfig {
+                id: "test".into(),
+                name: "Test".into(),
+                state: "active".into(),
+                file: "tracks/test.md".into(),
+            }],
+            clean: CleanConfig::default(),
+            ids: IdConfig::default(),
+            ui: UiConfig::default(),
+        };
+        let project = Project {
+            root: std::path::PathBuf::from("/tmp/test"),
+            frame_dir: std::path::PathBuf::from("/tmp/test/frame"),
+            config,
+            tracks: vec![("test".into(), track)],
+            inbox: None,
+        };
+        let mut app = App::new(project);
+        // Switch to All mode (default is Cc which filters for #cc tags)
+        app.board_state.mode = BoardMode::All;
+        let [ready, in_progress, done] = app.build_board_columns();
+
+        // Collect task IDs from each column
+        let ready_ids: Vec<&str> = ready
+            .iter()
+            .filter_map(|item| match item {
+                BoardItem::Task { task_id, .. } => Some(task_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let active_ids: Vec<&str> = in_progress
+            .iter()
+            .filter_map(|item| match item {
+                BoardItem::Task { task_id, .. } => Some(task_id.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        // T-001 is Todo with all deps resolved → Ready
+        // T-001.2 is Todo with all deps resolved → Ready
+        assert!(ready_ids.contains(&"T-001"), "T-001 should be in Ready");
+        assert!(ready_ids.contains(&"T-001.2"), "T-001.2 should be in Ready");
+
+        // T-001.1 is Active → In Progress
+        // T-002 is Active → In Progress
+        assert!(
+            active_ids.contains(&"T-001.1"),
+            "T-001.1 (active subtask) should be in In Progress, got: {:?}",
+            active_ids
+        );
+        assert!(
+            active_ids.contains(&"T-002"),
+            "T-002 should be in In Progress"
+        );
+
+        // Done should be empty
+        let done_ids: Vec<&str> = done
+            .iter()
+            .filter_map(|item| match item {
+                BoardItem::Task { task_id, .. } => Some(task_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(done_ids.is_empty(), "Done should be empty");
     }
 }

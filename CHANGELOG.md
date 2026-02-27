@@ -2,6 +2,11 @@
 
 All notable changes to frame will be documented in this file.
 
+## Unreleased
+
+### Added
+- Board view now shows subtasks: subtasks with Active, Todo (ready), or Done states appear in the appropriate board columns alongside top-level tasks
+
 ## v0.1.5 - 2026-02-24
 
 ### Added
