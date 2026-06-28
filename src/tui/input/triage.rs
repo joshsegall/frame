@@ -638,6 +638,12 @@ pub(super) fn execute_cross_track_move(
     };
 
     let target_prefix = app.track_prefix(target_track_id).unwrap_or("").to_string();
+    // Resolve the mover's namespace before any mutation so a frontier-empty
+    // abort leaves both source and target untouched.
+    let token = match app.resolve_mint_namespace() {
+        Ok(t) => t,
+        Err(()) => return,
+    };
 
     // Determine if task is a subtask (has a parent)
     let is_subtask = task_id.contains('.');
@@ -709,16 +715,16 @@ pub(super) fn execute_cross_track_move(
         Some(t) => t,
         None => return,
     };
-    // Cross-track move mints null until Phase 4 re-keys into the mover's token.
-    let new_num = task_ops::next_id_number(target_track, &target_prefix, None);
-    let new_id = TaskId::with_number(&target_prefix, new_num as u32, None);
+    // Re-mint the new id (and subtree) in the mover's namespace.
+    let new_num = task_ops::next_id_number(target_track, &target_prefix, token.as_ref());
+    let new_id = TaskId::with_number(&target_prefix, new_num as u32, token.as_ref());
     let old_id = task_id.clone();
 
     // Set new ID and depth
     task.id = Some(new_id.clone());
     task.depth = 0;
     task.mark_dirty();
-    task_ops::renumber_subtasks(&mut task, &new_id, None);
+    task_ops::renumber_subtasks(&mut task, &new_id, token.as_ref());
 
     // Insert into target backlog
     let target_track = match app.find_track_mut(target_track_id) {
@@ -820,6 +826,12 @@ pub(super) fn execute_bulk_cross_track_move(
     };
 
     let target_prefix = app.track_prefix(target_track_id).unwrap_or("").to_string();
+    // Resolve the mover's namespace before any mutation so a frontier-empty
+    // abort leaves both source and target untouched.
+    let token = match app.resolve_mint_namespace() {
+        Ok(t) => t,
+        Err(()) => return,
+    };
 
     // Collect selected task IDs in backlog order
     let selected_ids: Vec<String> = {
@@ -861,9 +873,9 @@ pub(super) fn execute_bulk_cross_track_move(
             Some(t) => t,
             None => continue,
         };
-        // Cross-track move mints null until Phase 4 re-keys into the mover's token.
-        let new_num = task_ops::next_id_number(target_track, &target_prefix, None);
-        let new_id = TaskId::with_number(&target_prefix, new_num as u32, None);
+        // Re-mint each moved id in the mover's namespace.
+        let new_num = task_ops::next_id_number(target_track, &target_prefix, token.as_ref());
+        let new_id = TaskId::with_number(&target_prefix, new_num as u32, token.as_ref());
 
         // Remove from source
         let source_track = match app.find_track_mut(&source_track_id) {
@@ -889,7 +901,7 @@ pub(super) fn execute_bulk_cross_track_move(
         task.id = Some(new_id.clone());
         task.depth = 0;
         task.mark_dirty();
-        task_ops::renumber_subtasks(&mut task, &new_id, None);
+        task_ops::renumber_subtasks(&mut task, &new_id, token.as_ref());
 
         // Insert into target backlog
         let target_track = match app.find_track_mut(target_track_id) {

@@ -1879,6 +1879,80 @@ fn test_mint_errors_when_frontier_empty_and_unclaimed() {
 }
 
 #[test]
+fn test_mv_cross_track_mints_in_movers_namespace() {
+    // A clone that has claimed token c moves M-001 to the side track. The new id
+    // is scanned in c's namespace on the target (which holds only null ids), so
+    // it lands as S-c1 — not S-003 and not a token belonging to another actor.
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    run_fr_ok(tmp.path(), &["actor", "set", "c"]);
+
+    let out = run_fr_ok(tmp.path(), &["mv", "M-001", "--track", "side"]);
+    assert!(out.contains("S-c1"), "out: {out}");
+
+    let side = fs::read_to_string(tmp.path().join("frame/tracks/side.md")).unwrap();
+    assert!(side.contains("S-c1"), "side: {side}");
+    let main = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    assert!(!main.contains("First task"), "M-001 should have moved out");
+}
+
+#[test]
+fn test_mv_promote_mints_in_movers_namespace() {
+    // A clone that has claimed token c promotes M-003.1 to top-level. The new
+    // top-level id is minted in c's namespace: M-c1.
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    run_fr_ok(tmp.path(), &["actor", "set", "c"]);
+
+    let out = run_fr_ok(tmp.path(), &["mv", "M-003.1", "--promote"]);
+    assert!(out.contains("M-c1"), "out: {out}");
+}
+
+#[test]
+fn test_cross_track_move_aborts_when_frontier_empty_and_unclaimed() {
+    // An unclaimed clone with an exhausted frontier attempting a cross-track move
+    // must fail with the routing message and leave BOTH source and target tracks
+    // unchanged (no partial mutation).
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    fs::remove_file(tmp.path().join("frame/.actor")).unwrap();
+
+    // Fill the entire safe alphabet so the frontier is empty.
+    let alphabet = [
+        "a", "b", "c", "d", "e", "f", "g", "h", "j", "k", "m", "n", "p", "q", "r", "s", "t", "u",
+        "v", "w", "x", "y", "z",
+    ];
+    let mut registry = String::new();
+    for t in alphabet {
+        registry.push_str(&format!(
+            "[actors.{t}]\nname = \"other\"\nstate = \"active\"\nclaimed = \"2026-01-01\"\n\n"
+        ));
+    }
+    fs::write(tmp.path().join("frame/actors.toml"), registry).unwrap();
+
+    let main_before = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    let side_before = fs::read_to_string(tmp.path().join("frame/tracks/side.md")).unwrap();
+
+    let (_stdout, stderr, success) = run_fr(tmp.path(), &["mv", "M-001", "--track", "side"]);
+    assert!(
+        !success,
+        "cross-track move should fail when no token is claimable"
+    );
+    assert!(stderr.contains("fr actor set"), "stderr: {stderr}");
+
+    // Neither track changed, and nothing was claimed.
+    assert_eq!(
+        main_before,
+        fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap()
+    );
+    assert_eq!(
+        side_before,
+        fs::read_to_string(tmp.path().join("frame/tracks/side.md")).unwrap()
+    );
+    assert!(!tmp.path().join("frame/.actor").exists());
+}
+
+#[test]
 fn test_actor_set_null_creates_registry_on_legacy_project() {
     let tmp = tempfile::TempDir::new().unwrap();
     create_test_project(tmp.path());

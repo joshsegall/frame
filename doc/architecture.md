@@ -38,11 +38,13 @@ On serialization: clean tasks (`dirty == false`) emit `source_text` verbatim. Di
 Task IDs use a prefix-per-track mapping defined in `[ids.prefixes]` in `project.toml`. Each track maps to a prefix string (e.g., `eng = "E"`), and IDs auto-increment within that prefix (E1, E2, ...).
 
 - **Subtask IDs**: `PARENT.N` format, up to 3 levels deep (e.g., `E5.2.1`)
+- **Actor-token namespaces**: Each ID segment carries an optional actor token (`E-a14`; the primary clone's `null` namespace is the bare `E-014`). New numbers are minted by max-scanning **within one namespace**, so two unsynced clones never collide — each scans only its own. `src/model/task_id.rs` owns the grammar and the per-namespace scan/construct primitives.
 - **Cross-track move**: Rewrites the moved task's ID (and all subtask IDs) to the target track's prefix, then scans **all** tracks to update dep references pointing to old IDs
 - **Reparent (depth/parent change)**: When a task changes parent via `h`/`l` in TUI move mode or `--promote`/`--parent` on CLI, all IDs in the subtree are re-keyed to match the new parent structure (e.g., `E5.2` → `E10` when promoted to top-level). ID re-keying happens on confirm (`Enter`), not during live preview.
+- **Re-keying mints in the mover's namespace**: Both re-keying paths above re-mint the new segments in the **mover's** actor-token namespace (scanning the target in that namespace), not the original creator's. *Why the mover, not the creator:* only the mover writes the mover's namespace, so the max-scan can't collide with another clone's concurrent mints — minting into a different clone's namespace from a copy that can't see its other writes is exactly the unsynced-collision the design prevents. Creator provenance is already lost when a cross-track move changes the prefix, so nothing extra is given up. These are explicit actions, so an unclaimed clone auto-claims a token first and aborts cleanly (no partial mutation) if the frontier is empty. The undo/redo paths recover the mover's token from the stored new ID's leaf segment (`TaskId::leaf_token`).
 - **Collision detection**: Checked at track creation and ID/prefix rename time to prevent duplicate prefixes
 
-**Why**: Prefixes make task IDs globally unique and immediately identify which track a task belongs to. The rewrite-on-move rule preserves this invariant.
+**Why**: Prefixes make task IDs globally unique and immediately identify which track a task belongs to. The rewrite-on-move rule preserves this invariant; the per-namespace mint rule keeps it collision-free across unsynced clones.
 
 **Code**: `src/ops/task_ops.rs` (ID assignment, cross-track move, reparent), `src/ops/track_ops.rs` (prefix management), `src/io/config_io.rs` (config mutations)
 

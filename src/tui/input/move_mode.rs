@@ -88,7 +88,7 @@ pub(super) fn handle_move(app: &mut App, key: KeyEvent) {
                         track_id,
                         task_id,
                         original_parent_id,
-                        original_section: _,
+                        original_section,
                         original_sibling_index,
                         original_depth,
                         force_expanded: _,
@@ -118,16 +118,57 @@ pub(super) fn handle_move(app: &mut App, key: KeyEvent) {
                                     .cloned()
                                     .unwrap_or_default();
 
+                                // Resolve the mover's namespace before minting.
+                                // On a frontier-empty failure, abort the reparent
+                                // and restore the task to its original position so
+                                // nothing changes.
+                                let token = match app.resolve_mint_namespace() {
+                                    Ok(t) => t,
+                                    Err(()) => {
+                                        if let Some(track_mut) = app.find_track_mut(&track_id) {
+                                            if let Some((mut task, _)) =
+                                                task_ops::remove_task_subtree(track_mut, &task_id)
+                                            {
+                                                task_ops::set_subtree_depth(
+                                                    &mut task,
+                                                    original_depth,
+                                                );
+                                                let _ = task_ops::insert_task_subtree(
+                                                    track_mut,
+                                                    task,
+                                                    original_parent_id.as_deref(),
+                                                    original_section,
+                                                    original_sibling_index,
+                                                );
+                                            }
+                                            let _ = app.save_track(&track_id);
+                                        }
+                                        app.mode = if app.selection.is_empty() {
+                                            Mode::Navigate
+                                        } else {
+                                            Mode::Select
+                                        };
+                                        return;
+                                    }
+                                };
+
                                 let track_mut = app.find_track_mut(&track_id);
                                 if let Some(track_mut) = track_mut {
-                                    // Get task to compute new ID
-                                    // Move-mode re-keying mints null until Phase 4
-                                    // re-keys into the mover's token.
+                                    // Compute the new ID by scanning in the mover's
+                                    // namespace; the re-keyed segments carry the
+                                    // mover's token.
                                     let new_id = match &cur_loc.parent_id {
                                         None => {
-                                            let next =
-                                                task_ops::next_id_number(track_mut, &prefix, None);
-                                            TaskId::with_number(&prefix, next as u32, None)
+                                            let next = task_ops::next_id_number(
+                                                track_mut,
+                                                &prefix,
+                                                token.as_ref(),
+                                            );
+                                            TaskId::with_number(
+                                                &prefix,
+                                                next as u32,
+                                                token.as_ref(),
+                                            )
                                         }
                                         Some(pid) => {
                                             // Gap-safe child number via the shared primitive:
@@ -139,9 +180,13 @@ pub(super) fn handle_move(app: &mut App, key: KeyEvent) {
                                                 .and_then(|p| p.id.clone())
                                                 .unwrap_or_else(|| TaskId::parse(pid));
                                             let child_num = parent.map_or(1, |p| {
-                                                task_ops::next_child_number(p, None)
+                                                task_ops::next_child_number(p, token.as_ref())
                                             });
-                                            TaskId::child_of(&parent_tid, child_num as u32, None)
+                                            TaskId::child_of(
+                                                &parent_tid,
+                                                child_num as u32,
+                                                token.as_ref(),
+                                            )
                                         }
                                     };
 
@@ -149,8 +194,11 @@ pub(super) fn handle_move(app: &mut App, key: KeyEvent) {
                                     let task_ref =
                                         task_ops::find_task_mut_in_track(track_mut, &task_id);
                                     if let Some(task_ref) = task_ref {
-                                        let id_mappings =
-                                            task_ops::rekey_subtree(task_ref, &new_id);
+                                        let id_mappings = task_ops::rekey_subtree(
+                                            task_ref,
+                                            &new_id,
+                                            token.as_ref(),
+                                        );
 
                                         // Update dep references across all tracks
                                         for (old_id, new_mapped_id) in &id_mappings {

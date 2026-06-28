@@ -968,8 +968,10 @@ fn apply_inverse(
             // Rename ID back
             task.id = Some(task_id_old.clone().into());
             task.mark_dirty();
-            // Undo of a cross-track move restores the prior null-namespace IDs.
-            task_ops::renumber_subtasks(&mut task, task_id_old, None);
+            // Undo restores the prior IDs, re-keying the subtree in the original
+            // id's namespace (its leaf token; null for a legacy id).
+            let old_parsed = crate::model::task_id::TaskId::parse(task_id_old);
+            task_ops::renumber_subtasks(&mut task, task_id_old, old_parsed.leaf_token());
 
             if let Some(parent_id) = source_parent_id {
                 // Was a subtask — restore depth and insert back as subtask
@@ -1412,8 +1414,10 @@ fn apply_forward(
             task.id = Some(task_id_new.clone().into());
             task.depth = 0;
             task.mark_dirty();
-            // Redo of a cross-track move re-applies the prior null-namespace IDs.
-            task_ops::renumber_subtasks(&mut task, task_id_new, None);
+            // Redo re-applies the moved id, re-keying the subtree in the mover's
+            // namespace (recovered from the new id's leaf token).
+            let new_parsed = crate::model::task_id::TaskId::parse(task_id_new);
+            task_ops::renumber_subtasks(&mut task, task_id_new, new_parsed.leaf_token());
 
             let target_track = find_track_mut(tracks, target_track_id)?;
             let target_tasks = target_track.section_tasks_mut(SectionKind::Backlog)?;
@@ -1443,8 +1447,10 @@ fn apply_forward(
             // Remove from old location
             let (mut task, _) = task_ops::remove_task_subtree(track, &old_root_id)?;
 
-            // Apply forward ID mappings
-            let _ = task_ops::rekey_subtree(&mut task, new_task_id);
+            // Apply forward ID mappings, re-keying the subtree in the mover's
+            // namespace (recovered from the new root id's leaf token).
+            let new_parsed = crate::model::task_id::TaskId::parse(new_task_id);
+            let _ = task_ops::rekey_subtree(&mut task, new_task_id, new_parsed.leaf_token());
 
             // Compute new depth
             let new_depth = match new_parent_id {

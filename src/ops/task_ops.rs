@@ -396,6 +396,7 @@ pub fn move_task_to_track(
     position: InsertPosition,
     target_prefix: &str,
     all_tracks_for_dep_update: &mut [(String, Track)],
+    token: Option<&Token>,
 ) -> Result<String, TaskError> {
     // Remove from source backlog
     let source_tasks = source_track
@@ -409,16 +410,17 @@ pub fn move_task_to_track(
 
     let mut task = source_tasks.remove(idx);
 
-    // Assign new ID. Cross-track re-keying mints in the null namespace until
-    // Phase 4 re-keys into the mover's token; see the Phase 3 plan.
-    let next_num = next_id_number(target_track, target_prefix, None);
-    let new_id = TaskId::with_number(target_prefix, next_num as u32, None);
+    // Assign a new ID by max-scanning the target in the *mover's* namespace
+    // (`token`): only the mover writes its own namespace, so this re-mint can't
+    // collide with the target track's own actors, who are invisible to the scan.
+    let next_num = next_id_number(target_track, target_prefix, token);
+    let new_id = TaskId::with_number(target_prefix, next_num as u32, token);
     let old_id = task.id.clone();
     task.id = Some(new_id.clone());
     task.mark_dirty();
 
-    // Renumber subtask IDs
-    renumber_subtasks(&mut task, &new_id, None);
+    // Re-key the subtree into the mover's namespace too.
+    renumber_subtasks(&mut task, &new_id, token);
 
     // Insert into target
     let target_tasks = target_track
@@ -817,18 +819,23 @@ pub fn max_subtree_depth(task: &Task) -> usize {
     }
 }
 
-/// Assign new IDs to a task and all its descendants.
-/// Returns the list of (old_id, new_id) mappings.
-pub fn rekey_subtree(task: &mut Task, new_id: &str) -> Vec<(String, String)> {
+/// Assign new IDs to a task and all its descendants. Re-minted child segments
+/// carry `token` (the mover's namespace; `None` = null), so a re-keyed subtree
+/// lands entirely in the mover's namespace and can't collide with the target's
+/// own actors. Returns the list of (old_id, new_id) mappings.
+pub fn rekey_subtree(
+    task: &mut Task,
+    new_id: &str,
+    token: Option<&Token>,
+) -> Vec<(String, String)> {
     let mut mappings = Vec::new();
     if let Some(ref old_id) = task.id {
         mappings.push((old_id.to_string(), new_id.to_string()));
     }
     let parsed = TaskId::parse(new_id);
     for (i, sub) in task.subtasks.iter_mut().enumerate() {
-        // Phase 4 owns re-keying into the mover's token; mint null for now.
-        let sub_new_id = TaskId::child_of(&parsed, (i + 1) as u32, None);
-        let sub_mappings = rekey_subtree(sub, &sub_new_id);
+        let sub_new_id = TaskId::child_of(&parsed, (i + 1) as u32, token);
+        let sub_mappings = rekey_subtree(sub, &sub_new_id, token);
         mappings.extend(sub_mappings);
     }
     task.id = Some(parsed);
@@ -891,6 +898,7 @@ pub fn reparent_task(
     sibling_index: usize,
     prefix: &str,
     all_tracks: &mut [(String, Track)],
+    token: Option<&Token>,
 ) -> Result<ReparentResult, TaskError> {
     // 1. Validate task exists
     let _old_location = find_task_location_any_section(track, task_id)
@@ -929,24 +937,24 @@ pub fn reparent_task(
     let (mut task, actual_old_location) = remove_task_subtree(track, task_id)
         .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
 
-    // 5. Compute new ID
+    // 5. Compute new ID by scanning in the *mover's* namespace (`token`). Only
+    // the mover writes its own namespace, so the re-mint can't collide.
     let new_id = match &new_parent_id {
         None => {
-            // Promote to top-level: get next available top-level ID. Reparent
-            // re-keying mints null until Phase 4 re-keys into the mover's token.
-            let next_num = next_id_number(track, prefix, None);
-            TaskId::with_number(prefix, next_num as u32, None)
+            // Promote to top-level: next available top-level ID in the namespace.
+            let next_num = next_id_number(track, prefix, token);
+            TaskId::with_number(prefix, next_num as u32, token)
         }
         Some(pid) => {
             // Reparent under parent: find next available child slot.
             let parent = find_task_in_track(track, pid)
                 .ok_or_else(|| TaskError::NotFound(pid.to_string()))?;
-            next_child_id(parent, pid, None)
+            next_child_id(parent, pid, token)
         }
     };
 
-    // 6. Rekey subtree
-    let id_mappings = rekey_subtree(&mut task, &new_id);
+    // 6. Rekey subtree into the mover's namespace
+    let id_mappings = rekey_subtree(&mut task, &new_id, token);
 
     // 7. Set depths
     set_subtree_depth(&mut task, new_depth);
@@ -1614,7 +1622,7 @@ mod tests {
         // Extract T-003 with its subtasks
         let (mut task, _) = remove_task_subtree(&mut track, "T-003").unwrap();
 
-        let mappings = rekey_subtree(&mut task, "T-005");
+        let mappings = rekey_subtree(&mut task, "T-005", None);
         assert_eq!(mappings.len(), 3); // T-003, T-003.1, T-003.2
         assert_eq!(mappings[0], ("T-003".to_string(), "T-005".to_string()));
         assert_eq!(mappings[1], ("T-003.1".to_string(), "T-005.1".to_string()));
@@ -1660,6 +1668,7 @@ mod tests {
             usize::MAX,
             "T",
             &mut all_tracks,
+            None,
         )
         .unwrap();
 
@@ -1692,6 +1701,7 @@ mod tests {
             usize::MAX,
             "T",
             &mut all_tracks,
+            None,
         )
         .unwrap();
 
@@ -1716,8 +1726,16 @@ mod tests {
 
         // T-002 has dep: T-001. Promote T-003.1 (no deps involved, but let's
         // reparent T-001 and check that T-002's dep is updated)
-        let result =
-            reparent_task(&mut track, "T-001", Some("T-003"), 0, "T", &mut all_tracks).unwrap();
+        let result = reparent_task(
+            &mut track,
+            "T-001",
+            Some("T-003"),
+            0,
+            "T",
+            &mut all_tracks,
+            None,
+        )
+        .unwrap();
 
         let new_id = &result.new_root_id;
         // T-002's dep should now reference the new ID
@@ -1763,6 +1781,7 @@ mod tests {
             usize::MAX,
             "D",
             &mut all_tracks,
+            None,
         );
         assert!(matches!(result, Err(TaskError::DepthExceeded)));
     }
@@ -1793,6 +1812,7 @@ mod tests {
             usize::MAX,
             "D",
             &mut all_tracks,
+            None,
         );
         assert!(matches!(result, Err(TaskError::DepthExceeded)));
     }
@@ -1810,6 +1830,7 @@ mod tests {
             usize::MAX,
             "T",
             &mut all_tracks,
+            None,
         );
         assert!(matches!(result, Err(TaskError::CycleDetected)));
     }
@@ -1827,6 +1848,7 @@ mod tests {
             usize::MAX,
             "T",
             &mut all_tracks,
+            None,
         );
         assert!(matches!(result, Err(TaskError::CycleDetected)));
     }
@@ -1978,6 +2000,7 @@ mod tests {
             usize::MAX,
             "T",
             &mut all_tracks,
+            None,
         )
         .unwrap();
 
@@ -2115,6 +2138,126 @@ mod tests {
         )
         .unwrap();
         assert_eq!(id, "EFF-b10");
+    }
+
+    // --- Cross-track / reparent re-key into the mover's namespace (Phase 4) ---
+
+    #[test]
+    fn test_cross_track_move_mints_in_movers_namespace() {
+        // Actor c moves EFF-a14 (created by a) into INF, which already holds
+        // INF-b3. The new id is scanned in c's namespace — b3 is invisible — so
+        // it is INF-c1, not INF-a… and not a null INF-…. A dep elsewhere that
+        // points at EFF-a14 is rewritten to the new id.
+        let mut source =
+            parse_track("# Eff\n\n## Backlog\n\n- [ ] `EFF-a14` Created by a\n\n## Done");
+        let mut target =
+            parse_track("# Inf\n\n## Backlog\n\n- [ ] `INF-b3` Created by b\n\n## Done");
+        let mut others = vec![(
+            "oth".to_string(),
+            parse_track(
+                "# Oth\n\n## Backlog\n\n- [ ] `OTH-001` Dependent\n  - dep: EFF-a14\n\n## Done",
+            ),
+        )];
+
+        let new_id = move_task_to_track(
+            &mut source,
+            &mut target,
+            "EFF-a14",
+            InsertPosition::Bottom,
+            "INF",
+            &mut others,
+            Some(&ns("c")),
+        )
+        .unwrap();
+
+        assert_eq!(new_id, "INF-c1");
+        assert!(find_task_in_track(&source, "EFF-a14").is_none());
+        assert!(find_task_in_track(&target, "INF-c1").is_some());
+        // Dep rewritten to the new id everywhere it appears.
+        let dep = find_task_in_track(&others[0].1, "OTH-001").unwrap();
+        assert!(
+            dep.metadata
+                .iter()
+                .any(|m| matches!(m, Metadata::Dep(d) if d == &vec!["INF-c1".to_string()]))
+        );
+    }
+
+    #[test]
+    fn test_cross_track_move_rekeys_subtree_into_movers_namespace() {
+        // A tokened task with children, moved by c, re-keys the whole subtree
+        // into c's namespace: INF-c1, INF-c1.c1, INF-c1.c2.
+        let mut source = parse_track(
+            "# Eff\n\n## Backlog\n\n- [ ] `EFF-a14` Parent\n  - [ ] `EFF-a14.b1` Child one\n  - [ ] `EFF-a14.b2` Child two\n\n## Done",
+        );
+        let mut target = parse_track("# Inf\n\n## Backlog\n\n## Done");
+
+        let new_id = move_task_to_track(
+            &mut source,
+            &mut target,
+            "EFF-a14",
+            InsertPosition::Bottom,
+            "INF",
+            &mut [],
+            Some(&ns("c")),
+        )
+        .unwrap();
+
+        assert_eq!(new_id, "INF-c1");
+        let moved = find_task_in_track(&target, "INF-c1").unwrap();
+        assert_eq!(moved.subtasks[0].id.as_deref(), Some("INF-c1.c1"));
+        assert_eq!(moved.subtasks[1].id.as_deref(), Some("INF-c1.c2"));
+    }
+
+    #[test]
+    fn test_promote_mints_top_level_in_movers_namespace() {
+        // Actor c promotes EFF-a14.b2 (whose subtree was minted by b) to
+        // top-level: a new top-level id in c's namespace (EFF-c1), with the
+        // former subtree re-keyed under it carrying c's token.
+        let mut track = parse_track(
+            "# Eff\n\n## Backlog\n\n- [ ] `EFF-a14` Parent\n  - [ ] `EFF-a14.b2` Child\n    - [ ] `EFF-a14.b2.b1` Grandchild\n\n## Done",
+        );
+        let mut others: Vec<(String, Track)> = Vec::new();
+
+        let result = reparent_task(
+            &mut track,
+            "EFF-a14.b2",
+            None,
+            usize::MAX,
+            "EFF",
+            &mut others,
+            Some(&ns("c")),
+        )
+        .unwrap();
+
+        assert_eq!(result.new_root_id, "EFF-c1");
+        let promoted = find_task_in_track(&track, "EFF-c1").unwrap();
+        assert_eq!(promoted.depth, 0);
+        assert_eq!(promoted.subtasks[0].id.as_deref(), Some("EFF-c1.c1"));
+    }
+
+    #[test]
+    fn test_reparent_mints_child_in_movers_namespace() {
+        // Actor c reparents EFF-a14 (created by a) under EFF-a20: the new child
+        // id is EFF-a20.c1 — the parent segment (a20) is preserved and only the
+        // new child segment carries c. This pins the mover-differs-from-creator
+        // invariant: the re-mint uses the mover (c), not the creator (a).
+        let mut track = parse_track(
+            "# Eff\n\n## Backlog\n\n- [ ] `EFF-a14` Mover\n- [ ] `EFF-a20` New parent\n\n## Done",
+        );
+        let mut others: Vec<(String, Track)> = Vec::new();
+
+        let result = reparent_task(
+            &mut track,
+            "EFF-a14",
+            Some("EFF-a20"),
+            usize::MAX,
+            "EFF",
+            &mut others,
+            Some(&ns("c")),
+        )
+        .unwrap();
+
+        assert_eq!(result.new_root_id, "EFF-a20.c1");
     }
 
     /// Verify that deleting a subtask from a parent with multiline notes

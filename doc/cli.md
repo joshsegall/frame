@@ -307,6 +307,8 @@ fr mv ID [POSITION] [--top] [--after ID] [--track TRACK] [--promote] [--parent I
 
 Cross-track moves rewrite the task's ID prefix to match the target track. Reparenting (`--promote` or `--parent`) re-keys the task and all descendant IDs to match the new parent structure. Both operations update all dependency references across tracks.
 
+The re-minted ID segments are created in **this clone's** [actor-token namespace](concepts.md#minting-in-a-token-namespace) — the *mover's* namespace, not the original creator's — by scanning the target in that namespace (e.g. clone `c` moving `EFF-a14` into track INF produces `INF-c1`, and a moved subtree re-keys to `INF-c1.c1`, `INF-c1.c2`). This is the collision-free rule: only the mover writes its own namespace, so the re-mint can't clash with another clone's concurrent work. As with `fr add`, the first such move in an unclaimed clone auto-claims a token; if no token can be claimed the move aborts with the `fr actor set …` routing message and changes nothing. Because a cross-track move changes the ID prefix, the original creator's namespace is not preserved across the move.
+
 ### `fr triage INDEX --track TRACK`
 
 Move an inbox item to a track, converting it to a task.

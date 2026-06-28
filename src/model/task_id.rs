@@ -199,6 +199,17 @@ impl TaskId {
         }
     }
 
+    /// The namespace token of this id's last segment (`None` for the null
+    /// namespace or a `Raw` id). For a minted id this is the minter's token, so
+    /// re-key/undo paths can recover the mover's namespace directly from an
+    /// already-minted id without threading the token separately.
+    pub fn leaf_token(&self) -> Option<&Token> {
+        match &self.parsed {
+            ParsedId::Structured { segments, .. } => segments.last()?.token.as_ref(),
+            ParsedId::Raw => None,
+        }
+    }
+
     /// If `self` is a direct child of `parent` (one extra segment whose preceding
     /// segments match the parent exactly) and that last segment is in the `token`
     /// namespace (`None` = null), return the child number. Used by the gap-safe,
@@ -564,6 +575,20 @@ mod tests {
             TaskId::child_of(&parent, 2, Some(&tok("b"))).to_string(),
             "EFF-a14.b2"
         );
+    }
+
+    #[test]
+    fn leaf_token_reports_last_segment_namespace() {
+        // Null and raw ids have no leaf token.
+        assert_eq!(TaskId::parse("EFF-014").leaf_token(), None);
+        assert_eq!(TaskId::parse("EFF-014.2").leaf_token(), None);
+        assert_eq!(TaskId::parse("weird id!").leaf_token(), None);
+        // The leaf token is the *last* segment's, regardless of ancestors.
+        assert_eq!(TaskId::parse("EFF-a14").leaf_token(), Some(&tok("a")));
+        assert_eq!(TaskId::parse("EFF-a14.b2").leaf_token(), Some(&tok("b")));
+        assert_eq!(TaskId::parse("EFF-a14.b2.c3").leaf_token(), Some(&tok("c")));
+        // A null leaf under a tokened parent is still null.
+        assert_eq!(TaskId::parse("EFF-a14.2").leaf_token(), None);
     }
 
     #[test]

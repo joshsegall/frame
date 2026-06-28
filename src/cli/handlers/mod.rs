@@ -1531,6 +1531,8 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
         let prefix = track_prefix(&project, &source_track_id)
             .ok_or_else(|| format!("no ID prefix configured for track '{}'", source_track_id))?
             .to_string();
+        // Promote re-mints the new top-level id in the mover's namespace.
+        let token = resolve_mint_namespace(&project.frame_dir)?;
 
         let track_idx = project
             .tracks
@@ -1579,6 +1581,7 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
             sibling_index,
             &prefix,
             &mut other_tracks,
+            token.as_ref(),
         )?;
 
         save_track(&project, &source_track_id)?;
@@ -1591,6 +1594,8 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
         let prefix = track_prefix(&project, &source_track_id)
             .ok_or_else(|| format!("no ID prefix configured for track '{}'", source_track_id))?
             .to_string();
+        // Reparent re-mints the new child id in the mover's namespace.
+        let token = resolve_mint_namespace(&project.frame_dir)?;
 
         let track_idx = project
             .tracks
@@ -1612,6 +1617,7 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
             usize::MAX,
             &prefix,
             &mut other_tracks,
+            token.as_ref(),
         )?;
 
         save_track(&project, &source_track_id)?;
@@ -1624,6 +1630,9 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
         let target_prefix = track_prefix(&project, target_track_id)
             .ok_or_else(|| format!("no ID prefix configured for track '{}'", target_track_id))?
             .to_string();
+        // Re-mint the moved id (and its subtree) in the mover's namespace.
+        // Resolved before any mutation so a frontier-empty abort changes nothing.
+        let token = resolve_mint_namespace(&project.frame_dir)?;
 
         // Get mutable references to both tracks
         let (source_idx, target_idx) = {
@@ -1670,6 +1679,7 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
             position,
             &target_prefix,
             &mut [], // We don't update deps in other tracks for simplicity
+            token.as_ref(),
         )?;
 
         // Save both tracks — if target save fails, log to recovery
