@@ -1952,6 +1952,206 @@ fn test_cross_track_move_aborts_when_frontier_empty_and_unclaimed() {
     assert!(!tmp.path().join("frame/.actor").exists());
 }
 
+// ---------------------------------------------------------------------------
+// CLI cross-track move updates cross-track dependency references
+// ---------------------------------------------------------------------------
+
+/// Project with four tracks and cross-track deps pointing at A-005 (the task we
+/// move). `alpha` also holds A-0050, a decoy id that resembles A-005 but must not
+/// be touched by a whole-id dep rewrite. Records the primary (null) actor so
+/// mints stay in the legacy namespace unless a test claims a token first.
+fn create_dep_project(root: &Path) {
+    let frame_dir = root.join("frame");
+    fs::create_dir_all(frame_dir.join("tracks")).unwrap();
+    fs::write(frame_dir.join(".actor"), "null\n").unwrap();
+
+    fs::write(
+        frame_dir.join("project.toml"),
+        r#"[project]
+name = "dep-project"
+
+[[tracks]]
+id = "alpha"
+name = "Alpha"
+state = "active"
+file = "tracks/alpha.md"
+
+[[tracks]]
+id = "beta"
+name = "Beta"
+state = "active"
+file = "tracks/beta.md"
+
+[[tracks]]
+id = "gamma"
+name = "Gamma"
+state = "active"
+file = "tracks/gamma.md"
+
+[[tracks]]
+id = "delta"
+name = "Delta"
+state = "active"
+file = "tracks/delta.md"
+
+[ids.prefixes]
+alpha = "A"
+beta = "B"
+gamma = "C"
+delta = "D"
+"#,
+    )
+    .unwrap();
+
+    fs::write(
+        frame_dir.join("tracks/alpha.md"),
+        "\
+# Alpha
+
+## Backlog
+
+- [ ] `A-001` First alpha
+  - added: 2025-05-01
+- [ ] `A-005` Movable task
+  - added: 2025-05-02
+- [ ] `A-0050` Decoy with a similar id
+  - added: 2025-05-03
+
+## Done
+",
+    )
+    .unwrap();
+
+    fs::write(
+        frame_dir.join("tracks/beta.md"),
+        "\
+# Beta
+
+## Backlog
+
+- [ ] `B-001` Depends on the movable task
+  - added: 2025-05-01
+  - dep: A-005
+- [ ] `B-002` Depends on the decoy
+  - added: 2025-05-02
+  - dep: A-0050
+
+## Done
+",
+    )
+    .unwrap();
+
+    fs::write(
+        frame_dir.join("tracks/gamma.md"),
+        "\
+# Gamma
+
+## Backlog
+
+## Done
+",
+    )
+    .unwrap();
+
+    fs::write(
+        frame_dir.join("tracks/delta.md"),
+        "\
+# Delta
+
+## Backlog
+
+- [ ] `D-001` Also depends on the movable task
+  - added: 2025-05-01
+  - dep: A-005
+
+## Done
+",
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_mv_cross_track_updates_dep_reference() {
+    // Previously broken: moving A-005 to gamma re-keyed it to C-001 but left
+    // B-001's `dep: A-005` dangling. The dependent must now be rewritten.
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_dep_project(tmp.path());
+
+    let out = run_fr_ok(tmp.path(), &["mv", "A-005", "--track", "gamma"]);
+    assert!(out.contains("A-005 → C-001"), "out: {out}");
+
+    let beta = fs::read_to_string(tmp.path().join("frame/tracks/beta.md")).unwrap();
+    assert!(beta.contains("dep: C-001"), "beta: {beta}");
+    assert!(!beta.contains("dep: A-005\n"), "stale dep remained: {beta}");
+
+    let gamma = fs::read_to_string(tmp.path().join("frame/tracks/gamma.md")).unwrap();
+    assert!(gamma.contains("`C-001`"), "gamma: {gamma}");
+}
+
+#[test]
+fn test_mv_cross_track_updates_dep_in_movers_namespace() {
+    // The dependent is rewritten to the fully tokened new id when a tokened clone
+    // performs the move: A-005 → C-c1, and B-001's dep follows.
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_dep_project(tmp.path());
+    run_fr_ok(tmp.path(), &["actor", "set", "c"]);
+
+    let out = run_fr_ok(tmp.path(), &["mv", "A-005", "--track", "gamma"]);
+    assert!(out.contains("A-005 → C-c1"), "out: {out}");
+
+    let beta = fs::read_to_string(tmp.path().join("frame/tracks/beta.md")).unwrap();
+    assert!(beta.contains("dep: C-c1"), "beta: {beta}");
+}
+
+#[test]
+fn test_mv_cross_track_updates_multiple_dependents() {
+    // Two dependents in different tracks (beta and delta) both pointing at the
+    // moved id are both updated.
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_dep_project(tmp.path());
+
+    run_fr_ok(tmp.path(), &["mv", "A-005", "--track", "gamma"]);
+
+    let beta = fs::read_to_string(tmp.path().join("frame/tracks/beta.md")).unwrap();
+    let delta = fs::read_to_string(tmp.path().join("frame/tracks/delta.md")).unwrap();
+    assert!(beta.contains("dep: C-001"), "beta: {beta}");
+    assert!(delta.contains("dep: C-001"), "delta: {delta}");
+}
+
+#[test]
+fn test_mv_cross_track_no_false_dep_rewrite() {
+    // A dep that merely resembles the old id (A-0050 vs A-005) must be left
+    // untouched — the rewrite matches whole ids, not substrings.
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_dep_project(tmp.path());
+
+    run_fr_ok(tmp.path(), &["mv", "A-005", "--track", "gamma"]);
+
+    let beta = fs::read_to_string(tmp.path().join("frame/tracks/beta.md")).unwrap();
+    // B-001 (dep: A-005) was rewritten; B-002 (dep: A-0050) was not.
+    assert!(beta.contains("dep: C-001"), "beta: {beta}");
+    assert!(
+        beta.contains("dep: A-0050"),
+        "decoy dep was wrongly rewritten: {beta}"
+    );
+}
+
+#[test]
+fn test_mv_cross_track_then_check_clean() {
+    // End-to-end guard: after the move, `fr check` reports no dangling dependency.
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_dep_project(tmp.path());
+
+    run_fr_ok(tmp.path(), &["mv", "A-005", "--track", "gamma"]);
+
+    let check = run_fr_ok(tmp.path(), &["check"]);
+    assert!(check.contains("✓ project is valid"), "check: {check}");
+    assert!(
+        !check.contains("dangling"),
+        "check reported a dangling dep: {check}"
+    );
+}
+
 #[test]
 fn test_actor_set_null_creates_registry_on_legacy_project() {
     let tmp = tempfile::TempDir::new().unwrap();

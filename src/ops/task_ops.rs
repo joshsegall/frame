@@ -638,6 +638,19 @@ pub fn update_dep_references(tracks: &mut [(String, Track)], old_id: &str, new_i
     }
 }
 
+/// True if any task (or subtask) in the track is marked dirty. Lets a caller
+/// persist exactly the tracks an in-memory mutation touched (e.g. the tracks
+/// whose dep references a cross-track move rewrote).
+pub fn track_has_dirty_task(track: &Track) -> bool {
+    fn any_dirty(tasks: &[Task]) -> bool {
+        tasks.iter().any(|t| t.dirty || any_dirty(&t.subtasks))
+    }
+    track
+        .nodes
+        .iter()
+        .any(|node| matches!(node, TrackNode::Section { tasks, .. } if any_dirty(tasks)))
+}
+
 /// Update all dep references within a single track from old_id to new_id.
 pub fn update_dep_references_in_track(track: &mut Track, old_id: &str, new_id: &str) {
     for node in &mut track.nodes {

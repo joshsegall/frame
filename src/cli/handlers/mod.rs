@@ -1678,9 +1678,14 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
             &args.id,
             position,
             &target_prefix,
-            &mut [], // We don't update deps in other tracks for simplicity
+            &mut [], // dep references are rewritten across all tracks below
             token.as_ref(),
         )?;
+
+        // Rewrite dep references to the moved task across ALL tracks (the same
+        // routine the TUI path uses), now that the source/target borrows have
+        // released. This also covers dependents in the source and target tracks.
+        task_ops::update_dep_references(&mut project.tracks, &args.id, &new_id);
 
         // Save both tracks — if target save fails, log to recovery
         save_track(&project, &source_track_id)?;
@@ -1711,6 +1716,17 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
                 },
             );
             return Err(e.into());
+        }
+        // Persist any other track whose dep references were rewritten. The move
+        // itself is already durable (source + target written), so a dangling dep
+        // here is recoverable; saving the touched tracks makes the rewrite stick.
+        for (other_id, other_track) in &project.tracks {
+            if other_id == &source_track_id || other_id == target_track_id {
+                continue;
+            }
+            if task_ops::track_has_dirty_task(other_track) {
+                save_track(&project, other_id)?;
+            }
         }
         println!("{} → {} ({})", args.id, new_id, target_track_id);
     } else {
