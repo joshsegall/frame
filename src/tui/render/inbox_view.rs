@@ -298,22 +298,29 @@ pub fn render_inbox_view(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
-    // Find the display line index of the cursor item (for autocomplete anchor + scroll)
+    // Find the display line range of the cursor item (for autocomplete anchor + scroll)
     let mut cursor_display_line: Option<usize> = None;
+    let mut cursor_display_line_end: Option<usize> = None;
     for (dl_idx, (item_idx, _)) in display_lines.iter().enumerate() {
-        if *item_idx == Some(cursor) && cursor_display_line.is_none() {
-            cursor_display_line = Some(dl_idx);
+        if *item_idx == Some(cursor) {
+            if cursor_display_line.is_none() {
+                cursor_display_line = Some(dl_idx);
+            }
+            cursor_display_line_end = Some(dl_idx);
         }
     }
 
-    // Auto-adjust scroll to keep cursor visible
+    // Auto-adjust scroll to keep the cursor item's full extent visible.
     let mut scroll = app.inbox_scroll;
     if let Some(cdl) = cursor_display_line {
-        if cdl < scroll {
-            scroll = cdl;
-        } else if cdl >= scroll + visible_height {
-            scroll = cdl.saturating_sub(visible_height - 1);
-        }
+        let cdl_end = cursor_display_line_end.unwrap_or(cdl);
+        scroll = super::scroll::adjust_scroll(
+            scroll,
+            visible_height,
+            cdl,
+            cdl_end,
+            super::scroll::SCROLL_MARGIN,
+        );
     }
 
     // When editing a note, ensure the editor's active line (cursor line) is visible

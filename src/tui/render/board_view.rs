@@ -286,17 +286,12 @@ fn render_column(
             Style::default().fg(app.theme.dim).bg(bg),
         )));
     } else {
-        // Scroll adjustment
-        let scroll = &mut app.board_state.scroll[col_idx];
-        if cursor < *scroll {
-            *scroll = cursor;
-        } else if cursor >= *scroll + body_height {
-            *scroll = cursor + 1 - body_height;
-        }
-        let scroll_val = *scroll;
-
-        // Build card lines
+        // Build card lines, tracking the cursor card's display-line range. Cards
+        // wrap to multiple lines, so scroll must be computed in display-line
+        // space (not item-space) to keep the cursor card visible.
         let mut card_lines: Vec<Line> = Vec::new();
+        let mut cursor_start_line = 0usize;
+        let mut cursor_end_line = 0usize;
         for (idx, item) in items.iter().enumerate() {
             match item {
                 BoardItem::TrackHeader { track_name } => {
@@ -316,6 +311,9 @@ fn render_column(
                     state,
                     ..
                 } => {
+                    if idx == cursor {
+                        cursor_start_line = card_lines.len();
+                    }
                     let is_cursor = is_focused && idx == cursor;
                     let is_flash = app.is_flashing(task_id);
                     let (flash_bg, flash_border) = state_flash_colors(*state, &app.theme);
@@ -473,9 +471,24 @@ fn render_column(
                     }
 
                     let _ = line_count; // used for max_lines cap above
+
+                    if idx == cursor {
+                        cursor_end_line = card_lines.len().saturating_sub(1);
+                    }
                 }
             }
         }
+
+        // Scroll adjustment in display-line space (with a scrolloff margin).
+        let scroll = &mut app.board_state.scroll[col_idx];
+        *scroll = super::scroll::adjust_scroll(
+            *scroll,
+            body_height,
+            cursor_start_line,
+            cursor_end_line,
+            super::scroll::SCROLL_MARGIN,
+        );
+        let scroll_val = *scroll;
 
         // Apply scroll: skip `scroll_val` lines, take `body_height`
         for line in card_lines.into_iter().skip(scroll_val).take(body_height) {

@@ -36,6 +36,7 @@ pub fn render_search_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let mut lines: Vec<Line> = Vec::new();
     let mut cursor_line: Option<usize> = None;
+    let mut cursor_line_end: Option<usize> = None;
     let mut current_group_idx = 0;
 
     let highlight_style = Style::default()
@@ -221,16 +222,23 @@ pub fn render_search_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 Style::default().fg(app.theme.dim).bg(app.theme.background),
             )));
         }
+
+        if is_cursor {
+            cursor_line_end = Some(lines.len().saturating_sub(1));
+        }
     }
 
-    // Auto-scroll to keep cursor visible
+    // Auto-scroll to keep the cursor item's full extent visible (with margin).
     let scroll_offset = if let Some(sr) = &mut app.project_search_results {
         if let Some(cl) = cursor_line {
-            if cl < sr.scroll_offset {
-                sr.scroll_offset = cl;
-            } else if cl >= sr.scroll_offset + visible_height {
-                sr.scroll_offset = cl + 1 - visible_height;
-            }
+            let cl_end = cursor_line_end.unwrap_or(cl);
+            sr.scroll_offset = super::scroll::adjust_scroll(
+                sr.scroll_offset,
+                visible_height,
+                cl,
+                cl_end,
+                super::scroll::SCROLL_MARGIN,
+            );
         }
         sr.scroll_offset
     } else {

@@ -12,6 +12,7 @@ pub mod project_picker;
 pub mod recent_view;
 pub mod recovery_overlay;
 pub mod results_overlay;
+pub mod scroll;
 pub mod search_view;
 pub mod status_row;
 pub mod tab_bar;

@@ -13,6 +13,7 @@ use crate::util::unicode;
 use super::detail_view::{UNDO_FLASH_COLORS, state_flash_colors, wrap_styled_spans};
 use super::helpers::{abbreviated_id, spans_width, state_symbol};
 use super::push_highlighted_spans;
+use super::scroll;
 
 /// Maximum visible lines for wrap-aware title editing
 const MAX_EDIT_LINES: usize = 8;
@@ -48,14 +49,11 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let visible_height = area.height as usize;
     {
+        // Clamp the cursor to a valid item; scroll is adjusted later in
+        // display-line space (after the multi-line layout is known).
         let state = app.get_track_state(&track_id);
         let cursor = state.cursor.min(flat_items.len().saturating_sub(1));
         state.cursor = cursor;
-        if cursor < state.scroll_offset {
-            state.scroll_offset = cursor;
-        } else if cursor >= state.scroll_offset + visible_height {
-            state.scroll_offset = cursor.saturating_sub(visible_height - 1);
-        }
     }
 
     if flat_items.is_empty() {
@@ -98,9 +96,10 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let search_re = app.active_search_re();
 
-    // Build all display lines, tracking cursor's display-line index
+    // Build all display lines, tracking cursor's display-line range
     let mut display_lines: Vec<Line> = Vec::new();
     let mut cursor_display_line: Option<usize> = None;
+    let mut cursor_display_line_end: Option<usize> = None;
     let mut edit_anchor_info: Option<(u16, usize)> = None; // (prefix_w, display_line_index)
     let mut bulk_editor_anchor: Option<(u16, usize)> = None;
 
@@ -167,6 +166,9 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
                             Some((prefix_w, cursor_display_line.unwrap_or(display_lines.len())));
                     }
                     display_lines.extend(task_lines);
+                    if is_cursor {
+                        cursor_display_line_end = Some(display_lines.len().saturating_sub(1));
+                    }
 
                     // Insert bulk inline editor below cursor row
                     if is_cursor && let Some(ref et) = app.edit_target {
@@ -187,6 +189,7 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
             FlatItem::ParkedSeparator => {
                 if is_cursor {
                     cursor_display_line = Some(display_lines.len());
+                    cursor_display_line_end = Some(display_lines.len());
                 }
                 display_lines.push(render_parked_separator(app, area.width as usize, is_cursor));
             }
@@ -211,17 +214,19 @@ pub fn render_track_view(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
-    // Adjust scroll in display-line space
+    // Adjust scroll in display-line space, keeping the cursor item's full extent
+    // visible with a scrolloff margin.
     let cdl = cursor_display_line.unwrap_or(0);
-    let mut scroll = app
-        .track_states
-        .get(&track_id)
-        .map_or(0, |s| s.scroll_offset);
-    if cdl < scroll {
-        scroll = cdl;
-    } else if cdl >= scroll + visible_height {
-        scroll = cdl.saturating_sub(visible_height - 1);
-    }
+    let cdl_end = cursor_display_line_end.unwrap_or(cdl);
+    let scroll = scroll::adjust_scroll(
+        app.track_states
+            .get(&track_id)
+            .map_or(0, |s| s.scroll_offset),
+        visible_height,
+        cdl,
+        cdl_end,
+        scroll::SCROLL_MARGIN,
+    );
     // Persist scroll back (display-line space)
     {
         let state = app.get_track_state(&track_id);

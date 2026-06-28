@@ -207,14 +207,16 @@ pub fn render_recent_view(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
-    // Auto-adjust scroll to keep cursor visible
+    // Auto-adjust scroll to keep cursor visible (with a scrolloff margin).
     let mut scroll = app.recent_scroll;
     if let Some(cl) = cursor_line {
-        if cl < scroll {
-            scroll = cl;
-        } else if cl >= scroll + visible_height {
-            scroll = cl.saturating_sub(visible_height - 1);
-        }
+        scroll = super::scroll::adjust_scroll(
+            scroll,
+            visible_height,
+            cl,
+            cl,
+            super::scroll::SCROLL_MARGIN,
+        );
     }
     app.recent_scroll = scroll;
 
