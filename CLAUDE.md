@@ -14,6 +14,20 @@ cargo clippy --all-targets -- -D warnings  # Lint (matches CI)
 cargo fmt --check        # Check formatting
 ```
 
+### Manual smoke-testing (IMPORTANT)
+
+When running the real `fr` binary by hand to verify a change, **always go through `scripts/fr-dev`**, never `target/debug/fr` or `cargo run` directly:
+
+```bash
+scripts/fr-dev init          # runs fr against an isolated config sandbox
+scripts/fr-dev info
+scripts/fr-dev projects list # inspect the sandbox registry
+```
+
+`fr` auto-registers any project it touches into the global registry at `~/.config/frame/projects.toml`. Running the binary directly against a throwaway project therefore pollutes the user's real project list. `scripts/fr-dev` redirects `XDG_CONFIG_HOME`/`HOME` to a sandbox under `target/`, so registration still happens (and stays testable) without touching the real registry. The automated test suites already isolate themselves the same way.
+
+If a stray entry does leak in, `fr projects prune` removes not-found entries, and the `scripts/check-registry.sh` guard (wired as a `.githooks/pre-commit` hook via `git config core.hooksPath .githooks`) warns about them at commit time.
+
 ## Architecture
 
 Frame is a markdown-based task tracker (TUI + CLI) where `.md` files are the source of truth. The binary is `fr`.

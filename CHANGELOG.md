@@ -13,6 +13,9 @@ All notable changes to frame will be documented in this file.
   - **Token-aware integrity:** `fr check`, `dep:` resolution, ID comparison, lookup (`--after`/`--parent`/`--track`/jump-to-task), prefix rename, and abbreviated display all distinguish namespaces — `EFF-a14`, `EFF-14`, and `EFF-b14` are three distinct tasks, so only a genuine same-namespace collision is reported as a duplicate (the post-merge safety net) and a `dep:` on a tokened ID resolves to that exact task.
   - **At-a-glance surfacing:** the TUI Tracks overview header shows this clone's token compactly (`Project: NAME · actor: a` / `· primary` / `· unclaimed`), and a new read-only `fr info` command prints version, project name, frame directory, actor token, and active-track count (human or `--json`). Both are display-only and never claim a token; in `--json`, `actor` is the literal token, `"null"` for primary, or JSON `null` when unclaimed.
 
+### Added
+- `fr projects prune` removes registry entries whose project directory no longer exists (the `(not found)` entries shown by `fr projects`). Supports `--dry-run` and `--json`. Useful for clearing stale entries left by deleted or temporary projects.
+
 ### Changed
 - TUI list scrolling now keeps a 4-line scrolloff margin between the cursor and the top/bottom edge, and reveals the cursor item's full (multi-line) summary instead of clipping it to its first line. An item taller than the viewport anchors to its first line and truncates at the bottom. Applies uniformly to the track, inbox, recent, search, and board views.
 

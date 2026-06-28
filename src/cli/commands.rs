@@ -475,12 +475,21 @@ pub enum ProjectsAction {
     Add(ProjectsAddArgs),
     /// Remove a project from the registry
     Remove(ProjectsRemoveArgs),
+    /// Remove registry entries whose project directory no longer exists
+    Prune(ProjectsPruneArgs),
 }
 
 #[derive(Args)]
 pub struct ProjectsAddArgs {
     /// Path to the project directory
     pub path: String,
+}
+
+#[derive(Args)]
+pub struct ProjectsPruneArgs {
+    /// Show what would be removed without modifying the registry
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args)]

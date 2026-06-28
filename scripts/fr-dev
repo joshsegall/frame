@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+#
+# Run the locally-built `fr` binary against an ISOLATED config sandbox so that
+# manual smoke-testing during development never pollutes the real global project
+# registry (~/.config/frame/projects.toml).
+#
+# The leak this prevents: `fr` auto-registers any project it touches into the
+# global registry (resolved via $XDG_CONFIG_HOME, falling back to $HOME/.config).
+# Running the real binary by hand against a throwaway project therefore writes a
+# stale entry into your actual project list. This wrapper redirects both
+# XDG_CONFIG_HOME and HOME at a sandbox under target/, so registration still
+# happens (and stays testable) but only inside the sandbox.
+#
+# Usage:
+#   scripts/fr-dev init
+#   scripts/fr-dev info
+#   scripts/fr-dev projects list        # inspect the sandbox registry
+#
+# The sandbox persists across invocations (so multi-step flows share state) and
+# lives under target/, so `cargo clean` or `rm -rf target/fr-dev-sandbox` wipes
+# it. Override its location with FR_DEV_HOME. Set FR_DEV_NO_BUILD=1 to skip the
+# build step (e.g. when iterating quickly on an already-built binary).
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+sandbox="${FR_DEV_HOME:-$repo_root/target/fr-dev-sandbox}"
+mkdir -p "$sandbox/.config"
+
+if [[ -z "${FR_DEV_NO_BUILD:-}" ]]; then
+  cargo build --quiet --manifest-path "$repo_root/Cargo.toml"
+fi
+
+exec env \
+  HOME="$sandbox" \
+  XDG_CONFIG_HOME="$sandbox/.config" \
+  "$repo_root/target/debug/fr" "$@"

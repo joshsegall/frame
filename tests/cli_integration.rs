@@ -166,6 +166,40 @@ fn test_list_default() {
 }
 
 #[test]
+fn test_projects_prune_removes_not_found() {
+    // All `fr` calls share one isolated registry via the XDG anchor `base`.
+    let base = tempfile::TempDir::new().unwrap();
+    let live = base.path().join("live");
+    let ghost = base.path().join("ghost");
+    create_test_project(&live);
+    create_test_project(&ghost);
+
+    run_fr_ok(base.path(), &["projects", "add", live.to_str().unwrap()]);
+    run_fr_ok(base.path(), &["projects", "add", ghost.to_str().unwrap()]);
+
+    // The ghost project's directory disappears (e.g. a temp smoke-test project).
+    fs::remove_dir_all(&ghost).unwrap();
+
+    // Dry run reports the ghost but mutates nothing.
+    let dry = run_fr_ok(base.path(), &["projects", "prune", "--dry-run", "--json"]);
+    assert!(dry.contains("ghost"));
+    assert!(!dry.contains("\"live\"") && !dry.contains("/live\""));
+    let still = run_fr_ok(base.path(), &["projects", "list", "--json"]);
+    assert!(still.contains("/ghost"), "dry-run must not remove anything");
+
+    // Real prune drops the ghost, keeps the live project.
+    let pruned = run_fr_ok(base.path(), &["projects", "prune"]);
+    assert!(pruned.contains("Removed 1 not-found project"));
+    let after = run_fr_ok(base.path(), &["projects", "list", "--json"]);
+    assert!(after.contains("/live"));
+    assert!(!after.contains("/ghost"));
+
+    // Pruning again is a no-op.
+    let again = run_fr_ok(base.path(), &["projects", "prune"]);
+    assert!(again.contains("No not-found projects"));
+}
+
+#[test]
 fn test_list_specific_track() {
     let tmp = tempfile::TempDir::new().unwrap();
     create_test_project(tmp.path());

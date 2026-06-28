@@ -505,6 +505,17 @@ fr projects remove design-system
 
 If the name is ambiguous (multiple projects share the same name), specify by path instead.
 
+### `fr projects prune`
+
+Remove every registry entry whose project directory no longer exists (the same `(not found)` entries shown by `fr projects`). Useful for clearing out stale entries left behind by deleted or temporary projects.
+
+```
+fr projects prune            # remove all not-found entries
+fr projects prune --dry-run  # list what would be removed, change nothing
+```
+
+Add `--json` for machine-readable output (an array of `{name, path}`). Only registry entries are removed — no project files are touched.
+
 ### The `-C` Flag
 
 Run any frame command against a different project directory:

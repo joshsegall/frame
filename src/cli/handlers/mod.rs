@@ -2291,6 +2291,7 @@ fn cmd_projects(args: ProjectsCmd, json: bool) -> Result<(), Box<dyn std::error:
         None | Some(ProjectsAction::List) => cmd_projects_list(json),
         Some(ProjectsAction::Add(a)) => cmd_projects_add(a),
         Some(ProjectsAction::Remove(a)) => cmd_projects_remove(a),
+        Some(ProjectsAction::Prune(a)) => cmd_projects_prune(a, json),
     }
 }
 
@@ -2392,6 +2393,65 @@ fn cmd_projects_remove(args: ProjectsRemoveArgs) -> Result<(), Box<dyn std::erro
         Ok(None) => Err(format!("not found: {}", args.name_or_path).into()),
         Err(e) => Err(e.into()),
     }
+}
+
+fn cmd_projects_prune(
+    args: ProjectsPruneArgs,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // For a dry run, report the not-found entries without mutating the file.
+    // Otherwise prune them and report what was removed.
+    let removed = if args.dry_run {
+        registry::read_registry()
+            .projects
+            .into_iter()
+            .filter(|e| !registry::entry_exists(e))
+            .collect::<Vec<_>>()
+    } else {
+        registry::prune_missing()
+    };
+
+    if json {
+        #[derive(serde::Serialize)]
+        struct PrunedJson {
+            name: String,
+            path: String,
+        }
+        let items: Vec<PrunedJson> = removed
+            .iter()
+            .map(|e| PrunedJson {
+                name: e.name.clone(),
+                path: e.path.clone(),
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&items)?);
+        return Ok(());
+    }
+
+    if removed.is_empty() {
+        println!("No not-found projects to prune.");
+        return Ok(());
+    }
+
+    let verb = if args.dry_run {
+        "Would remove"
+    } else {
+        "Removed"
+    };
+    println!(
+        "{} {} not-found project{}:",
+        verb,
+        removed.len(),
+        if removed.len() == 1 { "" } else { "s" }
+    );
+    for entry in &removed {
+        println!("  {}  {}", entry.name, entry.path);
+    }
+    if args.dry_run {
+        println!();
+        println!("Run `fr projects prune` to remove them.");
+    }
+    Ok(())
 }
 
 fn cmd_import(args: ImportArgs) -> Result<(), Box<dyn std::error::Error>> {

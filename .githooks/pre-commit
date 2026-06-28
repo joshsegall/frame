@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+#
+# Frame pre-commit hook. Enable with:
+#   git config core.hooksPath .githooks
+#
+# Currently it warns (without blocking) if manual smoke-testing has leaked stale
+# entries into your global frame registry. See scripts/check-registry.sh.
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+guard="$repo_root/scripts/check-registry.sh"
+
+if [[ -x "$guard" ]]; then
+  "$guard" || true
+fi

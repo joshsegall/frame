@@ -191,6 +191,36 @@ pub fn remove_project_from(
     }
 }
 
+/// True if a registered entry's project directory still exists on disk.
+/// Mirrors the "(not found)" criterion used by `projects list` and the picker:
+/// the path must contain a `frame/` directory.
+pub fn entry_exists(entry: &ProjectEntry) -> bool {
+    Path::new(&entry.path).join("frame").exists()
+}
+
+/// Remove registry entries whose project directory no longer exists.
+/// Returns the removed entries (empty if nothing was pruned).
+pub fn prune_missing() -> Vec<ProjectEntry> {
+    prune_missing_from(&registry_path())
+}
+
+/// Remove not-found entries from a specific registry file.
+pub fn prune_missing_from(reg_path: &Path) -> Vec<ProjectEntry> {
+    let mut reg = read_registry_from(reg_path);
+    let mut removed = Vec::new();
+    reg.projects.retain(|e| {
+        let keep = entry_exists(e);
+        if !keep {
+            removed.push(e.clone());
+        }
+        keep
+    });
+    if !removed.is_empty() {
+        let _ = write_registry_to(reg_path, &reg);
+    }
+    removed
+}
+
 /// Remove a project from the registry by exact path string.
 pub fn remove_by_path(path_str: &str) -> Option<ProjectEntry> {
     let reg_path = registry_path();
@@ -301,6 +331,35 @@ mod tests {
         let (_tmp, path) = temp_registry();
         let removed = remove_project_from(&path, "nonexistent").unwrap();
         assert!(removed.is_none());
+    }
+
+    #[test]
+    fn test_prune_missing() {
+        let (_tmp, path) = temp_registry();
+        // A live project (its `frame/` dir exists on disk).
+        let live = TempDir::new().unwrap();
+        fs::create_dir_all(live.path().join("frame")).unwrap();
+        register_project_in(&path, "live", live.path());
+        // A stale entry whose directory no longer exists.
+        register_project_in(&path, "ghost", Path::new("/tmp/does-not-exist-xyz"));
+
+        let removed = prune_missing_from(&path);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].name, "ghost");
+
+        let reg = read_registry_from(&path);
+        assert_eq!(reg.projects.len(), 1);
+        assert_eq!(reg.projects[0].name, "live");
+    }
+
+    #[test]
+    fn test_prune_missing_noop_when_all_live() {
+        let (_tmp, path) = temp_registry();
+        let live = TempDir::new().unwrap();
+        fs::create_dir_all(live.path().join("frame")).unwrap();
+        register_project_in(&path, "live", live.path());
+        assert!(prune_missing_from(&path).is_empty());
+        assert_eq!(read_registry_from(&path).projects.len(), 1);
     }
 
     #[test]
