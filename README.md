@@ -141,6 +141,10 @@ tasks whose deps are all done.
 **Inbox** is a quick-capture queue. Triage items into tracks when
 you're ready.
 
+**Actor tokens** give concurrent clones collision-free IDs: each working
+copy mints task IDs in its own token-namespace (`EFF-14` on the primary,
+`EFF-a1` on a tokened clone), so unsynced clones never produce the same ID.
+
 **`fr clean`** normalizes formatting, assigns IDs, archives completed
 tasks, and validates references. Runs automatically when external
 changes are detected.

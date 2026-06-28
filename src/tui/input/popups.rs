@@ -549,8 +549,10 @@ pub(super) fn handle_project_picker_key(app: &mut App, key: KeyEvent) {
                 // Switch project: load the new project
                 match crate::io::project_io::load_project(&root) {
                     Ok(mut project) => {
-                        // Ensure IDs and dates
-                        let modified = crate::ops::clean::ensure_ids_and_dates(&mut project);
+                        // Ensure IDs and dates (no auto-claim; an unclaimed clone
+                        // mints nothing per the strict null policy)
+                        let scope = crate::io::actors::id_scope(&project.frame_dir);
+                        let modified = crate::ops::clean::ensure_ids_and_dates(&mut project, scope);
                         if !modified.is_empty() {
                             let _lock =
                                 crate::io::lock::FileLock::acquire_default(&project.frame_dir).ok();

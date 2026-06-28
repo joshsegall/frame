@@ -160,7 +160,7 @@ fr add TRACK TITLE [--after ID] [--found-from ID]
 | `--after ID` | Insert after this task instead of at bottom |
 | `--found-from ID` | Add note "Found while working on ID" |
 
-Auto-generates a task ID using the track's configured prefix.
+Auto-generates a task ID using the track's configured prefix, minted in this working copy's [actor-token namespace](concepts.md#minting-in-a-token-namespace) (the primary clone mints bare numbers like `EFF-14`; a clone with token `a` mints `EFF-a1`). The **first mint in an unclaimed clone auto-claims** a token and announces it once on stderr.
 
 ### `fr push TRACK TITLE`
 
@@ -178,7 +178,7 @@ Add a subtask under an existing task.
 fr sub EFF-014 "Handle edge case"
 ```
 
-Auto-generates subtask ID in `PARENT.N` format (e.g., `EFF-014.3`).
+Auto-generates a subtask ID in `PARENT.N` format. The new last segment carries this clone's [actor token](concepts.md#minting-in-a-token-namespace) (e.g. clone `b` adds `EFF-014.b1`); the parent's segments are preserved. As with `fr add`, the first mint in an unclaimed clone auto-claims a token.
 
 ### `fr inbox TEXT`
 
@@ -323,6 +323,8 @@ fr triage INDEX --track TRACK [--top] [--bottom] [--after ID]
 | `--bottom` | Insert at bottom (default) |
 | `--after ID` | Insert after this task |
 
+Promoting an inbox item mints a new task ID in this clone's [actor-token namespace](concepts.md#minting-in-a-token-namespace) (auto-claiming a token on the first mint in an unclaimed clone).
+
 ## Track Management
 
 ### `fr track new ID NAME`
@@ -396,6 +398,8 @@ Actions performed:
 - Suggest actions (e.g., "all subtasks done — consider marking done")
 - Generate `ACTIVE.md` summary
 
+IDs assigned or reassigned by a real (non-`--dry-run`) clean are minted in this clone's [actor-token namespace](concepts.md#minting-in-a-token-namespace), auto-claiming a token on first use. Archival, thresholds and `ACTIVE.md` key on task state and `resolved:` dates, not ID structure, so they are unaffected by the token. A `--dry-run` previews without claiming a token or writing anything.
+
 ### `fr import FILE --track TRACK`
 
 Import tasks from a markdown file into a track.
@@ -410,7 +414,7 @@ fr import tasks.md --track api [--top] [--after ID]
 | `--top` | Insert at top of backlog |
 | `--after ID` | Insert after this task |
 
-Parses checkbox tasks from the file, auto-assigns IDs, preserves existing metadata. Supports up to 3-level nesting.
+Parses checkbox tasks from the file, auto-assigns IDs, preserves existing metadata. Supports up to 3-level nesting. Assigned IDs are minted in this clone's [actor-token namespace](concepts.md#minting-in-a-token-namespace), auto-claiming a token on the first mint in an unclaimed clone.
 
 ### `fr recovery`
 

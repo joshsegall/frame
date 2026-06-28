@@ -10,8 +10,9 @@
 //! today's default. Exactly one working copy holds it (the project creator /
 //! primary).
 //!
-//! Phase 2 manages token *lifecycle* only — claiming, setting, retiring,
-//! listing. Minting stays tokenless; nothing consumes a claimed token yet.
+//! This module manages token *lifecycle* (claiming, setting, retiring, listing)
+//! and resolves the token a mint operation should use ([`resolve_actor_token`],
+//! [`id_scope`]); the ID grammar itself lives in [`crate::model::task_id`].
 //!
 //! This is **not** the global project registry (`src/io/registry.rs`); that maps
 //! `~/.config/frame/projects.toml`. This module is per-project.
@@ -325,6 +326,89 @@ pub fn write_actors(frame_dir: &Path, registry: &ActorRegistry) -> std::io::Resu
     let text = toml::to_string_pretty(registry)
         .map_err(|e| std::io::Error::other(format!("serialize actors.toml: {}", e)))?;
     crate::io::recovery::atomic_write(&path, text.as_bytes())
+}
+
+/// The outcome of resolving this clone's minting token (see
+/// [`resolve_actor_token`]).
+#[derive(Debug, Clone)]
+pub struct ResolvedToken {
+    /// The token string to mint under (`"null"` for the primary/untokened actor,
+    /// or a letter/multi-char token).
+    pub token: String,
+    /// Set to a one-time, loud message when this call auto-claimed a fresh token
+    /// (so the caller can announce it once); `None` when `.actor` already existed.
+    pub announcement: Option<String>,
+}
+
+/// Resolve "my token" for a mint operation, the single hook every minting site
+/// calls. The caller must hold the project lock.
+///
+/// 1. If `frame/.actor` exists, return its token (including `null`).
+/// 2. If absent, **auto-claim**: draw from the frontier, write `.actor`, add the
+///    registry row, and return a one-time announcement (the "default to a new
+///    token" behavior for a fresh clone of an existing project).
+/// 3. If absent **and the frontier is empty**, fail with the routing message so
+///    the mint can abort without creating anything.
+pub fn resolve_actor_token(frame_dir: &Path) -> Result<ResolvedToken, String> {
+    if let Some(token) = read_actor_token(frame_dir) {
+        return Ok(ResolvedToken {
+            token,
+            announcement: None,
+        });
+    }
+
+    // Unclaimed working copy — auto-claim a token on first mint.
+    let mut reg = read_actors(frame_dir)?;
+    let token = match reg.auto_pick() {
+        Some(t) => t,
+        None => {
+            let hint = if reg.has_retired() {
+                "no unused actor tokens remain. Reclaim a retired token with `fr actor set <retired-token>` (see `fr actor list`), or claim a custom multi-char token with `fr actor set <aa|foo|…>`."
+            } else {
+                "no unused actor tokens remain. Claim a custom multi-char token with `fr actor set <aa|foo|…>`."
+            };
+            return Err(hint.to_string());
+        }
+    };
+
+    let name = default_name();
+    reg.claim(&token, &name, None, &today())?;
+    write_actors(frame_dir, &reg).map_err(|e| format!("cannot write actors.toml: {}", e))?;
+    write_actor_token(frame_dir, &token).map_err(|e| format!("cannot write .actor: {}", e))?;
+
+    let announcement = Some(format!(
+        "Claimed actor token '{}' for this working copy",
+        token
+    ));
+    Ok(ResolvedToken {
+        token,
+        announcement,
+    })
+}
+
+/// What namespace an ID-assigning path should mint in, honoring the strict null
+/// policy: the null namespace belongs only to a clone that deliberately took it
+/// (`fr init` or an explicit `fr actor set null`), never to a merely-unclaimed
+/// clone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdScope {
+    /// The clone holds a real namespace (`None` = null) and may mint in it.
+    Mint(Option<crate::model::task_id::Token>),
+    /// The clone is unclaimed (no `.actor`). Passive paths must **not** mint —
+    /// they leave tasks ID-less until an explicit action resolves a token.
+    Unclaimed,
+}
+
+/// This clone's ID scope **without** claiming anything, read from `.actor`: a
+/// present token (including `null`) → [`IdScope::Mint`]; an absent `.actor` →
+/// [`IdScope::Unclaimed`]. Used by passive paths (TUI load-time auto-clean,
+/// clean previews) that must neither auto-claim a token nor mint null from an
+/// unclaimed clone.
+pub fn id_scope(frame_dir: &Path) -> IdScope {
+    match read_actor_token(frame_dir) {
+        Some(t) => IdScope::Mint(crate::model::task_id::actor_namespace(&t)),
+        None => IdScope::Unclaimed,
+    }
 }
 
 /// Read this clone's token from `.actor`, or `None` if unclaimed (file absent).
@@ -642,5 +726,83 @@ state = \"active\"
     #[test]
     fn default_name_nonempty() {
         assert!(!default_name().is_empty());
+    }
+
+    // --- resolve_actor_token (Phase 3 mint hook) ---
+
+    #[test]
+    fn resolve_returns_existing_actor_without_claiming() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+        write_actor_token(&frame_dir, "null").unwrap();
+
+        let resolved = resolve_actor_token(&frame_dir).unwrap();
+        assert_eq!(resolved.token, "null");
+        assert!(resolved.announcement.is_none());
+        // No registry was written (the existing-token path doesn't touch it).
+        assert!(!actors_path(&frame_dir).exists());
+    }
+
+    #[test]
+    fn resolve_auto_claims_when_unclaimed() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+
+        let resolved = resolve_actor_token(&frame_dir).unwrap();
+        // A letter token was claimed and announced once.
+        assert_ne!(resolved.token, "null");
+        assert!(SAFE_ALPHABET.contains(&resolved.token.as_str()));
+        assert!(resolved.announcement.unwrap().contains(&resolved.token));
+        // `.actor` and the registry row were persisted.
+        assert_eq!(
+            read_actor_token(&frame_dir).as_deref(),
+            Some(resolved.token.as_str())
+        );
+        let reg = read_actors(&frame_dir).unwrap();
+        assert!(reg.actors.get(&resolved.token).unwrap().is_active());
+
+        // A second resolve is now a no-op (no re-announcement).
+        let again = resolve_actor_token(&frame_dir).unwrap();
+        assert_eq!(again.token, resolved.token);
+        assert!(again.announcement.is_none());
+    }
+
+    #[test]
+    fn resolve_errors_when_frontier_empty_and_unclaimed() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+        // Fill the whole safe alphabet (some retired) so the frontier is empty.
+        let mut tokens: Vec<(&str, &str)> = SAFE_ALPHABET.iter().map(|t| (*t, "active")).collect();
+        tokens[0].1 = "retired";
+        write_actors(&frame_dir, &reg_with(&tokens)).unwrap();
+
+        let err = resolve_actor_token(&frame_dir).unwrap_err();
+        assert!(err.contains("fr actor set"));
+        // Nothing was claimed.
+        assert!(read_actor_token(&frame_dir).is_none());
+    }
+
+    #[test]
+    fn id_scope_distinguishes_unclaimed_from_null() {
+        use crate::model::task_id::Token;
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+
+        // Unclaimed (no `.actor`) is its own state — NOT null.
+        assert_eq!(id_scope(&frame_dir), IdScope::Unclaimed);
+        // A read-only scope check claims nothing.
+        assert!(read_actor_token(&frame_dir).is_none());
+        assert!(!actors_path(&frame_dir).exists());
+
+        // The `fr init` creator deliberately holds null.
+        write_actor_token(&frame_dir, "null").unwrap();
+        assert_eq!(id_scope(&frame_dir), IdScope::Mint(None));
+        // Tokened → that token's namespace.
+        write_actor_token(&frame_dir, "a").unwrap();
+        assert_eq!(id_scope(&frame_dir), IdScope::Mint(Token::new("a")));
     }
 }

@@ -120,6 +120,10 @@ pub(super) fn add_task_action(app: &mut App, pos: AddPosition) {
         Some(p) => p.to_string(),
         None => return,
     };
+    let token = match app.resolve_mint_namespace() {
+        Ok(t) => t,
+        Err(()) => return,
+    };
 
     // Save cursor position for restore on cancel
     let saved_cursor = app.track_states.get(&track_id).map(|s| s.cursor);
@@ -164,11 +168,16 @@ pub(super) fn add_task_action(app: &mut App, pos: AddPosition) {
                 Some(t) => t,
                 None => return,
             };
-            let sub_id =
-                match task_ops::add_subtask_after(track, &parent_id, &sibling_id, String::new()) {
-                    Ok(id) => id,
-                    Err(_) => return,
-                };
+            let sub_id = match task_ops::add_subtask_after(
+                track,
+                &parent_id,
+                &sibling_id,
+                String::new(),
+                token.as_ref(),
+            ) {
+                Ok(id) => id,
+                Err(_) => return,
+            };
 
             // Enter EDIT mode for the new subtask's title
             app.edit_buffer.clear();
@@ -205,10 +214,11 @@ pub(super) fn add_task_action(app: &mut App, pos: AddPosition) {
         None => return,
     };
 
-    let task_id = match task_ops::add_task(track, String::new(), insert_pos, &prefix) {
-        Ok(id) => id,
-        Err(_) => return,
-    };
+    let task_id =
+        match task_ops::add_task(track, String::new(), insert_pos, &prefix, token.as_ref()) {
+            Ok(id) => id,
+            Err(_) => return,
+        };
 
     // Enter EDIT mode for the new task's title
     app.edit_buffer.clear();
@@ -236,12 +246,17 @@ pub(super) fn add_subtask_action(app: &mut App) {
     // Save cursor position for restore on cancel
     app.pre_edit_cursor = app.track_states.get(&track_id).map(|s| s.cursor);
 
+    let token = match app.resolve_mint_namespace() {
+        Ok(t) => t,
+        Err(()) => return,
+    };
+
     let track = match app.find_track_mut(&track_id) {
         Some(t) => t,
         None => return,
     };
 
-    let sub_id = match task_ops::add_subtask(track, &parent_id, String::new()) {
+    let sub_id = match task_ops::add_subtask(track, &parent_id, String::new(), token.as_ref()) {
         Ok(id) => id,
         Err(_) => return,
     };
@@ -327,11 +342,16 @@ pub(super) fn append_sibling_action(app: &mut App) {
     // Save cursor position for restore on cancel
     let saved_cursor = app.track_states.get(&track_id).map(|s| s.cursor);
 
+    let token = match app.resolve_mint_namespace() {
+        Ok(t) => t,
+        Err(()) => return,
+    };
+
     let track = match app.find_track_mut(&track_id) {
         Some(t) => t,
         None => return,
     };
-    let sub_id = match task_ops::add_subtask(track, &parent_id, String::new()) {
+    let sub_id = match task_ops::add_subtask(track, &parent_id, String::new(), token.as_ref()) {
         Ok(id) => id,
         Err(_) => return,
     };
@@ -388,6 +408,12 @@ pub(super) fn outdent_new_subtask(app: &mut App) {
 
     // Preserve the original pre_edit_cursor across outdent operations
     let saved_cursor = app.pre_edit_cursor;
+
+    // Resolve the minting namespace up front, before borrowing the track tree.
+    let token = match app.resolve_mint_namespace() {
+        Ok(t) => t,
+        Err(()) => return,
+    };
 
     // Remove the current placeholder subtask from the parent
     if !app.track_changed_on_disk(&track_id) {
@@ -457,11 +483,16 @@ pub(super) fn outdent_new_subtask(app: &mut App) {
             Some(t) => t,
             None => return,
         };
-        let new_id =
-            match task_ops::add_subtask_after(track, &grandparent_id, &parent_id, String::new()) {
-                Ok(id) => id,
-                Err(_) => return,
-            };
+        let new_id = match task_ops::add_subtask_after(
+            track,
+            &grandparent_id,
+            &parent_id,
+            String::new(),
+            token.as_ref(),
+        ) {
+            Ok(id) => id,
+            Err(_) => return,
+        };
 
         // Enter EDIT mode for the new subtask (still has a parent, so edit_is_fresh stays true)
         app.edit_buffer.clear();
@@ -488,6 +519,7 @@ pub(super) fn outdent_new_subtask(app: &mut App) {
             String::new(),
             InsertPosition::After(parent_id),
             &prefix,
+            token.as_ref(),
         ) {
             Ok(id) => id,
             Err(_) => return,
@@ -1076,18 +1108,23 @@ pub(super) fn confirm_edit(app: &mut App) {
                     // Replace in-memory with disk version, then add our new task on top
                     app.replace_track(&track_id, disk_track);
 
+                    let token = match app.resolve_mint_namespace() {
+                        Ok(t) => t,
+                        Err(()) => return,
+                    };
                     let track = match app.find_track_mut(&track_id) {
                         Some(t) => t,
                         None => return,
                     };
                     if let Some(ref pid) = parent_id {
-                        let _ = task_ops::add_subtask(track, pid, title.clone());
+                        let _ = task_ops::add_subtask(track, pid, title.clone(), token.as_ref());
                     } else {
                         let _ = task_ops::add_task(
                             track,
                             title.clone(),
                             InsertPosition::Bottom,
                             &prefix,
+                            token.as_ref(),
                         );
                     }
 

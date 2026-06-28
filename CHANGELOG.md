@@ -6,7 +6,8 @@ All notable changes to frame will be documented in this file.
 
 ### Added
 - Board view now shows subtasks: subtasks with Active, Todo (ready), or Done states appear in the appropriate board columns alongside top-level tasks
-- `fr actor` commands for per-working-copy actor tokens: `fr actor` (status), `fr actor claim`, `fr actor set <token|null>`, `fr actor retire <token>`, and `fr actor list`. Tokens are recorded in a committed `frame/actors.toml` registry and a gitignored `frame/.actor` file; `fr init` claims the `null` (primary) token. This is infrastructure for future concurrent ID minting — minted IDs are unchanged for now.
+- `fr actor` commands for per-working-copy actor tokens: `fr actor` (status), `fr actor claim`, `fr actor set <token|null>`, `fr actor retire <token>`, and `fr actor list`. Tokens are recorded in a committed `frame/actors.toml` registry and a gitignored `frame/.actor` file; `fr init` claims the `null` (primary) token.
+- Tokened ID minting: every newly minted task ID is created in the minting clone's actor-token namespace, so concurrent unsynced clones never collide. The primary (`null`) clone still mints bare numbers (`EFF-14`); a clone with token `a` mints `EFF-a1`, and a subtask added by clone `b` under `EFF-a14` becomes `EFF-a14.b1`. Numbers auto-increment per namespace. Applies to `fr add`, `fr push`, `fr sub`, `fr import`, inbox triage, and the IDs assigned/reassigned by `fr clean`, plus the equivalent TUI actions. The first mint in an unclaimed clone auto-claims a token (announced once). Cross-track re-keying lands next; no version is tagged until that and the hardening sweep are in.
 
 ### Fixed
 - Board view displayed task IDs with the track prefix doubled (e.g. `ST-ST-001`) when `[ids.prefixes]` was set; now shows the correct id (`ST-001`)

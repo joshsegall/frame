@@ -811,9 +811,11 @@ pub(super) fn palette_preview_clean(app: &mut App) {
     use ratatui::style::{Modifier, Style};
     use ratatui::text::{Line, Span};
 
-    // Clone project so we don't mutate the real one
+    // Clone project so we don't mutate the real one. Preview only — don't
+    // auto-claim, and an unclaimed clone previews no minting (strict null policy).
+    let scope = crate::io::actors::id_scope(&app.project.frame_dir);
     let mut project_clone = app.project.clone();
-    let result = clean::clean_project(&mut project_clone);
+    let result = clean::clean_project(&mut project_clone, scope);
 
     let bg = app.theme.background;
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -1117,6 +1119,14 @@ pub(super) fn confirm_import_tasks(app: &mut App, track_id: &str, file_path: &st
         }
     };
 
+    let token = match app.resolve_mint_namespace() {
+        Ok(t) => t,
+        Err(()) => {
+            app.status_is_error = true;
+            return;
+        }
+    };
+
     let track = match app.project.tracks.iter_mut().find(|(id, _)| id == track_id) {
         Some((_, t)) => t,
         None => return,
@@ -1125,7 +1135,13 @@ pub(super) fn confirm_import_tasks(app: &mut App, track_id: &str, file_path: &st
     // Record position before import (top of backlog)
     let position = track.backlog().len();
 
-    match import::import_tasks(&markdown, track, task_ops::InsertPosition::Bottom, &prefix) {
+    match import::import_tasks(
+        &markdown,
+        track,
+        task_ops::InsertPosition::Bottom,
+        &prefix,
+        token.as_ref(),
+    ) {
         Ok(result) => {
             let count = result.total_count;
             let top_level = result.assigned_ids.len();

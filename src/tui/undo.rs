@@ -968,7 +968,8 @@ fn apply_inverse(
             // Rename ID back
             task.id = Some(task_id_old.clone().into());
             task.mark_dirty();
-            task_ops::renumber_subtasks(&mut task, task_id_old);
+            // Undo of a cross-track move restores the prior null-namespace IDs.
+            task_ops::renumber_subtasks(&mut task, task_id_old, None);
 
             if let Some(parent_id) = source_parent_id {
                 // Was a subtask — restore depth and insert back as subtask
@@ -1411,7 +1412,8 @@ fn apply_forward(
             task.id = Some(task_id_new.clone().into());
             task.depth = 0;
             task.mark_dirty();
-            task_ops::renumber_subtasks(&mut task, task_id_new);
+            // Redo of a cross-track move re-applies the prior null-namespace IDs.
+            task_ops::renumber_subtasks(&mut task, task_id_new, None);
 
             let target_track = find_track_mut(tracks, target_track_id)?;
             let target_tasks = target_track.section_tasks_mut(SectionKind::Backlog)?;

@@ -3,9 +3,10 @@ use std::path::Path;
 
 use chrono::Local;
 
+use crate::io::actors::IdScope;
 use crate::model::project::Project;
 use crate::model::task::{Metadata, Task, TaskState};
-use crate::model::task_id::TaskId;
+use crate::model::task_id::{TaskId, Token};
 use crate::model::track::{SectionKind, Track, TrackNode};
 use crate::ops::task_ops::{find_max_id_in_track, renumber_subtasks};
 
@@ -110,7 +111,13 @@ pub enum SuggestionKind {
 /// This runs steps 1–3 of the clean pipeline (ID assignment, date assignment,
 /// duplicate ID resolution). Returns the list of track IDs that were modified,
 /// so callers can selectively save only those tracks.
-pub fn ensure_ids_and_dates(project: &mut Project) -> Vec<String> {
+///
+/// `scope` honors the strict null policy: with [`IdScope::Mint`] any IDs minted
+/// are scoped to that namespace (`None` = null); with [`IdScope::Unclaimed`] the
+/// minting steps (ID assignment and duplicate reassignment) are **skipped** —
+/// tasks are left ID-less — while date filling and section reconciliation still
+/// run, since those mint nothing.
+pub fn ensure_ids_and_dates(project: &mut Project, scope: IdScope) -> Vec<String> {
     let mut result = CleanResult::default();
     let mut modified = HashSet::new();
 
@@ -120,8 +127,8 @@ pub fn ensure_ids_and_dates(project: &mut Project) -> Vec<String> {
 
         let prefix = project.config.ids.prefixes.get(track_id.as_str()).cloned();
 
-        if let Some(ref pfx) = prefix {
-            assign_missing_ids(track, track_id, pfx, &mut result);
+        if let (Some(pfx), IdScope::Mint(ns)) = (&prefix, &scope) {
+            assign_missing_ids(track, track_id, pfx, ns.as_ref(), &mut result);
         }
         assign_missing_dates(track, track_id, &mut result);
 
@@ -130,14 +137,18 @@ pub fn ensure_ids_and_dates(project: &mut Project) -> Vec<String> {
         }
     }
 
-    // Resolve duplicate IDs (cross-track and within-track)
-    let before_dups = result.duplicates_resolved.len();
-    resolve_duplicate_ids(project, &mut result);
-    for dup in &result.duplicates_resolved[before_dups..] {
-        modified.insert(dup.track_id.clone());
+    // Resolve duplicate IDs (cross-track and within-track) — minting, so only
+    // when this clone owns a namespace.
+    if let IdScope::Mint(ns) = &scope {
+        let before_dups = result.duplicates_resolved.len();
+        resolve_duplicate_ids(project, ns.as_ref(), &mut result);
+        for dup in &result.duplicates_resolved[before_dups..] {
+            modified.insert(dup.track_id.clone());
+        }
     }
 
-    // Reconcile misplaced tasks (e.g., parked task in Backlog section)
+    // Reconcile misplaced tasks (e.g., parked task in Backlog section) — no
+    // minting, so it runs regardless of claim state.
     for (track_id, track) in &mut project.tracks {
         if reconcile_sections_for_track(track, track_id, &mut result) {
             modified.insert(track_id.clone());
@@ -234,23 +245,32 @@ pub fn reconcile_sections(project: &mut Project) -> Vec<String> {
 /// 7. Archive done tasks past threshold
 ///
 /// Returns a report of all changes made and issues found.
-pub fn clean_project(project: &mut Project) -> CleanResult {
+///
+/// `scope` honors the strict null policy: with [`IdScope::Mint`] any IDs minted
+/// (newly assigned or reassigned duplicates) are scoped to that namespace
+/// (`None` = null); with [`IdScope::Unclaimed`] those minting steps are skipped
+/// so the clone never mints null IDs it doesn't own. Archival, thresholds and
+/// `ACTIVE.md` key on task state and `resolved:` dates, not ID structure, so
+/// they run identically regardless of `scope`.
+pub fn clean_project(project: &mut Project, scope: IdScope) -> CleanResult {
     let mut result = CleanResult::default();
 
     for (track_id, track) in &mut project.tracks {
         let prefix = project.config.ids.prefixes.get(track_id.as_str()).cloned();
 
-        // 1. Assign missing IDs
-        if let Some(ref pfx) = prefix {
-            assign_missing_ids(track, track_id, pfx, &mut result);
+        // 1. Assign missing IDs (minting — only when this clone owns a namespace)
+        if let (Some(pfx), IdScope::Mint(ns)) = (&prefix, &scope) {
+            assign_missing_ids(track, track_id, pfx, ns.as_ref(), &mut result);
         }
 
         // 2. Assign missing added dates
         assign_missing_dates(track, track_id, &mut result);
     }
 
-    // 3. Duplicate ID resolution
-    resolve_duplicate_ids(project, &mut result);
+    // 3. Duplicate ID resolution (minting — only when this clone owns a namespace)
+    if let IdScope::Mint(ns) = &scope {
+        resolve_duplicate_ids(project, ns.as_ref(), &mut result);
+    }
 
     // 3b. Reconcile misplaced tasks (e.g., parked task in Backlog section)
     for (track_id, track) in &mut project.tracks {
@@ -341,14 +361,20 @@ pub fn generate_active_md(project: &Project) -> String {
 // 1. Assign missing IDs
 // ---------------------------------------------------------------------------
 
-fn assign_missing_ids(track: &mut Track, track_id: &str, prefix: &str, result: &mut CleanResult) {
+fn assign_missing_ids(
+    track: &mut Track,
+    track_id: &str,
+    prefix: &str,
+    token: Option<&Token>,
+    result: &mut CleanResult,
+) {
     let prefix_dash = format!("{}-", prefix);
     let mut max = 0usize;
-    find_max_id_in_track(track, &prefix_dash, &mut max);
+    find_max_id_in_track(track, &prefix_dash, token, &mut max);
 
     for node in &mut track.nodes {
         if let TrackNode::Section { tasks, .. } = node {
-            assign_ids_in_tasks(tasks, track_id, prefix, &prefix_dash, &mut max, result);
+            assign_ids_in_tasks(tasks, track_id, prefix, token, &mut max, result);
         }
     }
 }
@@ -357,14 +383,14 @@ fn assign_ids_in_tasks(
     tasks: &mut [Task],
     track_id: &str,
     prefix: &str,
-    _prefix_dash: &str,
+    token: Option<&Token>,
     max: &mut usize,
     result: &mut CleanResult,
 ) {
     for task in tasks.iter_mut() {
         if task.id.is_none() {
             *max += 1;
-            let new_id = TaskId::with_number(prefix, *max as u32);
+            let new_id = TaskId::with_number(prefix, *max as u32, token);
             task.id = Some(new_id.clone());
             task.mark_dirty();
             result.ids_assigned.push(IdAssignment {
@@ -375,24 +401,30 @@ fn assign_ids_in_tasks(
         }
         // Recurse into subtasks — subtasks with no ID also get assigned
         // (subtask IDs are parent_id.N)
-        assign_subtask_ids(task, track_id, result);
+        assign_subtask_ids(task, track_id, token, result);
     }
 }
 
-fn assign_subtask_ids(parent: &mut Task, track_id: &str, result: &mut CleanResult) {
+fn assign_subtask_ids(
+    parent: &mut Task,
+    track_id: &str,
+    token: Option<&Token>,
+    result: &mut CleanResult,
+) {
     let parent_id = match &parent.id {
         Some(id) => id.clone(),
         None => return, // Parent must have an ID first
     };
 
-    // Find the max existing child number to avoid collisions after deletions.
-    // E.g., if subtasks are [.1, .2, .4] (after deleting .3), next should be .5 not .4.
+    // Find the max existing child number in this namespace to avoid collisions
+    // after deletions. E.g., if subtasks are [.1, .2, .4] (after deleting .3),
+    // next should be .5 not .4.
     let mut max_num: u32 = 0;
     for sub in parent.subtasks.iter() {
         if let Some(n) = sub
             .id
             .as_ref()
-            .and_then(|id| id.child_number_of(&parent_id))
+            .and_then(|id| id.child_number_of(&parent_id, token))
         {
             max_num = max_num.max(n);
         }
@@ -401,7 +433,7 @@ fn assign_subtask_ids(parent: &mut Task, track_id: &str, result: &mut CleanResul
     for sub in parent.subtasks.iter_mut() {
         if sub.id.is_none() {
             max_num += 1;
-            let sub_id = TaskId::child_of(&parent_id, max_num);
+            let sub_id = TaskId::child_of(&parent_id, max_num, token);
             sub.id = Some(sub_id.clone());
             sub.mark_dirty();
             result.ids_assigned.push(IdAssignment {
@@ -411,7 +443,7 @@ fn assign_subtask_ids(parent: &mut Task, track_id: &str, result: &mut CleanResul
             });
         }
         // Recurse deeper
-        assign_subtask_ids(sub, track_id, result);
+        assign_subtask_ids(sub, track_id, token, result);
     }
 }
 
@@ -462,7 +494,7 @@ fn assign_dates_in_tasks(
 /// position within the track keeps its ID. Subsequent duplicates are reassigned
 /// new IDs via the standard `max + 1` rule. Dependencies pointing to the
 /// reassigned ID are updated across all tracks.
-fn resolve_duplicate_ids(project: &mut Project, result: &mut CleanResult) {
+fn resolve_duplicate_ids(project: &mut Project, token: Option<&Token>, result: &mut CleanResult) {
     // Build ordered track list from config (defines precedence)
     let track_order: Vec<String> = project
         .config
@@ -549,11 +581,11 @@ fn resolve_duplicate_ids(project: &mut Project, result: &mut CleanResult) {
         let Some(track) = track else { continue };
 
         let mut max = 0usize;
-        find_max_id_in_track(track, &prefix_dash, &mut max);
-        // Also account for any already-assigned new IDs in this batch
+        find_max_id_in_track(track, &prefix_dash, token, &mut max);
+        // Also account for any already-assigned new IDs in this batch (same namespace)
         for new_id in reassignments.values().flatten() {
             if let Some(n) = TaskId::parse(new_id)
-                .top_level_number(&pfx)
+                .top_level_number(&pfx, token)
                 .map(|n| n as usize)
                 .filter(|&n| n > max)
             {
@@ -561,7 +593,7 @@ fn resolve_duplicate_ids(project: &mut Project, result: &mut CleanResult) {
             }
         }
 
-        let new_id = TaskId::with_number(&pfx, (max + 1) as u32).to_string();
+        let new_id = TaskId::with_number(&pfx, (max + 1) as u32, token).to_string();
         reassignments
             .entry(old_id.clone())
             .or_default()
@@ -584,6 +616,7 @@ fn resolve_duplicate_ids(project: &mut Project, result: &mut CleanResult) {
                     apply_duplicate_reassignments(
                         tasks,
                         config_track_id,
+                        token,
                         &reassignments,
                         &mut reassignment_cursors,
                         &mut seen_in_apply,
@@ -616,9 +649,11 @@ fn find_duplicates_in_tasks(
 
 /// Walk tasks in order, applying reassignments to duplicate instances.
 /// The first time we see an ID, it's the keeper (skip). Second+ times, reassign.
+#[allow(clippy::too_many_arguments)]
 fn apply_duplicate_reassignments(
     tasks: &mut [Task],
     track_id: &str,
+    token: Option<&Token>,
     reassignments: &HashMap<String, Vec<String>>,
     cursors: &mut HashMap<String, usize>,
     seen: &mut HashSet<String>,
@@ -636,7 +671,7 @@ fn apply_duplicate_reassignments(
             if let Some(new_id) = reassignments.get(&old_id).and_then(|ids| ids.get(*cursor)) {
                 task.id = Some(TaskId::parse(new_id));
                 task.mark_dirty();
-                renumber_subtasks(task, new_id);
+                renumber_subtasks(task, new_id, token);
                 result.duplicates_resolved.push(DuplicateResolution {
                     track_id: track_id.to_string(),
                     original_id: old_id.clone(),
@@ -649,6 +684,7 @@ fn apply_duplicate_reassignments(
         apply_duplicate_reassignments(
             &mut task.subtasks,
             track_id,
+            token,
             reassignments,
             cursors,
             seen,
@@ -1015,7 +1051,7 @@ mod tests {
             vec![("main", "M")],
         );
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
         assert_eq!(result.ids_assigned.len(), 2);
         assert_eq!(result.ids_assigned[0].assigned_id, "M-002");
         assert_eq!(result.ids_assigned[0].title, "Missing ID task");
@@ -1043,7 +1079,7 @@ mod tests {
             vec![], // no prefixes
         );
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
         // Should not assign IDs if no prefix configured
         assert!(result.ids_assigned.is_empty());
     }
@@ -1065,7 +1101,7 @@ mod tests {
             vec![("main", "M")],
         );
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
         // Only the first subtask should get an ID assigned
         let sub_assignments: Vec<_> = result
             .ids_assigned
@@ -1096,7 +1132,7 @@ mod tests {
             vec![("main", "M")],
         );
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
         assert_eq!(result.dates_assigned.len(), 1);
         assert_eq!(result.dates_assigned[0].task_id, "M-002");
 
@@ -1126,7 +1162,7 @@ mod tests {
             vec![("main", "M")],
         );
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
         assert!(result.dates_assigned.is_empty());
     }
 
@@ -1151,7 +1187,7 @@ mod tests {
             vec![("main", "M")],
         );
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
         assert_eq!(result.dangling_deps.len(), 1);
         assert_eq!(result.dangling_deps[0].task_id, "M-003");
         assert_eq!(result.dangling_deps[0].dep_id, "NONEXIST-999");
@@ -1207,7 +1243,7 @@ mod tests {
             inbox: None,
         };
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
         assert!(result.dangling_deps.is_empty());
     }
 
@@ -1244,7 +1280,7 @@ mod tests {
             inbox: None,
         };
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
         assert_eq!(result.broken_refs.len(), 2);
         assert_eq!(result.broken_refs[0].path, "missing.md");
         assert_eq!(result.broken_refs[0].kind, RefKind::Ref);
@@ -1281,7 +1317,7 @@ mod tests {
             inbox: None,
         };
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
         assert!(result.broken_refs.is_empty());
     }
 
@@ -1309,7 +1345,7 @@ mod tests {
             vec![("main", "M")],
         );
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
         assert_eq!(result.suggestions.len(), 1);
         assert_eq!(result.suggestions[0].task_id, "M-001");
         assert_eq!(result.suggestions[0].kind, SuggestionKind::AllSubtasksDone);
@@ -1333,7 +1369,7 @@ mod tests {
             vec![("main", "M")],
         );
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
         assert!(result.suggestions.is_empty());
     }
 
@@ -1352,7 +1388,7 @@ mod tests {
             vec![("main", "M")],
         );
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
         assert!(result.suggestions.is_empty());
     }
 
@@ -1401,7 +1437,7 @@ mod tests {
             inbox: None,
         };
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
         assert_eq!(result.tasks_archived.len(), 100);
 
         // Done section should now be empty
@@ -1429,7 +1465,7 @@ mod tests {
             vec![("main", "M")],
         );
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
         assert!(result.tasks_archived.is_empty());
     }
 
@@ -1490,7 +1526,7 @@ mod tests {
             inbox: None,
         };
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
         // 5 tasks <= threshold of 5, so nothing should be archived
         assert!(result.tasks_archived.is_empty());
         assert_eq!(project.tracks[0].1.done().len(), 5);
@@ -1536,7 +1572,7 @@ mod tests {
             inbox: None,
         };
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
         assert_eq!(result.tasks_archived.len(), 3);
         assert!(project.tracks[0].1.done().is_empty());
     }
@@ -1586,7 +1622,7 @@ mod tests {
             inbox: None,
         };
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
 
         // 5 tasks - 2 retained = 3 archived
         assert_eq!(result.tasks_archived.len(), 3);
@@ -1650,7 +1686,7 @@ mod tests {
             inbox: None,
         };
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
 
         // Nothing should be archived since retain >= count
         assert!(result.tasks_archived.is_empty());
@@ -1775,7 +1811,7 @@ mod tests {
             inbox: None,
         };
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
 
         // Track A's DUP-001 should be kept, track B's should be reassigned
         assert_eq!(result.duplicates_resolved.len(), 1);
@@ -1810,7 +1846,7 @@ mod tests {
             vec![("main", "M")],
         );
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
 
         assert_eq!(result.duplicates_resolved.len(), 1);
         assert_eq!(result.duplicates_resolved[0].original_id, "M-001");
@@ -1877,7 +1913,7 @@ mod tests {
             inbox: None,
         };
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
 
         // Track B is first in config, so it keeps X-001. Track A's gets reassigned.
         assert_eq!(result.duplicates_resolved.len(), 1);
@@ -1927,7 +1963,7 @@ mod tests {
             vec![("main", "M")],
         );
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
 
         assert_eq!(result.duplicates_resolved.len(), 1);
         let backlog = project.tracks[0].1.backlog();
@@ -1958,7 +1994,7 @@ mod tests {
             vec![("main", "M")],
         );
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
         assert!(result.duplicates_resolved.is_empty());
     }
 
@@ -1981,7 +2017,7 @@ mod tests {
             vec![("main", "M")],
         );
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
         // Deps should be valid (M-002 exists)
         assert!(result.dangling_deps.is_empty());
     }
@@ -2018,7 +2054,7 @@ mod tests {
             inbox: None,
         };
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
 
         // Should have assigned 1 ID
         assert_eq!(result.ids_assigned.len(), 1);
@@ -2053,7 +2089,7 @@ mod tests {
             vec![("main", "M")],
         );
 
-        let modified = ensure_ids_and_dates(&mut project);
+        let modified = ensure_ids_and_dates(&mut project, IdScope::Mint(None));
         assert_eq!(modified, vec!["main".to_string()]);
 
         let backlog = project.tracks[0].1.backlog();
@@ -2086,7 +2122,7 @@ mod tests {
             vec![("main", "M")],
         );
 
-        let modified = ensure_ids_and_dates(&mut project);
+        let modified = ensure_ids_and_dates(&mut project, IdScope::Mint(None));
         assert!(modified.is_empty());
     }
 
@@ -2105,7 +2141,7 @@ mod tests {
             vec![], // no prefixes
         );
 
-        let modified = ensure_ids_and_dates(&mut project);
+        let modified = ensure_ids_and_dates(&mut project, IdScope::Mint(None));
         // Should still assign dates even without a prefix
         assert_eq!(modified, vec!["main".to_string()]);
         // But should NOT assign IDs
@@ -2138,7 +2174,7 @@ mod tests {
             vec![("main", "M")],
         );
 
-        let modified = ensure_ids_and_dates(&mut project);
+        let modified = ensure_ids_and_dates(&mut project, IdScope::Mint(None));
         assert!(modified.contains(&"main".to_string()));
 
         let backlog = project.tracks[0].1.backlog();
@@ -2166,7 +2202,7 @@ mod tests {
             vec![("main", "M")],
         );
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
         assert_eq!(result.sections_reconciled.len(), 1);
         assert_eq!(result.sections_reconciled[0].task_id, "M-002");
         assert_eq!(result.sections_reconciled[0].from, SectionKind::Backlog);
@@ -2196,7 +2232,7 @@ mod tests {
             vec![("main", "M")],
         );
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
         assert_eq!(result.sections_reconciled.len(), 1);
         assert_eq!(result.sections_reconciled[0].to, SectionKind::Done);
 
@@ -2222,7 +2258,7 @@ mod tests {
             vec![("main", "M")],
         );
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
         assert_eq!(result.sections_reconciled.len(), 1);
         assert_eq!(result.sections_reconciled[0].from, SectionKind::Parked);
         assert_eq!(result.sections_reconciled[0].to, SectionKind::Backlog);
@@ -2256,7 +2292,7 @@ mod tests {
             vec![("main", "M")],
         );
 
-        let result = clean_project(&mut project);
+        let result = clean_project(&mut project, IdScope::Mint(None));
         assert!(result.sections_reconciled.is_empty());
     }
 
@@ -2276,7 +2312,7 @@ mod tests {
             vec![("main", "M")],
         );
 
-        let modified = ensure_ids_and_dates(&mut project);
+        let modified = ensure_ids_and_dates(&mut project, IdScope::Mint(None));
         assert!(modified.contains(&"main".to_string()));
         assert_eq!(project.tracks[0].1.parked().len(), 1);
         assert!(project.tracks[0].1.backlog().is_empty());
@@ -2311,7 +2347,7 @@ mod tests {
             inbox: None,
         };
 
-        let modified = ensure_ids_and_dates(&mut project);
+        let modified = ensure_ids_and_dates(&mut project, IdScope::Mint(None));
         assert!(modified.contains(&"main".to_string()));
 
         // The new subtask should get .5 (not .4 which already exists)
@@ -2319,5 +2355,179 @@ mod tests {
             crate::ops::task_ops::find_task_in_track(&project.tracks[0].1, "T-001").unwrap();
         let new_sub = &parent.subtasks[3];
         assert_eq!(new_sub.id.as_deref(), Some("T-001.5"));
+    }
+
+    // --- Namespace-scoped minting (Phase 3) ---
+
+    #[test]
+    fn test_clean_assigns_missing_ids_in_token_namespace() {
+        let token = Token::new("a").unwrap();
+        let mut project = make_project(
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Has null ID
+- [ ] Missing ID task
+  - [ ] Missing subtask ID
+
+## Done
+",
+            vec![("main", "M")],
+        );
+
+        // Cleaning in actor `a`'s clone mints into the empty `a` namespace.
+        let result = clean_project(&mut project, IdScope::Mint(Some(token.clone())));
+        let assigned: Vec<&str> = result
+            .ids_assigned
+            .iter()
+            .map(|a| a.assigned_id.as_str())
+            .collect();
+        assert_eq!(assigned, vec!["M-a1", "M-a1.a1"]);
+        // The pre-existing null ID is untouched.
+        assert_eq!(
+            project.tracks[0].1.backlog()[0].id.as_deref(),
+            Some("M-001")
+        );
+    }
+
+    #[test]
+    fn test_clean_resolves_duplicates_in_token_namespace() {
+        let token = Token::new("a").unwrap();
+        let mut project = make_project(
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` First occurrence
+  - added: 2025-05-01
+- [ ] `M-001` Duplicate
+  - added: 2025-05-02
+
+## Done
+",
+            vec![("main", "M")],
+        );
+
+        clean_project(&mut project, IdScope::Mint(Some(token.clone())));
+        let backlog = project.tracks[0].1.backlog();
+        // Keeper retains its null ID; the duplicate is reassigned in `a`'s namespace.
+        assert_eq!(backlog[0].id.as_deref(), Some("M-001"));
+        assert_eq!(backlog[1].id.as_deref(), Some("M-a1"));
+    }
+
+    #[test]
+    fn test_clean_archival_unchanged_by_token() {
+        // Archival keys on state + resolved date, not ID structure, so a tokened
+        // clean archives exactly what a null clean does.
+        let src = "\
+# Main
+
+## Backlog
+
+- [ ] `M-100` Active task
+
+## Done
+
+- [x] `M-001` Task one
+  - added: 2025-01-01
+  - resolved: 2025-05-01
+- [x] `M-002` Task two
+  - added: 2025-01-02
+  - resolved: 2025-05-02
+- [x] `M-003` Task three
+  - added: 2025-01-03
+  - resolved: 2025-05-03
+";
+        let archived_count = |scope: IdScope| {
+            let tmp = TempDir::new().unwrap();
+            let root = tmp.path();
+            std::fs::create_dir_all(root.join("frame/tracks")).unwrap();
+            let mut config = make_config(vec![("main", "M")]);
+            config.clean.done_threshold = 2;
+            config.clean.done_retain = 0;
+            let mut project = Project {
+                root: root.to_path_buf(),
+                frame_dir: root.join("frame"),
+                config,
+                tracks: vec![("main".to_string(), parse_track(src))],
+                inbox: None,
+            };
+            clean_project(&mut project, scope).tasks_archived.len()
+        };
+        // Null creator, a tokened clone, and an unclaimed clone all archive the
+        // same set — archival is independent of ID minting.
+        assert_eq!(archived_count(IdScope::Mint(None)), 3);
+        assert_eq!(archived_count(IdScope::Mint(Token::new("a"))), 3);
+        assert_eq!(archived_count(IdScope::Unclaimed), 3);
+    }
+
+    // --- Strict null policy: passive paths on an unclaimed clone (Phase 3.x) ---
+
+    fn project_with_idless_task() -> Project {
+        make_project(
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Has an ID
+- [ ] Missing an ID
+
+## Done
+",
+            vec![("main", "M")],
+        )
+    }
+
+    #[test]
+    fn test_unclaimed_passive_skips_id_assignment() {
+        // An unclaimed clone must NOT mint null on a passive path: the ID-less
+        // task stays ID-less.
+        let mut project = project_with_idless_task();
+        let modified = ensure_ids_and_dates(&mut project, IdScope::Unclaimed);
+        let backlog = project.tracks[0].1.backlog();
+        assert!(
+            backlog[1].id.is_none(),
+            "unclaimed clone must not mint an ID"
+        );
+        // The date-only normalization still ran (it mints nothing).
+        assert!(
+            backlog[1]
+                .metadata
+                .iter()
+                .any(|m| matches!(m, Metadata::Added(_)))
+        );
+        assert!(modified.contains(&"main".to_string()));
+    }
+
+    #[test]
+    fn test_null_creator_passive_mints_null() {
+        // The `fr init` creator deliberately owns null, so it still mints null.
+        let mut project = project_with_idless_task();
+        ensure_ids_and_dates(&mut project, IdScope::Mint(None));
+        assert_eq!(
+            project.tracks[0].1.backlog()[1].id.as_deref(),
+            Some("M-002")
+        );
+    }
+
+    #[test]
+    fn test_tokened_passive_mints_in_namespace() {
+        let mut project = project_with_idless_task();
+        ensure_ids_and_dates(&mut project, IdScope::Mint(Token::new("a")));
+        assert_eq!(project.tracks[0].1.backlog()[1].id.as_deref(), Some("M-a1"));
+    }
+
+    #[test]
+    fn test_unclaimed_clean_skips_minting_but_archives() {
+        // `clean_project` on an unclaimed clone skips ID assignment and duplicate
+        // resolution, but still archives done tasks.
+        let mut project = project_with_idless_task();
+        let result = clean_project(&mut project, IdScope::Unclaimed);
+        assert!(result.ids_assigned.is_empty());
+        assert!(project.tracks[0].1.backlog()[1].id.is_none());
     }
 }

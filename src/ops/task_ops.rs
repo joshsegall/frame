@@ -1,7 +1,7 @@
 use chrono::Local;
 
 use crate::model::task::{Metadata, Task, TaskState};
-use crate::model::task_id::TaskId;
+use crate::model::task_id::{TaskId, Token};
 use crate::model::track::{SectionKind, Track, TrackNode};
 use crate::parse::parse_title_and_tags;
 
@@ -122,9 +122,10 @@ pub fn add_task(
     title: String,
     position: InsertPosition,
     prefix: &str,
+    token: Option<&Token>,
 ) -> Result<String, TaskError> {
-    let next_num = next_id_number(track, prefix);
-    let id = TaskId::with_number(prefix, next_num as u32);
+    let next_num = next_id_number(track, prefix, token);
+    let id = TaskId::with_number(prefix, next_num as u32, token);
 
     let (parsed_title, tags) = parse_title_and_tags(&title);
     let mut task = Task::new(TaskState::Todo, Some(id.clone()), parsed_title);
@@ -141,7 +142,12 @@ pub fn add_task(
 
 /// Add a subtask to an existing task identified by `parent_id`.
 /// Returns the assigned subtask ID.
-pub fn add_subtask(track: &mut Track, parent_id: &str, title: String) -> Result<String, TaskError> {
+pub fn add_subtask(
+    track: &mut Track,
+    parent_id: &str,
+    title: String,
+    token: Option<&Token>,
+) -> Result<String, TaskError> {
     let parent = find_task_mut_in_track(track, parent_id)
         .ok_or_else(|| TaskError::NotFound(parent_id.to_string()))?;
 
@@ -149,7 +155,7 @@ pub fn add_subtask(track: &mut Track, parent_id: &str, title: String) -> Result<
         return Err(TaskError::MaxDepthReached);
     }
 
-    let sub_id = next_child_id(parent, parent_id);
+    let sub_id = next_child_id(parent, parent_id, token);
     let (parsed_title, tags) = parse_title_and_tags(&title);
     let mut subtask = Task::new(TaskState::Todo, Some(sub_id.clone()), parsed_title);
     subtask.tags = tags;
@@ -168,6 +174,7 @@ pub fn add_subtask_after(
     parent_id: &str,
     after_sibling_id: &str,
     title: String,
+    token: Option<&Token>,
 ) -> Result<String, TaskError> {
     let parent = find_task_mut_in_track(track, parent_id)
         .ok_or_else(|| TaskError::NotFound(parent_id.to_string()))?;
@@ -176,7 +183,7 @@ pub fn add_subtask_after(
         return Err(TaskError::MaxDepthReached);
     }
 
-    let sub_id = next_child_id(parent, parent_id);
+    let sub_id = next_child_id(parent, parent_id, token);
     let (parsed_title, tags) = parse_title_and_tags(&title);
     let mut subtask = Task::new(TaskState::Todo, Some(sub_id.clone()), parsed_title);
     subtask.tags = tags;
@@ -402,15 +409,16 @@ pub fn move_task_to_track(
 
     let mut task = source_tasks.remove(idx);
 
-    // Assign new ID
-    let next_num = next_id_number(target_track, target_prefix);
-    let new_id = TaskId::with_number(target_prefix, next_num as u32);
+    // Assign new ID. Cross-track re-keying mints in the null namespace until
+    // Phase 4 re-keys into the mover's token; see the Phase 3 plan.
+    let next_num = next_id_number(target_track, target_prefix, None);
+    let new_id = TaskId::with_number(target_prefix, next_num as u32, None);
     let old_id = task.id.clone();
     task.id = Some(new_id.clone());
     task.mark_dirty();
 
     // Renumber subtask IDs
-    renumber_subtasks(&mut task, &new_id);
+    renumber_subtasks(&mut task, &new_id, None);
 
     // Insert into target
     let target_tasks = target_track
@@ -480,24 +488,33 @@ fn remove_metadata(task: &mut Task, key: &str) {
     task.metadata.retain(|m| m.key() != key);
 }
 
-/// Find the next available ID number for a given prefix in a track.
-pub fn next_id_number(track: &Track, prefix: &str) -> usize {
+/// Find the next available ID number for a given prefix in a track, scoped to
+/// the `token` namespace (`None` = null). Two clones minting in different
+/// namespaces never collide because each scans only its own.
+pub fn next_id_number(track: &Track, prefix: &str, token: Option<&Token>) -> usize {
     let mut max = 0usize;
     let prefix_dash = format!("{}-", prefix);
-    find_max_id_in_track(track, &prefix_dash, &mut max);
+    find_max_id_in_track(track, &prefix_dash, token, &mut max);
     max + 1
 }
 
-/// Scan a track for the highest ID number with the given prefix (e.g. "T-").
-/// Updates `max` if a higher number is found.
+/// Scan a track for the highest ID number with the given prefix (e.g. "T-") in
+/// the `token` namespace (`None` = null). Updates `max` if a higher number is
+/// found.
 ///
-/// Only structured, null-namespace IDs under the prefix are considered; `Raw`
-/// IDs and token (non-null) segments are invisible and never perturb `max`.
-pub fn find_max_id_in_track(track: &Track, prefix_dash: &str, max: &mut usize) {
+/// Only structured IDs under the prefix whose first segment is in `token`'s
+/// namespace are considered; `Raw` IDs and segments in other namespaces are
+/// invisible and never perturb `max`.
+pub fn find_max_id_in_track(
+    track: &Track,
+    prefix_dash: &str,
+    token: Option<&Token>,
+    max: &mut usize,
+) {
     let prefix = prefix_dash.strip_suffix('-').unwrap_or(prefix_dash);
     for_each_task_in_track(track, &mut |task: &Task| {
         if let Some(id) = &task.id
-            && let Some(n) = id.top_level_number(prefix)
+            && let Some(n) = id.top_level_number(prefix, token)
             && (n as usize) > *max
         {
             *max = n as usize;
@@ -596,12 +613,13 @@ fn for_each_task(tasks: &[Task], f: &mut dyn FnMut(&Task)) {
     }
 }
 
-/// Recursively renumber subtask IDs based on the new parent ID.
-pub fn renumber_subtasks(task: &mut Task, parent_id: &str) {
+/// Recursively renumber subtask IDs based on the new parent ID. New child
+/// segments carry `token` (`None` = null namespace).
+pub fn renumber_subtasks(task: &mut Task, parent_id: &str, token: Option<&Token>) {
     let parent = TaskId::parse(parent_id);
     for (i, sub) in task.subtasks.iter_mut().enumerate() {
-        let new_sub_id = TaskId::child_of(&parent, (i + 1) as u32);
-        renumber_subtasks(sub, &new_sub_id);
+        let new_sub_id = TaskId::child_of(&parent, (i + 1) as u32, token);
+        renumber_subtasks(sub, &new_sub_id, token);
         sub.id = Some(new_sub_id);
         sub.mark_dirty();
     }
@@ -808,7 +826,8 @@ pub fn rekey_subtree(task: &mut Task, new_id: &str) -> Vec<(String, String)> {
     }
     let parsed = TaskId::parse(new_id);
     for (i, sub) in task.subtasks.iter_mut().enumerate() {
-        let sub_new_id = TaskId::child_of(&parsed, (i + 1) as u32);
+        // Phase 4 owns re-keying into the mover's token; mint null for now.
+        let sub_new_id = TaskId::child_of(&parsed, (i + 1) as u32, None);
         let sub_mappings = rekey_subtree(sub, &sub_new_id);
         mappings.extend(sub_mappings);
     }
@@ -829,7 +848,7 @@ pub fn is_descendant_of(track: &Track, ancestor_id: &str, candidate_id: &str) ->
 /// Scans existing subtask IDs to find the max suffix number, avoiding collisions
 /// when subtasks have been deleted (e.g., deleting .3 from [.1, .2, .3, .4]
 /// should produce .5, not .4).
-pub fn next_child_number(parent: &Task) -> usize {
+pub fn next_child_number(parent: &Task, token: Option<&Token>) -> usize {
     let parent_id = match &parent.id {
         Some(id) => id,
         None => return parent.subtasks.len() + 1,
@@ -840,20 +859,21 @@ pub fn next_child_number(parent: &Task) -> usize {
         .filter_map(|sub| {
             sub.id
                 .as_ref()
-                .and_then(|cid| cid.child_number_of(parent_id))
+                .and_then(|cid| cid.child_number_of(parent_id, token))
         })
         .max()
         .unwrap_or(0);
     (max_num as usize) + 1
 }
 
-/// Compute the next child ID for a parent (gap-safe). `parent_id` is the parent
-/// task's ID as a string, used as a fallback when the parent has no parsed ID.
-fn next_child_id(parent: &Task, parent_id: &str) -> TaskId {
-    let num = next_child_number(parent) as u32;
+/// Compute the next child ID for a parent (gap-safe), in the `token` namespace
+/// (`None` = null). `parent_id` is the parent task's ID as a string, used as a
+/// fallback when the parent has no parsed ID.
+fn next_child_id(parent: &Task, parent_id: &str, token: Option<&Token>) -> TaskId {
+    let num = next_child_number(parent, token) as u32;
     match &parent.id {
-        Some(pid) => TaskId::child_of(pid, num),
-        None => TaskId::child_of(&TaskId::parse(parent_id), num),
+        Some(pid) => TaskId::child_of(pid, num, token),
+        None => TaskId::child_of(&TaskId::parse(parent_id), num, token),
     }
 }
 
@@ -912,15 +932,16 @@ pub fn reparent_task(
     // 5. Compute new ID
     let new_id = match &new_parent_id {
         None => {
-            // Promote to top-level: get next available top-level ID
-            let next_num = next_id_number(track, prefix);
-            TaskId::with_number(prefix, next_num as u32)
+            // Promote to top-level: get next available top-level ID. Reparent
+            // re-keying mints null until Phase 4 re-keys into the mover's token.
+            let next_num = next_id_number(track, prefix, None);
+            TaskId::with_number(prefix, next_num as u32, None)
         }
         Some(pid) => {
-            // Reparent under parent: find next available child slot
+            // Reparent under parent: find next available child slot.
             let parent = find_task_in_track(track, pid)
                 .ok_or_else(|| TaskError::NotFound(pid.to_string()))?;
-            next_child_id(parent, pid)
+            next_child_id(parent, pid, None)
         }
     };
 
@@ -1113,7 +1134,14 @@ mod tests {
     #[test]
     fn test_add_task_bottom() {
         let mut track = sample_track();
-        let id = add_task(&mut track, "New task".into(), InsertPosition::Bottom, "T").unwrap();
+        let id = add_task(
+            &mut track,
+            "New task".into(),
+            InsertPosition::Bottom,
+            "T",
+            None,
+        )
+        .unwrap();
         assert_eq!(id, "T-011");
         let tasks = track.backlog();
         assert_eq!(tasks.last().unwrap().title, "New task");
@@ -1130,7 +1158,14 @@ mod tests {
     #[test]
     fn test_add_task_top() {
         let mut track = sample_track();
-        let id = add_task(&mut track, "Top task".into(), InsertPosition::Top, "T").unwrap();
+        let id = add_task(
+            &mut track,
+            "Top task".into(),
+            InsertPosition::Top,
+            "T",
+            None,
+        )
+        .unwrap();
         assert_eq!(id, "T-011");
         assert_eq!(track.backlog()[0].title, "Top task");
     }
@@ -1143,6 +1178,7 @@ mod tests {
             "After first".into(),
             InsertPosition::After("T-001".into()),
             "T",
+            None,
         )
         .unwrap();
         assert_eq!(id, "T-011");
@@ -1152,7 +1188,7 @@ mod tests {
     #[test]
     fn test_add_subtask() {
         let mut track = sample_track();
-        let id = add_subtask(&mut track, "T-001", "New sub".into()).unwrap();
+        let id = add_subtask(&mut track, "T-001", "New sub".into(), None).unwrap();
         assert_eq!(id, "T-001.1");
         let parent = find_task_in_track(&track, "T-001").unwrap();
         assert_eq!(parent.subtasks.len(), 1);
@@ -1163,11 +1199,11 @@ mod tests {
     fn test_add_subtask_max_depth() {
         let mut track = sample_track();
         // T-003.1 is depth 1, add sub to make depth 2
-        let id = add_subtask(&mut track, "T-003.1", "Deep sub".into()).unwrap();
+        let id = add_subtask(&mut track, "T-003.1", "Deep sub".into(), None).unwrap();
         assert!(id.starts_with("T-003.1."));
 
         // Now try to add another level (depth 3) — should fail
-        let result = add_subtask(&mut track, &id, "Too deep".into());
+        let result = add_subtask(&mut track, &id, "Too deep".into(), None);
         assert!(result.is_err());
     }
 
@@ -1896,20 +1932,20 @@ mod tests {
 
         // With all 4 subtasks, next should be 5
         let parent = find_task_in_track(&track, "T-001").unwrap();
-        assert_eq!(next_child_number(parent), 5);
+        assert_eq!(next_child_number(parent, None), 5);
 
         // Delete subtask 3 — next should still be 5, not 4
         let mut track = track;
         hard_delete_task(&mut track, "T-001.3", "test").unwrap();
         let parent = find_task_in_track(&track, "T-001").unwrap();
         assert_eq!(parent.subtasks.len(), 3);
-        assert_eq!(next_child_number(parent), 5); // must skip over existing .4
+        assert_eq!(next_child_number(parent, None), 5); // must skip over existing .4
 
         // Delete subtask 4 too — now remaining are [.1, .2], max is 2, so next is 3
         hard_delete_task(&mut track, "T-001.4", "test").unwrap();
         let parent = find_task_in_track(&track, "T-001").unwrap();
         assert_eq!(parent.subtasks.len(), 2);
-        assert_eq!(next_child_number(parent), 3); // .3 and .4 are gone, no collision
+        assert_eq!(next_child_number(parent, None), 3); // .3 and .4 are gone, no collision
     }
 
     #[test]
@@ -1963,8 +1999,122 @@ mod tests {
 
 ## Done",
         );
-        let id = add_task(&mut track, "New".into(), InsertPosition::Bottom, "T").unwrap();
+        let id = add_task(&mut track, "New".into(), InsertPosition::Bottom, "T", None).unwrap();
         assert_eq!(id, "T-006");
+    }
+
+    // --- Namespace-scoped minting (Phase 3) ---
+
+    fn ns(s: &str) -> crate::model::task_id::Token {
+        crate::model::task_id::Token::new(s).unwrap()
+    }
+
+    #[test]
+    fn test_add_task_mints_in_token_namespace() {
+        // A track containing EFF-a3, EFF-b7, EFF-a5: actor `a` mints EFF-a6,
+        // actor `b` mints EFF-b8, actor `c` mints EFF-c1 (empty namespace → 1),
+        // and null mints the next bare-digit.
+        let src = "\
+# Eff
+
+## Backlog
+
+- [ ] `EFF-014` Null task
+- [ ] `EFF-a3` A task
+- [ ] `EFF-b7` B task
+- [ ] `EFF-a5` Another A task
+
+## Done";
+        let mint = |token: Option<&Token>| {
+            let mut track = parse_track(src);
+            add_task(
+                &mut track,
+                "New".into(),
+                InsertPosition::Bottom,
+                "EFF",
+                token,
+            )
+            .unwrap()
+        };
+        assert_eq!(mint(Some(&ns("a"))), "EFF-a6");
+        assert_eq!(mint(Some(&ns("b"))), "EFF-b8");
+        assert_eq!(mint(Some(&ns("c"))), "EFF-c1");
+        assert_eq!(mint(None), "EFF-015");
+    }
+
+    #[test]
+    fn test_add_task_null_and_token_coexist() {
+        // EFF-014 (null) and EFF-a14 (token a): null mints EFF-015 (ignoring a14),
+        // actor a mints EFF-a15 (ignoring 014).
+        let src = "\
+# Eff
+
+## Backlog
+
+- [ ] `EFF-014` Null task
+- [ ] `EFF-a14` A task
+
+## Done";
+        let mut t1 = parse_track(src);
+        assert_eq!(
+            add_task(&mut t1, "N".into(), InsertPosition::Bottom, "EFF", None).unwrap(),
+            "EFF-015"
+        );
+        let mut t2 = parse_track(src);
+        assert_eq!(
+            add_task(
+                &mut t2,
+                "N".into(),
+                InsertPosition::Bottom,
+                "EFF",
+                Some(&ns("a"))
+            )
+            .unwrap(),
+            "EFF-a15"
+        );
+    }
+
+    #[test]
+    fn test_add_subtask_mints_in_token_namespace() {
+        // Actor b adds a child under EFF-a14 → EFF-a14.b1; a second b child →
+        // EFF-a14.b2. The scan is scoped to that parent and to b's namespace.
+        let src = "\
+# Eff
+
+## Backlog
+
+- [ ] `EFF-a14` Parent
+
+## Done";
+        let mut track = parse_track(src);
+        let first = add_subtask(&mut track, "EFF-a14", "child".into(), Some(&ns("b"))).unwrap();
+        assert_eq!(first, "EFF-a14.b1");
+        let second = add_subtask(&mut track, "EFF-a14", "child2".into(), Some(&ns("b"))).unwrap();
+        assert_eq!(second, "EFF-a14.b2");
+        // A different actor's child starts its own sequence under the same parent.
+        let other = add_subtask(&mut track, "EFF-a14", "child3".into(), Some(&ns("c"))).unwrap();
+        assert_eq!(other, "EFF-a14.c1");
+    }
+
+    #[test]
+    fn test_reclaim_continues_sequence() {
+        // A track with EFF-b1..EFF-b9 where `b` was retired and re-claimed by a
+        // new owner → next `b` mint is EFF-b10 (derive-from-max-scan is automatic).
+        let mut src = String::from("# Eff\n\n## Backlog\n\n");
+        for i in 1..=9 {
+            src.push_str(&format!("- [ ] `EFF-b{}` Task {}\n", i, i));
+        }
+        src.push_str("\n## Done");
+        let mut track = parse_track(&src);
+        let id = add_task(
+            &mut track,
+            "New".into(),
+            InsertPosition::Bottom,
+            "EFF",
+            Some(&ns("b")),
+        )
+        .unwrap();
+        assert_eq!(id, "EFF-b10");
     }
 
     /// Verify that deleting a subtask from a parent with multiline notes

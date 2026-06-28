@@ -1186,6 +1186,20 @@ fn cmd_check(json: bool) -> Result<(), Box<dyn std::error::Error>> {
 // Write command handlers
 // ---------------------------------------------------------------------------
 
+/// Resolve this clone's minting namespace for a CLI mint command, auto-claiming
+/// a token on first use and announcing it once to stderr (so stdout stays clean
+/// for the minted ID). A frontier-empty error aborts the mint, creating nothing.
+/// The project lock must already be held.
+fn resolve_mint_namespace(
+    frame_dir: &std::path::Path,
+) -> Result<Option<crate::model::task_id::Token>, Box<dyn std::error::Error>> {
+    let resolved = actors::resolve_actor_token(frame_dir)?;
+    if let Some(msg) = resolved.announcement {
+        eprintln!("{}", msg);
+    }
+    Ok(crate::model::task_id::actor_namespace(&resolved.token))
+}
+
 fn cmd_add(args: AddArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut project = load_project_cwd()?;
     let _lock = FileLock::acquire_default(&project.frame_dir)?;
@@ -1193,6 +1207,7 @@ fn cmd_add(args: AddArgs) -> Result<(), Box<dyn std::error::Error>> {
     let prefix = track_prefix(&project, &args.track)
         .ok_or_else(|| format!("no ID prefix configured for track '{}'", args.track))?
         .to_string();
+    let token = resolve_mint_namespace(&project.frame_dir)?;
 
     let position = if let Some(ref after_id) = args.after {
         task_ops::InsertPosition::After(after_id.clone())
@@ -1203,7 +1218,7 @@ fn cmd_add(args: AddArgs) -> Result<(), Box<dyn std::error::Error>> {
     let track = find_track_mut(&mut project, &args.track)
         .ok_or_else(|| format!("track not found: {}", args.track))?;
 
-    let id = task_ops::add_task(track, args.title.clone(), position, &prefix)?;
+    let id = task_ops::add_task(track, args.title.clone(), position, &prefix, token.as_ref())?;
 
     // If --found-from, add a note
     if let Some(ref from_id) = args.found_from {
@@ -1222,6 +1237,7 @@ fn cmd_push(args: PushArgs) -> Result<(), Box<dyn std::error::Error>> {
     let prefix = track_prefix(&project, &args.track)
         .ok_or_else(|| format!("no ID prefix configured for track '{}'", args.track))?
         .to_string();
+    let token = resolve_mint_namespace(&project.frame_dir)?;
 
     let track = find_track_mut(&mut project, &args.track)
         .ok_or_else(|| format!("track not found: {}", args.track))?;
@@ -1231,6 +1247,7 @@ fn cmd_push(args: PushArgs) -> Result<(), Box<dyn std::error::Error>> {
         args.title.clone(),
         task_ops::InsertPosition::Top,
         &prefix,
+        token.as_ref(),
     )?;
 
     save_track(&project, &args.track)?;
@@ -1246,11 +1263,12 @@ fn cmd_sub(args: SubArgs) -> Result<(), Box<dyn std::error::Error>> {
     let track_id = find_task_track(&project, &args.id)
         .ok_or_else(|| format!("task not found: {}", args.id))?
         .to_string();
+    let token = resolve_mint_namespace(&project.frame_dir)?;
 
     let track = find_track_mut(&mut project, &track_id)
         .ok_or_else(|| format!("track not found: {}", track_id))?;
 
-    let sub_id = task_ops::add_subtask(track, &args.id, args.title)?;
+    let sub_id = task_ops::add_subtask(track, &args.id, args.title, token.as_ref())?;
 
     save_track(&project, &track_id)?;
     println!("{}", sub_id);
@@ -1746,6 +1764,7 @@ fn cmd_triage(args: TriageArgs) -> Result<(), Box<dyn std::error::Error>> {
     let prefix = track_prefix(&project, &args.track)
         .ok_or_else(|| format!("no ID prefix configured for track '{}'", args.track))?
         .to_string();
+    let token = resolve_mint_namespace(&project.frame_dir)?;
 
     let position = if args.top {
         task_ops::InsertPosition::Top
@@ -1768,7 +1787,7 @@ fn cmd_triage(args: TriageArgs) -> Result<(), Box<dyn std::error::Error>> {
     let inbox = project.inbox.as_mut().ok_or("no inbox.md found")?;
     let track = &mut project.tracks[track_idx].1;
 
-    let task_id = inbox_ops::triage(inbox, index, track, position, &prefix)?;
+    let task_id = inbox_ops::triage(inbox, index, track, position, &prefix, token.as_ref())?;
 
     // Save track first (new data), then inbox (deletion)
     save_track(&project, &args.track)?;
@@ -2060,11 +2079,19 @@ fn cmd_track_rename(args: TrackRenameArgs) -> Result<(), Box<dyn std::error::Err
 fn cmd_clean(args: CleanArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut project = load_project_cwd()?;
 
-    if !args.dry_run {
-        let _lock = FileLock::acquire_default(&project.frame_dir)?;
-    }
+    // A real clean holds the lock and mints in this clone's namespace (auto-
+    // claiming a token on first use); a dry run only previews, so it neither
+    // locks nor claims — and on an unclaimed clone it mints nothing (strict
+    // null policy).
+    let (_lock, scope) = if args.dry_run {
+        (None, actors::id_scope(&project.frame_dir))
+    } else {
+        let lock = FileLock::acquire_default(&project.frame_dir)?;
+        let token = resolve_mint_namespace(&project.frame_dir)?;
+        (Some(lock), actors::IdScope::Mint(token))
+    };
 
-    let result = clean::clean_project(&mut project);
+    let result = clean::clean_project(&mut project, scope);
 
     // Report results
     if !result.ids_assigned.is_empty() {
@@ -2280,6 +2307,7 @@ fn cmd_import(args: ImportArgs) -> Result<(), Box<dyn std::error::Error>> {
     let prefix = track_prefix(&project, &args.track)
         .ok_or_else(|| format!("no ID prefix configured for track '{}'", args.track))?
         .to_string();
+    let token = resolve_mint_namespace(&project.frame_dir)?;
 
     let position = if args.top {
         task_ops::InsertPosition::Top
@@ -2295,7 +2323,7 @@ fn cmd_import(args: ImportArgs) -> Result<(), Box<dyn std::error::Error>> {
     let track = find_track_mut(&mut project, &args.track)
         .ok_or_else(|| format!("track not found: {}", args.track))?;
 
-    let result = import::import_tasks(&markdown, track, position, &prefix)?;
+    let result = import::import_tasks(&markdown, track, position, &prefix, token.as_ref())?;
 
     save_track(&project, &args.track)?;
 

@@ -1,7 +1,7 @@
 use chrono::Local;
 
 use crate::model::task::{Metadata, Task};
-use crate::model::task_id::TaskId;
+use crate::model::task_id::{TaskId, Token};
 use crate::model::track::{SectionKind, Track};
 use crate::ops::task_ops::{InsertPosition, TaskError, find_max_id_in_track};
 use crate::parse::parse_tasks;
@@ -32,6 +32,7 @@ pub fn import_tasks(
     track: &mut Track,
     position: InsertPosition,
     prefix: &str,
+    token: Option<&Token>,
 ) -> Result<ImportResult, ImportError> {
     let lines: Vec<String> = markdown.lines().map(|l| l.to_string()).collect();
 
@@ -46,7 +47,7 @@ pub fn import_tasks(
     let mut next_num = {
         let mut max = 0usize;
         let prefix_dash = format!("{}-", prefix);
-        find_max_id_in_track(track, &prefix_dash, &mut max);
+        find_max_id_in_track(track, &prefix_dash, token, &mut max);
         max + 1
     };
 
@@ -57,7 +58,7 @@ pub fn import_tasks(
     // Prepare tasks: assign IDs, set dates, mark dirty
     let mut prepared_tasks = Vec::new();
     for mut task in tasks {
-        let id = TaskId::with_number(prefix, next_num as u32);
+        let id = TaskId::with_number(prefix, next_num as u32, token);
         task.id = Some(id.clone());
         task.depth = 0;
         task.mark_dirty();
@@ -68,7 +69,7 @@ pub fn import_tasks(
         }
 
         // Recursively assign subtask IDs and dates
-        assign_subtask_ids(&mut task, &id, &today);
+        assign_subtask_ids(&mut task, &id, &today, token);
 
         total_count += 1 + count_subtasks(&task);
         assigned_ids.push(id.to_string());
@@ -142,11 +143,11 @@ fn is_task_line(line: &str, indent: usize) -> bool {
     content.starts_with("- [") && content.len() >= 5 && content.as_bytes().get(4) == Some(&b']')
 }
 
-/// Recursively assign subtask IDs and `added:` dates.
-fn assign_subtask_ids(task: &mut Task, parent_id: &str, today: &str) {
+/// Recursively assign subtask IDs (in `token`'s namespace) and `added:` dates.
+fn assign_subtask_ids(task: &mut Task, parent_id: &str, today: &str, token: Option<&Token>) {
     let parent = TaskId::parse(parent_id);
     for (i, sub) in task.subtasks.iter_mut().enumerate() {
-        let sub_id = TaskId::child_of(&parent, (i + 1) as u32);
+        let sub_id = TaskId::child_of(&parent, (i + 1) as u32, token);
         sub.depth = task.depth + 1;
         sub.mark_dirty();
 
@@ -154,7 +155,7 @@ fn assign_subtask_ids(task: &mut Task, parent_id: &str, today: &str) {
             sub.metadata.insert(0, Metadata::Added(today.to_string()));
         }
 
-        assign_subtask_ids(sub, &sub_id, today);
+        assign_subtask_ids(sub, &sub_id, today, token);
         sub.id = Some(sub_id);
     }
 }
@@ -249,8 +250,14 @@ Some description text here.
     #[test]
     fn test_import_bottom() {
         let mut track = sample_track();
-        let result =
-            import_tasks(simple_import_md(), &mut track, InsertPosition::Bottom, "T").unwrap();
+        let result = import_tasks(
+            simple_import_md(),
+            &mut track,
+            InsertPosition::Bottom,
+            "T",
+            None,
+        )
+        .unwrap();
 
         assert_eq!(result.assigned_ids, vec!["T-003", "T-004", "T-005"]);
         assert_eq!(result.total_count, 3);
@@ -272,8 +279,14 @@ Some description text here.
     #[test]
     fn test_import_top() {
         let mut track = sample_track();
-        let result =
-            import_tasks(simple_import_md(), &mut track, InsertPosition::Top, "T").unwrap();
+        let result = import_tasks(
+            simple_import_md(),
+            &mut track,
+            InsertPosition::Top,
+            "T",
+            None,
+        )
+        .unwrap();
 
         assert_eq!(result.assigned_ids.len(), 3);
 
@@ -294,6 +307,7 @@ Some description text here.
             &mut track,
             InsertPosition::After("T-001".into()),
             "T",
+            None,
         )
         .unwrap();
 
@@ -318,6 +332,7 @@ Some description text here.
             &mut track,
             InsertPosition::Bottom,
             "T",
+            None,
         )
         .unwrap();
 
@@ -351,6 +366,7 @@ Some description text here.
             &mut track,
             InsertPosition::Bottom,
             "T",
+            None,
         )
         .unwrap();
 
@@ -372,6 +388,7 @@ Some description text here.
             &mut track,
             InsertPosition::Bottom,
             "T",
+            None,
         )
         .unwrap();
 
@@ -412,6 +429,7 @@ Some description text here.
             &mut track,
             InsertPosition::Bottom,
             "T",
+            None,
         )
         .unwrap();
 
@@ -429,7 +447,7 @@ Some description text here.
     #[test]
     fn test_import_empty_file() {
         let mut track = sample_track();
-        let result = import_tasks("", &mut track, InsertPosition::Bottom, "T");
+        let result = import_tasks("", &mut track, InsertPosition::Bottom, "T", None);
         assert!(matches!(result, Err(ImportError::NoTasks)));
     }
 
@@ -441,6 +459,7 @@ Some description text here.
             &mut track,
             InsertPosition::Bottom,
             "T",
+            None,
         );
         assert!(matches!(result, Err(ImportError::NoTasks)));
     }
@@ -453,6 +472,7 @@ Some description text here.
             &mut track,
             InsertPosition::After("T-999".into()),
             "T",
+            None,
         );
         assert!(result.is_err());
     }
@@ -467,6 +487,7 @@ Some description text here.
             &mut track,
             InsertPosition::Bottom,
             "T",
+            None,
         )
         .unwrap();
 
@@ -491,8 +512,14 @@ Some description text here.
 ## Done
 ",
         );
-        let result =
-            import_tasks(simple_import_md(), &mut track, InsertPosition::Bottom, "T").unwrap();
+        let result = import_tasks(
+            simple_import_md(),
+            &mut track,
+            InsertPosition::Bottom,
+            "T",
+            None,
+        )
+        .unwrap();
 
         assert_eq!(result.assigned_ids, vec!["T-051", "T-052", "T-053"]);
     }
@@ -507,7 +534,7 @@ Some description text here.
     - [ ] Sub-sub level
 ";
         let mut track = sample_track();
-        let result = import_tasks(md, &mut track, InsertPosition::Bottom, "T").unwrap();
+        let result = import_tasks(md, &mut track, InsertPosition::Bottom, "T", None).unwrap();
 
         assert_eq!(result.assigned_ids, vec!["T-003"]);
         assert_eq!(result.total_count, 3);
@@ -517,5 +544,36 @@ Some description text here.
         assert_eq!(top.subtasks[0].id.as_deref(), Some("T-003.1"));
         assert_eq!(top.subtasks[0].subtasks.len(), 1);
         assert_eq!(top.subtasks[0].subtasks[0].id.as_deref(), Some("T-003.1.1"));
+    }
+
+    // --- Namespace-scoped minting (Phase 3) ---
+
+    #[test]
+    fn test_import_mints_in_token_namespace() {
+        let token = crate::model::task_id::Token::new("a").unwrap();
+        let mut track = parse_track(
+            "\
+# Test
+
+## Backlog
+
+- [ ] `T-005` Existing null task
+
+## Done
+",
+        );
+        let result = import_tasks(
+            import_with_subtasks_md(),
+            &mut track,
+            InsertPosition::Bottom,
+            "T",
+            Some(&token),
+        )
+        .unwrap();
+        // Empty `a` namespace → first is T-a1; subtasks carry the token too.
+        assert_eq!(result.assigned_ids, vec!["T-a1", "T-a2"]);
+        let parent = find_task_in_track(&track, "T-a1").unwrap();
+        assert_eq!(parent.subtasks[0].id.as_deref(), Some("T-a1.a1"));
+        assert_eq!(parent.subtasks[1].id.as_deref(), Some("T-a1.a2"));
     }
 }

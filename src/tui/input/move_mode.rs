@@ -121,10 +121,13 @@ pub(super) fn handle_move(app: &mut App, key: KeyEvent) {
                                 let track_mut = app.find_track_mut(&track_id);
                                 if let Some(track_mut) = track_mut {
                                     // Get task to compute new ID
+                                    // Move-mode re-keying mints null until Phase 4
+                                    // re-keys into the mover's token.
                                     let new_id = match &cur_loc.parent_id {
                                         None => {
-                                            let next = task_ops::next_id_number(track_mut, &prefix);
-                                            TaskId::with_number(&prefix, next as u32)
+                                            let next =
+                                                task_ops::next_id_number(track_mut, &prefix, None);
+                                            TaskId::with_number(&prefix, next as u32, None)
                                         }
                                         Some(pid) => {
                                             // Gap-safe child number via the shared primitive:
@@ -135,9 +138,10 @@ pub(super) fn handle_move(app: &mut App, key: KeyEvent) {
                                             let parent_tid = parent
                                                 .and_then(|p| p.id.clone())
                                                 .unwrap_or_else(|| TaskId::parse(pid));
-                                            let child_num =
-                                                parent.map_or(1, task_ops::next_child_number);
-                                            TaskId::child_of(&parent_tid, child_num as u32)
+                                            let child_num = parent.map_or(1, |p| {
+                                                task_ops::next_child_number(p, None)
+                                            });
+                                            TaskId::child_of(&parent_tid, child_num as u32, None)
                                         }
                                     };
 

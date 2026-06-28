@@ -22,6 +22,11 @@ fn create_test_project(root: &Path) {
     let frame_dir = root.join("frame");
     fs::create_dir_all(frame_dir.join("tracks")).unwrap();
 
+    // Record this working copy as the primary (null) actor, exactly as `fr init`
+    // does, so mints stay in the legacy null namespace (e.g. `M-011`) and don't
+    // auto-claim a letter token.
+    fs::write(frame_dir.join(".actor"), "null\n").unwrap();
+
     fs::write(
         frame_dir.join("project.toml"),
         r#"[project]
@@ -1754,9 +1759,11 @@ fn test_init_force_does_not_clobber_actors() {
 
 #[test]
 fn test_actor_status_missing_registry_reports_unclaimed() {
-    // create_test_project writes no actors.toml — the migration case.
+    // The migration case: no actors.toml and no `.actor`. Remove the primary
+    // `.actor` the helper writes to model a pre-actors legacy project.
     let tmp = tempfile::TempDir::new().unwrap();
     create_test_project(tmp.path());
+    fs::remove_file(tmp.path().join("frame/.actor")).unwrap();
 
     let (stdout, _stderr, success) = run_fr(tmp.path(), &["actor"]);
     assert!(
@@ -1766,6 +1773,109 @@ fn test_actor_status_missing_registry_reports_unclaimed() {
     assert!(stdout.contains("unclaimed"), "stdout: {stdout}");
     // No file was created by a read-only status check.
     assert!(!tmp.path().join("frame/actors.toml").exists());
+}
+
+#[test]
+fn test_first_mint_auto_claims_token() {
+    // A fresh clone of an existing project has no `.actor`; the first `fr add`
+    // auto-claims a letter token, announces it once, and mints in that namespace.
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    fs::remove_file(tmp.path().join("frame/.actor")).unwrap();
+
+    let (stdout, stderr, success) = run_fr(tmp.path(), &["add", "main", "First in fresh clone"]);
+    assert!(success, "stderr: {stderr}");
+
+    // The minted ID is tokened (e.g. `M-e1`), not a bare null-namespace number.
+    let id = stdout.trim();
+    assert!(
+        id.starts_with("M-") && id.chars().nth(2).is_some_and(|c| c.is_ascii_alphabetic()),
+        "expected a tokened id, got {id}"
+    );
+    // Announced exactly once, to stderr (stdout stays clean for the id).
+    assert!(stderr.contains("Claimed actor token"), "stderr: {stderr}");
+
+    // `.actor` and the registry row were persisted.
+    let token = fs::read_to_string(tmp.path().join("frame/.actor"))
+        .unwrap()
+        .trim()
+        .to_string();
+    assert_ne!(token, "null");
+    assert_eq!(id, format!("M-{token}1"));
+    let registry = fs::read_to_string(tmp.path().join("frame/actors.toml")).unwrap();
+    assert!(
+        registry.contains(&format!("[actors.{token}]")),
+        "{registry}"
+    );
+
+    // A second mint does not re-announce (token already claimed).
+    let (_stdout2, stderr2, success2) = run_fr(tmp.path(), &["add", "main", "Second"]);
+    assert!(success2);
+    assert!(
+        !stderr2.contains("Claimed actor token"),
+        "stderr2: {stderr2}"
+    );
+}
+
+#[test]
+fn test_dry_run_clean_on_unclaimed_clone_mints_nothing() {
+    // Strict null policy: a passive path (`fr clean --dry-run`) on an unclaimed
+    // clone must neither claim a token nor mint a null ID for an ID-less task.
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    fs::remove_file(tmp.path().join("frame/.actor")).unwrap();
+
+    // Give the track an ID-less task.
+    let main_path = tmp.path().join("frame/tracks/main.md");
+    let main = fs::read_to_string(&main_path).unwrap();
+    fs::write(
+        &main_path,
+        main.replace("## Backlog\n", "## Backlog\n\n- [ ] Task with no id\n"),
+    )
+    .unwrap();
+
+    let (stdout, _stderr, success) = run_fr(tmp.path(), &["clean", "--dry-run"]);
+    assert!(success);
+    // Nothing was assigned, and no claim happened.
+    assert!(
+        !stdout.contains("IDs assigned"),
+        "unclaimed clone must not mint on a dry run: {stdout}"
+    );
+    assert!(!tmp.path().join("frame/.actor").exists());
+    assert!(!tmp.path().join("frame/actors.toml").exists());
+}
+
+#[test]
+fn test_mint_errors_when_frontier_empty_and_unclaimed() {
+    // No `.actor`, and every safe token is already taken: a mint must fail with
+    // the routing message and create nothing.
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    fs::remove_file(tmp.path().join("frame/.actor")).unwrap();
+
+    // Fill the entire safe alphabet in the registry so the frontier is empty.
+    let alphabet = [
+        "a", "b", "c", "d", "e", "f", "g", "h", "j", "k", "m", "n", "p", "q", "r", "s", "t", "u",
+        "v", "w", "x", "y", "z",
+    ];
+    let mut registry = String::new();
+    for t in alphabet {
+        registry.push_str(&format!(
+            "[actors.{t}]\nname = \"other\"\nstate = \"active\"\nclaimed = \"2026-01-01\"\n\n"
+        ));
+    }
+    fs::write(tmp.path().join("frame/actors.toml"), registry).unwrap();
+
+    let track_before = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    let (_stdout, stderr, success) = run_fr(tmp.path(), &["add", "main", "Should not be created"]);
+    assert!(!success, "mint should fail when no token can be claimed");
+    assert!(stderr.contains("fr actor set"), "stderr: {stderr}");
+
+    // Nothing was created or claimed.
+    let track_after = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    assert_eq!(track_before, track_after);
+    assert!(!track_after.contains("Should not be created"));
+    assert!(!tmp.path().join("frame/.actor").exists());
 }
 
 #[test]

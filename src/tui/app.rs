@@ -2376,6 +2376,28 @@ impl App {
             .map(|s| s.as_str())
     }
 
+    /// Resolve this working copy's minting namespace for an interactive mint,
+    /// auto-claiming a token on first use. On a fresh auto-claim, sets a one-time
+    /// status message. On failure (no token claimable), sets an error status and
+    /// returns `Err(())` so the caller can abort the mint without creating
+    /// anything.
+    pub(crate) fn resolve_mint_namespace(
+        &mut self,
+    ) -> Result<Option<crate::model::task_id::Token>, ()> {
+        match crate::io::actors::resolve_actor_token(&self.project.frame_dir) {
+            Ok(resolved) => {
+                if let Some(msg) = resolved.announcement {
+                    self.status_message = Some(msg);
+                }
+                Ok(crate::model::task_id::actor_namespace(&resolved.token))
+            }
+            Err(e) => {
+                self.status_message = Some(e);
+                Err(())
+            }
+        }
+    }
+
     /// Get the file path for a track (relative to frame_dir)
     pub fn track_file(&self, track_id: &str) -> Option<&str> {
         self.project
@@ -2627,8 +2649,11 @@ impl App {
             }
         }
 
-        // Auto-assign IDs and dates to any newly-loaded tasks
-        let modified_tracks = crate::ops::clean::ensure_ids_and_dates(&mut self.project);
+        // Auto-assign IDs and dates to any newly-loaded tasks. Passive load must
+        // not auto-claim a token; an unclaimed clone mints nothing (strict null
+        // policy) until an explicit action resolves a token.
+        let scope = crate::io::actors::id_scope(&self.project.frame_dir);
+        let modified_tracks = crate::ops::clean::ensure_ids_and_dates(&mut self.project, scope);
         for track_id in &modified_tracks {
             let _ = self.save_track(track_id);
         }
@@ -3361,8 +3386,11 @@ pub fn run(project_dir_override: Option<&str>) -> Result<(), Box<dyn std::error:
     };
     let mut project = load_project(&root)?;
 
-    // Auto-assign IDs and dates so all tasks are interactive from the start
-    let modified_tracks = crate::ops::clean::ensure_ids_and_dates(&mut project);
+    // Auto-assign IDs and dates so all tasks are interactive from the start.
+    // Startup must not auto-claim a token; an unclaimed clone mints nothing
+    // (strict null policy) until an explicit action resolves a token.
+    let scope = crate::io::actors::id_scope(&project.frame_dir);
+    let modified_tracks = crate::ops::clean::ensure_ids_and_dates(&mut project, scope);
     if !modified_tracks.is_empty() {
         let _lock = FileLock::acquire_default(&project.frame_dir)?;
         for track_id in &modified_tracks {
@@ -3799,7 +3827,10 @@ fn handle_pending_reload(app: &mut App, paths: &[PathBuf]) {
 fn run_auto_clean(app: &mut App) {
     use crate::ops::clean::clean_project;
 
-    let result = clean_project(&mut app.project);
+    // Passive auto-clean after external changes — no auto-claim, and an
+    // unclaimed clone mints nothing (strict null policy).
+    let scope = crate::io::actors::id_scope(&app.project.frame_dir);
+    let result = clean_project(&mut app.project, scope);
 
     let has_changes = !result.ids_assigned.is_empty()
         || !result.dates_assigned.is_empty()

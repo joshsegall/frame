@@ -128,7 +128,7 @@ Tasks tagged `#lost` were created by the recovery system after a failed cross-tr
 
 An **actor** is a *working copy* — a single git clone of the project. The working copy, not a person or a session, is the unit of identity. Two agent sessions running in the same clone share that clone's identity (and are serialized by the file lock); two separate clones are two distinct actors.
 
-Each actor holds one **token**. Tokens exist so that, in a later phase, separate clones can mint task IDs concurrently without colliding. Phase-2 frame manages the token lifecycle but does not yet use tokens in minted IDs — every ID is still tokenless today.
+Each actor holds one **token**. Tokens let separate clones mint task IDs concurrently without colliding: every newly minted ID is created in the minting clone's **token-namespace**.
 
 - **`null`** is a real token, spelled `null`. It means the empty-token (default) namespace — the IDs you already see, like `EFF-14`. Exactly one working copy holds `null`; it's the **primary** (the clone that ran `fr init`).
 - **Safe alphabet**: auto-assigned tokens are single letters from `a–z` minus `i`, `l`, and `o` (which read as digits) — 23 in all. Teams that outgrow 23 can manually claim multi-character tokens (`aa`, `foo`); those may use any lowercase letters.
@@ -141,6 +141,18 @@ Two files track this:
 **Retirement** tombstones a token (`state = retired`): it leaves the pool of auto-assignable tokens but stays in the registry and can be reclaimed later with `fr actor set <token>`. A project created before actor tokens existed simply has no `actors.toml`; it operates as the untokened primary until someone runs `fr actor set null` (or any claim), which creates the registry.
 
 Manage tokens with the `fr actor` commands (see `doc/cli.md`).
+
+### Minting in a token-namespace
+
+An ID is a `prefix-segment(.segment)*` chain, and **each segment carries its own token** — the token of whoever minted that segment. The primary (`null`) clone mints bare numbers (`EFF-14`, `EFF-15`); a clone with token `a` mints `EFF-a1`, `EFF-a2`, …; token `b` mints `EFF-b1`, and so on. A subtask's *last* segment carries the adding clone's token while the parent's segments are preserved verbatim, so actor `b` adding a child under `EFF-a14` produces `EFF-a14.b1`.
+
+Numbers auto-increment by scanning **only the minter's own namespace** for the highest existing number and adding one (an empty namespace starts at 1). Because the scan ignores every other namespace — including `null` versus tokened — two unsynced clones can each mint freely and never produce the same ID. Reclaiming a retired token continues its sequence automatically, since the next number derives from the max already present.
+
+A clone resolves its token from `frame/.actor` the first time it mints. A fresh clone of an existing project has no `.actor` (it's gitignored), so its **first mint auto-claims** a token from the frontier — the "default to a new token" behavior — and announces it once. (The primary already recorded `null` at `fr init`, so it keeps minting bare numbers.) If every token is taken and the clone is still unclaimed, the mint fails and routes you to `fr actor set <token>` rather than guessing.
+
+**Strict null policy.** The null namespace belongs *only* to a clone that deliberately took it — the one that ran `fr init`, or one that ran an explicit `fr actor set null`. A clone with no `.actor` is **not** the null actor, so it must never mint null-namespace IDs. Explicit mints handle this by auto-claiming a letter (above; the frontier never offers `null`). Background and passive paths — TUI startup auto-assign, post-external-change auto-clean, `fr clean --dry-run` previews — go further: on an unclaimed clone they **skip ID assignment entirely**, leaving tasks ID-less rather than falling back to null. The blank IDs are filled later, when an explicit action resolves (and if needed claims) a token. This is what keeps a machine that doesn't own `null` from silently re-introducing cross-clone ID collisions.
+
+Tokens disambiguate *who minted* an ID, not *when*: cross-actor ordering comes from each task's `added:` date, not from its number. Numbers are unique per namespace, not globally sortable across actors.
 
 ## Configuration
 

@@ -29,8 +29,10 @@ use serde::ser::{Serialize, Serializer};
 
 /// A namespace token: one or more lowercase ASCII letters.
 ///
-/// In Phase 1 tokens are never minted (every segment is tokenless / null
-/// namespace), but the grammar and type are ready for token namespacing.
+/// Each working copy mints into its own token-namespace (set by the actor token
+/// in `frame/.actor`), so two unsynced clones never collide. `None` (the absence
+/// of a token on a segment) is the *null* namespace — the primary clone's
+/// default.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Token(String);
 
@@ -48,6 +50,18 @@ impl Token {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// Map an actor-token string to the segment namespace it denotes. The literal
+/// `"null"` is the null namespace (`None`); any other value is parsed as a
+/// [`Token`] (returning `None` for malformed input, which should not occur for a
+/// validated actor token). This is the single bridge between the actor registry's
+/// string tokens and the structured-ID grammar.
+pub fn actor_namespace(actor_token: &str) -> Option<Token> {
+    match actor_token {
+        "null" => None,
+        other => Token::new(other),
     }
 }
 
@@ -114,14 +128,17 @@ impl TaskId {
         }
     }
 
-    /// Construct a top-level structured ID with the given prefix and number,
-    /// zero-padded to a minimum width of 3 (matching the legacy `{:03}` mint
-    /// format). The single segment is tokenless (null namespace).
-    pub fn with_number(prefix: &str, number: u32) -> TaskId {
+    /// Construct a top-level structured ID with the given prefix and number. The
+    /// single segment carries `token` (the minter's namespace; `None` = null).
+    /// Null-namespace IDs are zero-padded to a minimum width of 3 (matching the
+    /// legacy `{:03}` mint format, e.g. `EFF-014`); tokened IDs are unpadded
+    /// (e.g. `EFF-a14`) since the token already disambiguates the segment.
+    pub fn with_number(prefix: &str, number: u32, token: Option<&Token>) -> TaskId {
+        let width = if token.is_some() { 1 } else { 3 };
         let segments = vec![Segment {
-            token: None,
+            token: token.cloned(),
             number,
-            width: 3,
+            width,
         }];
         let text = render(prefix, &segments);
         TaskId {
@@ -133,15 +150,17 @@ impl TaskId {
         }
     }
 
-    /// Construct a child ID by appending a tokenless, unpadded segment to the
-    /// given parent (matching the legacy `{}` child-number format). If the
-    /// parent is `Raw`, the child is `Raw` too (`"{parent}.{number}"`).
-    pub fn child_of(parent: &TaskId, number: u32) -> TaskId {
+    /// Construct a child ID by appending an unpadded segment to the given parent
+    /// (matching the legacy `{}` child-number format). The parent's segments are
+    /// preserved verbatim; only the new last segment carries `token` (the
+    /// minter's namespace; `None` = null). If the parent is `Raw`, the child is
+    /// `Raw` too (`"{parent}.{number}"`) and the token is ignored.
+    pub fn child_of(parent: &TaskId, number: u32, token: Option<&Token>) -> TaskId {
         match &parent.parsed {
             ParsedId::Structured { prefix, segments } => {
                 let mut segments = segments.clone();
                 segments.push(Segment {
-                    token: None,
+                    token: token.cloned(),
                     number,
                     width: 1,
                 });
@@ -158,17 +177,19 @@ impl TaskId {
         }
     }
 
-    /// The top-level number for this ID if it is a structured, null-namespace ID
-    /// under `prefix`. Used by max-scan: `Raw` IDs and token (non-null) segments
-    /// return `None` and so never perturb the next minted number.
-    pub fn top_level_number(&self, prefix: &str) -> Option<u32> {
+    /// The top-level number for this ID if it is a structured ID under `prefix`
+    /// whose first segment is in the `token` namespace (`None` = null). Used by
+    /// max-scan: `Raw` IDs, a different prefix, or a segment in a *different*
+    /// namespace return `None` and so never perturb the next minted number. This
+    /// per-namespace scoping is what lets two clones mint without colliding.
+    pub fn top_level_number(&self, prefix: &str, token: Option<&Token>) -> Option<u32> {
         match &self.parsed {
             ParsedId::Structured {
                 prefix: p,
                 segments,
             } if p == prefix => {
                 let first = segments.first()?;
-                if first.token.is_none() {
+                if first.token.as_ref() == token {
                     Some(first.number)
                 } else {
                     None
@@ -178,10 +199,11 @@ impl TaskId {
         }
     }
 
-    /// If `self` is a direct, null-namespace child of `parent` (one extra
-    /// segment whose preceding segments match the parent exactly), return the
-    /// child number. Used by the gap-safe child-number scan.
-    pub fn child_number_of(&self, parent: &TaskId) -> Option<u32> {
+    /// If `self` is a direct child of `parent` (one extra segment whose preceding
+    /// segments match the parent exactly) and that last segment is in the `token`
+    /// namespace (`None` = null), return the child number. Used by the gap-safe,
+    /// per-namespace child-number scan.
+    pub fn child_number_of(&self, parent: &TaskId, token: Option<&Token>) -> Option<u32> {
         match (&self.parsed, &parent.parsed) {
             (
                 ParsedId::Structured {
@@ -194,7 +216,7 @@ impl TaskId {
                 },
             ) if cp == pp && cs.len() == ps.len() + 1 && cs[..ps.len()] == ps[..] => {
                 let last = cs.last()?;
-                if last.token.is_none() {
+                if last.token.as_ref() == token {
                     Some(last.number)
                 } else {
                     None
@@ -394,29 +416,96 @@ mod tests {
         assert!(matches!(TaskId::parse("EFF-1a").parsed, ParsedId::Raw));
     }
 
+    fn tok(s: &str) -> Token {
+        Token::new(s).unwrap()
+    }
+
     #[test]
     fn raw_invisible_to_top_level_scan() {
         let raw = TaskId::parse("weird id!");
-        assert_eq!(raw.top_level_number("EFF"), None);
-        // A token (non-null) segment is also invisible to the null-namespace scan.
-        assert_eq!(TaskId::parse("EFF-a14").top_level_number("EFF"), None);
+        assert_eq!(raw.top_level_number("EFF", None), None);
+        // A token (non-null) segment is invisible to the null-namespace scan.
+        assert_eq!(TaskId::parse("EFF-a14").top_level_number("EFF", None), None);
         // A structured, null-namespace ID is visible.
-        assert_eq!(TaskId::parse("EFF-14").top_level_number("EFF"), Some(14));
+        assert_eq!(
+            TaskId::parse("EFF-14").top_level_number("EFF", None),
+            Some(14)
+        );
         // Subtasks expose their parent's top-level number.
-        assert_eq!(TaskId::parse("EFF-14.2").top_level_number("EFF"), Some(14));
+        assert_eq!(
+            TaskId::parse("EFF-14.2").top_level_number("EFF", None),
+            Some(14)
+        );
         // Different prefix → invisible.
-        assert_eq!(TaskId::parse("EFF-14").top_level_number("INF"), None);
+        assert_eq!(TaskId::parse("EFF-14").top_level_number("INF", None), None);
+    }
+
+    #[test]
+    fn top_level_scan_is_per_namespace() {
+        // Each namespace scans only its own segments.
+        assert_eq!(
+            TaskId::parse("EFF-a14").top_level_number("EFF", Some(&tok("a"))),
+            Some(14)
+        );
+        // Null is invisible to the `a` scan; `a` is invisible to the null scan.
+        assert_eq!(
+            TaskId::parse("EFF-014").top_level_number("EFF", Some(&tok("a"))),
+            None
+        );
+        assert_eq!(TaskId::parse("EFF-a14").top_level_number("EFF", None), None);
+        // A different token is invisible too.
+        assert_eq!(
+            TaskId::parse("EFF-a14").top_level_number("EFF", Some(&tok("b"))),
+            None
+        );
+        // Multi-char tokens work the same way.
+        assert_eq!(
+            TaskId::parse("EFF-foo3").top_level_number("EFF", Some(&tok("foo"))),
+            Some(3)
+        );
     }
 
     #[test]
     fn child_number_scan() {
         let parent = TaskId::parse("T-001");
-        assert_eq!(TaskId::parse("T-001.1").child_number_of(&parent), Some(1));
-        assert_eq!(TaskId::parse("T-001.4").child_number_of(&parent), Some(4));
+        assert_eq!(
+            TaskId::parse("T-001.1").child_number_of(&parent, None),
+            Some(1)
+        );
+        assert_eq!(
+            TaskId::parse("T-001.4").child_number_of(&parent, None),
+            Some(4)
+        );
         // Grandchildren are not direct children.
-        assert_eq!(TaskId::parse("T-001.1.1").child_number_of(&parent), None);
+        assert_eq!(
+            TaskId::parse("T-001.1.1").child_number_of(&parent, None),
+            None
+        );
         // Different parent.
-        assert_eq!(TaskId::parse("T-002.1").child_number_of(&parent), None);
+        assert_eq!(
+            TaskId::parse("T-002.1").child_number_of(&parent, None),
+            None
+        );
+    }
+
+    #[test]
+    fn child_number_scan_is_per_namespace() {
+        // A child's last segment carries the minter's token; the scan is scoped
+        // to one namespace under one parent.
+        let parent = TaskId::parse("EFF-a14");
+        assert_eq!(
+            TaskId::parse("EFF-a14.b2").child_number_of(&parent, Some(&tok("b"))),
+            Some(2)
+        );
+        // The `b` child is invisible to the null and `c` scans.
+        assert_eq!(
+            TaskId::parse("EFF-a14.b2").child_number_of(&parent, None),
+            None
+        );
+        assert_eq!(
+            TaskId::parse("EFF-a14.b2").child_number_of(&parent, Some(&tok("c"))),
+            None
+        );
     }
 
     #[test]
@@ -424,21 +513,64 @@ mod tests {
         assert_eq!(TaskId::parse("EFF-014").to_string(), "EFF-014");
         assert_eq!(TaskId::parse("ST-001").to_string(), "ST-001");
         // Mint reproduces the legacy 3-wide zero padding.
-        assert_eq!(TaskId::with_number("T", 5).to_string(), "T-005");
-        assert_eq!(TaskId::with_number("T", 142).to_string(), "T-142");
-        assert_eq!(TaskId::with_number("T", 1000).to_string(), "T-1000");
+        assert_eq!(TaskId::with_number("T", 5, None).to_string(), "T-005");
+        assert_eq!(TaskId::with_number("T", 142, None).to_string(), "T-142");
+        assert_eq!(TaskId::with_number("T", 1000, None).to_string(), "T-1000");
+    }
+
+    #[test]
+    fn with_number_carries_token() {
+        // Tokened IDs are unpadded (the token already disambiguates).
+        assert_eq!(
+            TaskId::with_number("EFF", 1, Some(&tok("a"))).to_string(),
+            "EFF-a1"
+        );
+        assert_eq!(
+            TaskId::with_number("EFF", 15, Some(&tok("foo"))).to_string(),
+            "EFF-foo15"
+        );
+        // Null namespace keeps the legacy 3-wide padding.
+        assert_eq!(TaskId::with_number("EFF", 1, None).to_string(), "EFF-001");
     }
 
     #[test]
     fn child_of_construction() {
         let parent = TaskId::parse("EFF-014");
-        assert_eq!(TaskId::child_of(&parent, 1).to_string(), "EFF-014.1");
-        assert_eq!(TaskId::child_of(&parent, 12).to_string(), "EFF-014.12");
-        let grandparent = TaskId::child_of(&parent, 2);
-        assert_eq!(TaskId::child_of(&grandparent, 3).to_string(), "EFF-014.2.3");
+        assert_eq!(TaskId::child_of(&parent, 1, None).to_string(), "EFF-014.1");
+        assert_eq!(
+            TaskId::child_of(&parent, 12, None).to_string(),
+            "EFF-014.12"
+        );
+        let grandparent = TaskId::child_of(&parent, 2, None);
+        assert_eq!(
+            TaskId::child_of(&grandparent, 3, None).to_string(),
+            "EFF-014.2.3"
+        );
         // Raw parent → raw child, matching the legacy format.
         let raw = TaskId::parse("weird");
-        assert_eq!(TaskId::child_of(&raw, 1).to_string(), "weird.1");
+        assert_eq!(TaskId::child_of(&raw, 1, None).to_string(), "weird.1");
+    }
+
+    #[test]
+    fn child_of_carries_token_on_last_segment_only() {
+        // Parent's tokened segments are preserved; only the new child carries
+        // the minter's token.
+        let parent = TaskId::parse("EFF-a14");
+        assert_eq!(
+            TaskId::child_of(&parent, 1, Some(&tok("b"))).to_string(),
+            "EFF-a14.b1"
+        );
+        assert_eq!(
+            TaskId::child_of(&parent, 2, Some(&tok("b"))).to_string(),
+            "EFF-a14.b2"
+        );
+    }
+
+    #[test]
+    fn actor_namespace_maps_null_and_tokens() {
+        assert_eq!(actor_namespace("null"), None);
+        assert_eq!(actor_namespace("a"), Some(tok("a")));
+        assert_eq!(actor_namespace("foo"), Some(tok("foo")));
     }
 
     #[test]
