@@ -46,3 +46,26 @@ pub(super) fn spans_width(spans: &[Span]) -> usize {
         .map(|s| unicode::display_width(&s.content))
         .sum()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::abbreviated_id;
+
+    #[test]
+    fn abbreviated_id_keeps_token_in_subtask_tail() {
+        // The tail is a string slice, so the subtask token survives: the
+        // tail of `EFF-a14.b2` is `.b2` (not `.2`).
+        assert_eq!(abbreviated_id("EFF-a14.b2"), ".b2");
+        assert_eq!(abbreviated_id("EFF-a14.b2.c3"), ".b2.c3");
+        // Null-namespace subtasks abbreviate as before.
+        assert_eq!(abbreviated_id("EFF-014.2"), ".2");
+    }
+
+    #[test]
+    fn abbreviated_id_renders_top_level_tokened_id_in_full() {
+        // A top-level tokened id has no `.` after the prefix, so it renders
+        // verbatim, token included.
+        assert_eq!(abbreviated_id("EFF-a14"), "EFF-a14");
+        assert_eq!(abbreviated_id("EFF-14"), "EFF-14");
+    }
+}

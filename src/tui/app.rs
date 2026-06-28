@@ -4242,4 +4242,66 @@ mod tests {
             "expected ST-002, not ST-ST-002"
         );
     }
+
+    // --- inverse dep index resolves tokened ids on both ends ---
+
+    #[test]
+    fn build_dep_index_resolves_tokened_ids() {
+        use crate::model::config::{CleanConfig, IdConfig, ProjectConfig, ProjectInfo, UiConfig};
+        use crate::model::project::Project;
+        use crate::parse::parse_track;
+
+        // EFF-b2 depends on the tokened EFF-a14; EFF-c3 depends on the null
+        // EFF-14. Both edges must resolve to the canonical-form target id.
+        let track = parse_track(
+            "\
+# Eff
+
+## Backlog
+
+- [ ] `EFF-a14` Upstream tokened
+- [ ] `EFF-14` Upstream null
+- [ ] `EFF-b2` Downstream of tokened
+  - dep: EFF-a14
+- [ ] `EFF-c3` Downstream of null
+  - dep: EFF-14
+
+## Done
+",
+        );
+        let config = ProjectConfig {
+            project: ProjectInfo {
+                name: "test".into(),
+            },
+            agent: Default::default(),
+            tracks: vec![TrackConfig {
+                id: "eff".into(),
+                name: "Eff".into(),
+                state: "active".into(),
+                file: "tracks/eff.md".into(),
+            }],
+            clean: CleanConfig::default(),
+            ids: IdConfig::default(),
+            ui: UiConfig::default(),
+        };
+        let project = Project {
+            root: std::path::PathBuf::from("/tmp/test"),
+            frame_dir: std::path::PathBuf::from("/tmp/test/frame"),
+            config,
+            tracks: vec![("eff".into(), track)],
+            inbox: None,
+        };
+
+        let index = App::build_dep_index(&project);
+        // The tokened upstream id maps to its tokened dependent, distinct from
+        // the null-namespace edge.
+        assert_eq!(
+            index.get("EFF-a14").map(Vec::as_slice),
+            Some(&["EFF-b2".to_string()][..])
+        );
+        assert_eq!(
+            index.get("EFF-14").map(Vec::as_slice),
+            Some(&["EFF-c3".to_string()][..])
+        );
+    }
 }

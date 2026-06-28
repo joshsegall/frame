@@ -2153,6 +2153,105 @@ mod tests {
         assert_eq!(id, "EFF-b10");
     }
 
+    // --- Token-namespace lookup / compare (Phase 5a) ---
+    //
+    // Every lookup compares the whole canonical id string
+    // (`task.id.as_deref() == Some(id)`), so a tokened target resolves to its
+    // own task and never to a same-prefix id in another namespace. These tests
+    // pin the shared primitive behind jump-to-task, `--after`, `--parent`,
+    // dep-add validation, and `expand_parent_chain`'s ancestor walk.
+
+    fn tokened_track() -> Track {
+        parse_track(
+            "\
+# Eff
+
+## Backlog
+
+- [ ] `EFF-a14` Tokened parent
+  - added: 2025-05-01
+  - [ ] `EFF-a14.b2` Tokened subtask
+    - added: 2025-05-01
+- [ ] `EFF-14` Null-namespace sibling
+  - added: 2025-05-02
+- [ ] `EFF-b14` Different-token sibling
+  - added: 2025-05-03
+
+## Done",
+        )
+    }
+
+    #[test]
+    fn test_find_task_resolves_tokened_id() {
+        let track = tokened_track();
+        // A tokened id resolves to its own task, distinct from the same-prefix
+        // ids in the null and `b` namespaces.
+        assert_eq!(
+            find_task_in_track(&track, "EFF-a14").unwrap().title,
+            "Tokened parent"
+        );
+        assert_eq!(
+            find_task_in_track(&track, "EFF-14").unwrap().title,
+            "Null-namespace sibling"
+        );
+        assert_eq!(
+            find_task_in_track(&track, "EFF-b14").unwrap().title,
+            "Different-token sibling"
+        );
+        // A tokened subtask resolves through segment boundaries; its parent id
+        // (the `expand_parent_chain` ancestor) resolves too.
+        assert_eq!(
+            find_task_in_track(&track, "EFF-a14.b2").unwrap().title,
+            "Tokened subtask"
+        );
+        let parent_id = "EFF-a14.b2".rsplit_once('.').unwrap().0;
+        assert_eq!(parent_id, "EFF-a14");
+        assert!(find_task_in_track(&track, parent_id).is_some());
+    }
+
+    #[test]
+    fn test_add_task_after_tokened_target() {
+        // `--after` resolves a tokened target id when inserting.
+        let mut track = tokened_track();
+        let new_id = add_task(
+            &mut track,
+            "Inserted".into(),
+            InsertPosition::After("EFF-a14".into()),
+            "EFF",
+            Some(&ns("a")),
+        )
+        .unwrap();
+        let backlog = track.backlog();
+        let pos = backlog
+            .iter()
+            .position(|t| t.id.as_deref() == Some(new_id.as_str()))
+            .unwrap();
+        // Landed immediately after the tokened target, not after a same-prefix
+        // id in another namespace.
+        assert_eq!(backlog[pos - 1].id.as_deref(), Some("EFF-a14"));
+    }
+
+    #[test]
+    fn test_add_dep_on_tokened_target() {
+        // dep-add validates against the tokened task; the same-prefix null id
+        // does not stand in for a missing tokened id.
+        let mut track = tokened_track();
+        let all_tracks = vec![("eff".to_string(), tokened_track())];
+
+        add_dep(&mut track, "EFF-14", "EFF-a14", &all_tracks).unwrap();
+        let task = find_task_in_track(&track, "EFF-14").unwrap();
+        assert!(
+            task.metadata
+                .iter()
+                .any(|m| matches!(m, Metadata::Dep(d) if d.contains(&"EFF-a14".to_string())))
+        );
+
+        // A dep on a non-existent tokened id is rejected even though the
+        // null-namespace `EFF-14` exists.
+        let err = add_dep(&mut track, "EFF-14", "EFF-c99", &all_tracks);
+        assert!(err.is_err());
+    }
+
     // --- Cross-track / reparent re-key into the mover's namespace (Phase 4) ---
 
     #[test]

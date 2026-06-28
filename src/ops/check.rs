@@ -984,6 +984,120 @@ mod tests {
         ));
     }
 
+    // --- Actor-token namespaces ---
+    //
+    // Duplicate detection and dep resolution operate on `TaskId`'s canonical
+    // text form (the `id.to_string()` keys in `collect_all_task_ids` /
+    // `find_duplicate_ids`), so distinct token namespaces are distinct ids and a
+    // genuine same-namespace collision still rides the existing duplicate report.
+
+    /// Keystone safety-net: the three duplicate cases under tokened ids.
+    /// `EFF-a14`/`EFF-a14` collide (same namespace), but `EFF-a14`/`EFF-14`
+    /// (token vs null) and `EFF-a14`/`EFF-b14` (different tokens) do not.
+    #[test]
+    fn test_check_duplicate_token_namespaces() {
+        let tmp = TempDir::new().unwrap();
+        let project = make_project_at(
+            tmp.path(),
+            "\
+# Main
+
+## Backlog
+
+- [ ] `EFF-a14` Same namespace, occurrence one
+  - added: 2025-05-01
+- [ ] `EFF-a14` Same namespace, occurrence two
+  - added: 2025-05-02
+- [ ] `EFF-14` Null namespace, not a dup of a14
+  - added: 2025-05-03
+- [ ] `EFF-b14` Different token, not a dup of a14
+  - added: 2025-05-04
+
+## Done
+",
+        );
+
+        let result = check_project(&project);
+
+        // Exactly the same-namespace pair is reported.
+        let dups: Vec<&String> = result
+            .errors
+            .iter()
+            .filter_map(|e| match e {
+                CheckError::DuplicateId { task_id, .. } => Some(task_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(dups, vec![&"EFF-a14".to_string()]);
+        // The cross-namespace ids are NOT flagged as duplicates.
+        assert!(!dups.iter().any(|id| *id == "EFF-14"));
+        assert!(!dups.iter().any(|id| *id == "EFF-b14"));
+    }
+
+    /// A healthy project mixing null and tokened ids, with deps that cross
+    /// namespaces, validates clean.
+    #[test]
+    fn test_check_clean_tokened_project() {
+        let tmp = TempDir::new().unwrap();
+        let project = make_project_at(
+            tmp.path(),
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Null-namespace task
+  - added: 2025-05-01
+- [ ] `M-a1` Tokened task depending on a null id
+  - added: 2025-05-02
+  - dep: M-001
+- [ ] `M-b2` Another tokened task depending on a tokened id
+  - added: 2025-05-03
+  - dep: M-a1
+  - [ ] `M-b2.c1` Tokened subtask depending on a null id
+    - added: 2025-05-04
+    - dep: M-001
+
+## Done
+",
+        );
+
+        let result = check_project(&project);
+        assert!(result.valid, "expected valid, got {:?}", result.errors);
+        assert!(result.errors.is_empty());
+    }
+
+    /// A dep on a non-existent tokened id is dangling; a same-prefix id in a
+    /// different namespace does not satisfy it.
+    #[test]
+    fn test_check_dangling_dep_tokened() {
+        let tmp = TempDir::new().unwrap();
+        let project = make_project_at(
+            tmp.path(),
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-014` A null-namespace task
+  - added: 2025-05-01
+- [ ] `M-a1` Depends on a tokened id that does not exist
+  - added: 2025-05-02
+  - dep: M-a14
+
+## Done
+",
+        );
+
+        let result = check_project(&project);
+        assert!(!result.valid);
+        // `M-a14` is dangling even though the null-namespace `M-014` exists.
+        assert!(result.errors.iter().any(|e| matches!(
+            e,
+            CheckError::DanglingDep { dep_id, .. } if dep_id == "M-a14"
+        )));
+    }
+
     // --- JSON serialization ---
 
     #[test]

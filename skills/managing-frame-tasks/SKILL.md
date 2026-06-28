@@ -48,7 +48,12 @@ here sort first in `fr ready --cc`.
 
 ### Metadata
 
-- **ID** — track-prefixed (e.g., `EFF-014`). Subtasks use dots: `EFF-014.1`
+- **ID** — track-prefixed (e.g., `EFF-014`). Subtasks use dots: `EFF-014.1`.
+  An ID may carry a per-working-copy **actor token** before the number
+  (`EFF-a14`, subtask `EFF-a14.b2`) so concurrent unsynced clones never collide.
+  The token is part of the ID, not a decoration — never strip it. IDs stay
+  copy-paste-stable: pass them verbatim to `--after`, `dep`, `show`, `state`,
+  etc. `EFF-a14`, `EFF-14`, and `EFF-b14` are three distinct tasks.
 - **Tags** — `#cc`, `#cc-added`, `#bug`, `#needs-input`, `#research`, `#design`
 - **dep:** — IDs of blocking tasks
 - **spec:** — path to spec this task implements

@@ -1165,6 +1165,116 @@ file = "tracks/old.md"
         );
     }
 
+    /// Prefix rename must replace only the prefix and preserve the token,
+    /// number, and any `.child` suffix verbatim — across tasks, subtasks,
+    /// cross-track dep refs, and the archive file on disk.
+    #[test]
+    fn test_rename_track_prefix_preserves_token() {
+        let track_content = "\
+# Effects
+
+## Backlog
+
+- [ ] `EFF-a14` Tokened task
+  - [ ] `EFF-a14.b2` Tokened subtask
+- [ ] `EFF-14` Null-namespace task
+  - dep: EFF-a14
+
+## Done
+";
+        let other_track_content = "\
+# Other
+
+## Backlog
+
+- [ ] `OTH-001` Dependent
+  - dep: EFF-a14, EFF-a14.b2, EFF-14
+
+## Done
+";
+        let mut config = ProjectConfig {
+            project: crate::model::config::ProjectInfo {
+                name: "test".into(),
+            },
+            agent: Default::default(),
+            tracks: vec![],
+            clean: Default::default(),
+            ids: crate::model::config::IdConfig {
+                prefixes: [
+                    ("effects".into(), "EFF".into()),
+                    ("other".into(), "OTH".into()),
+                ]
+                .into(),
+            },
+            ui: Default::default(),
+        };
+
+        let mut tracks = vec![
+            (
+                "effects".to_string(),
+                crate::parse::parse_track(track_content),
+            ),
+            (
+                "other".to_string(),
+                crate::parse::parse_track(other_track_content),
+            ),
+        ];
+
+        let result = rename_track_prefix(&mut config, &mut tracks, "effects", "EFF", "FX").unwrap();
+        assert_eq!(result.tasks_renamed, 3); // EFF-a14, EFF-a14.b2, EFF-14
+
+        // Token, number, and child suffix preserved; only the prefix changed.
+        let backlog = tracks[0].1.backlog();
+        assert_eq!(backlog[0].id.as_deref(), Some("FX-a14"));
+        assert_eq!(backlog[0].subtasks[0].id.as_deref(), Some("FX-a14.b2"));
+        assert_eq!(backlog[1].id.as_deref(), Some("FX-14"));
+
+        // Cross-track dep refs rewritten with tokens intact.
+        let other_deps: Vec<String> = tracks[1].1.backlog()[0]
+            .metadata
+            .iter()
+            .find_map(|m| match m {
+                crate::model::task::Metadata::Dep(d) => Some(d.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            other_deps,
+            vec![
+                "FX-a14".to_string(),
+                "FX-a14.b2".to_string(),
+                "FX-14".to_string()
+            ]
+        );
+
+        // Archive file on disk is rewritten with tokens preserved.
+        let tmp = TempDir::new().unwrap();
+        let archive_dir = tmp.path().join("frame").join("archive");
+        fs::create_dir_all(&archive_dir).unwrap();
+        fs::write(
+            archive_dir.join("effects.md"),
+            "\
+# Effects
+
+## Done
+
+- [x] `EFF-a1` Archived tokened
+  - [x] `EFF-a1.b1` Archived tokened subtask
+- [x] `EFF-002` Archived null
+",
+        )
+        .unwrap();
+
+        let count =
+            rename_archive_prefix(&tmp.path().join("frame"), "effects", "EFF", "FX").unwrap();
+        assert_eq!(count, 3);
+        let rewritten = fs::read_to_string(archive_dir.join("effects.md")).unwrap();
+        assert!(rewritten.contains("`FX-a1`"));
+        assert!(rewritten.contains("`FX-a1.b1`"));
+        assert!(rewritten.contains("`FX-002`"));
+        assert!(!rewritten.contains("EFF-"));
+    }
+
     #[test]
     fn test_rename_track_prefix_collision() {
         let mut config = ProjectConfig {
