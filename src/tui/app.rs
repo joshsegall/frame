@@ -928,6 +928,10 @@ pub struct App {
     /// Set to true after a project switch so the event loop can reinitialize the file watcher
     pub watcher_needs_restart: bool,
     pub theme: Theme,
+    /// This clone's actor token as read from `.actor` at startup (non-claiming):
+    /// `Some("a")` tokened, `Some("null")` primary, `None` unclaimed. Display
+    /// only — surfaced compactly on the Tracks overview header.
+    pub actor_token: Option<String>,
     /// IDs of active tracks (in display order)
     pub active_track_ids: Vec<String>,
     /// Per-track view state
@@ -1129,6 +1133,9 @@ impl App {
         let theme = Theme::from_config(&project.config.ui);
         let note_wrap = project.config.ui.note_wrap;
 
+        // Read-only: surface which clone we're on; never claims a token.
+        let actor_token = crate::io::actors::read_actor_token(&project.frame_dir);
+
         let initial_view = if active_track_ids.is_empty() {
             View::Tracks
         } else {
@@ -1168,6 +1175,7 @@ impl App {
             should_quit: false,
             watcher_needs_restart: false,
             theme,
+            actor_token,
             active_track_ids,
             track_states,
             tracks_cursor: 0,

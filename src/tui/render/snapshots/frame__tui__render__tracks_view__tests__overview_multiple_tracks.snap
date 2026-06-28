@@ -2,7 +2,7 @@
 source: src/tui/render/tracks_view.rs
 expression: output
 ---
- Project: Test
+ Project: Test · actor: unclaimed
            pfx   todo  act  blk done park
  Active           [ ]  [>]  [-]  [x]  [~]
 ▎1  Alpha  ALPHA    1    1    0    1    0

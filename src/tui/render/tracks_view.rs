@@ -4,6 +4,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use crate::io::actors;
 use crate::ops::track_ops::task_counts;
 use crate::tui::app::{App, EditTarget, Mode};
 use crate::util::unicode;
@@ -74,14 +75,33 @@ pub fn render_tracks_view(frame: &mut Frame, app: &mut App, area: Rect) {
     // border(1) + num + "  " + name + "  " + id
     let name_col = 1 + num_width + 2 + max_name_len + 2 + max_id_len;
 
-    // Project name header
-    lines.push(Line::from(Span::styled(
+    // Project name header, with this clone's actor token as a compact dim
+    // suffix (`· actor: a` / `· primary` / `· unclaimed`). Read-only display.
+    let project_span = Span::styled(
         format!(" Project: {}", app.project.config.project.name),
         Style::default()
             .fg(app.theme.text)
             .bg(app.theme.background)
             .add_modifier(Modifier::BOLD),
-    )));
+    );
+    let actor_text = format!(
+        " · actor: {}",
+        actors::actor_label(app.actor_token.as_deref())
+    );
+    let project_w = unicode::display_width(&project_span.content);
+    let actor_w = unicode::display_width(&actor_text);
+    // The actor segment is the first thing to drop if the line is tight.
+    if project_w + actor_w <= area.width as usize {
+        lines.push(Line::from(vec![
+            project_span,
+            Span::styled(
+                actor_text,
+                Style::default().fg(app.theme.dim).bg(app.theme.background),
+            ),
+        ]));
+    } else {
+        lines.push(Line::from(project_span));
+    }
 
     // Top header: short state names aligned to stat columns
     lines.push(render_col_names(app, name_col, max_id_len));
@@ -807,5 +827,61 @@ mod tests {
             render_tracks_view(frame, &mut app, area);
         });
         assert_snapshot!(output);
+    }
+
+    /// The overview header shows the actor segment for each of the three states.
+    /// `app_with_track` points at a non-existent frame dir, so the default state
+    /// is unclaimed; the tokened/primary cases set the cached token directly.
+    fn header_line_for(token: Option<&str>) -> String {
+        let mut app = app_with_track(SIMPLE_TRACK_MD);
+        app.view = crate::tui::app::View::Tracks;
+        app.actor_token = token.map(|s| s.to_string());
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_tracks_view(frame, &mut app, area);
+        });
+        output.lines().next().unwrap_or_default().to_string()
+    }
+
+    #[test]
+    fn overview_header_actor_tokened() {
+        assert_eq!(header_line_for(Some("a")), " Project: Test · actor: a");
+    }
+
+    #[test]
+    fn overview_header_actor_primary() {
+        assert_eq!(
+            header_line_for(Some("null")),
+            " Project: Test · actor: primary"
+        );
+    }
+
+    #[test]
+    fn overview_header_actor_unclaimed() {
+        assert_eq!(header_line_for(None), " Project: Test · actor: unclaimed");
+    }
+
+    /// Rendering the overview on an unclaimed clone must not write `.actor` or
+    /// `actors.toml` (no claim-on-render).
+    #[test]
+    fn overview_render_writes_nothing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+
+        let mut project = project_with_track("test", "Test", SIMPLE_TRACK_MD);
+        project.frame_dir = frame_dir.clone();
+        let mut app = App::new(project);
+        app.view = crate::tui::app::View::Tracks;
+        assert_eq!(app.actor_token, None, "frame dir has no .actor");
+
+        let _ = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_tracks_view(frame, &mut app, area);
+        });
+
+        assert!(!frame_dir.join(".actor").exists(), "must not write .actor");
+        assert!(
+            !frame_dir.join("actors.toml").exists(),
+            "must not write actors.toml"
+        );
     }
 }

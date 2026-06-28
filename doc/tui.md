@@ -12,6 +12,8 @@ The default view. Shows a single track's tasks as an indented tree with expand/c
 
 Overview of all tracks grouped by state (active, shelved, archived) with task count statistics. Switch to it with `0` or `` ` ``.
 
+The header line shows the project name followed by this clone's actor token as a compact dim suffix — `Project: NAME · actor: a` (the literal token), `· actor: primary` for the null/primary clone, or `· actor: unclaimed` when no token is set. This is a read-only indicator (it never claims a token); see `fr info` and `fr actor` for the full surface.
+
 ### Board View
 
 A kanban-style cross-track view showing tasks in three columns: Ready, In Progress, and Done. Switch to it with `K`.

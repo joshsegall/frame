@@ -2239,3 +2239,95 @@ fn test_actor_set_owned_by_another_refused() {
     let combined = format!("{stdout}{stderr}");
     assert!(combined.contains("already claimed"), "combined: {combined}");
 }
+
+// ---------------------------------------------------------------------------
+// `fr info` tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_info_human_primary() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path()); // .actor = null
+
+    let out = run_fr_ok(tmp.path(), &["info"]);
+    assert!(out.contains("version"), "out: {out}");
+    assert!(out.contains(env!("CARGO_PKG_VERSION")), "out: {out}");
+    assert!(out.contains("test-project"), "out: {out}");
+    // null renders as the human-friendly "primary".
+    assert!(out.contains("actor"), "out: {out}");
+    assert!(out.contains("primary"), "out: {out}");
+    assert!(
+        !out.contains("null"),
+        "human output should not show literal null: {out}"
+    );
+    // Two active tracks (main, side).
+    assert!(out.contains("tracks"), "out: {out}");
+    assert!(out.contains('2'), "out: {out}");
+}
+
+#[test]
+fn test_info_json_primary() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path()); // .actor = null
+
+    let out = run_fr_ok(tmp.path(), &["info", "--json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(parsed["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(parsed["project"], "test-project");
+    assert_eq!(parsed["actor"], "null"); // primary is the literal string "null"
+    assert_eq!(parsed["tracks"], 2);
+    let frame_dir = parsed["frame_dir"].as_str().unwrap();
+    assert!(frame_dir.ends_with("frame"), "frame_dir: {frame_dir}");
+    assert!(
+        Path::new(frame_dir).is_absolute(),
+        "frame_dir should be absolute: {frame_dir}"
+    );
+}
+
+#[test]
+fn test_info_json_tokened() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    fs::write(tmp.path().join("frame/.actor"), "a\n").unwrap();
+
+    let out = run_fr_ok(tmp.path(), &["info", "--json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(parsed["actor"], "a");
+}
+
+#[test]
+fn test_info_json_unclaimed_is_read_only() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    // Remove the .actor file so the clone is unclaimed.
+    fs::remove_file(tmp.path().join("frame/.actor")).unwrap();
+    assert!(!tmp.path().join("frame/actors.toml").exists());
+
+    let out = run_fr_ok(tmp.path(), &["info", "--json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    // Unclaimed distinguishes as JSON null.
+    assert!(
+        parsed["actor"].is_null(),
+        "actor should be JSON null: {out}"
+    );
+
+    // Read-only invariant: running info must not claim a token.
+    assert!(
+        !tmp.path().join("frame/.actor").exists(),
+        "fr info must not create .actor"
+    );
+    assert!(
+        !tmp.path().join("frame/actors.toml").exists(),
+        "fr info must not create actors.toml"
+    );
+}
+
+#[test]
+fn test_info_human_unclaimed() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    fs::remove_file(tmp.path().join("frame/.actor")).unwrap();
+
+    let out = run_fr_ok(tmp.path(), &["info"]);
+    assert!(out.contains("unclaimed"), "out: {out}");
+}

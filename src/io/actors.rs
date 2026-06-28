@@ -419,6 +419,19 @@ pub fn read_actor_token(frame_dir: &Path) -> Option<String> {
     if token.is_empty() { None } else { Some(token) }
 }
 
+/// Human-facing label for this clone's actor token, as read by
+/// [`read_actor_token`]: `None` (no `.actor`) → `"unclaimed"`, `Some("null")` →
+/// `"primary"`, and any other token → the literal token. Used by passive
+/// surfaces (`fr info`, the TUI overview header) to show which clone you are on
+/// without claiming anything.
+pub fn actor_label(token: Option<&str>) -> &str {
+    match token {
+        None => "unclaimed",
+        Some("null") => "primary",
+        Some(t) => t,
+    }
+}
+
 /// Write this clone's token to `.actor`.
 pub fn write_actor_token(frame_dir: &Path, token: &str) -> std::io::Result<()> {
     let path = actor_token_path(frame_dir);

@@ -184,6 +184,7 @@ fr sub EFF-014 "Test with nested closures"
 | `fr recent --limit <n>` | Limit results (default: 20) |
 | `fr inbox` | List inbox items |
 | `fr check` | Validate project integrity (deps, refs, IDs) |
+| `fr info` | Project identity: version, name, frame dir, actor token, track count (report which clone you're on) |
 
 ### Creating tasks
 

@@ -41,6 +41,8 @@ pub enum Commands {
     Deps(DepsArgs),
     /// Validate project integrity
     Check,
+    /// Show project identity (version, name, frame dir, actor, track count)
+    Info,
     /// Add a task to a track's backlog (bottom)
     Add(AddArgs),
     /// Push a task to top of a track's backlog

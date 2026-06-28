@@ -145,6 +145,24 @@ fr deps EFF-014
 
 Validate project integrity (read-only). Reports dangling dependencies, broken refs/specs, duplicate IDs, missing metadata, and format warnings.
 
+### `fr info`
+
+Show project identity at a glance (read-only — never claims a token):
+
+| Field      | Description                                                        |
+|------------|--------------------------------------------------------------------|
+| `version`  | `fr` crate version                                                 |
+| `project`  | project name from `project.toml`                                   |
+| `frame_dir`| absolute path to the discovered `frame/` directory                 |
+| `actor`    | this clone's token — the literal token, `primary` (null), or `unclaimed` |
+| `tracks`   | count of active tracks                                             |
+
+```
+fr info [--json]
+```
+
+With `--json`, the `actor` field distinguishes all three states for machine consumers: a literal token string (`"a"`), `"null"` for the primary clone, and JSON `null` when unclaimed. The JSON object also includes `shelved_tracks` and `archived_tracks` counts.
+
 ## Task Creation
 
 ### `fr add TRACK TITLE`

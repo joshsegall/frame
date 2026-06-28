@@ -70,6 +70,7 @@ pub fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             Commands::Recent(args) => cmd_recent(args, json),
             Commands::Deps(args) => cmd_deps(args),
             Commands::Check => cmd_check(json),
+            Commands::Info => cmd_info(json),
 
             // Write commands
             Commands::Add(args) => cmd_add(args),
@@ -841,6 +842,73 @@ fn cmd_tracks(json: bool) -> Result<(), Box<dyn std::error::Error>> {
                 print_row(name, id, pfx, file, *is_cc);
             }
         }
+    }
+    Ok(())
+}
+
+/// Show project identity at a glance: version, name, frame dir, this clone's
+/// actor token, and track counts. Read-only — never claims a token.
+fn cmd_info(json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let project = load_project_cwd()?;
+    let frame_dir = &project.frame_dir;
+    // Non-claiming read of this clone's token.
+    let token = actors::read_actor_token(frame_dir);
+
+    let version = env!("CARGO_PKG_VERSION");
+    let name = &project.config.project.name;
+    let frame_dir_str = frame_dir.display().to_string();
+
+    let active = project
+        .config
+        .tracks
+        .iter()
+        .filter(|t| t.state == "active")
+        .count();
+    let shelved = project
+        .config
+        .tracks
+        .iter()
+        .filter(|t| t.state == "shelved")
+        .count();
+    let archived = project.config.tracks.len() - active - shelved;
+
+    if json {
+        #[derive(serde::Serialize)]
+        struct InfoJson {
+            version: String,
+            project: String,
+            frame_dir: String,
+            /// Literal token (`"a"`), `"null"` for primary, or JSON `null` when
+            /// unclaimed — so consumers can distinguish all three states.
+            actor: Option<String>,
+            tracks: usize,
+            shelved_tracks: usize,
+            archived_tracks: usize,
+        }
+        let info = InfoJson {
+            version: version.to_string(),
+            project: name.clone(),
+            frame_dir: frame_dir_str,
+            actor: token.clone(),
+            tracks: active,
+            shelved_tracks: shelved,
+            archived_tracks: archived,
+        };
+        println!("{}", serde_json::to_string_pretty(&info)?);
+        return Ok(());
+    }
+
+    println!("{:<10} {}", "version", version);
+    println!("{:<10} {}", "project", name);
+    println!("{:<10} {}", "frame_dir", frame_dir_str);
+    println!("{:<10} {}", "actor", actors::actor_label(token.as_deref()));
+    if shelved > 0 || archived > 0 {
+        println!(
+            "{:<10} {} active, {} shelved, {} archived",
+            "tracks", active, shelved, archived
+        );
+    } else {
+        println!("{:<10} {}", "tracks", active);
     }
     Ok(())
 }
