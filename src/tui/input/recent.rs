@@ -76,7 +76,7 @@ fn push_done_entry(
 ) {
     entries.push(RecentEntry {
         track_id: track_id.to_string(),
-        id: task.id.clone().unwrap_or_default(),
+        id: task.id.as_ref().map(|i| i.to_string()).unwrap_or_default(),
         title: task.title.clone(),
         resolved: resolved_date(task),
         track_name: track_name.to_string(),

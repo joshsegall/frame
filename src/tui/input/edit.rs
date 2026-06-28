@@ -176,7 +176,7 @@ pub(super) fn add_task_action(app: &mut App, pos: AddPosition) {
             app.edit_target = Some(EditTarget::NewTask {
                 task_id: sub_id.clone(),
                 track_id: track_id.clone(),
-                parent_id: Some(parent_id),
+                parent_id: Some(parent_id.to_string()),
             });
             app.pre_edit_cursor = saved_cursor;
             app.edit_history = Some(EditHistory::new("", 0, 0));
@@ -271,7 +271,7 @@ pub(super) fn add_subtask_action(app: &mut App) {
     app.edit_target = Some(EditTarget::NewTask {
         task_id: sub_id.clone(),
         track_id: track_id.clone(),
-        parent_id: Some(parent_id),
+        parent_id: Some(parent_id.to_string()),
     });
     app.edit_history = Some(EditHistory::new("", 0, 0));
     app.edit_is_fresh = true;
@@ -361,7 +361,7 @@ pub(super) fn append_sibling_action(app: &mut App) {
     app.edit_target = Some(EditTarget::NewTask {
         task_id: sub_id.clone(),
         track_id: track_id.clone(),
-        parent_id: Some(parent_id),
+        parent_id: Some(parent_id.to_string()),
     });
     app.pre_edit_cursor = saved_cursor;
     app.edit_history = Some(EditHistory::new("", 0, 0));
@@ -469,7 +469,7 @@ pub(super) fn outdent_new_subtask(app: &mut App) {
         app.edit_target = Some(EditTarget::NewTask {
             task_id: new_id.clone(),
             track_id: track_id.clone(),
-            parent_id: Some(grandparent_id),
+            parent_id: Some(grandparent_id.to_string()),
         });
         app.pre_edit_cursor = saved_cursor;
         app.edit_history = Some(EditHistory::new("", 0, 0));

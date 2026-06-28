@@ -127,7 +127,7 @@ pub fn task_to_json(task: &Task) -> TaskJson {
     }
 
     TaskJson {
-        id: task.id.clone(),
+        id: task.id.as_ref().map(|i| i.to_string()),
         title: task.title.clone(),
         state: task.state,
         tags: task.tags.clone(),

@@ -853,9 +853,9 @@ mod tests {
             "Frontend".to_string(),
         ];
         let prefixes = vec![
-            Some("INF".to_string()), // 3 chars
-            Some("BE".to_string()),  // 2 chars
-            Some("FE".to_string()),  // 2 chars
+            Some("INF".into()), // 3 chars
+            Some("BE".into()),  // 2 chars
+            Some("FE".into()),  // 2 chars
         ];
         // Width 36: shrinks all to 3, then FE swaps at 2 → fits at 36.
         // INF swaps at 3 (same-size swap), but Bac(3) stays since BE is 2 chars.
@@ -875,7 +875,7 @@ mod tests {
     fn test_prefix_swap_is_zero_width() {
         // Prefix swap doesn't cause extra shrinking — rightmost shrinks first
         let names = vec!["Alpha".to_string(), "Bravo".to_string()];
-        let prefixes = vec![Some("ALP".to_string()), Some("BRV".to_string())];
+        let prefixes = vec![Some("ALP".into()), Some("BRV".into())];
         // Full: 8+8+19=35. Width 32: need 3 chars removed.
         // Bravo(rightmost) 5→4, Alpha 5→4, Bravo 4→3 (swap BRV) → 7+6+19=32 fits.
         // Alpha stays at "Alph"(4), not over-shrunk.
@@ -895,10 +895,10 @@ mod tests {
             "DDDD".to_string(),
         ];
         let prefixes = vec![
-            Some("AAAA".to_string()),
-            Some("BBBB".to_string()),
-            Some("CCCC".to_string()),
-            Some("DDDD".to_string()),
+            Some("AAAA".into()),
+            Some("BBBB".into()),
+            Some("CCCC".into()),
+            Some("DDDD".into()),
         ];
         // At 4 chars: 7*4=28, +19=47. Width 43: need all at 3 (6*4=24, +19=43).
         let layout = compute_tab_layout(&names, &prefixes, None, 43, 0, 0);

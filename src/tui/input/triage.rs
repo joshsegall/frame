@@ -1,6 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::model::SectionKind;
+use crate::model::task_id::TaskId;
 use crate::ops::task_ops::{self, InsertPosition};
 use crate::util::unicode;
 
@@ -699,7 +700,7 @@ pub(super) fn execute_cross_track_move(
         None => return,
     };
     let new_num = task_ops::next_id_number(target_track, &target_prefix);
-    let new_id = format!("{}-{:03}", target_prefix, new_num);
+    let new_id = TaskId::with_number(&target_prefix, new_num as u32);
     let old_id = task_id.clone();
 
     // Set new ID and depth
@@ -745,7 +746,7 @@ pub(super) fn execute_cross_track_move(
         source_track_id: source_track_id.clone(),
         target_track_id: target_track_id.to_string(),
         task_id_old: old_id.clone(),
-        task_id_new: new_id.clone(),
+        task_id_new: new_id.to_string(),
         source_index,
         target_index,
         source_parent_id,
@@ -819,9 +820,13 @@ pub(super) fn execute_bulk_cross_track_move(
         backlog
             .iter()
             .filter_map(|t| {
-                t.id.as_ref()
-                    .filter(|id| app.selection.contains(*id))
-                    .cloned()
+                t.id.as_ref().and_then(|id| {
+                    if app.selection.contains(&**id) {
+                        Some(id.to_string())
+                    } else {
+                        None
+                    }
+                })
             })
             .collect()
     };
@@ -846,7 +851,7 @@ pub(super) fn execute_bulk_cross_track_move(
             None => continue,
         };
         let new_num = task_ops::next_id_number(target_track, &target_prefix);
-        let new_id = format!("{}-{:03}", target_prefix, new_num);
+        let new_id = TaskId::with_number(&target_prefix, new_num as u32);
 
         // Remove from source
         let source_track = match app.find_track_mut(&source_track_id) {
@@ -912,14 +917,14 @@ pub(super) fn execute_bulk_cross_track_move(
             source_track_id: source_track_id.clone(),
             target_track_id: target_track_id.to_string(),
             task_id_old: old_id,
-            task_id_new: new_id.clone(),
+            task_id_new: new_id.to_string(),
             source_index,
             target_index,
             source_parent_id: None,
             old_depth: 0,
         });
 
-        new_ids.push(new_id);
+        new_ids.push(new_id.to_string());
     }
 
     if !ops.is_empty() {

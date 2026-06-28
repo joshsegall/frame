@@ -272,7 +272,7 @@ fn collect_all_task_ids(project: &Project) -> HashSet<String> {
 fn collect_ids_from_tasks(tasks: &[Task], ids: &mut HashSet<String>) {
     for task in tasks {
         if let Some(ref id) = task.id {
-            ids.insert(id.clone());
+            ids.insert(id.to_string());
         }
         collect_ids_from_tasks(&task.subtasks, ids);
     }
@@ -306,7 +306,7 @@ fn collect_id_locations(
     for task in tasks {
         if let Some(ref id) = task.id {
             id_to_tracks
-                .entry(id.clone())
+                .entry(id.to_string())
                 .or_default()
                 .push(track_id.to_string());
         }

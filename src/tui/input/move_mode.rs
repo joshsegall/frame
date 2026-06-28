@@ -3,6 +3,7 @@ use std::collections::HashSet;
 
 use crate::model::SectionKind;
 use crate::model::task::Task;
+use crate::model::task_id::TaskId;
 use crate::model::track::Track;
 use crate::ops::task_ops::{self, InsertPosition};
 
@@ -123,15 +124,20 @@ pub(super) fn handle_move(app: &mut App, key: KeyEvent) {
                                     let new_id = match &cur_loc.parent_id {
                                         None => {
                                             let next = task_ops::next_id_number(track_mut, &prefix);
-                                            format!("{}-{:03}", prefix, next)
+                                            TaskId::with_number(&prefix, next as u32)
                                         }
                                         Some(pid) => {
+                                            // Gap-safe child number via the shared primitive:
+                                            // the task is already inserted under its new parent,
+                                            // but still carries its old ID, so it is not counted.
                                             let parent =
                                                 task_ops::find_task_in_track(track_mut, pid);
-                                            let child_num = parent.map_or(1, |p| p.subtasks.len());
-                                            // The task is already inserted, so the current count includes it
-                                            // We need to find its current position to get the right number
-                                            format!("{}.{}", pid, child_num)
+                                            let parent_tid = parent
+                                                .and_then(|p| p.id.clone())
+                                                .unwrap_or_else(|| TaskId::parse(pid));
+                                            let child_num =
+                                                parent.map_or(1, task_ops::next_child_number);
+                                            TaskId::child_of(&parent_tid, child_num as u32)
                                         }
                                     };
 
@@ -176,7 +182,7 @@ pub(super) fn handle_move(app: &mut App, key: KeyEvent) {
 
                                         app.undo_stack.push(Operation::Reparent {
                                             track_id: track_id.clone(),
-                                            new_task_id: new_id.clone(),
+                                            new_task_id: new_id.to_string(),
                                             old_parent_id: original_parent_id,
                                             new_parent_id: cur_loc.parent_id,
                                             old_sibling_index: original_sibling_index,
@@ -256,7 +262,7 @@ pub(super) fn handle_move(app: &mut App, key: KeyEvent) {
                             if let Some(id) = &task.id {
                                 ops.push(Operation::TaskMove {
                                     track_id: track_id.clone(),
-                                    task_id: id.clone(),
+                                    task_id: id.to_string(),
                                     parent_id: None,
                                     old_index: *orig_idx,
                                     new_index: insert_pos,
@@ -741,7 +747,7 @@ pub(super) fn collect_at_depth(
 ) {
     if current_depth == target_depth {
         if let Some(ref id) = task.id {
-            result.push(id.clone());
+            result.push(id.to_string());
         }
         return;
     }

@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
 
+use crate::model::task_id::TaskId;
+
 /// Task checkbox state
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -75,7 +77,7 @@ pub struct Task {
     /// Checkbox state
     pub state: TaskState,
     /// Optional task ID like `EFF-014` or `EFF-014.2`
-    pub id: Option<String>,
+    pub id: Option<TaskId>,
     /// Task title text
     pub title: String,
     /// Tags (without the `#` prefix)
@@ -101,7 +103,7 @@ pub struct Task {
 
 impl Task {
     /// Create a new task with the given fields, marked dirty (no source)
-    pub fn new(state: TaskState, id: Option<String>, title: String) -> Self {
+    pub fn new(state: TaskState, id: Option<TaskId>, title: String) -> Self {
         Task {
             state,
             id,

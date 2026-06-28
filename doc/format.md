@@ -63,6 +63,27 @@ INDENT- [STATE] `ID` Title text #tag1 #tag2
 
 **ID** (optional): Enclosed in backticks after the checkbox. Format: `PREFIX-NNN` for top-level, `PREFIX-NNN.N` for subtasks, `PREFIX-NNN.N.N` for sub-subtasks.
 
+The ID grammar is:
+
+```
+task_id  = prefix "-" segment ("." segment)*
+segment  = token? number
+token    = one or more lowercase letters   (omitted = "null" / default namespace)
+number   = digits
+prefix   = the track's configured prefix (e.g. EFF)
+```
+
+A segment is a maximal run of lowercase letters (the optional token) followed by
+a maximal run of digits (the number); because letters and digits are disjoint no
+delimiter is needed between them. Today frame mints only tokenless (null
+namespace) IDs like `EFF-014` and `EFF-014.2`; the optional token (e.g.
+`EFF-a14`) is reserved for future use.
+
+**Literal passthrough**: any backtick-wrapped ID that does not match this grammar
+(including legacy or hand-written IDs) is preserved verbatim on round-trip and is
+ignored when frame computes the next ID to mint, so it never perturbs numbering.
+Zero-padding in the number is preserved (`EFF-014` stays `EFF-014`).
+
 **Tags** (optional): `#word` tokens at the end of the line. Parsed right-to-left from the end; only trailing `#word` sequences are recognized as tags.
 
 Examples:

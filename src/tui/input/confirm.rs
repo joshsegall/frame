@@ -198,7 +198,7 @@ pub(super) fn reopen_recent_task(app: &mut App) {
         let _ = app.undo_stack.undo(&mut app.project.tracks, inbox);
 
         let _ = app.save_track(&track_id);
-        app.status_message = Some("Re-closed".to_string());
+        app.status_message = Some("Re-closed".into());
         return;
     }
 

@@ -5,8 +5,9 @@ use chrono::Local;
 
 use crate::model::project::Project;
 use crate::model::task::{Metadata, Task, TaskState};
+use crate::model::task_id::TaskId;
 use crate::model::track::{SectionKind, Track, TrackNode};
-use crate::ops::task_ops::find_max_id_in_track;
+use crate::ops::task_ops::{find_max_id_in_track, renumber_subtasks};
 
 /// Result of a clean operation
 #[derive(Debug, Default)]
@@ -178,7 +179,7 @@ fn reconcile_sections_for_track(
                 if target != *kind
                     && let Some(ref id) = task.id
                 {
-                    moves.push((id.clone(), *kind, target));
+                    moves.push((id.to_string(), *kind, target));
                 }
             }
         }
@@ -355,20 +356,20 @@ fn assign_missing_ids(track: &mut Track, track_id: &str, prefix: &str, result: &
 fn assign_ids_in_tasks(
     tasks: &mut [Task],
     track_id: &str,
-    _prefix: &str,
-    prefix_dash: &str,
+    prefix: &str,
+    _prefix_dash: &str,
     max: &mut usize,
     result: &mut CleanResult,
 ) {
     for task in tasks.iter_mut() {
         if task.id.is_none() {
             *max += 1;
-            let new_id = format!("{}{:03}", prefix_dash, max);
+            let new_id = TaskId::with_number(prefix, *max as u32);
             task.id = Some(new_id.clone());
             task.mark_dirty();
             result.ids_assigned.push(IdAssignment {
                 track_id: track_id.to_string(),
-                assigned_id: new_id,
+                assigned_id: new_id.to_string(),
                 title: task.title.clone(),
             });
         }
@@ -386,13 +387,12 @@ fn assign_subtask_ids(parent: &mut Task, track_id: &str, result: &mut CleanResul
 
     // Find the max existing child number to avoid collisions after deletions.
     // E.g., if subtasks are [.1, .2, .4] (after deleting .3), next should be .5 not .4.
-    let prefix = format!("{}.", parent_id);
-    let mut max_num: usize = 0;
+    let mut max_num: u32 = 0;
     for sub in parent.subtasks.iter() {
-        if let Some(ref id) = sub.id
-            && let Some(suffix) = id.strip_prefix(&prefix)
-            && !suffix.contains('.')
-            && let Ok(n) = suffix.parse::<usize>()
+        if let Some(n) = sub
+            .id
+            .as_ref()
+            .and_then(|id| id.child_number_of(&parent_id))
         {
             max_num = max_num.max(n);
         }
@@ -401,12 +401,12 @@ fn assign_subtask_ids(parent: &mut Task, track_id: &str, result: &mut CleanResul
     for sub in parent.subtasks.iter_mut() {
         if sub.id.is_none() {
             max_num += 1;
-            let sub_id = format!("{}{}", prefix, max_num);
+            let sub_id = TaskId::child_of(&parent_id, max_num);
             sub.id = Some(sub_id.clone());
             sub.mark_dirty();
             result.ids_assigned.push(IdAssignment {
                 track_id: track_id.to_string(),
-                assigned_id: sub_id,
+                assigned_id: sub_id.to_string(),
                 title: sub.title.clone(),
             });
         }
@@ -444,7 +444,7 @@ fn assign_dates_in_tasks(
             task.mark_dirty();
             result.dates_assigned.push(DateAssignment {
                 track_id: track_id.to_string(),
-                task_id: task.id.clone().unwrap_or_default(),
+                task_id: task.id.as_ref().map(|i| i.to_string()).unwrap_or_default(),
                 date: today.to_string(),
             });
         }
@@ -552,17 +552,16 @@ fn resolve_duplicate_ids(project: &mut Project, result: &mut CleanResult) {
         find_max_id_in_track(track, &prefix_dash, &mut max);
         // Also account for any already-assigned new IDs in this batch
         for new_id in reassignments.values().flatten() {
-            if let Some(n) = new_id
-                .strip_prefix(&prefix_dash)
-                .and_then(|s| s.split('.').next())
-                .and_then(|s| s.parse::<usize>().ok())
+            if let Some(n) = TaskId::parse(new_id)
+                .top_level_number(&pfx)
+                .map(|n| n as usize)
                 .filter(|&n| n > max)
             {
                 max = n;
             }
         }
 
-        let new_id = format!("{}{:03}", prefix_dash, max + 1);
+        let new_id = TaskId::with_number(&pfx, (max + 1) as u32).to_string();
         reassignments
             .entry(old_id.clone())
             .or_default()
@@ -603,9 +602,13 @@ fn find_duplicates_in_tasks(
     duplicates: &mut Vec<(String, String, String)>,
 ) {
     for task in tasks {
-        if task.id.as_ref().is_some_and(|id| !seen.insert(id.clone())) {
+        if task
+            .id
+            .as_ref()
+            .is_some_and(|id| !seen.insert(id.to_string()))
+        {
             let id = task.id.as_ref().unwrap();
-            duplicates.push((id.clone(), track_id.to_string(), task.title.clone()));
+            duplicates.push((id.to_string(), track_id.to_string(), task.title.clone()));
         }
         find_duplicates_in_tasks(&task.subtasks, track_id, seen, duplicates);
     }
@@ -622,17 +625,18 @@ fn apply_duplicate_reassignments(
     result: &mut CleanResult,
 ) {
     for task in tasks.iter_mut() {
-        if let Some(old_id) = task
+        let dup_old: Option<String> = task
             .id
-            .clone()
-            .filter(|id| reassignments.contains_key(id) && !seen.insert(id.clone()))
-        {
+            .as_ref()
+            .map(|id| id.to_string())
+            .filter(|id| reassignments.contains_key(id) && !seen.insert(id.clone()));
+        if let Some(old_id) = dup_old {
             // This is a duplicate occurrence — reassign
             let cursor = cursors.entry(old_id.clone()).or_insert(0);
             if let Some(new_id) = reassignments.get(&old_id).and_then(|ids| ids.get(*cursor)) {
-                task.id = Some(new_id.clone());
+                task.id = Some(TaskId::parse(new_id));
                 task.mark_dirty();
-                renumber_subtask_ids(task, new_id);
+                renumber_subtasks(task, new_id);
                 result.duplicates_resolved.push(DuplicateResolution {
                     track_id: track_id.to_string(),
                     original_id: old_id.clone(),
@@ -650,16 +654,6 @@ fn apply_duplicate_reassignments(
             seen,
             result,
         );
-    }
-}
-
-/// After reassigning a parent's ID, renumber its subtasks to use the new parent ID.
-fn renumber_subtask_ids(parent: &mut Task, new_parent_id: &str) {
-    for (i, sub) in parent.subtasks.iter_mut().enumerate() {
-        let new_sub_id = format!("{}.{}", new_parent_id, i + 1);
-        sub.id = Some(new_sub_id.clone());
-        sub.mark_dirty();
-        renumber_subtask_ids(sub, &new_sub_id);
     }
 }
 
@@ -782,7 +776,7 @@ fn collect_suggestions_in_tasks(tasks: &[Task], track_id: &str, result: &mut Cle
         {
             result.suggestions.push(Suggestion {
                 track_id: track_id.to_string(),
-                task_id: task.id.clone().unwrap_or_default(),
+                task_id: task.id.as_ref().map(|i| i.to_string()).unwrap_or_default(),
                 kind: SuggestionKind::AllSubtasksDone,
             });
         }
@@ -889,7 +883,7 @@ fn archive_done_tasks(project: &mut Project, result: &mut CleanResult) {
         for task in &archived {
             result.tasks_archived.push(ArchiveRecord {
                 track_id: track_id.clone(),
-                task_id: task.id.clone().unwrap_or_default(),
+                task_id: task.id.as_ref().map(|i| i.to_string()).unwrap_or_default(),
                 title: task.title.clone(),
             });
         }
@@ -946,7 +940,7 @@ fn collect_all_task_ids(project: &Project) -> HashSet<String> {
 fn collect_ids_from_tasks(tasks: &[Task], ids: &mut HashSet<String>) {
     for task in tasks {
         if let Some(ref id) = task.id {
-            ids.insert(id.clone());
+            ids.insert(id.to_string());
         }
         collect_ids_from_tasks(&task.subtasks, ids);
     }

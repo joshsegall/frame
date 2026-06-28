@@ -574,11 +574,15 @@ pub fn rename_task_ids(
 ) -> usize {
     let mut count = 0;
     for task in tasks.iter_mut() {
-        if let Some(ref mut id) = task.id
-            && let Some(rest) = id.strip_prefix(old_prefix)
-            && rest.starts_with('-')
-        {
-            *id = format!("{}{}", new_prefix, rest);
+        let renamed = task.id.as_ref().and_then(|id| {
+            id.strip_prefix(old_prefix)
+                .filter(|rest| rest.starts_with('-'))
+                .map(|rest| {
+                    crate::model::task_id::TaskId::parse(&format!("{}{}", new_prefix, rest))
+                })
+        });
+        if let Some(new_id) = renamed {
+            task.id = Some(new_id);
             task.mark_dirty();
             count += 1;
         }

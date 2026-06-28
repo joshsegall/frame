@@ -12,6 +12,7 @@ static PROJECT_DIR_OVERRIDE: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 use crate::cli::commands::*;
 use crate::cli::output::*;
+use crate::io::actors;
 use crate::io::config_io;
 use crate::io::lock::FileLock;
 use crate::io::project_io::{self, ProjectError};
@@ -47,6 +48,9 @@ pub fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
             // Project registry (doesn't require a project context)
             Commands::Projects(args) => cmd_projects(args, json),
+
+            // Actor token management
+            Commands::Actor(args) => cmd_actor(args, json),
 
             // Read commands
             Commands::List(args) => cmd_list(args, json),
@@ -1710,7 +1714,7 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 if target_idx < backlog.len() {
                     if let Some(ref after_task_id) = backlog[target_idx].id {
-                        task_ops::InsertPosition::After(after_task_id.clone())
+                        task_ops::InsertPosition::After(after_task_id.to_string())
                     } else {
                         task_ops::InsertPosition::Bottom
                     }
@@ -2375,6 +2379,288 @@ fn cmd_delete(args: DeleteArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     for (_, task_id) in &to_delete {
         println!("deleted {}", task_id);
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Actor token handlers
+// ---------------------------------------------------------------------------
+
+fn cmd_actor(args: ActorCmd, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    match args.action {
+        None => cmd_actor_status(json),
+        Some(ActorAction::Claim(a)) => cmd_actor_claim(a, json),
+        Some(ActorAction::Set(a)) => cmd_actor_set(a, json),
+        Some(ActorAction::Retire(a)) => cmd_actor_retire(a, json),
+        Some(ActorAction::List) => cmd_actor_list(json),
+    }
+}
+
+/// Read registry + this clone's token, claim `token`, and persist both files.
+fn finalize_claim(
+    frame_dir: &std::path::Path,
+    reg: &mut actors::ActorRegistry,
+    token: &str,
+    name: &str,
+) -> Result<actors::ClaimOutcome, Box<dyn std::error::Error>> {
+    let current = actors::read_actor_token(frame_dir);
+    let outcome = reg.claim(token, name, current.as_deref(), &actors::today())?;
+    actors::write_actors(frame_dir, reg)?;
+    actors::write_actor_token(frame_dir, token)?;
+    Ok(outcome)
+}
+
+fn thin_frontier_notice(reg: &actors::ActorRegistry) {
+    if reg.is_thin_frontier() {
+        let remaining = reg.never_used_frontier().len();
+        eprintln!(
+            "note: only {} unused token(s) remain — explicit `fr actor set <token>` is recommended.",
+            remaining
+        );
+    }
+}
+
+fn cmd_actor_status(json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let project = load_project_cwd()?;
+    let frame_dir = &project.frame_dir;
+    let reg = actors::read_actors(frame_dir)?;
+    let token = actors::read_actor_token(frame_dir);
+    let entry = token.as_ref().and_then(|t| reg.actors.get(t));
+    let frontier_remaining = reg.never_used_frontier().len();
+
+    if json {
+        #[derive(serde::Serialize)]
+        struct StatusJson {
+            token: Option<String>,
+            claimed: bool,
+            primary: bool,
+            in_registry: bool,
+            state: Option<String>,
+            name: Option<String>,
+            frontier_remaining: usize,
+            thin_frontier: bool,
+        }
+        let status = StatusJson {
+            primary: token.as_deref() == Some("null"),
+            in_registry: entry.is_some(),
+            state: entry.map(|e| e.state.clone()),
+            name: entry.map(|e| e.name.clone()),
+            claimed: token.is_some(),
+            token: token.clone(),
+            frontier_remaining,
+            thin_frontier: reg.is_thin_frontier(),
+        };
+        println!("{}", serde_json::to_string_pretty(&status)?);
+        return Ok(());
+    }
+
+    match &token {
+        None => {
+            println!("This working copy is unclaimed (operating as primary / legacy, untokened).");
+            println!(
+                "Run `fr actor claim` to claim a token, or `fr actor set null` to record this clone as primary."
+            );
+        }
+        Some(tok) if tok == "null" => {
+            println!("Token: null — primary (untokened)");
+            if entry.is_none() {
+                println!(
+                    "warning: token 'null' is not in the registry (run `fr actor set null` to record it)"
+                );
+            }
+        }
+        Some(tok) => match entry {
+            Some(e) => println!("Token: {} ({}) — {}", tok, e.state, e.name),
+            None => {
+                println!("Token: {}", tok);
+                println!(
+                    "warning: token '{}' is not in the registry (run `fr actor set {}` to record it)",
+                    tok, tok
+                );
+            }
+        },
+    }
+
+    thin_frontier_notice(&reg);
+    Ok(())
+}
+
+fn cmd_actor_claim(args: ActorClaimArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let project = load_project_cwd()?;
+    let frame_dir = project.frame_dir.clone();
+    let _lock = FileLock::acquire_default(&frame_dir)?;
+
+    let mut reg = actors::read_actors(&frame_dir)?;
+    let token = match reg.auto_pick() {
+        Some(t) => t,
+        None => {
+            let hint = if reg.has_retired() {
+                "no unused tokens remain. Reclaim a retired token with `fr actor set <retired-token>` (see `fr actor list`), or claim a custom multi-char token with `fr actor set <aa|foo|…>`."
+            } else {
+                "no unused tokens remain. Claim a custom multi-char token with `fr actor set <aa|foo|…>`."
+            };
+            return Err(hint.into());
+        }
+    };
+
+    let name = args.name.unwrap_or_else(actors::default_name);
+    finalize_claim(&frame_dir, &mut reg, &token, &name)?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "token": token,
+                "outcome": "created",
+            }))?
+        );
+    } else {
+        println!("claimed token '{}'", token);
+        thin_frontier_notice(&reg);
+    }
+    Ok(())
+}
+
+fn cmd_actor_set(args: ActorSetArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let project = load_project_cwd()?;
+    let frame_dir = project.frame_dir.clone();
+    let _lock = FileLock::acquire_default(&frame_dir)?;
+
+    let warnings = actors::validate_token(&args.token)?;
+    for w in &warnings {
+        eprintln!("warning: {}", w);
+    }
+
+    let mut reg = actors::read_actors(&frame_dir)?;
+    let name = args.name.unwrap_or_else(actors::default_name);
+    let outcome = finalize_claim(&frame_dir, &mut reg, &args.token, &name)?;
+
+    let outcome_str = match outcome {
+        actors::ClaimOutcome::Created => "created",
+        actors::ClaimOutcome::Reclaimed => "reclaimed",
+        actors::ClaimOutcome::AlreadyOwned => "already_owned",
+    };
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "token": args.token,
+                "outcome": outcome_str,
+            }))?
+        );
+        return Ok(());
+    }
+
+    match outcome {
+        actors::ClaimOutcome::Created if args.token == "null" => {
+            println!("claimed token 'null' (primary / untokened)");
+        }
+        actors::ClaimOutcome::Created => println!("claimed token '{}'", args.token),
+        actors::ClaimOutcome::Reclaimed => {
+            println!("reclaimed retired token '{}'", args.token)
+        }
+        actors::ClaimOutcome::AlreadyOwned => {
+            println!(
+                "token '{}' is already claimed by this working copy (no change)",
+                args.token
+            )
+        }
+    }
+    thin_frontier_notice(&reg);
+    Ok(())
+}
+
+fn cmd_actor_retire(args: ActorRetireArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let project = load_project_cwd()?;
+    let frame_dir = project.frame_dir.clone();
+    let _lock = FileLock::acquire_default(&frame_dir)?;
+
+    let mut reg = actors::read_actors(&frame_dir)?;
+    reg.retire(&args.token, &actors::today())?;
+    actors::write_actors(&frame_dir, &reg)?;
+
+    let is_own = actors::read_actor_token(&frame_dir).as_deref() == Some(args.token.as_str());
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "token": args.token,
+                "outcome": "retired",
+                "was_own": is_own,
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!("retired token '{}'", args.token);
+    if is_own {
+        eprintln!(
+            "warning: this working copy's token ('{}') is now retired — run `fr actor claim` or `fr actor set <token>` to claim a new one.",
+            args.token
+        );
+    }
+    Ok(())
+}
+
+fn cmd_actor_list(json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let project = load_project_cwd()?;
+    let reg = actors::read_actors(&project.frame_dir)?;
+    let current = actors::read_actor_token(&project.frame_dir);
+
+    if json {
+        #[derive(serde::Serialize)]
+        struct RowJson {
+            token: String,
+            name: String,
+            state: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            claimed: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            retired: Option<String>,
+            is_current: bool,
+        }
+        let rows: Vec<RowJson> = reg
+            .actors
+            .iter()
+            .map(|(t, e)| RowJson {
+                is_current: current.as_deref() == Some(t.as_str()),
+                token: t.clone(),
+                name: e.name.clone(),
+                state: e.state.clone(),
+                claimed: e.claimed.clone(),
+                retired: e.retired.clone(),
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+
+    if reg.actors.is_empty() {
+        println!(
+            "No actors registered (this project predates actor tokens; it operates as primary/legacy)."
+        );
+        return Ok(());
+    }
+
+    let token_w = reg.actors.keys().map(|t| t.len()).max().unwrap_or(5).max(5);
+    for (tok, e) in &reg.actors {
+        let marker = if current.as_deref() == Some(tok.as_str()) {
+            "*"
+        } else {
+            " "
+        };
+        let date = match e.state.as_str() {
+            "retired" => e.retired.as_deref().map(|d| format!("retired {}", d)),
+            _ => e.claimed.as_deref().map(|d| format!("claimed {}", d)),
+        }
+        .unwrap_or_default();
+        println!(
+            "{} {:<token_w$}  {:<8}  {:<20}  {}",
+            marker, tok, e.state, e.name, date
+        );
     }
     Ok(())
 }

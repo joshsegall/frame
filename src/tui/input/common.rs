@@ -244,7 +244,7 @@ pub(super) fn get_cursor_task_id(app: &mut App) -> Option<String> {
     if let FlatItem::Task { section, path, .. } = &items[cursor] {
         let track = App::find_track_in_project(&app.project, &track_id)?;
         let task = resolve_task_from_flat(track, *section, path)?;
-        return task.id.clone();
+        return task.id.as_ref().map(|i| i.to_string());
     }
     None
 }

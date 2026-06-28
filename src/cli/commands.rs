@@ -79,6 +79,8 @@ pub enum Commands {
     Delete(DeleteArgs),
     /// Manage project registry
     Projects(ProjectsCmd),
+    /// Manage this working copy's actor token
+    Actor(ActorCmd),
     /// View or manage the recovery log
     Recovery(RecoveryCmd),
 }
@@ -483,6 +485,50 @@ pub struct ProjectsAddArgs {
 pub struct ProjectsRemoveArgs {
     /// Project name or path
     pub name_or_path: String,
+}
+
+// ---------------------------------------------------------------------------
+// Actor tokens
+// ---------------------------------------------------------------------------
+
+#[derive(Args)]
+pub struct ActorCmd {
+    #[command(subcommand)]
+    pub action: Option<ActorAction>,
+}
+
+#[derive(Subcommand)]
+pub enum ActorAction {
+    /// Auto-claim a token from the frontier
+    Claim(ActorClaimArgs),
+    /// Claim a specific token (manual; accepts multi-char and `null`)
+    Set(ActorSetArgs),
+    /// Retire (tombstone) a token — leaves the frontier, stays reclaimable
+    Retire(ActorRetireArgs),
+    /// List all tokens with state and provenance
+    List,
+}
+
+#[derive(Args)]
+pub struct ActorClaimArgs {
+    /// Provenance name for the registry row (default: machine hostname)
+    #[arg(long)]
+    pub name: Option<String>,
+}
+
+#[derive(Args)]
+pub struct ActorSetArgs {
+    /// Token to claim (a single safe letter, a multi-char token, or `null`)
+    pub token: String,
+    /// Provenance name for the registry row (default: machine hostname)
+    #[arg(long)]
+    pub name: Option<String>,
+}
+
+#[derive(Args)]
+pub struct ActorRetireArgs {
+    /// Token to retire
+    pub token: String,
 }
 
 // ---------------------------------------------------------------------------

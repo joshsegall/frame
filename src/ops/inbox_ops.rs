@@ -2,6 +2,7 @@ use chrono::Local;
 
 use crate::model::inbox::{Inbox, InboxItem};
 use crate::model::task::{Metadata, Task, TaskState};
+use crate::model::task_id::TaskId;
 use crate::model::track::{SectionKind, Track, TrackNode};
 use crate::ops::task_ops::{InsertPosition, TaskError};
 
@@ -70,7 +71,7 @@ pub fn triage(
 
     // Build the task from the inbox item
     let next_num = next_id_for_track(track, prefix);
-    let id = format!("{}-{:03}", prefix, next_num);
+    let id = TaskId::with_number(prefix, next_num as u32);
 
     let mut task = Task::new(TaskState::Todo, Some(id.clone()), item.title);
     task.tags = item.tags;
@@ -99,7 +100,7 @@ pub fn triage(
         }
     }
 
-    Ok(id)
+    Ok(id.to_string())
 }
 
 fn today_str() -> String {

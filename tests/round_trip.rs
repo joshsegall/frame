@@ -47,6 +47,30 @@ fn round_trip_simple_track() {
     assert_track_round_trip("simple_track.md");
 }
 
+/// Zero-padded structured IDs and a non-conforming (raw) ID must both
+/// round-trip byte-identically. The padded IDs are the arbiter for the
+/// TaskId padding decision; the raw ID exercises verbatim passthrough.
+#[test]
+fn round_trip_padded_and_raw_ids() {
+    let source = "\
+# Padded and Raw
+
+## Backlog
+
+- [ ] `EFF-014` Zero-padded structured id
+  - added: 2025-05-10
+  - [ ] `EFF-014.2` Subtask keeps padded parent
+- [ ] `legacy id 7` Raw passthrough id
+
+## Done
+
+- [x] `ST-001` Padded done task
+  - resolved: 2025-05-01";
+    let track = parse_track(source);
+    let output = serialize_track(&track);
+    assert_eq!(output, source, "padded/raw IDs must round-trip verbatim");
+}
+
 #[test]
 fn round_trip_complex_track() {
     assert_track_round_trip("complex_track.md");

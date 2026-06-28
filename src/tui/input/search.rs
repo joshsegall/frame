@@ -1329,7 +1329,7 @@ pub(super) fn search_in_recent(app: &mut App, re: &Regex, direction: i32) {
                 })
                 .unwrap_or_default();
             done_tasks.push((
-                task.id.clone().unwrap_or_default(),
+                task.id.as_ref().map(|i| i.to_string()).unwrap_or_default(),
                 format!("{}:{}", track_id, resolved),
             ));
         }
@@ -1587,7 +1587,7 @@ pub(super) fn count_matches_for_pattern(app: &App, re: &Regex) -> usize {
                     if let Some(task) = resolve_task_from_flat(track, *section, path)
                         && let Some(id) = &task.id
                     {
-                        visible_ids.push(id.clone());
+                        visible_ids.push(id.to_string());
                     }
                 }
             }

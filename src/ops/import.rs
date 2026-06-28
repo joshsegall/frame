@@ -1,6 +1,7 @@
 use chrono::Local;
 
 use crate::model::task::{Metadata, Task};
+use crate::model::task_id::TaskId;
 use crate::model::track::{SectionKind, Track};
 use crate::ops::task_ops::{InsertPosition, TaskError, find_max_id_in_track};
 use crate::parse::parse_tasks;
@@ -56,7 +57,7 @@ pub fn import_tasks(
     // Prepare tasks: assign IDs, set dates, mark dirty
     let mut prepared_tasks = Vec::new();
     for mut task in tasks {
-        let id = format!("{}-{:03}", prefix, next_num);
+        let id = TaskId::with_number(prefix, next_num as u32);
         task.id = Some(id.clone());
         task.depth = 0;
         task.mark_dirty();
@@ -70,7 +71,7 @@ pub fn import_tasks(
         assign_subtask_ids(&mut task, &id, &today);
 
         total_count += 1 + count_subtasks(&task);
-        assigned_ids.push(id);
+        assigned_ids.push(id.to_string());
         prepared_tasks.push(task);
         next_num += 1;
     }
@@ -143,9 +144,9 @@ fn is_task_line(line: &str, indent: usize) -> bool {
 
 /// Recursively assign subtask IDs and `added:` dates.
 fn assign_subtask_ids(task: &mut Task, parent_id: &str, today: &str) {
+    let parent = TaskId::parse(parent_id);
     for (i, sub) in task.subtasks.iter_mut().enumerate() {
-        let sub_id = format!("{}.{}", parent_id, i + 1);
-        sub.id = Some(sub_id.clone());
+        let sub_id = TaskId::child_of(&parent, (i + 1) as u32);
         sub.depth = task.depth + 1;
         sub.mark_dirty();
 
@@ -154,6 +155,7 @@ fn assign_subtask_ids(task: &mut Task, parent_id: &str, today: &str) {
         }
 
         assign_subtask_ids(sub, &sub_id, today);
+        sub.id = Some(sub_id);
     }
 }
 

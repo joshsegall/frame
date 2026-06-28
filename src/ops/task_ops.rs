@@ -1,6 +1,7 @@
 use chrono::Local;
 
 use crate::model::task::{Metadata, Task, TaskState};
+use crate::model::task_id::TaskId;
 use crate::model::track::{SectionKind, Track, TrackNode};
 use crate::parse::parse_title_and_tags;
 
@@ -123,7 +124,7 @@ pub fn add_task(
     prefix: &str,
 ) -> Result<String, TaskError> {
     let next_num = next_id_number(track, prefix);
-    let id = format!("{}-{:03}", prefix, next_num);
+    let id = TaskId::with_number(prefix, next_num as u32);
 
     let (parsed_title, tags) = parse_title_and_tags(&title);
     let mut task = Task::new(TaskState::Todo, Some(id.clone()), parsed_title);
@@ -135,7 +136,7 @@ pub fn add_task(
         .ok_or_else(|| TaskError::InvalidPosition("no backlog section".into()))?;
 
     insert_at(tasks, task, &position)?;
-    Ok(id)
+    Ok(id.to_string())
 }
 
 /// Add a subtask to an existing task identified by `parent_id`.
@@ -148,8 +149,7 @@ pub fn add_subtask(track: &mut Track, parent_id: &str, title: String) -> Result<
         return Err(TaskError::MaxDepthReached);
     }
 
-    let sub_num = next_child_number(parent);
-    let sub_id = format!("{}.{}", parent_id, sub_num);
+    let sub_id = next_child_id(parent, parent_id);
     let (parsed_title, tags) = parse_title_and_tags(&title);
     let mut subtask = Task::new(TaskState::Todo, Some(sub_id.clone()), parsed_title);
     subtask.tags = tags;
@@ -158,7 +158,7 @@ pub fn add_subtask(track: &mut Track, parent_id: &str, title: String) -> Result<
     parent.subtasks.push(subtask);
     parent.mark_dirty();
 
-    Ok(sub_id)
+    Ok(sub_id.to_string())
 }
 
 /// Add a subtask to an existing task, inserted after a specific sibling.
@@ -176,8 +176,7 @@ pub fn add_subtask_after(
         return Err(TaskError::MaxDepthReached);
     }
 
-    let sub_num = next_child_number(parent);
-    let sub_id = format!("{}.{}", parent_id, sub_num);
+    let sub_id = next_child_id(parent, parent_id);
     let (parsed_title, tags) = parse_title_and_tags(&title);
     let mut subtask = Task::new(TaskState::Todo, Some(sub_id.clone()), parsed_title);
     subtask.tags = tags;
@@ -193,7 +192,7 @@ pub fn add_subtask_after(
     parent.subtasks.insert(insert_idx, subtask);
     parent.mark_dirty();
 
-    Ok(sub_id)
+    Ok(sub_id.to_string())
 }
 
 /// Edit a task's title.
@@ -405,7 +404,7 @@ pub fn move_task_to_track(
 
     // Assign new ID
     let next_num = next_id_number(target_track, target_prefix);
-    let new_id = format!("{}-{:03}", target_prefix, next_num);
+    let new_id = TaskId::with_number(target_prefix, next_num as u32);
     let old_id = task.id.clone();
     task.id = Some(new_id.clone());
     task.mark_dirty();
@@ -424,7 +423,7 @@ pub fn move_task_to_track(
         update_dep_references(all_tracks_for_dep_update, old, &new_id);
     }
 
-    Ok(new_id)
+    Ok(new_id.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -491,17 +490,17 @@ pub fn next_id_number(track: &Track, prefix: &str) -> usize {
 
 /// Scan a track for the highest ID number with the given prefix (e.g. "T-").
 /// Updates `max` if a higher number is found.
+///
+/// Only structured, null-namespace IDs under the prefix are considered; `Raw`
+/// IDs and token (non-null) segments are invisible and never perturb `max`.
 pub fn find_max_id_in_track(track: &Track, prefix_dash: &str, max: &mut usize) {
+    let prefix = prefix_dash.strip_suffix('-').unwrap_or(prefix_dash);
     for_each_task_in_track(track, &mut |task: &Task| {
-        if let Some(ref id) = task.id
-            && let Some(num_str) = id.strip_prefix(prefix_dash)
+        if let Some(id) = &task.id
+            && let Some(n) = id.top_level_number(prefix)
+            && (n as usize) > *max
         {
-            let num_part = num_str.split('.').next().unwrap_or("");
-            if let Ok(n) = num_part.parse::<usize>()
-                && n > *max
-            {
-                *max = n;
-            }
+            *max = n as usize;
         }
     });
 }
@@ -599,11 +598,12 @@ fn for_each_task(tasks: &[Task], f: &mut dyn FnMut(&Task)) {
 
 /// Recursively renumber subtask IDs based on the new parent ID.
 pub fn renumber_subtasks(task: &mut Task, parent_id: &str) {
+    let parent = TaskId::parse(parent_id);
     for (i, sub) in task.subtasks.iter_mut().enumerate() {
-        let new_sub_id = format!("{}.{}", parent_id, i + 1);
-        sub.id = Some(new_sub_id.clone());
-        sub.mark_dirty();
+        let new_sub_id = TaskId::child_of(&parent, (i + 1) as u32);
         renumber_subtasks(sub, &new_sub_id);
+        sub.id = Some(new_sub_id);
+        sub.mark_dirty();
     }
 }
 
@@ -680,7 +680,7 @@ fn find_in_subtasks(parent: &Task, task_id: &str, section: SectionKind) -> Optio
         if sub.id.as_deref() == Some(task_id) {
             return Some(TaskLocation {
                 section,
-                parent_id: Some(parent_id.clone()),
+                parent_id: Some(parent_id.to_string()),
                 sibling_index: i,
             });
         }
@@ -735,7 +735,7 @@ fn remove_from_list(
         let pid = tasks[i].id.clone();
         if let Some(pid) = &pid
             && let Some(result) =
-                remove_from_list(&mut tasks[i].subtasks, task_id, section, Some(pid))
+                remove_from_list(&mut tasks[i].subtasks, task_id, section, Some(&**pid))
         {
             tasks[i].mark_dirty();
             return Some(result);
@@ -804,15 +804,16 @@ pub fn max_subtree_depth(task: &Task) -> usize {
 pub fn rekey_subtree(task: &mut Task, new_id: &str) -> Vec<(String, String)> {
     let mut mappings = Vec::new();
     if let Some(ref old_id) = task.id {
-        mappings.push((old_id.clone(), new_id.to_string()));
+        mappings.push((old_id.to_string(), new_id.to_string()));
     }
-    task.id = Some(new_id.to_string());
-    task.mark_dirty();
+    let parsed = TaskId::parse(new_id);
     for (i, sub) in task.subtasks.iter_mut().enumerate() {
-        let sub_new_id = format!("{}.{}", new_id, i + 1);
+        let sub_new_id = TaskId::child_of(&parsed, (i + 1) as u32);
         let sub_mappings = rekey_subtree(sub, &sub_new_id);
         mappings.extend(sub_mappings);
     }
+    task.id = Some(parsed);
+    task.mark_dirty();
     mappings
 }
 
@@ -828,27 +829,32 @@ pub fn is_descendant_of(track: &Track, ancestor_id: &str, candidate_id: &str) ->
 /// Scans existing subtask IDs to find the max suffix number, avoiding collisions
 /// when subtasks have been deleted (e.g., deleting .3 from [.1, .2, .3, .4]
 /// should produce .5, not .4).
-fn next_child_number(parent: &Task) -> usize {
+pub fn next_child_number(parent: &Task) -> usize {
     let parent_id = match &parent.id {
         Some(id) => id,
         None => return parent.subtasks.len() + 1,
     };
-    let prefix = format!("{}.", parent_id);
     let max_num = parent
         .subtasks
         .iter()
         .filter_map(|sub| {
-            let id = sub.id.as_ref()?;
-            let suffix = id.strip_prefix(&prefix)?;
-            // Only parse the immediate child number (no dots — skip grandchild IDs)
-            if suffix.contains('.') {
-                return None;
-            }
-            suffix.parse::<usize>().ok()
+            sub.id
+                .as_ref()
+                .and_then(|cid| cid.child_number_of(parent_id))
         })
         .max()
         .unwrap_or(0);
-    max_num + 1
+    (max_num as usize) + 1
+}
+
+/// Compute the next child ID for a parent (gap-safe). `parent_id` is the parent
+/// task's ID as a string, used as a fallback when the parent has no parsed ID.
+fn next_child_id(parent: &Task, parent_id: &str) -> TaskId {
+    let num = next_child_number(parent) as u32;
+    match &parent.id {
+        Some(pid) => TaskId::child_of(pid, num),
+        None => TaskId::child_of(&TaskId::parse(parent_id), num),
+    }
 }
 
 /// Main reparent operation: move a task to a new parent (or promote to top-level).
@@ -908,14 +914,13 @@ pub fn reparent_task(
         None => {
             // Promote to top-level: get next available top-level ID
             let next_num = next_id_number(track, prefix);
-            format!("{}-{:03}", prefix, next_num)
+            TaskId::with_number(prefix, next_num as u32)
         }
         Some(pid) => {
             // Reparent under parent: find next available child slot
             let parent = find_task_in_track(track, pid)
                 .ok_or_else(|| TaskError::NotFound(pid.to_string()))?;
-            let child_num = next_child_number(parent);
-            format!("{}.{}", pid, child_num)
+            next_child_id(parent, pid)
         }
     };
 
@@ -937,7 +942,7 @@ pub fn reparent_task(
     }
 
     Ok(ReparentResult {
-        new_root_id: new_id,
+        new_root_id: new_id.to_string(),
         id_mappings,
         old_location: actual_old_location,
     })
@@ -1905,6 +1910,61 @@ mod tests {
         let parent = find_task_in_track(&track, "T-001").unwrap();
         assert_eq!(parent.subtasks.len(), 2);
         assert_eq!(next_child_number(parent), 3); // .3 and .4 are gone, no collision
+    }
+
+    #[test]
+    fn test_reparent_child_number_gap_safe() {
+        // Regression: reparenting under a parent must use the gap-safe child
+        // number, not the child count. After deleting a middle sibling, the new
+        // child must skip the deleted number rather than collide.
+        let mut track = parse_track(
+            "\
+# Test
+
+## Backlog
+
+- [ ] `T-001` Standalone
+- [ ] `T-003` Parent
+  - [ ] `T-003.1` Sub 1
+  - [ ] `T-003.2` Sub 2
+  - [ ] `T-003.3` Sub 3
+
+## Done",
+        );
+        // Delete the middle child → children are [.1, .3], count is 2 but max is 3.
+        hard_delete_task(&mut track, "T-003.2", "test").unwrap();
+
+        let mut all_tracks: Vec<(String, Track)> = Vec::new();
+        let result = reparent_task(
+            &mut track,
+            "T-001",
+            Some("T-003"),
+            usize::MAX,
+            "T",
+            &mut all_tracks,
+        )
+        .unwrap();
+
+        // Gap-safe: next child is .4 (not .3, which exists, nor .2, deleted).
+        assert_eq!(result.new_root_id, "T-003.4");
+    }
+
+    #[test]
+    fn test_raw_id_invisible_to_mint() {
+        // A non-conforming (Raw) ID must not perturb the next minted number.
+        let mut track = parse_track(
+            "\
+# Test
+
+## Backlog
+
+- [ ] `T-005` Real task
+- [ ] `weird id!` Raw id task
+
+## Done",
+        );
+        let id = add_task(&mut track, "New".into(), InsertPosition::Bottom, "T").unwrap();
+        assert_eq!(id, "T-006");
     }
 
     /// Verify that deleting a subtask from a parent with multiline notes

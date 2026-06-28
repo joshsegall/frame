@@ -310,7 +310,7 @@ pub fn nav_target_for_op(op: &Operation, is_undo: bool) -> Option<UndoNavTarget>
             task,
             ..
         } => {
-            let task_id = task.id.clone().unwrap_or_default();
+            let task_id = task.id.as_ref().map(|i| i.to_string()).unwrap_or_default();
             if is_undo {
                 // Task was restored — navigate to it
                 Some(UndoNavTarget::Task {
@@ -334,7 +334,7 @@ pub fn nav_target_for_op(op: &Operation, is_undo: bool) -> Option<UndoNavTarget>
         Operation::BulkTaskDelete { deletions } => {
             // Navigate to the first deletion's track/position
             if let Some((track_id, _section, _parent, position, task)) = deletions.first() {
-                let task_id = task.id.clone().unwrap_or_default();
+                let task_id = task.id.as_ref().map(|i| i.to_string()).unwrap_or_default();
                 if is_undo {
                     Some(UndoNavTarget::Task {
                         track_id: track_id.clone(),
@@ -376,7 +376,10 @@ pub fn nav_target_for_op(op: &Operation, is_undo: bool) -> Option<UndoNavTarget>
                 })
             } else {
                 // Tasks were re-inserted — navigate to first imported task
-                let task_id = tasks.first().and_then(|t| t.id.clone()).unwrap_or_default();
+                let task_id = tasks
+                    .first()
+                    .and_then(|t| t.id.as_ref().map(|i| i.to_string()))
+                    .unwrap_or_default();
                 Some(UndoNavTarget::Task {
                     track_id: track_id.clone(),
                     task_id,
@@ -963,7 +966,7 @@ fn apply_inverse(
             let mut task = target_tasks.remove(idx);
 
             // Rename ID back
-            task.id = Some(task_id_old.clone());
+            task.id = Some(task_id_old.clone().into());
             task.mark_dirty();
             task_ops::renumber_subtasks(&mut task, task_id_old);
 
@@ -1099,7 +1102,7 @@ fn apply_inverse(
 /// Reverse a single ID rename within a task tree (new_id -> old_id).
 fn reverse_rekey_task(task: &mut Task, from_id: &str, to_id: &str) {
     if task.id.as_deref() == Some(from_id) {
-        task.id = Some(to_id.to_string());
+        task.id = Some(crate::model::task_id::TaskId::parse(to_id));
         task.mark_dirty();
     }
     for sub in &mut task.subtasks {
@@ -1152,7 +1155,7 @@ fn apply_forward(
         } => {
             let track = find_track_mut(tracks, track_id)?;
             let tasks = track.section_tasks_mut(SectionKind::Backlog)?;
-            let mut task = Task::new(TaskState::Todo, Some(task_id.clone()), title.clone());
+            let mut task = Task::new(TaskState::Todo, Some(task_id.clone().into()), title.clone());
             task.metadata.push(crate::model::task::Metadata::Added(
                 chrono::Local::now().format("%Y-%m-%d").to_string(),
             ));
@@ -1168,7 +1171,7 @@ fn apply_forward(
         } => {
             let track = find_track_mut(tracks, track_id)?;
             let parent = task_ops::find_task_mut_in_track(track, parent_id)?;
-            let mut sub = Task::new(TaskState::Todo, Some(task_id.clone()), title.clone());
+            let mut sub = Task::new(TaskState::Todo, Some(task_id.clone().into()), title.clone());
             sub.depth = parent.depth + 1;
             sub.metadata.push(crate::model::task::Metadata::Added(
                 chrono::Local::now().format("%Y-%m-%d").to_string(),
@@ -1300,8 +1303,11 @@ fn apply_forward(
             if let Some(track) = track
                 && let Some(tasks) = track.section_tasks_mut(SectionKind::Backlog)
             {
-                let mut task =
-                    Task::new(TaskState::Todo, Some(task_id.clone()), item.title.clone());
+                let mut task = Task::new(
+                    TaskState::Todo,
+                    Some(task_id.clone().into()),
+                    item.title.clone(),
+                );
                 task.tags = item.tags.clone();
                 task.metadata.push(crate::model::task::Metadata::Added(
                     chrono::Local::now().format("%Y-%m-%d").to_string(),
@@ -1402,7 +1408,7 @@ fn apply_forward(
             };
 
             let mut task = task;
-            task.id = Some(task_id_new.clone());
+            task.id = Some(task_id_new.clone().into());
             task.depth = 0;
             task.mark_dirty();
             task_ops::renumber_subtasks(&mut task, task_id_new);

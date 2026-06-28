@@ -106,10 +106,23 @@ mod tests {
     }
 
     #[test]
+    fn test_serialize_dirty_padded_id_canonical() {
+        // A dirty task (no source_text) renders its ID via the canonical path,
+        // which must reproduce zero-padding faithfully.
+        let task = Task::new(
+            TaskState::Todo,
+            Some("EFF-014".into()),
+            "Padded".to_string(),
+        );
+        let lines = serialize_tasks(&[task], 0);
+        assert_eq!(lines[0], "- [ ] `EFF-014` Padded");
+    }
+
+    #[test]
     fn test_serialize_task_with_id_and_tags() {
         let mut task = Task::new(
             TaskState::Active,
-            Some("EFF-014".to_string()),
+            Some("EFF-014".into()),
             "Implement effect inference".to_string(),
         );
         task.tags = vec!["core".to_string(), "cc".to_string()];
@@ -124,7 +137,7 @@ mod tests {
     fn test_serialize_task_with_metadata() {
         let mut task = Task::new(
             TaskState::Active,
-            Some("EFF-014".to_string()),
+            Some("EFF-014".into()),
             "Test task".to_string(),
         );
         task.metadata = vec![
@@ -158,20 +171,12 @@ mod tests {
     fn test_serialize_subtasks() {
         let mut parent = Task::new(
             TaskState::Active,
-            Some("T-001".to_string()),
+            Some("T-001".into()),
             "Parent".to_string(),
         );
         parent.subtasks = vec![
-            Task::new(
-                TaskState::Todo,
-                Some("T-001.1".to_string()),
-                "Sub 1".to_string(),
-            ),
-            Task::new(
-                TaskState::Todo,
-                Some("T-001.2".to_string()),
-                "Sub 2".to_string(),
-            ),
+            Task::new(TaskState::Todo, Some("T-001.1".into()), "Sub 1".to_string()),
+            Task::new(TaskState::Todo, Some("T-001.2".into()), "Sub 2".to_string()),
         ];
         let lines = serialize_tasks(&[parent], 0);
         assert_eq!(lines[0], "- [>] `T-001` Parent");
@@ -200,7 +205,7 @@ mod tests {
         // The clean sibling subtask should be emitted verbatim.
         let mut parent = Task::new(
             TaskState::Active,
-            Some("T-001".to_string()),
+            Some("T-001".into()),
             "Parent".to_string(),
         );
         parent.dirty = false;
@@ -211,7 +216,7 @@ mod tests {
 
         let mut sub1 = Task::new(
             TaskState::Todo,
-            Some("T-001.1".to_string()),
+            Some("T-001.1".into()),
             "Sub 1 original".to_string(),
         );
         sub1.dirty = false;
@@ -220,7 +225,7 @@ mod tests {
         // Sub 2 has been modified — dirty, no source_text
         let sub2 = Task::new(
             TaskState::Done,
-            Some("T-001.2".to_string()),
+            Some("T-001.2".into()),
             "Sub 2 modified".to_string(),
         );
         // sub2 is dirty by default from Task::new

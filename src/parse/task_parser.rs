@@ -1,4 +1,5 @@
 use crate::model::task::{Metadata, Task, TaskState};
+use crate::model::task_id::TaskId;
 use crate::parse::{count_indent, has_continuation_at_indent};
 
 /// Maximum nesting depth (3 levels: top, sub, sub-sub)
@@ -146,7 +147,7 @@ fn parse_single_task(
 }
 
 /// Parse the task line itself: `- [x] \`ID\` Title text #tag1 #tag2`
-fn parse_task_line(line: &str, indent: usize) -> (TaskState, Option<String>, String, Vec<String>) {
+fn parse_task_line(line: &str, indent: usize) -> (TaskState, Option<TaskId>, String, Vec<String>) {
     let content = &line[indent..];
 
     // Parse checkbox: `- [X] `
@@ -166,7 +167,7 @@ fn parse_task_line(line: &str, indent: usize) -> (TaskState, Option<String>, Str
             let id_text = &after_tick[..end_tick];
             let rest = &after_tick[end_tick + 1..];
             let rest = rest.strip_prefix(' ').unwrap_or(rest);
-            (Some(id_text.to_string()), rest)
+            (Some(TaskId::parse(id_text)), rest)
         } else {
             (None, after_checkbox)
         }

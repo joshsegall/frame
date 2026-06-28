@@ -136,3 +136,12 @@ fr add api "Handle empty response body #cc-added" --found-from API-003
 **`--context`** — Agents should always use `fr show ID --context` (not plain `fr show ID`). Parent tasks often contain specs, notes, and dependencies that explain why a subtask exists.
 
 **`--json`** — Agents should use `--json` on read commands when parsing output programmatically. Human-formatted output may change between versions.
+
+## Working Copies and Tokens
+
+Frame identifies work by *working copy* (git clone), via an [actor token](concepts.md#actors). This matters when running multiple agents:
+
+- **Two agent sessions in the same clone** share that clone's single token. They are serialized by frame's file lock (`frame/.lock`), so concurrent `fr` writes don't corrupt each other — no extra setup needed.
+- **Separate clones** (e.g. git worktrees or independent checkouts) are distinct actors. Each should claim its own token with `fr actor claim` so future concurrent ID minting won't collide. The clone that ran `fr init` is the untokened **primary**.
+
+In Phase 2 tokens are tracked but not yet used in minted IDs, so existing single-clone setups need no changes.

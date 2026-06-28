@@ -75,7 +75,7 @@ pub(super) fn finalize_range_select(app: &mut App) {
             if let Some(task) = resolve_task_from_flat(track, *section, path)
                 && let Some(id) = &task.id
             {
-                app.selection.insert(id.clone());
+                app.selection.insert(id.to_string());
             }
         }
     }
@@ -110,7 +110,7 @@ pub(super) fn select_all(app: &mut App) {
             if let Some(task) = resolve_task_from_flat(track, *section, path)
                 && let Some(id) = &task.id
             {
-                app.selection.insert(id.clone());
+                app.selection.insert(id.to_string());
             }
         }
     }
@@ -866,7 +866,7 @@ pub(super) fn begin_bulk_move(app: &mut App) {
     let mut to_remove_indices: Vec<usize> = Vec::new();
     for (i, task) in backlog.iter().enumerate() {
         if let Some(id) = &task.id
-            && selected_ids.contains(id)
+            && selected_ids.contains(&id.to_string())
         {
             to_remove_indices.push(i);
         }

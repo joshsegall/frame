@@ -102,7 +102,12 @@ fn update_gitignore(cwd: &std::path::Path) -> bool {
     let gitignore_path = cwd.join(".gitignore");
     let existing = fs::read_to_string(&gitignore_path).unwrap_or_default();
 
-    let entries = ["frame/.state.json", "frame/.lock", "frame/.recovery.log"];
+    let entries = [
+        "frame/.state.json",
+        "frame/.lock",
+        "frame/.recovery.log",
+        "frame/.actor",
+    ];
     let mut to_add = Vec::new();
     for entry in &entries {
         if !existing.lines().any(|line| line.trim() == *entry) {
@@ -194,6 +199,18 @@ pub fn cmd_init(args: InitArgs) -> Result<(), Box<dyn std::error::Error>> {
         fs::write(frame_dir.join(format!("tracks/{}.md", id)), content)?;
     }
 
+    // Claim the `null` (primary) token for this working copy. Don't clobber an
+    // existing registry on --force reinit.
+    if !crate::io::actors::actors_path(&frame_dir).exists() {
+        let mut registry = crate::io::actors::ActorRegistry::default();
+        let actor_name = crate::io::actors::default_name();
+        registry
+            .claim("null", &actor_name, None, &crate::io::actors::today())
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        crate::io::actors::write_actors(&frame_dir, &registry)?;
+        crate::io::actors::write_actor_token(&frame_dir, "null")?;
+    }
+
     // Register in global project registry
     crate::io::registry::register_project(&name, &cwd);
 
@@ -211,7 +228,7 @@ pub fn cmd_init(args: InitArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     if gitignore_updated {
         println!();
-        println!("  added frame/.state.json, frame/.lock to .gitignore");
+        println!("  added frame/.state.json, frame/.lock, frame/.actor to .gitignore");
     }
 
     Ok(())
@@ -365,7 +382,7 @@ mod tests {
         fs::create_dir(tmp.path().join(".git")).unwrap();
         fs::write(
             tmp.path().join(".gitignore"),
-            "frame/.state.json\nframe/.lock\nframe/.recovery.log\n",
+            "frame/.state.json\nframe/.lock\nframe/.recovery.log\nframe/.actor\n",
         )
         .unwrap();
 

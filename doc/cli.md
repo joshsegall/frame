@@ -491,3 +491,56 @@ fr -C ~/code/api-server add bugs "Fix auth bug"
 ```
 
 The `-C` flag also triggers auto-registration if the target project isn't already in the registry.
+
+## Actor Tokens
+
+Each working copy (git clone) holds one **actor token**, recorded in the committed `frame/actors.toml` registry and the gitignored `frame/.actor` file. See [concepts.md](concepts.md#actors) for the model. Tokens are managed today but not yet used in minted IDs.
+
+### `fr actor`
+
+Show this working copy's token and status. `null` is displayed as "primary (untokened)". Warns if the `.actor` token isn't recorded in the registry, and prints a notice when the never-used frontier is nearly empty.
+
+```
+fr actor
+fr actor --json
+```
+
+### `fr actor claim [--name NAME]`
+
+Auto-claim a token from the frontier (a random pick from the first few never-used safe letters, to scatter concurrent claims). Writes `.actor` and a registry row. Fails when no unused tokens remain, pointing you to `fr actor set` to reclaim a retired token or claim a custom multi-character one.
+
+```
+fr actor claim
+fr actor claim --name josh-laptop
+```
+
+`--name` sets the registry provenance (default: the machine hostname).
+
+### `fr actor set TOKEN [--name NAME]`
+
+Claim a specific token. Accepts a single safe letter (`a–z` minus `i`, `l`, `o`), a multi-character token (`aa`, `foo`), or `null`. Reclaims a retired token by flipping it back to active. Refuses a token that another working copy already holds (retire it there first, or pick another). Idempotent if this clone already holds the token.
+
+```
+fr actor set b
+fr actor set null          # record this clone as the primary
+fr actor set team-ci --name ci-runner
+```
+
+`fr actor set null` is also the migration entry point: running it in a project that predates actor tokens creates `frame/actors.toml`.
+
+### `fr actor retire TOKEN`
+
+Tombstone a token (`state = retired`). It leaves the auto-assignment frontier but stays in the registry and can be reclaimed later with `fr actor set TOKEN`. If you retire your own clone's token, frame warns you to claim a new one.
+
+```
+fr actor retire b
+```
+
+### `fr actor list`
+
+List all tokens with state and provenance. The current clone's token is marked with `*`.
+
+```
+fr actor list
+fr actor list --json
+```

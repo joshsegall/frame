@@ -1262,11 +1262,12 @@ fn test_init_gitignore_added() {
     fs::create_dir(tmp.path().join(".git")).unwrap();
 
     let out = run_fr_ok(tmp.path(), &["init", "--name", "Git Project"]);
-    assert!(out.contains("added frame/.state.json, frame/.lock to .gitignore"));
+    assert!(out.contains("added frame/.state.json, frame/.lock, frame/.actor to .gitignore"));
 
     let gitignore = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
     assert!(gitignore.contains("frame/.state.json"));
     assert!(gitignore.contains("frame/.lock"));
+    assert!(gitignore.contains("frame/.actor"));
 }
 
 #[test]
@@ -1284,7 +1285,7 @@ fn test_init_gitignore_already_present() {
     fs::create_dir(tmp.path().join(".git")).unwrap();
     fs::write(
         tmp.path().join(".gitignore"),
-        "frame/.state.json\nframe/.lock\nframe/.recovery.log\n",
+        "frame/.state.json\nframe/.lock\nframe/.recovery.log\nframe/.actor\n",
     )
     .unwrap();
 
@@ -1301,7 +1302,7 @@ fn test_init_gitignore_partial() {
 
     let out = run_fr_ok(tmp.path(), &["init", "--name", "Partial"]);
     // Should still add the missing entry
-    assert!(out.contains("added frame/.state.json, frame/.lock to .gitignore"));
+    assert!(out.contains("added frame/.state.json, frame/.lock, frame/.actor to .gitignore"));
 
     let gitignore = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
     assert!(gitignore.contains("frame/.state.json"));
@@ -1709,4 +1710,148 @@ fn test_check_json_with_recovery_log() {
     assert!(parsed["info"].is_array());
     let info = parsed["info"].as_array().unwrap();
     assert!(info.iter().any(|i| i["type"] == "recovery_log"));
+}
+
+// ---------------------------------------------------------------------------
+// Actor token tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_init_claims_null_and_writes_both_files() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    run_fr_ok(tmp.path(), &["init", "--name", "Tokened"]);
+
+    // actors.toml exists with null claimed active
+    let actors = fs::read_to_string(tmp.path().join("frame/actors.toml")).unwrap();
+    let parsed: toml::Value = toml::from_str(&actors).unwrap();
+    assert_eq!(
+        parsed["actors"]["null"]["state"].as_str().unwrap(),
+        "active"
+    );
+
+    // .actor points to null
+    let actor = fs::read_to_string(tmp.path().join("frame/.actor")).unwrap();
+    assert_eq!(actor.trim(), "null");
+}
+
+#[test]
+fn test_init_force_does_not_clobber_actors() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    run_fr_ok(tmp.path(), &["init", "--name", "First"]);
+
+    // Mutate the registry, then reinit with --force.
+    run_fr_ok(tmp.path(), &["actor", "set", "a", "--name", "mine"]);
+    run_fr_ok(tmp.path(), &["init", "--name", "Second", "--force"]);
+
+    // The registry survived the reinit.
+    let actors = fs::read_to_string(tmp.path().join("frame/actors.toml")).unwrap();
+    assert!(
+        actors.contains("[actors.a]"),
+        "actors.toml clobbered: {actors}"
+    );
+    assert!(actors.contains("mine"));
+}
+
+#[test]
+fn test_actor_status_missing_registry_reports_unclaimed() {
+    // create_test_project writes no actors.toml — the migration case.
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    let (stdout, _stderr, success) = run_fr(tmp.path(), &["actor"]);
+    assert!(
+        success,
+        "fr actor should not error on a registry-less project"
+    );
+    assert!(stdout.contains("unclaimed"), "stdout: {stdout}");
+    // No file was created by a read-only status check.
+    assert!(!tmp.path().join("frame/actors.toml").exists());
+}
+
+#[test]
+fn test_actor_set_null_creates_registry_on_legacy_project() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    run_fr_ok(tmp.path(), &["actor", "set", "null"]);
+
+    assert!(tmp.path().join("frame/actors.toml").exists());
+    let actor = fs::read_to_string(tmp.path().join("frame/.actor")).unwrap();
+    assert_eq!(actor.trim(), "null");
+}
+
+#[test]
+fn test_actor_claim_picks_a_token() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    run_fr_ok(tmp.path(), &["init", "--name", "Claimer"]);
+
+    let out = run_fr_ok(tmp.path(), &["actor", "claim"]);
+    assert!(out.contains("claimed token"), "out: {out}");
+
+    // .actor now holds a single safe letter (not null anymore).
+    let actor = fs::read_to_string(tmp.path().join("frame/.actor"))
+        .unwrap()
+        .trim()
+        .to_string();
+    assert_ne!(actor, "null");
+    assert_eq!(actor.len(), 1);
+}
+
+#[test]
+fn test_actor_set_rejects_invalid_token() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    run_fr_ok(tmp.path(), &["init", "--name", "Strict"]);
+
+    // Uppercase rejected.
+    let (_o, _e, ok_upper) = run_fr(tmp.path(), &["actor", "set", "A"]);
+    assert!(!ok_upper);
+    // Single 'i' rejected (not in safe alphabet).
+    let (_o, _e, ok_i) = run_fr(tmp.path(), &["actor", "set", "i"]);
+    assert!(!ok_i);
+}
+
+#[test]
+fn test_actor_retire_then_reclaim() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    run_fr_ok(tmp.path(), &["init", "--name", "Retirer"]);
+    run_fr_ok(tmp.path(), &["actor", "set", "a"]);
+
+    run_fr_ok(tmp.path(), &["actor", "retire", "a"]);
+    let listing = run_fr_ok(tmp.path(), &["actor", "list"]);
+    assert!(listing.contains("retired"), "list: {listing}");
+
+    // Reclaim flips it back to active.
+    let out = run_fr_ok(tmp.path(), &["actor", "set", "a"]);
+    assert!(out.contains("reclaimed"), "out: {out}");
+}
+
+#[test]
+fn test_actor_list_json() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    run_fr_ok(tmp.path(), &["init", "--name", "Lister"]);
+
+    let out = run_fr_ok(tmp.path(), &["actor", "list", "--json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let rows = parsed.as_array().unwrap();
+    assert!(rows.iter().any(|r| r["token"] == "null"));
+}
+
+#[test]
+fn test_actor_set_owned_by_another_refused() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    run_fr_ok(tmp.path(), &["init", "--name", "Owner"]);
+
+    // Hand-build a registry where 'a' is active but owned by a different clone
+    // (this clone's .actor is null, not a).
+    let actors_path = tmp.path().join("frame/actors.toml");
+    let mut content = fs::read_to_string(&actors_path).unwrap();
+    content.push_str(
+        "\n[actors.a]\nname = \"other-machine\"\nstate = \"active\"\nclaimed = \"2026-06-01\"\n",
+    );
+    fs::write(&actors_path, content).unwrap();
+
+    let (stdout, stderr, success) = run_fr(tmp.path(), &["actor", "set", "a"]);
+    assert!(!success);
+    let combined = format!("{stdout}{stderr}");
+    assert!(combined.contains("already claimed"), "combined: {combined}");
 }

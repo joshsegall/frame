@@ -1327,7 +1327,7 @@ impl App {
             for top_task in track.backlog() {
                 for task in Self::flatten_board_tasks(top_task) {
                     let task_id = match &task.id {
-                        Some(id) => id.clone(),
+                        Some(id) => id.to_string(),
                         None => continue,
                     };
 
@@ -1428,7 +1428,7 @@ impl App {
                 for top_task in track.section_tasks(SectionKind::Done) {
                     for task in Self::flatten_board_tasks(top_task) {
                         let task_id = match &task.id {
-                            Some(id) => id.clone(),
+                            Some(id) => id.to_string(),
                             None => continue,
                         };
 
@@ -1934,7 +1934,7 @@ impl App {
     fn collect_ids_from_tasks(tasks: &[Task], ids: &mut Vec<String>) {
         for task in tasks {
             if let Some(ref id) = task.id {
-                ids.push(id.clone());
+                ids.push(id.to_string());
             }
             Self::collect_ids_from_tasks(&task.subtasks, ids);
         }
@@ -2168,7 +2168,7 @@ impl App {
                             index
                                 .entry(dep_id.clone())
                                 .or_default()
-                                .push(task_id.clone());
+                                .push(task_id.to_string());
                         }
                     }
                 }
@@ -2518,7 +2518,7 @@ impl App {
         if let FlatItem::Task { section, path, .. } = item {
             let track = Self::find_track_in_project(&self.project, &track_id)?;
             let task = resolve_task_from_flat(track, *section, path)?;
-            let task_id = task.id.clone()?;
+            let task_id = task.id.as_ref()?.to_string();
             Some((track_id, task_id, *section))
         } else {
             None
@@ -2852,7 +2852,7 @@ pub fn flatten_subtask_ids(task: &Task) -> Vec<String> {
 fn flatten_subtask_ids_inner(tasks: &[Task], ids: &mut Vec<String>) {
     for task in tasks {
         if let Some(ref id) = task.id {
-            ids.push(id.clone());
+            ids.push(id.to_string());
         }
         flatten_subtask_ids_inner(&task.subtasks, ids);
     }
@@ -2861,7 +2861,7 @@ fn flatten_subtask_ids_inner(tasks: &[Task], ids: &mut Vec<String>) {
 /// Generate a unique key for a task's expand/collapse state
 pub fn task_expand_key(task: &Task, section: SectionKind, path: &[usize]) -> String {
     if let Some(id) = &task.id {
-        id.clone()
+        id.to_string()
     } else {
         let section_str = match section {
             SectionKind::Backlog => "b",
@@ -2925,7 +2925,7 @@ fn flatten_tasks_inner(
             if is_done {
                 done_count += 1;
                 // Visible during grace period
-                let in_grace = task.id.as_ref().is_some_and(|id| grace_ids.contains(id));
+                let in_grace = task.id.as_ref().is_some_and(|id| grace_ids.contains(&**id));
                 if in_grace {
                     visible_indices.push(i);
                 }
@@ -2940,7 +2940,7 @@ fn flatten_tasks_inner(
                 .iter()
                 .filter(|t| {
                     t.state == TaskState::Done
-                        && t.id.as_ref().is_some_and(|id| grace_ids.contains(id))
+                        && t.id.as_ref().is_some_and(|id| grace_ids.contains(&**id))
                 })
                 .count(),
         );

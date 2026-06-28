@@ -69,6 +69,13 @@ EFF-001.1.2      # sub-subtask
 
 The prefix mapping (e.g., `effects` -> `EFF`) is configured in `project.toml` under `[ids.prefixes]`.
 
+Each dotted segment may optionally carry a leading lowercase **token** before its
+number (e.g. `EFF-a14`), reserved for future namespacing; frame currently mints
+only tokenless IDs. An ID's position is a stable handle, not its priority —
+ordering within a section is positional, and `added:` is the authority for
+relative age. IDs that don't match the grammar are kept verbatim and ignored by
+ID minting (see `doc/format.md`).
+
 ### Tags
 
 Tags are `#word` tokens at the end of a task line:
@@ -116,6 +123,24 @@ Frame includes a recovery log (`frame/.recovery.log`) that prevents silent data 
 View the log with `fr recovery`, prune old entries with `fr recovery prune`, or open it from the TUI command palette ("View recovery log").
 
 Tasks tagged `#lost` were created by the recovery system after a failed cross-track move or other mutation error. The `fr check` command warns about any `#lost` tasks.
+
+## Actors
+
+An **actor** is a *working copy* — a single git clone of the project. The working copy, not a person or a session, is the unit of identity. Two agent sessions running in the same clone share that clone's identity (and are serialized by the file lock); two separate clones are two distinct actors.
+
+Each actor holds one **token**. Tokens exist so that, in a later phase, separate clones can mint task IDs concurrently without colliding. Phase-2 frame manages the token lifecycle but does not yet use tokens in minted IDs — every ID is still tokenless today.
+
+- **`null`** is a real token, spelled `null`. It means the empty-token (default) namespace — the IDs you already see, like `EFF-14`. Exactly one working copy holds `null`; it's the **primary** (the clone that ran `fr init`).
+- **Safe alphabet**: auto-assigned tokens are single letters from `a–z` minus `i`, `l`, and `o` (which read as digits) — 23 in all. Teams that outgrow 23 can manually claim multi-character tokens (`aa`, `foo`); those may use any lowercase letters.
+
+Two files track this:
+
+- **`frame/actors.toml`** (committed): the registry of every known token — its state (`active` or `retired`) and provenance (`name`, defaulting to the machine hostname, plus claim/retire dates). It's committed so a fresh clone can see what's already taken and so claims are recorded in git history.
+- **`frame/.actor`** (gitignored): a single line holding *this* clone's token. Like `.state.json` and `.lock`, it's local to the working copy and never committed.
+
+**Retirement** tombstones a token (`state = retired`): it leaves the pool of auto-assignable tokens but stays in the registry and can be reclaimed later with `fr actor set <token>`. A project created before actor tokens existed simply has no `actors.toml`; it operates as the untokened primary until someone runs `fr actor set null` (or any claim), which creates the registry.
+
+Manage tokens with the `fr actor` commands (see `doc/cli.md`).
 
 ## Configuration
 

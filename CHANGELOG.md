@@ -6,9 +6,11 @@ All notable changes to frame will be documented in this file.
 
 ### Added
 - Board view now shows subtasks: subtasks with Active, Todo (ready), or Done states appear in the appropriate board columns alongside top-level tasks
+- `fr actor` commands for per-working-copy actor tokens: `fr actor` (status), `fr actor claim`, `fr actor set <token|null>`, `fr actor retire <token>`, and `fr actor list`. Tokens are recorded in a committed `frame/actors.toml` registry and a gitignored `frame/.actor` file; `fr init` claims the `null` (primary) token. This is infrastructure for future concurrent ID minting — minted IDs are unchanged for now.
 
 ### Fixed
 - Board view displayed task IDs with the track prefix doubled (e.g. `ST-ST-001`) when `[ids.prefixes]` was set; now shows the correct id (`ST-001`)
+- Reparenting a task under a parent (TUI move mode) could reuse a deleted sibling's subtask number, producing a duplicate ID; the new child number is now gap-safe
 
 ## v0.1.5 - 2026-02-24
 
