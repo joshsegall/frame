@@ -1688,10 +1688,8 @@ pub(super) fn count_matches_in_task(task: &Task, re: &Regex) -> usize {
                     }
                 }
             }
-            Metadata::Spec(spec) => {
-                if re.is_match(spec) {
-                    return 1;
-                }
+            Metadata::Spec(spec) if re.is_match(spec) => {
+                return 1;
             }
             _ => {}
         }

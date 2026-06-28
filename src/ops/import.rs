@@ -44,7 +44,7 @@ pub fn import_tasks(
     }
 
     // Find the next available ID number for this prefix
-    let mut next_num = {
+    let start_num = {
         let mut max = 0usize;
         let prefix_dash = format!("{}-", prefix);
         find_max_id_in_track(track, &prefix_dash, token, &mut max);
@@ -57,7 +57,8 @@ pub fn import_tasks(
 
     // Prepare tasks: assign IDs, set dates, mark dirty
     let mut prepared_tasks = Vec::new();
-    for mut task in tasks {
+    for (offset, mut task) in tasks.into_iter().enumerate() {
+        let next_num = start_num + offset;
         let id = TaskId::with_number(prefix, next_num as u32, token);
         task.id = Some(id.clone());
         task.depth = 0;
@@ -74,7 +75,6 @@ pub fn import_tasks(
         total_count += 1 + count_subtasks(&task);
         assigned_ids.push(id.to_string());
         prepared_tasks.push(task);
-        next_num += 1;
     }
 
     // Insert into the backlog section

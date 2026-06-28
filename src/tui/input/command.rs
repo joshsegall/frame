@@ -73,15 +73,13 @@ pub(super) fn handle_command(app: &mut App, key: KeyEvent) {
                 app.command_palette = Some(cp);
             }
         }
-        (_, KeyCode::Char(c)) => {
-            if app.command_palette.is_some() {
-                let mut cp = app.command_palette.take().unwrap();
-                cp.input.push(c);
-                cp.cursor = cp.input.len();
-                cp.selected = 0;
-                cp.update_filter(app);
-                app.command_palette = Some(cp);
-            }
+        (_, KeyCode::Char(c)) if app.command_palette.is_some() => {
+            let mut cp = app.command_palette.take().unwrap();
+            cp.input.push(c);
+            cp.cursor = cp.input.len();
+            cp.selected = 0;
+            cp.update_filter(app);
+            app.command_palette = Some(cp);
         }
         _ => {}
     }
@@ -1357,7 +1355,7 @@ pub(super) fn confirm_bulk_delete_tasks(app: &mut App, task_ids: &[(String, Stri
     if !deletions.is_empty() {
         let count = deletions.len();
         // Sort by position descending for correct undo reinsertion order
-        deletions.sort_by(|a, b| b.3.cmp(&a.3));
+        deletions.sort_by_key(|d| std::cmp::Reverse(d.3));
         app.undo_stack.push(Operation::BulkTaskDelete { deletions });
 
         for track_id in &tracks_to_save {

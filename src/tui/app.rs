@@ -734,8 +734,7 @@ impl ProjectPickerState {
     pub fn toggle_sort(&mut self) {
         self.sort_alpha = !self.sort_alpha;
         if self.sort_alpha {
-            self.entries
-                .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            self.entries.sort_by_key(|a| a.name.to_lowercase());
         } else {
             self.entries.sort_by(|a, b| {
                 let ta = a.last_accessed_tui.unwrap_or_default();

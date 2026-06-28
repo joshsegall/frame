@@ -123,7 +123,7 @@ pub fn nav_target_for_op(op: &Operation, is_undo: bool) -> Option<UndoNavTarget>
             if is_undo {
                 // Item was removed by undo — stay at same cursor
                 Some(UndoNavTarget::Inbox {
-                    cursor: Some(index.saturating_sub(1).max(0)),
+                    cursor: Some(index.saturating_sub(1)),
                 })
             } else {
                 Some(UndoNavTarget::Inbox {
@@ -139,7 +139,7 @@ pub fn nav_target_for_op(op: &Operation, is_undo: bool) -> Option<UndoNavTarget>
                 })
             } else {
                 Some(UndoNavTarget::Inbox {
-                    cursor: Some(index.saturating_sub(1).max(0)),
+                    cursor: Some(index.saturating_sub(1)),
                 })
             }
         }
