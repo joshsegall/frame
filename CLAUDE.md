@@ -28,6 +28,10 @@ scripts/fr-dev projects list # inspect the sandbox registry
 
 If a stray entry does leak in, `fr projects prune` removes not-found entries, and the `scripts/check-registry.sh` guard (wired as a `.githooks/pre-commit` hook via `git config core.hooksPath .githooks`) warns about them at commit time.
 
+### Toolchain freshness
+
+CI always runs the latest stable Rust, so a stale local toolchain can miss `clippy` lints that fail CI. A `.githooks/pre-push` hook runs `rustup check` and warns (non-blocking) when a newer stable is available — run `rustup update stable` when it does. Both hooks require `git config core.hooksPath .githooks` (one-time, per clone).
+
 ## Architecture
 
 Frame is a markdown-based task tracker (TUI + CLI) where `.md` files are the source of truth. The binary is `fr`.

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+#
+# Frame pre-push hook. Enable with:
+#   git config core.hooksPath .githooks
+#
+# Warns (without blocking) when a newer stable Rust toolchain is available.
+# CI always runs the latest stable, so a stale local toolchain can miss lints
+# that fail CI -- exactly what happened around v0.1.6. `rustup check` answers
+# "is there a newer stable than mine?" directly, so there's no time heuristic.
+#
+# Network-tolerant and non-blocking: if rustup is missing or offline, the push
+# proceeds silently.
+set -euo pipefail
+
+if command -v rustup >/dev/null 2>&1; then
+  # `rustup check` exits non-zero when any channel is stale; tolerate that.
+  out="$(rustup check 2>/dev/null || true)"
+  if printf '%s' "$out" | grep -qi '^stable.*update available'; then
+    echo "note: a newer stable Rust is available; CI runs the latest stable." >&2
+    printf '%s\n' "$out" | grep -i '^stable' | sed 's/^/  /' >&2
+    echo "  -> run: rustup update stable" >&2
+  fi
+fi
