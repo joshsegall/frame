@@ -4,6 +4,8 @@ All notable changes to frame will be documented in this file.
 
 ## Unreleased
 
+## v0.1.6 - 2026-06-28
+
 ### Added
 - Board view now shows subtasks: subtasks with Active, Todo (ready), or Done states appear in the appropriate board columns alongside top-level tasks
 - Concurrent task IDs via actor tokens. Each working copy mints task IDs in its own actor-token namespace, so independent unsynced clones can create tasks in parallel without ever producing colliding IDs that clash on merge.
@@ -12,8 +14,6 @@ All notable changes to frame will be documented in this file.
   - **Namespace-correct re-keying on move:** cross-track moves (`fr mv --track`, TUI `M`) and reparent/promote (`fr mv --parent`/`--promote`, TUI move `h`/`l`) re-mint the new ID segments in the mover's namespace (e.g. clone `c` moving `EFF-a14` into track INF produces `INF-c1`, and a moved subtree re-keys to `INF-c1.c1`, `INF-c1.c2`). A move with no claimable token aborts with the `fr actor set …` routing message, changing nothing. A cross-track move changes the ID prefix, so creator provenance is not preserved across it.
   - **Token-aware integrity:** `fr check`, `dep:` resolution, ID comparison, lookup (`--after`/`--parent`/`--track`/jump-to-task), prefix rename, and abbreviated display all distinguish namespaces — `EFF-a14`, `EFF-14`, and `EFF-b14` are three distinct tasks, so only a genuine same-namespace collision is reported as a duplicate (the post-merge safety net) and a `dep:` on a tokened ID resolves to that exact task.
   - **At-a-glance surfacing:** the TUI Tracks overview header shows this clone's token compactly (`Project: NAME · actor: a` / `· primary` / `· unclaimed`), and a new read-only `fr info` command prints version, project name, frame directory, actor token, and active-track count (human or `--json`). Both are display-only and never claim a token; in `--json`, `actor` is the literal token, `"null"` for primary, or JSON `null` when unclaimed.
-
-### Added
 - `fr projects prune` removes registry entries whose project directory no longer exists (the `(not found)` entries shown by `fr projects`). Supports `--dry-run` and `--json`. Useful for clearing stale entries left by deleted or temporary projects.
 
 ### Changed
