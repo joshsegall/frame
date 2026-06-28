@@ -6,6 +6,12 @@ frame.txt
 # test directory
 frame/
 
+# scratch / working artifacts
+scratch/
+
+# yarda
+.yarda/
+
 
 # Added by cargo
 
