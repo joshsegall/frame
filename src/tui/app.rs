@@ -1320,14 +1320,6 @@ impl App {
                 None => continue,
             };
             let track_name = self.track_name(track_id).to_string();
-            let prefix = self
-                .project
-                .config
-                .ids
-                .prefixes
-                .get(track_id.as_str())
-                .cloned()
-                .unwrap_or_default();
 
             let mut has_ready = false;
             let mut has_active = false;
@@ -1339,11 +1331,9 @@ impl App {
                         None => continue,
                     };
 
-                    let id_display = if prefix.is_empty() {
-                        task_id.clone()
-                    } else {
-                        format!("{}-{}", prefix, task_id)
-                    };
+                    // task.id already carries the track prefix (e.g. "ST-001"),
+                    // so render it directly without re-prefixing.
+                    let id_display = task_id.clone();
 
                     // Apply tag filter
                     if let Some(tf) = tag_filter
@@ -1484,11 +1474,8 @@ impl App {
                             continue;
                         }
 
-                        let id_display = if prefix.is_empty() {
-                            task_id.clone()
-                        } else {
-                            format!("{}-{}", prefix, task_id)
-                        };
+                        // task.id already carries the track prefix; render directly.
+                        let id_display = task_id.clone();
 
                         done_items.push((
                             resolved_str,
@@ -4141,5 +4128,87 @@ mod tests {
             })
             .collect();
         assert!(done_ids.is_empty(), "Done should be empty");
+    }
+
+    // --- board id_display does not double the track prefix (regression) ---
+
+    #[test]
+    fn board_id_display_does_not_double_prefix() {
+        use crate::model::config::{CleanConfig, IdConfig, ProjectConfig, ProjectInfo, UiConfig};
+        use crate::model::project::Project;
+        use crate::parse::parse_track;
+
+        let track_md = "\
+# Stuff
+
+## Backlog
+
+- [ ] `ST-001` Parent task
+  - [ ] `ST-001.2` Todo subtask
+- [>] `ST-002` Top-level active
+
+## Done
+";
+        let track = parse_track(track_md);
+        let mut prefixes = indexmap::IndexMap::new();
+        prefixes.insert("stuff".to_string(), "ST".to_string());
+        let config = ProjectConfig {
+            project: ProjectInfo {
+                name: "test".into(),
+            },
+            agent: Default::default(),
+            tracks: vec![TrackConfig {
+                id: "stuff".into(),
+                name: "Stuff".into(),
+                state: "active".into(),
+                file: "tracks/stuff.md".into(),
+            }],
+            clean: CleanConfig::default(),
+            ids: IdConfig { prefixes },
+            ui: UiConfig::default(),
+        };
+        let project = Project {
+            root: std::path::PathBuf::from("/tmp/test"),
+            frame_dir: std::path::PathBuf::from("/tmp/test/frame"),
+            config,
+            tracks: vec![("stuff".into(), track)],
+            inbox: None,
+        };
+        let mut app = App::new(project);
+        app.board_state.mode = BoardMode::All;
+        let [ready, in_progress, _done] = app.build_board_columns();
+
+        // Map task_id -> id_display across both populated columns.
+        let displays: std::collections::HashMap<String, String> = ready
+            .iter()
+            .chain(in_progress.iter())
+            .filter_map(|item| match item {
+                BoardItem::Task {
+                    task_id,
+                    id_display,
+                    ..
+                } => Some((task_id.clone(), id_display.clone())),
+                _ => None,
+            })
+            .collect();
+
+        // Top-level id is rendered as stored, not doubled.
+        assert_eq!(
+            displays.get("ST-001").map(String::as_str),
+            Some("ST-001"),
+            "expected ST-001, not ST-ST-001"
+        );
+        // Subtask id is rendered as stored, not doubled.
+        assert_eq!(
+            displays.get("ST-001.2").map(String::as_str),
+            Some("ST-001.2"),
+            "expected ST-001.2, not ST-ST-001.2"
+        );
+        // Active top-level id is also un-doubled.
+        assert_eq!(
+            displays.get("ST-002").map(String::as_str),
+            Some("ST-002"),
+            "expected ST-002, not ST-ST-002"
+        );
     }
 }

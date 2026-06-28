@@ -7,6 +7,9 @@ All notable changes to frame will be documented in this file.
 ### Added
 - Board view now shows subtasks: subtasks with Active, Todo (ready), or Done states appear in the appropriate board columns alongside top-level tasks
 
+### Fixed
+- Board view displayed task IDs with the track prefix doubled (e.g. `ST-ST-001`) when `[ids.prefixes]` was set; now shows the correct id (`ST-001`)
+
 ## v0.1.5 - 2026-02-24
 
 ### Added
