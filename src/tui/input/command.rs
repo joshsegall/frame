@@ -748,6 +748,18 @@ pub(super) fn palette_check_project(app: &mut App) {
                 check::CheckWarning::LostTask { track_id, task_id } => {
                     format!("  [{}] {} has #lost tag", track_id, task_id)
                 }
+                check::CheckWarning::ActorTokenUnregistered { token } => {
+                    format!(
+                        "  actor token '{}' missing from actors.toml (next mint re-registers it)",
+                        token
+                    )
+                }
+                check::CheckWarning::ActorTokenRetiredButHeld { token } => {
+                    format!(
+                        "  actor token '{}' is retired in actors.toml but still held",
+                        token
+                    )
+                }
             };
             lines.push(Line::from(Span::styled(msg, yellow)));
         }

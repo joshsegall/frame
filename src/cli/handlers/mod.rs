@@ -1213,6 +1213,18 @@ fn cmd_check(json: bool) -> Result<(), Box<dyn std::error::Error>> {
                             track_id, task_id
                         );
                     }
+                    check::CheckWarning::ActorTokenUnregistered { token } => {
+                        println!(
+                            "  actor token '{}' (this clone's .actor) is missing from actors.toml — the next mint re-registers it, or run `fr actor set {}`",
+                            token, token
+                        );
+                    }
+                    check::CheckWarning::ActorTokenRetiredButHeld { token } => {
+                        println!(
+                            "  actor token '{}' (this clone's .actor) is retired in actors.toml — claim a fresh token (`fr actor claim`) or reactivate it (`fr actor set {}`)",
+                            token, token
+                        );
+                    }
                 }
             }
         }

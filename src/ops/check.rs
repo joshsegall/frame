@@ -69,6 +69,15 @@ pub enum CheckWarning {
     /// Task has the #lost tag (created by recovery system)
     #[serde(rename = "lost_task")]
     LostTask { track_id: String, task_id: String },
+    /// This clone's `.actor` token has no row in `actors.toml` (registry drift —
+    /// the committed registry lost our claim). The next mint re-registers it.
+    #[serde(rename = "actor_token_unregistered")]
+    ActorTokenUnregistered { token: String },
+    /// This clone's `.actor` token is present but retired in `actors.toml`, yet
+    /// this working copy still holds it. Claim a fresh token, or `fr actor set`
+    /// it to reactivate.
+    #[serde(rename = "actor_token_retired")]
+    ActorTokenRetiredButHeld { token: String },
 }
 
 /// Informational messages (not errors or warnings).
@@ -111,6 +120,10 @@ pub fn check_project(project: &Project) -> CheckResult {
     for (track_id, track) in &project.tracks {
         check_track(track, track_id, &all_ids, &project.root, &mut result);
     }
+
+    // Actor-registry drift: this clone's `.actor` token should have an active
+    // row in the committed `actors.toml`.
+    check_actor_registry(&project.frame_dir, &mut result);
 
     // Recovery log summary
     if let Some(summary) = crate::io::recovery::recovery_summary(&project.frame_dir) {
@@ -256,6 +269,28 @@ fn check_task(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Compare this clone's `.actor` token against the committed registry. A held
+/// token that is missing from, or retired in, `actors.toml` is drift worth
+/// flagging. An unclaimed clone (no `.actor`) and an unreadable registry are
+/// both no-ops here — the latter is a separate concern surfaced elsewhere.
+fn check_actor_registry(frame_dir: &Path, result: &mut CheckResult) {
+    let Some(token) = crate::io::actors::read_actor_token(frame_dir) else {
+        return;
+    };
+    let Ok(reg) = crate::io::actors::read_actors(frame_dir) else {
+        return;
+    };
+    match reg.actors.get(&token) {
+        None => result
+            .warnings
+            .push(CheckWarning::ActorTokenUnregistered { token }),
+        Some(entry) if entry.is_retired() => result
+            .warnings
+            .push(CheckWarning::ActorTokenRetiredButHeld { token }),
+        Some(_) => {}
+    }
+}
 
 fn collect_all_task_ids(project: &Project) -> HashSet<String> {
     let mut ids = HashSet::new();
@@ -1095,6 +1130,86 @@ mod tests {
         assert!(result.errors.iter().any(|e| matches!(
             e,
             CheckError::DanglingDep { dep_id, .. } if dep_id == "M-a14"
+        )));
+    }
+
+    // --- Actor registry drift ---
+
+    /// A clone holding a token absent from `actors.toml` is flagged (the bug
+    /// where a concurrent clone clobbered the committed registry).
+    #[test]
+    fn test_check_actor_token_unregistered() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+        crate::io::actors::write_actor_token(&frame_dir, "null").unwrap();
+        // Registry exists but lists only another clone's token.
+        std::fs::write(
+            frame_dir.join("actors.toml"),
+            "[actors.b]\nname = \"ccdev\"\nstate = \"active\"\n",
+        )
+        .unwrap();
+
+        let project = make_project_at(tmp.path(), "# Main\n\n## Backlog\n\n## Done\n");
+        let result = check_project(&project);
+        assert!(result.warnings.iter().any(|w| matches!(
+            w,
+            CheckWarning::ActorTokenUnregistered { token } if token == "null"
+        )));
+    }
+
+    /// A clone still holding a token the registry has retired is flagged.
+    #[test]
+    fn test_check_actor_token_retired_but_held() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+        crate::io::actors::write_actor_token(&frame_dir, "a").unwrap();
+        std::fs::write(
+            frame_dir.join("actors.toml"),
+            "[actors.a]\nname = \"host\"\nstate = \"retired\"\nretired = \"2026-06-27\"\n",
+        )
+        .unwrap();
+
+        let project = make_project_at(tmp.path(), "# Main\n\n## Backlog\n\n## Done\n");
+        let result = check_project(&project);
+        assert!(result.warnings.iter().any(|w| matches!(
+            w,
+            CheckWarning::ActorTokenRetiredButHeld { token } if token == "a"
+        )));
+    }
+
+    /// A clone whose active token is properly registered raises no actor warning,
+    /// and an unclaimed clone (no `.actor`) is silent too.
+    #[test]
+    fn test_check_actor_token_healthy_and_unclaimed() {
+        // Healthy: token present and active.
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+        crate::io::actors::write_actor_token(&frame_dir, "a").unwrap();
+        std::fs::write(
+            frame_dir.join("actors.toml"),
+            "[actors.a]\nname = \"host\"\nstate = \"active\"\nclaimed = \"2026-06-27\"\n",
+        )
+        .unwrap();
+        let project = make_project_at(tmp.path(), "# Main\n\n## Backlog\n\n## Done\n");
+        let result = check_project(&project);
+        assert!(!result.warnings.iter().any(|w| matches!(
+            w,
+            CheckWarning::ActorTokenUnregistered { .. }
+                | CheckWarning::ActorTokenRetiredButHeld { .. }
+        )));
+
+        // Unclaimed: no `.actor` at all — nothing to compare, no warning.
+        let tmp2 = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp2.path().join("frame")).unwrap();
+        let project2 = make_project_at(tmp2.path(), "# Main\n\n## Backlog\n\n## Done\n");
+        let result2 = check_project(&project2);
+        assert!(!result2.warnings.iter().any(|w| matches!(
+            w,
+            CheckWarning::ActorTokenUnregistered { .. }
+                | CheckWarning::ActorTokenRetiredButHeld { .. }
         )));
     }
 

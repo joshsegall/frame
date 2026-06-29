@@ -4,6 +4,12 @@ All notable changes to frame will be documented in this file.
 
 ## Unreleased
 
+### Added
+- `fr check` now reports actor-registry drift: when this clone's gitignored `frame/.actor` token has no row in the committed `frame/actors.toml` (or its row is retired while the clone still holds it), check emits a warning pointing to the fix. Surfaced in both the CLI and the TUI check overlay.
+
+### Fixed
+- Mint operations now self-heal a drifted actor registry: if this clone holds a token (`frame/.actor`) that is missing from `frame/actors.toml`, the next `fr add`/`push`/`sub`/triage re-registers it (announced once) instead of silently minting against an absent registry row. This recovers the case where a concurrent clone overwrote the committed registry — or a `git reset`/`restore` reverted an uncommitted claim — leaving the gitignored `.actor` orphaned. A deliberately-retired token is left alone (reported by `fr check` rather than resurrected).
+
 ## v0.1.6 - 2026-06-28
 
 ### Added

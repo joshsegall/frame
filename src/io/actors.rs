@@ -351,6 +351,29 @@ pub struct ResolvedToken {
 ///    the mint can abort without creating anything.
 pub fn resolve_actor_token(frame_dir: &Path) -> Result<ResolvedToken, String> {
     if let Some(token) = read_actor_token(frame_dir) {
+        // Self-heal a drifted registry. This clone's identity lives in the
+        // gitignored `.actor`, but the shared, committed `actors.toml` can lose
+        // our row out from under us — a concurrent clone may overwrite the
+        // registry without it, or a `git reset`/`restore` can revert an
+        // as-yet-uncommitted claim. If our token has no row at all, re-register
+        // it so the committed registry reflects reality again. (A *retired* row
+        // is left untouched: `fr actor retire` deliberately leaves `.actor`
+        // pointing at the tombstone, so resurrecting it here would fight intent.
+        // `fr check` reports that case instead.)
+        let mut reg = read_actors(frame_dir)?;
+        if !reg.actors.contains_key(&token) {
+            let name = default_name();
+            reg.claim(&token, &name, Some(token.as_str()), &today())?;
+            write_actors(frame_dir, &reg)
+                .map_err(|e| format!("cannot write actors.toml: {}", e))?;
+            return Ok(ResolvedToken {
+                token: token.clone(),
+                announcement: Some(format!(
+                    "re-registered actor token '{}' in actors.toml (registry had drifted)",
+                    token
+                )),
+            });
+        }
         return Ok(ResolvedToken {
             token,
             announcement: None,
@@ -749,12 +772,62 @@ state = \"active\"
         let frame_dir = tmp.path().join("frame");
         std::fs::create_dir_all(&frame_dir).unwrap();
         write_actor_token(&frame_dir, "null").unwrap();
+        // Registry already lists our token — the happy path is a pure no-op.
+        write_actors(&frame_dir, &reg_with(&[("null", "active")])).unwrap();
 
         let resolved = resolve_actor_token(&frame_dir).unwrap();
         assert_eq!(resolved.token, "null");
         assert!(resolved.announcement.is_none());
-        // No registry was written (the existing-token path doesn't touch it).
-        assert!(!actors_path(&frame_dir).exists());
+    }
+
+    #[test]
+    fn resolve_self_heals_token_missing_from_registry() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+        // This clone holds `null`, but a concurrent clone overwrote the committed
+        // registry with only its own token — our row was lost (the real-world
+        // drift: a gitignored `.actor` outliving a clobbered `actors.toml`).
+        write_actor_token(&frame_dir, "null").unwrap();
+        write_actors(&frame_dir, &reg_with(&[("b", "active")])).unwrap();
+
+        let resolved = resolve_actor_token(&frame_dir).unwrap();
+        assert_eq!(resolved.token, "null");
+        // Healed: announced once, our row is back, and `b` is left intact.
+        assert!(resolved.announcement.unwrap().contains("re-registered"));
+        let reg = read_actors(&frame_dir).unwrap();
+        assert!(reg.actors.get("null").unwrap().is_active());
+        assert!(reg.actors.contains_key("b"));
+        // `.actor` itself is never disturbed.
+        assert_eq!(read_actor_token(&frame_dir).as_deref(), Some("null"));
+
+        // A second resolve is now a no-op — the row is present again.
+        let again = resolve_actor_token(&frame_dir).unwrap();
+        assert!(again.announcement.is_none());
+    }
+
+    #[test]
+    fn resolve_does_not_resurrect_a_retired_held_token() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+        // `.actor` still points at a token the registry has tombstoned (e.g. the
+        // user ran `fr actor retire` on their own token). A mint must NOT silently
+        // flip it back to active — that case is `fr check`'s to report.
+        write_actor_token(&frame_dir, "a").unwrap();
+        write_actors(&frame_dir, &reg_with(&[("a", "retired")])).unwrap();
+
+        let resolved = resolve_actor_token(&frame_dir).unwrap();
+        assert_eq!(resolved.token, "a");
+        assert!(resolved.announcement.is_none());
+        assert!(
+            read_actors(&frame_dir)
+                .unwrap()
+                .actors
+                .get("a")
+                .unwrap()
+                .is_retired()
+        );
     }
 
     #[test]
