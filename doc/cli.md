@@ -416,9 +416,8 @@ Actions performed:
 - Archive done tasks exceeding the threshold
 - Report dangling dependencies and broken refs
 - Suggest actions (e.g., "all subtasks done — consider marking done")
-- Generate `ACTIVE.md` summary
 
-IDs assigned or reassigned by a real (non-`--dry-run`) clean are minted in this clone's [actor-token namespace](concepts.md#minting-in-a-token-namespace), auto-claiming a token on first use. Archival, thresholds and `ACTIVE.md` key on task state and `resolved:` dates, not ID structure, so they are unaffected by the token. A `--dry-run` previews without claiming a token or writing anything.
+IDs assigned or reassigned by a real (non-`--dry-run`) clean are minted in this clone's [actor-token namespace](concepts.md#minting-in-a-token-namespace), auto-claiming a token on first use. Archival and thresholds key on task state and `resolved:` dates, not ID structure, so they are unaffected by the token. A `--dry-run` previews without claiming a token or writing anything.
 
 ### `fr import FILE --track TRACK`
 

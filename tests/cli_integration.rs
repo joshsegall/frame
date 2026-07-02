@@ -958,9 +958,6 @@ fn test_clean() {
     let out = run_fr_ok(tmp.path(), &["clean"]);
     // Project should be clean (all IDs and dates assigned)
     assert!(out.contains("clean"));
-
-    // ACTIVE.md should be generated
-    assert!(tmp.path().join("frame/ACTIVE.md").exists());
 }
 
 #[test]
@@ -970,9 +967,6 @@ fn test_clean_dry_run() {
 
     let out = run_fr_ok(tmp.path(), &["clean", "--dry-run"]);
     assert!(out.contains("dry run"));
-
-    // ACTIVE.md should NOT be generated in dry-run
-    assert!(!tmp.path().join("frame/ACTIVE.md").exists());
 }
 
 #[test]

@@ -2273,11 +2273,6 @@ fn cmd_clean(args: CleanArgs) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // Generate ACTIVE.md
-        let active_md = clean::generate_active_md(&project);
-        let active_path = project.frame_dir.join("ACTIVE.md");
-        crate::io::recovery::atomic_write(&active_path, active_md.as_bytes())?;
-
         let total_changes = result.ids_assigned.len()
             + result.dates_assigned.len()
             + result.duplicates_resolved.len()

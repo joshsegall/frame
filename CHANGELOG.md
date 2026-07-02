@@ -4,6 +4,9 @@ All notable changes to frame will be documented in this file.
 
 ## Unreleased
 
+### Removed
+- `fr clean` no longer generates `ACTIVE.md`. The summary was write-only — nothing read it back — and went stale after any change that wasn't a clean, making the committed copy misleading. Use `fr ready` / `fr list` for a live view of active work.
+
 ### Added
 - `fr check` now reports actor-registry drift: when this clone's gitignored `frame/.actor` token has no row in the committed `frame/actors.toml` (or its row is retired while the clone still holds it), check emits a warning pointing to the fix. Surfaced in both the CLI and the TUI check overlay.
 
