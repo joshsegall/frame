@@ -516,8 +516,26 @@ pub enum ActorAction {
     Set(ActorSetArgs),
     /// Retire (tombstone) a token — leaves the frontier, stays reclaimable
     Retire(ActorRetireArgs),
+    /// Merge one or more tokens into a single target (renumbers ids, retires sources)
+    Merge(ActorMergeArgs),
     /// List all tokens with state and provenance
     List,
+}
+
+#[derive(Args)]
+pub struct ActorMergeArgs {
+    /// Source tokens to merge away — their ids are renumbered into `--into`
+    #[arg(required = true)]
+    pub from: Vec<String>,
+    /// Target token to merge into (must be an existing, active token)
+    #[arg(long)]
+    pub into: String,
+    /// Preview the full id remap and reference changes without writing anything
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Also rewrite id mentions inside note/spec/ref prose (skips git citations)
+    #[arg(long)]
+    pub rewrite_notes: bool,
 }
 
 #[derive(Args)]

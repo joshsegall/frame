@@ -113,6 +113,11 @@ pub struct TaskId {
 }
 
 impl TaskId {
+    /// The canonical text form of the id.
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+
     /// Parse a string into a `TaskId`. Never fails: anything that does not match
     /// the grammar becomes a `Raw` ID that round-trips verbatim.
     pub fn parse(s: &str) -> TaskId {
@@ -207,6 +212,31 @@ impl TaskId {
         match &self.parsed {
             ParsedId::Structured { segments, .. } => segments.last()?.token.as_ref(),
             ParsedId::Raw => None,
+        }
+    }
+
+    /// The prefix and segments of a structured id, or `None` for a `Raw` id.
+    /// Used by the actor-merge remapper, which rewrites individual segments in
+    /// place while preserving every untouched segment (token, number, and width)
+    /// verbatim.
+    pub fn segments(&self) -> Option<(&str, &[Segment])> {
+        match &self.parsed {
+            ParsedId::Structured { prefix, segments } => Some((prefix, segments)),
+            ParsedId::Raw => None,
+        }
+    }
+
+    /// Build a structured id from a prefix and an explicit list of segments. The
+    /// inverse of [`segments`](Self::segments); segment widths are honored exactly
+    /// as given, so round-tripping unchanged segments preserves their padding.
+    pub fn from_segments(prefix: &str, segments: Vec<Segment>) -> TaskId {
+        let text = render(prefix, &segments);
+        TaskId {
+            text,
+            parsed: ParsedId::Structured {
+                prefix: prefix.to_string(),
+                segments,
+            },
         }
     }
 

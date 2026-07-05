@@ -1,7 +1,7 @@
 mod init;
 pub use init::cmd_init;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -21,7 +21,7 @@ use crate::model::inbox::Inbox;
 use crate::model::project::Project;
 use crate::model::task::{Metadata, Task, TaskState};
 use crate::model::track::{Track, TrackNode};
-use crate::ops::{check, clean, import, inbox_ops, search, task_ops, track_ops};
+use crate::ops::{actor_merge, check, clean, import, inbox_ops, search, task_ops, track_ops};
 
 // ---------------------------------------------------------------------------
 // Dispatch
@@ -2582,6 +2582,7 @@ fn cmd_actor(args: ActorCmd, json: bool) -> Result<(), Box<dyn std::error::Error
         Some(ActorAction::Claim(a)) => cmd_actor_claim(a, json),
         Some(ActorAction::Set(a)) => cmd_actor_set(a, json),
         Some(ActorAction::Retire(a)) => cmd_actor_retire(a, json),
+        Some(ActorAction::Merge(a)) => cmd_actor_merge(a, json),
         Some(ActorAction::List) => cmd_actor_list(json),
     }
 }
@@ -2608,6 +2609,264 @@ fn thin_frontier_notice(reg: &actors::ActorRegistry) {
             remaining
         );
     }
+}
+
+/// Every id-bearing markdown file under `frame/archive/` (per-track archives and
+/// archived whole-track files under `_tracks/`).
+fn archive_md_files(frame_dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let archive_dir = frame_dir.join("archive");
+    let push_md_dir = |dir: &std::path::Path, out: &mut Vec<PathBuf>| {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md") {
+                    out.push(path);
+                }
+            }
+        }
+    };
+    push_md_dir(&archive_dir, &mut out);
+    push_md_dir(&archive_dir.join("_tracks"), &mut out);
+    out.sort();
+    out
+}
+
+fn cmd_actor_merge(args: ActorMergeArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::io::recovery::atomic_write;
+    use crate::model::task_id::{TaskId, actor_namespace};
+    use crate::ops::actor_merge::ProseHit;
+    use crate::parse::{parse_tasks, serialize_tasks};
+
+    let mut project = load_project_cwd()?;
+    let frame_dir = project.frame_dir.clone();
+    let _lock = FileLock::acquire_default(&frame_dir)?;
+
+    // Syntactic validation: token grammar, non-empty sources, no self-merge.
+    actor_merge::validate_merge_request(&args.from, &args.into)?;
+
+    let mut reg = actors::read_actors(&frame_dir)?;
+
+    // The target must be an existing, active token.
+    match reg.actors.get(&args.into) {
+        Some(e) if e.is_retired() => {
+            return Err(format!(
+                "target token '{}' is retired — reactivate it with `fr actor set {}` before merging into it",
+                args.into, args.into
+            )
+            .into());
+        }
+        Some(_) => {}
+        None => {
+            return Err(format!(
+                "target token '{}' is not in the registry — claim it with `fr actor set {}` first",
+                args.into, args.into
+            )
+            .into());
+        }
+    }
+
+    // Source tokens that have a registry row get retired on apply; sources that
+    // are pure id-drift (no row) are still renumbered.
+    let retire: Vec<String> = args
+        .from
+        .iter()
+        .filter(|t| matches!(reg.actors.get(*t), Some(e) if !e.is_retired()))
+        .cloned()
+        .collect();
+
+    // Collect every id across tracks and archive files, then plan the remap.
+    let mut all_ids: Vec<TaskId> = Vec::new();
+    for (_, track) in &project.tracks {
+        actor_merge::collect_ids_in_track(track, &mut all_ids);
+    }
+    // Archive files are a `# Archive — <track>` header followed by a bare task
+    // list (no `## Section` headers), so they parse/serialize as task lists, not
+    // tracks. Keep the header verbatim and round-trip only the tasks.
+    let archive_paths = archive_md_files(&frame_dir);
+    let mut archives: Vec<(PathBuf, Vec<String>, Vec<Task>)> = Vec::new();
+    for path in &archive_paths {
+        let content = std::fs::read_to_string(path)?;
+        let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+        let start = lines
+            .iter()
+            .position(|l| l.starts_with("- ["))
+            .unwrap_or(lines.len());
+        let header = lines[..start].to_vec();
+        let (tasks, _) = parse_tasks(&lines, start, 0, 0);
+        actor_merge::collect_ids(&tasks, &mut all_ids);
+        archives.push((path.clone(), header, tasks));
+    }
+
+    let into_tok = actor_namespace(&args.into);
+    let from_set: HashSet<String> = args.from.iter().cloned().collect();
+    let pairs = actor_merge::build_merge_map(&all_ids, &from_set, into_tok.as_ref());
+
+    if pairs.is_empty() && retire.is_empty() {
+        return Err(format!(
+            "nothing to merge: no ids in namespace(s) {} and no matching active registry row",
+            args.from.join(", ")
+        )
+        .into());
+    }
+
+    let map: HashMap<String, TaskId> = pairs
+        .iter()
+        .map(|(o, n)| (o.as_str().to_string(), n.clone()))
+        .collect();
+
+    // Apply in memory (for both the preview and the real run), gathering the
+    // prose occurrences and which files changed.
+    let mut hits: Vec<(String, ProseHit)> = Vec::new();
+    let mut changed_tracks: Vec<String> = Vec::new();
+    for (id, track) in project.tracks.iter_mut() {
+        let mut local: Vec<ProseHit> = Vec::new();
+        if actor_merge::apply_map_to_track(track, &map, args.rewrite_notes, &mut local) {
+            changed_tracks.push(id.clone());
+        }
+        for h in local {
+            hits.push((format!("track:{}", id), h));
+        }
+    }
+    let mut changed_archives: Vec<usize> = Vec::new();
+    for (i, (path, _header, tasks)) in archives.iter_mut().enumerate() {
+        let mut local: Vec<ProseHit> = Vec::new();
+        let changed = actor_merge::apply_map_to_tasks(tasks, &map, args.rewrite_notes, &mut local);
+        let label = format!(
+            "archive:{}",
+            path.file_name().and_then(|s| s.to_str()).unwrap_or("")
+        );
+        if changed {
+            changed_archives.push(i);
+        }
+        for h in local {
+            hits.push((label.clone(), h));
+        }
+    }
+
+    // Persist, unless this is a dry run.
+    if !args.dry_run {
+        for tid in &changed_tracks {
+            save_track(&project, tid)?;
+        }
+        for &i in &changed_archives {
+            let (path, header, tasks) = &archives[i];
+            let body = serialize_tasks(tasks, 0).join("\n");
+            let content = if header.is_empty() {
+                format!("{}\n", body)
+            } else {
+                format!("{}\n{}\n", header.join("\n"), body)
+            };
+            atomic_write(path, content.as_bytes())?;
+        }
+        for tok in &retire {
+            reg.retire(tok, &actors::today())?;
+        }
+        actors::write_actors(&frame_dir, &reg)?;
+
+        // The remap is collision-free by construction; verify against a reload.
+        if let Ok(reloaded) = project_io::load_project(&project.root) {
+            let dups = check::check_project(&reloaded)
+                .errors
+                .iter()
+                .filter(|e| matches!(e, check::CheckError::DuplicateId { .. }))
+                .count();
+            if dups > 0 {
+                eprintln!(
+                    "warning: {} duplicate id(s) present after merge — run `fr check`",
+                    dups
+                );
+            }
+        }
+    }
+
+    if json {
+        let renamed: Vec<_> = pairs
+            .iter()
+            .map(|(o, n)| serde_json::json!({ "old": o.as_str(), "new": n.as_str() }))
+            .collect();
+        let prose: Vec<_> = hits
+            .iter()
+            .map(|(src, h)| {
+                serde_json::json!({
+                    "source": src,
+                    "old": h.old,
+                    "new": h.new,
+                    "is_citation": h.is_citation,
+                    "rewritten": args.rewrite_notes && !h.is_citation,
+                    "context": h.context,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "into": args.into,
+                "from": args.from,
+                "dry_run": args.dry_run,
+                "applied": !args.dry_run,
+                "renamed": renamed,
+                "retired": retire,
+                "prose_hits": prose,
+            }))?
+        );
+        return Ok(());
+    }
+
+    if args.dry_run {
+        println!("DRY RUN — no files written\n");
+    }
+    println!("Merge {} → {}", args.from.join(" + "), args.into);
+
+    if pairs.is_empty() {
+        println!("\n(no ids to renumber)");
+    } else {
+        println!("\n{} id(s) renumbered:", pairs.len());
+        for (o, n) in &pairs {
+            println!("  {:<18} → {}", o.as_str(), n.as_str());
+        }
+    }
+
+    if !hits.is_empty() {
+        println!("\nprose references ({}):", hits.len());
+        for (src, h) in &hits {
+            let tag = if h.is_citation {
+                "  [git citation — NOT rewritten]"
+            } else if args.rewrite_notes {
+                "  [rewritten]"
+            } else {
+                "  [report only — pass --rewrite-notes to rewrite]"
+            };
+            println!("  [{}] {} → {}{}", src, h.old, h.new, tag);
+            println!("      …{}…", h.context);
+        }
+    }
+
+    let retire_verb = if args.dry_run {
+        "would retire"
+    } else {
+        "retired"
+    };
+    if !retire.is_empty() {
+        println!("\ntokens {}: {}", retire_verb, retire.join(", "));
+    }
+
+    if args.dry_run {
+        println!("\nRe-run without --dry-run to apply.");
+    } else {
+        println!(
+            "\nMerged into '{}'. Any working copy still holding {} must be re-pointed \
+             (`fr actor set {}` there, or delete its `frame/.actor` to inherit the shared token).",
+            args.into,
+            args.from
+                .iter()
+                .map(|t| format!("'{}'", t))
+                .collect::<Vec<_>>()
+                .join("/"),
+            args.into
+        );
+    }
+    Ok(())
 }
 
 fn cmd_actor_status(json: bool) -> Result<(), Box<dyn std::error::Error>> {

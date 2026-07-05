@@ -570,6 +570,24 @@ Tombstone a token (`state = retired`). It leaves the auto-assignment frontier bu
 fr actor retire b
 ```
 
+### `fr actor merge FROM... --into TOKEN`
+
+Collapse one or more actor namespaces into a single target token, renumbering every id minted by a `FROM` token into `--into`'s sequence and retiring the source tokens. Use it when a machine has accumulated several tokens (e.g. a git-worktree-per-session workflow, where each fresh working copy auto-claims its own token) and you want them back down to one.
+
+The remap is **per-segment**: only segments minted by a `FROM` token change; a subtask minted by a third actor is preserved. Merging `d` and `f` into `b` turns `SEC-d1` into `SEC-b2` and `SEC-d1.a3` into `SEC-b2.a3` (actor `a`'s child is kept), never `SEC-b2.b1`. Numbers continue after the highest existing `--into` number, so no id collides. Ids across all tracks **and archives** are renumbered, and `dep:` references are rewritten to match.
+
+`--into` must be an existing, active token. Source tokens are retired (tombstoned, reclaimable) on success. The full `OLD → NEW` mapping is printed (and available with `--json`).
+
+```
+fr actor merge d f --into b            # merge tokens d and f into b
+fr actor merge d f --into b --dry-run  # preview the remap, write nothing
+fr actor merge d f --into b --rewrite-notes  # also rewrite id mentions in note/spec/ref prose
+```
+
+By default, id mentions inside note/spec/ref **prose** are reported but not changed. `--rewrite-notes` rewrites them too, while skipping anything that looks like a git citation (e.g. `fix(SEC-d1)` or an id next to a commit sha), since those quote immutable history.
+
+After a merge, any *other* working copy still holding a retired source token should be re-pointed — run `fr actor set <into>` there, or delete its `frame/.actor` so it inherits the shared token on next mint.
+
 ### `fr actor list`
 
 List all tokens with state and provenance. The current clone's token is marked with `*`.

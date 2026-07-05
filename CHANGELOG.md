@@ -8,6 +8,7 @@ All notable changes to frame will be documented in this file.
 - `fr clean` no longer generates `ACTIVE.md`. The summary was write-only — nothing read it back — and went stale after any change that wasn't a clean, making the committed copy misleading. Use `fr ready` / `fr list` for a live view of active work.
 
 ### Added
+- `fr actor merge <from>... --into <token>` collapses several actor namespaces into one, renumbering every id minted by a source token into the target's sequence and retiring the sources. Useful when a machine accumulates tokens (e.g. a git-worktree-per-session workflow, where each fresh working copy auto-claims its own token). The remap is per-segment — a subtask minted by a third actor is preserved (`SEC-d1.a3` → `SEC-b2.a3`, not `SEC-b2.b1`) — and covers all tracks, archives, and `dep:` references. Prints the full `OLD → NEW` map (`--json` supported). `--dry-run` previews without writing; `--rewrite-notes` also rewrites id mentions in note/spec/ref prose, skipping git citations like `fix(SEC-d1)`.
 - `fr check` now reports actor-registry drift: when this clone's gitignored `frame/.actor` token has no row in the committed `frame/actors.toml` (or its row is retired while the clone still holds it), check emits a warning pointing to the fix. Surfaced in both the CLI and the TUI check overlay.
 
 ### Fixed
