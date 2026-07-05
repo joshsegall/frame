@@ -2593,11 +2593,12 @@ fn finalize_claim(
     reg: &mut actors::ActorRegistry,
     token: &str,
     name: &str,
+    scope: actors::TokenScope,
 ) -> Result<actors::ClaimOutcome, Box<dyn std::error::Error>> {
     let current = actors::read_actor_token(frame_dir);
     let outcome = reg.claim(token, name, current.as_deref(), &actors::today())?;
     actors::write_actors(frame_dir, reg)?;
-    actors::write_actor_token(frame_dir, token)?;
+    actors::write_actor_token_scoped(frame_dir, token, scope)?;
     Ok(outcome)
 }
 
@@ -2873,9 +2874,20 @@ fn cmd_actor_status(json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let project = load_project_cwd()?;
     let frame_dir = &project.frame_dir;
     let reg = actors::read_actors(frame_dir)?;
+    let local = actors::read_local_actor_token(frame_dir);
+    let shared = actors::read_shared_actor_token(frame_dir);
     let token = actors::read_actor_token(frame_dir);
     let entry = token.as_ref().and_then(|t| reg.actors.get(t));
     let frontier_remaining = reg.never_used_frontier().len();
+    // How this clone resolved its token: a local override, an inherited shared
+    // token, or nothing.
+    let source = if local.is_some() {
+        "local"
+    } else if shared.is_some() {
+        "shared"
+    } else {
+        "none"
+    };
 
     if json {
         #[derive(serde::Serialize)]
@@ -2886,6 +2898,7 @@ fn cmd_actor_status(json: bool) -> Result<(), Box<dyn std::error::Error>> {
             in_registry: bool,
             state: Option<String>,
             name: Option<String>,
+            source: String,
             frontier_remaining: usize,
             thin_frontier: bool,
         }
@@ -2896,12 +2909,23 @@ fn cmd_actor_status(json: bool) -> Result<(), Box<dyn std::error::Error>> {
             name: entry.map(|e| e.name.clone()),
             claimed: token.is_some(),
             token: token.clone(),
+            source: source.to_string(),
             frontier_remaining,
             thin_frontier: reg.is_thin_frontier(),
         };
         println!("{}", serde_json::to_string_pretty(&status)?);
         return Ok(());
     }
+
+    // A one-word note on where a tokened identity came from.
+    let scope_note = match source {
+        "shared" => "  (shared clone token, inherited by worktrees)",
+        "local" if shared.is_some() && shared != local => {
+            "  (local override; shared token differs)"
+        }
+        "local" => "  (local to this worktree)",
+        _ => "",
+    };
 
     match &token {
         None => {
@@ -2911,7 +2935,7 @@ fn cmd_actor_status(json: bool) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         Some(tok) if tok == "null" => {
-            println!("Token: null — primary (untokened)");
+            println!("Token: null — primary (untokened){}", scope_note);
             if entry.is_none() {
                 println!(
                     "warning: token 'null' is not in the registry (run `fr actor set null` to record it)"
@@ -2919,9 +2943,9 @@ fn cmd_actor_status(json: bool) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Some(tok) => match entry {
-            Some(e) => println!("Token: {} ({}) — {}", tok, e.state, e.name),
+            Some(e) => println!("Token: {} ({}) — {}{}", tok, e.state, e.name, scope_note),
             None => {
-                println!("Token: {}", tok);
+                println!("Token: {}{}", tok, scope_note);
                 println!(
                     "warning: token '{}' is not in the registry (run `fr actor set {}` to record it)",
                     tok, tok
@@ -2953,7 +2977,12 @@ fn cmd_actor_claim(args: ActorClaimArgs, json: bool) -> Result<(), Box<dyn std::
     };
 
     let name = args.name.unwrap_or_else(actors::default_name);
-    finalize_claim(&frame_dir, &mut reg, &token, &name)?;
+    let scope = if args.local {
+        actors::TokenScope::Local
+    } else {
+        actors::TokenScope::Shared
+    };
+    finalize_claim(&frame_dir, &mut reg, &token, &name, scope)?;
 
     if json {
         println!(
@@ -2982,7 +3011,14 @@ fn cmd_actor_set(args: ActorSetArgs, json: bool) -> Result<(), Box<dyn std::erro
 
     let mut reg = actors::read_actors(&frame_dir)?;
     let name = args.name.unwrap_or_else(actors::default_name);
-    let outcome = finalize_claim(&frame_dir, &mut reg, &args.token, &name)?;
+    // The null (primary) token is always local — the shared token is a real
+    // letter that worktrees inherit, never null.
+    let scope = if args.local || args.token == "null" {
+        actors::TokenScope::Local
+    } else {
+        actors::TokenScope::Shared
+    };
+    let outcome = finalize_claim(&frame_dir, &mut reg, &args.token, &name, scope)?;
 
     let outcome_str = match outcome {
         actors::ClaimOutcome::Created => "created",

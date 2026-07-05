@@ -543,6 +543,10 @@ pub struct ActorClaimArgs {
     /// Provenance name for the registry row (default: machine hostname)
     #[arg(long)]
     pub name: Option<String>,
+    /// Claim only for this worktree (write `frame/.actor`), not the shared,
+    /// clone-wide token that sibling worktrees inherit
+    #[arg(long)]
+    pub local: bool,
 }
 
 #[derive(Args)]
@@ -552,6 +556,10 @@ pub struct ActorSetArgs {
     /// Provenance name for the registry row (default: machine hostname)
     #[arg(long)]
     pub name: Option<String>,
+    /// Claim only for this worktree (write `frame/.actor`), not the shared,
+    /// clone-wide token that sibling worktrees inherit. Implied for `null`.
+    #[arg(long)]
+    pub local: bool,
 }
 
 #[derive(Args)]

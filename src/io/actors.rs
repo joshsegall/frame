@@ -302,9 +302,45 @@ pub fn actors_path(frame_dir: &Path) -> PathBuf {
     frame_dir.join("actors.toml")
 }
 
-/// Path to this clone's gitignored token file.
+/// Path to this working copy's *local* gitignored token file (`frame/.actor`).
+/// A local token overrides the clone-wide shared one and is how a single
+/// worktree deliberately diverges onto its own token.
 pub fn actor_token_path(frame_dir: &Path) -> PathBuf {
     frame_dir.join(".actor")
+}
+
+/// Path to the clone-wide *shared* token file, under the git common directory
+/// (`<common-dir>/frame-actor`). All git worktrees of one clone resolve the same
+/// path, so they share one actor identity by default. `None` when the project is
+/// not in a git repository — such projects use only the local `.actor`.
+pub fn shared_actor_path(frame_dir: &Path) -> Option<PathBuf> {
+    crate::io::git::git_common_dir(frame_dir).map(|d| d.join("frame-actor"))
+}
+
+/// Where a token write should land.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenScope {
+    /// The clone-wide shared file (inherited by every worktree). Falls back to
+    /// the local file when the project is not in a git repo.
+    Shared,
+    /// This working copy's local `frame/.actor` (a per-worktree override).
+    Local,
+}
+
+fn read_token_file(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let token = text.trim().to_string();
+    if token.is_empty() { None } else { Some(token) }
+}
+
+/// This working copy's *local* token (`frame/.actor`), ignoring any shared token.
+pub fn read_local_actor_token(frame_dir: &Path) -> Option<String> {
+    read_token_file(&actor_token_path(frame_dir))
+}
+
+/// The clone-wide *shared* token (`<common-dir>/frame-actor`), if any.
+pub fn read_shared_actor_token(frame_dir: &Path) -> Option<String> {
+    read_token_file(&shared_actor_path(frame_dir)?)
 }
 
 /// Read the registry. A missing file is treated as an empty registry (migration
@@ -397,12 +433,21 @@ pub fn resolve_actor_token(frame_dir: &Path) -> Result<ResolvedToken, String> {
     let name = default_name();
     reg.claim(&token, &name, None, &today())?;
     write_actors(frame_dir, &reg).map_err(|e| format!("cannot write actors.toml: {}", e))?;
-    write_actor_token(frame_dir, &token).map_err(|e| format!("cannot write .actor: {}", e))?;
+    // Auto-claim writes the clone-wide *shared* token (never null), so every
+    // other git worktree of this clone inherits it instead of each auto-claiming
+    // its own. Falls back to the local file for non-git projects.
+    write_actor_token_scoped(frame_dir, &token, TokenScope::Shared)
+        .map_err(|e| format!("cannot write actor token: {}", e))?;
 
-    let announcement = Some(format!(
-        "Claimed actor token '{}' for this working copy",
-        token
-    ));
+    let shared = shared_actor_path(frame_dir).is_some();
+    let announcement = Some(if shared {
+        format!(
+            "Claimed actor token '{}' for this clone (shared across its worktrees)",
+            token
+        )
+    } else {
+        format!("Claimed actor token '{}' for this working copy", token)
+    });
     Ok(ResolvedToken {
         token,
         announcement,
@@ -434,12 +479,11 @@ pub fn id_scope(frame_dir: &Path) -> IdScope {
     }
 }
 
-/// Read this clone's token from `.actor`, or `None` if unclaimed (file absent).
+/// This working copy's effective token, or `None` if unclaimed. A local
+/// `frame/.actor` (a deliberate per-worktree override) wins; otherwise the
+/// clone-wide shared token, inherited by every worktree, applies.
 pub fn read_actor_token(frame_dir: &Path) -> Option<String> {
-    let path = actor_token_path(frame_dir);
-    let text = std::fs::read_to_string(&path).ok()?;
-    let token = text.trim().to_string();
-    if token.is_empty() { None } else { Some(token) }
+    read_local_actor_token(frame_dir).or_else(|| read_shared_actor_token(frame_dir))
 }
 
 /// Human-facing label for this clone's actor token, as read by
@@ -455,9 +499,27 @@ pub fn actor_label(token: Option<&str>) -> &str {
     }
 }
 
-/// Write this clone's token to `.actor`.
+/// Write this clone's token to the local `frame/.actor` file.
 pub fn write_actor_token(frame_dir: &Path, token: &str) -> std::io::Result<()> {
-    let path = actor_token_path(frame_dir);
+    write_actor_token_scoped(frame_dir, token, TokenScope::Local)
+}
+
+/// Write a token to the chosen scope. [`TokenScope::Shared`] targets the
+/// clone-wide file (so every worktree inherits it) but falls back to the local
+/// file when the project is not in a git repo. The null (primary) token must
+/// only ever be written [`TokenScope::Local`] — the shared token is always a
+/// real letter — but that policy is enforced by callers, not here.
+pub fn write_actor_token_scoped(
+    frame_dir: &Path,
+    token: &str,
+    scope: TokenScope,
+) -> std::io::Result<()> {
+    let path = match scope {
+        TokenScope::Shared => {
+            shared_actor_path(frame_dir).unwrap_or_else(|| actor_token_path(frame_dir))
+        }
+        TokenScope::Local => actor_token_path(frame_dir),
+    };
     crate::io::recovery::atomic_write(&path, format!("{}\n", token).as_bytes())
 }
 
@@ -757,6 +819,48 @@ state = \"active\"
         assert_eq!(read_actor_token(&frame_dir).as_deref(), Some("a"));
         write_actor_token(&frame_dir, "null").unwrap();
         assert_eq!(read_actor_token(&frame_dir).as_deref(), Some("null"));
+    }
+
+    #[test]
+    fn shared_write_falls_back_to_local_without_git() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+        // Not a git repo: there is no shared path, so a shared write lands local.
+        assert!(shared_actor_path(&frame_dir).is_none());
+        write_actor_token_scoped(&frame_dir, "a", TokenScope::Shared).unwrap();
+        assert_eq!(read_local_actor_token(&frame_dir).as_deref(), Some("a"));
+        assert_eq!(read_actor_token(&frame_dir).as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn local_token_overrides_shared_in_git_repo() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let git_ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["init", "-q"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !git_ok {
+            return; // git unavailable — skip the git-backed assertions
+        }
+        let frame_dir = root.join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+        let Some(shared) = shared_actor_path(&frame_dir) else {
+            return;
+        };
+        // A shared token is inherited when there is no local override.
+        write_actor_token_scoped(&frame_dir, "d", TokenScope::Shared).unwrap();
+        assert!(shared.exists());
+        assert_eq!(read_shared_actor_token(&frame_dir).as_deref(), Some("d"));
+        assert_eq!(read_actor_token(&frame_dir).as_deref(), Some("d"));
+        // A local token wins over the shared one.
+        write_actor_token_scoped(&frame_dir, "k", TokenScope::Local).unwrap();
+        assert_eq!(read_local_actor_token(&frame_dir).as_deref(), Some("k"));
+        assert_eq!(read_actor_token(&frame_dir).as_deref(), Some("k"));
     }
 
     #[test]

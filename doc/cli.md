@@ -539,24 +539,26 @@ fr actor
 fr actor --json
 ```
 
-### `fr actor claim [--name NAME]`
+### `fr actor claim [--name NAME] [--local]`
 
-Auto-claim a token from the frontier (a random pick from the first few never-used safe letters, to scatter concurrent claims). Writes `.actor` and a registry row. Fails when no unused tokens remain, pointing you to `fr actor set` to reclaim a retired token or claim a custom multi-character one.
+Auto-claim a token from the frontier (a random pick from the first few never-used safe letters, to scatter concurrent claims). Writes the clone-wide **shared** token (`<git-common-dir>/frame-actor`, inherited by every worktree) and a registry row. Fails when no unused tokens remain, pointing you to `fr actor set` to reclaim a retired token or claim a custom multi-character one.
 
 ```
 fr actor claim
 fr actor claim --name josh-laptop
+fr actor claim --local     # claim only for this worktree (frame/.actor)
 ```
 
-`--name` sets the registry provenance (default: the machine hostname).
+`--name` sets the registry provenance (default: the machine hostname). `--local` writes this worktree's `frame/.actor` instead of the shared token, so this one working copy diverges onto its own token — use it to run a worktree as a genuinely distinct, concurrent actor.
 
-### `fr actor set TOKEN [--name NAME]`
+### `fr actor set TOKEN [--name NAME] [--local]`
 
-Claim a specific token. Accepts a single safe letter (`a–z` minus `i`, `l`, `o`), a multi-character token (`aa`, `foo`), or `null`. Reclaims a retired token by flipping it back to active. Refuses a token that another working copy already holds (retire it there first, or pick another). Idempotent if this clone already holds the token.
+Claim a specific token. Accepts a single safe letter (`a–z` minus `i`, `l`, `o`), a multi-character token (`aa`, `foo`), or `null`. Reclaims a retired token by flipping it back to active. Refuses a token that another working copy already holds (retire it there first, or pick another). Idempotent if this clone already holds the token. Writes the clone-wide shared token by default; `--local` (and always `null`) writes this worktree's `frame/.actor`.
 
 ```
-fr actor set b
-fr actor set null          # record this clone as the primary
+fr actor set b             # set the shared token every worktree inherits
+fr actor set b --local     # override just this worktree
+fr actor set null          # record this clone as the primary (always local)
 fr actor set team-ci --name ci-runner
 ```
 
