@@ -760,6 +760,14 @@ pub(super) fn palette_check_project(app: &mut App) {
                         token
                     )
                 }
+                check::CheckWarning::ActorNameCollision { name, tokens } => {
+                    format!(
+                        "  {} active tokens share the name '{}': {} (see `fr actor merge`)",
+                        tokens.len(),
+                        name,
+                        tokens.join(", ")
+                    )
+                }
             };
             lines.push(Line::from(Span::styled(msg, yellow)));
         }

@@ -1225,6 +1225,16 @@ fn cmd_check(json: bool) -> Result<(), Box<dyn std::error::Error>> {
                             token, token
                         );
                     }
+                    check::CheckWarning::ActorNameCollision { name, tokens } => {
+                        println!(
+                            "  {} active tokens share the name '{}': {} — likely one machine's worktrees. Collapse with `fr actor merge {} --into {}`",
+                            tokens.len(),
+                            name,
+                            tokens.join(", "),
+                            tokens[1..].join(" "),
+                            tokens[0],
+                        );
+                    }
                 }
             }
         }

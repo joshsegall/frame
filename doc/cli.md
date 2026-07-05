@@ -143,7 +143,7 @@ fr deps EFF-014
 
 ### `fr check`
 
-Validate project integrity (read-only). Reports dangling dependencies, broken refs/specs, duplicate IDs, missing metadata, and format warnings.
+Validate project integrity (read-only). Reports dangling dependencies, broken refs/specs, duplicate IDs, missing metadata, and format warnings. Also flags actor issues: this clone's token drifting from `actors.toml`, and **multiple active tokens sharing one provenance name** (a sign a machine has accumulated tokens — e.g. a git-worktree-per-session workflow — with a suggested `fr actor merge` to collapse them).
 
 ### `fr info`
 

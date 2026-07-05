@@ -78,6 +78,11 @@ pub enum CheckWarning {
     /// it to reactivate.
     #[serde(rename = "actor_token_retired")]
     ActorTokenRetiredButHeld { token: String },
+    /// Several active tokens share one provenance `name` (typically a hostname) —
+    /// a sign a machine has accumulated tokens (e.g. a git-worktree-per-session
+    /// workflow). Consider `fr actor merge` to collapse them.
+    #[serde(rename = "actor_name_collision")]
+    ActorNameCollision { name: String, tokens: Vec<String> },
 }
 
 /// Informational messages (not errors or warnings).
@@ -124,6 +129,9 @@ pub fn check_project(project: &Project) -> CheckResult {
     // Actor-registry drift: this clone's `.actor` token should have an active
     // row in the committed `actors.toml`.
     check_actor_registry(&project.frame_dir, &mut result);
+
+    // Actor proliferation: several active tokens under one provenance name.
+    check_actor_name_collisions(&project.frame_dir, &mut result);
 
     // Recovery log summary
     if let Some(summary) = crate::io::recovery::recovery_summary(&project.frame_dir) {
@@ -292,6 +300,35 @@ fn check_actor_registry(frame_dir: &Path, result: &mut CheckResult) {
     }
 }
 
+/// Flag provenance names that back more than one *active* token. Same-name
+/// active tokens usually mean one machine auto-claimed several (e.g. a fresh git
+/// worktree per session) — proliferation worth collapsing with `fr actor merge`.
+/// Retired tokens are ignored (they're already tombstoned). An unreadable
+/// registry is a no-op.
+fn check_actor_name_collisions(frame_dir: &Path, result: &mut CheckResult) {
+    let Ok(reg) = crate::io::actors::read_actors(frame_dir) else {
+        return;
+    };
+    // Group active tokens by provenance name, preserving registry order.
+    let mut by_name: Vec<(String, Vec<String>)> = Vec::new();
+    for (token, entry) in &reg.actors {
+        if !entry.is_active() {
+            continue;
+        }
+        match by_name.iter_mut().find(|(n, _)| n == &entry.name) {
+            Some((_, tokens)) => tokens.push(token.clone()),
+            None => by_name.push((entry.name.clone(), vec![token.clone()])),
+        }
+    }
+    for (name, tokens) in by_name {
+        if tokens.len() > 1 {
+            result
+                .warnings
+                .push(CheckWarning::ActorNameCollision { name, tokens });
+        }
+    }
+}
+
 fn collect_all_task_ids(project: &Project) -> HashSet<String> {
     let mut ids = HashSet::new();
     for (_, track) in &project.tracks {
@@ -392,6 +429,37 @@ mod tests {
             tracks: vec![("main".to_string(), track)],
             inbox: None,
         }
+    }
+
+    // --- Actor name collision (proliferation) ---
+
+    #[test]
+    fn test_check_actor_name_collision() {
+        use crate::io::actors::{ActorRegistry, write_actors};
+        let tmp = TempDir::new().unwrap();
+        let project = make_project_at(tmp.path(), "# Main\n\n## Backlog\n\n## Done\n");
+        std::fs::create_dir_all(&project.frame_dir).unwrap();
+
+        let mut reg = ActorRegistry::default();
+        reg.claim("null", "Mac", None, "2026-06-01").unwrap();
+        reg.claim("b", "ccdev", None, "2026-06-02").unwrap();
+        reg.claim("d", "ccdev", None, "2026-06-03").unwrap();
+        reg.claim("f", "ccdev", None, "2026-06-04").unwrap();
+        reg.retire("f", "2026-06-05").unwrap(); // retired: excluded from collision
+        write_actors(&project.frame_dir, &reg).unwrap();
+
+        let collisions: Vec<_> = check_project(&project)
+            .warnings
+            .into_iter()
+            .filter_map(|w| match w {
+                CheckWarning::ActorNameCollision { name, tokens } => Some((name, tokens)),
+                _ => None,
+            })
+            .collect();
+        // Only 'ccdev' collides (b, d); the retired 'f' and the lone 'Mac' don't.
+        assert_eq!(collisions.len(), 1);
+        assert_eq!(collisions[0].0, "ccdev");
+        assert_eq!(collisions[0].1, vec!["b".to_string(), "d".to_string()]);
     }
 
     // --- Dangling deps ---
