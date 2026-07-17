@@ -936,6 +936,147 @@ fn test_track_activate() {
 }
 
 #[test]
+fn test_add_to_shelved_track_blocked() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    run_fr_ok(tmp.path(), &["track", "shelve", "side"]);
+
+    let (_out, err, ok) = run_fr(tmp.path(), &["add", "side", "New task"]);
+    assert!(!ok, "adding to a shelved track should fail");
+    assert!(
+        err.contains("shelved"),
+        "error should mention shelved: {err}"
+    );
+    assert!(
+        err.contains("fr track activate side"),
+        "error should suggest activating the track: {err}"
+    );
+
+    // The task must not have been written.
+    let side = fs::read_to_string(tmp.path().join("frame/tracks/side.md")).unwrap();
+    assert!(!side.contains("New task"));
+}
+
+#[test]
+fn test_push_to_shelved_track_blocked() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    run_fr_ok(tmp.path(), &["track", "shelve", "side"]);
+
+    let (_out, err, ok) = run_fr(tmp.path(), &["push", "side", "Urgent"]);
+    assert!(!ok, "pushing to a shelved track should fail");
+    assert!(
+        err.contains("shelved"),
+        "error should mention shelved: {err}"
+    );
+}
+
+#[test]
+fn test_sub_to_shelved_track_blocked() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    run_fr_ok(tmp.path(), &["track", "shelve", "side"]);
+
+    let (_out, err, ok) = run_fr(tmp.path(), &["sub", "S-001", "A subtask"]);
+    assert!(!ok, "adding a subtask in a shelved track should fail");
+    assert!(
+        err.contains("shelved"),
+        "error should mention shelved: {err}"
+    );
+}
+
+#[test]
+fn test_triage_to_shelved_track_blocked() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    run_fr_ok(tmp.path(), &["track", "shelve", "side"]);
+
+    let (_out, err, ok) = run_fr(tmp.path(), &["triage", "1", "--track", "side"]);
+    assert!(!ok, "triaging into a shelved track should fail");
+    assert!(
+        err.contains("shelved"),
+        "error should mention shelved: {err}"
+    );
+}
+
+#[test]
+fn test_mv_into_shelved_track_blocked() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    run_fr_ok(tmp.path(), &["track", "shelve", "side"]);
+
+    let (_out, err, ok) = run_fr(tmp.path(), &["mv", "M-001", "--track", "side"]);
+    assert!(!ok, "moving a task into a shelved track should fail");
+    assert!(
+        err.contains("shelved"),
+        "error should mention shelved: {err}"
+    );
+}
+
+#[test]
+fn test_import_to_shelved_track_blocked() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    let import_file = tmp.path().join("import.md");
+    fs::write(&import_file, "- [ ] Imported task\n").unwrap();
+
+    run_fr_ok(tmp.path(), &["track", "shelve", "side"]);
+
+    let (_out, err, ok) = run_fr(
+        tmp.path(),
+        &["import", import_file.to_str().unwrap(), "--track", "side"],
+    );
+    assert!(!ok, "importing into a shelved track should fail");
+    assert!(
+        err.contains("shelved"),
+        "error should mention shelved: {err}"
+    );
+}
+
+#[test]
+fn test_state_active_in_shelved_track_blocked() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    run_fr_ok(tmp.path(), &["track", "shelve", "side"]);
+
+    let (_out, err, ok) = run_fr(tmp.path(), &["state", "S-001", "active"]);
+    assert!(!ok, "activating a task in a shelved track should fail");
+    assert!(
+        err.contains("shelved"),
+        "error should mention shelved: {err}"
+    );
+
+    // `fr start` is a thin alias for `state active` and must be blocked too.
+    let (_out, err, ok) = run_fr(tmp.path(), &["start", "S-001"]);
+    assert!(!ok, "`fr start` in a shelved track should fail");
+    assert!(
+        err.contains("shelved"),
+        "error should mention shelved: {err}"
+    );
+}
+
+#[test]
+fn test_state_non_active_in_shelved_track_allowed() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    run_fr_ok(tmp.path(), &["track", "shelve", "side"]);
+
+    // Only *activating* is blocked — you can still close out or re-open work in a
+    // shelved track (e.g. mark done, park, or reset to todo).
+    run_fr_ok(tmp.path(), &["state", "S-001", "done"]);
+    let side = fs::read_to_string(tmp.path().join("frame/tracks/side.md")).unwrap();
+    assert!(side.contains("[x] `S-001`"));
+}
+
+#[test]
 fn test_track_cc_focus() {
     let tmp = tempfile::TempDir::new().unwrap();
     create_test_project(tmp.path());

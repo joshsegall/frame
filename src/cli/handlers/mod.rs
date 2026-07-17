@@ -149,6 +149,34 @@ fn find_track<'a>(project: &'a Project, track_id: &str) -> Option<&'a Track> {
         .map(|(_, track)| track)
 }
 
+/// Return the configured state of a track ("active"/"shelved"/"archived"), if
+/// the track exists in config.
+fn track_state<'a>(project: &'a Project, track_id: &str) -> Option<&'a str> {
+    project
+        .config
+        .tracks
+        .iter()
+        .find(|tc| tc.id == track_id)
+        .map(|tc| tc.state.as_str())
+}
+
+/// Reject an operation that would add a task to a shelved track. A shelved
+/// track is preserved for later, not receiving new work, so adding to it is
+/// almost always a mistake (often a stale `--track` argument).
+fn reject_add_to_shelved(
+    project: &Project,
+    track_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if track_state(project, track_id) == Some("shelved") {
+        return Err(format!(
+            "track '{track_id}' is shelved and does not accept new tasks; \
+             activate it first with `fr track activate {track_id}`"
+        )
+        .into());
+    }
+    Ok(())
+}
+
 /// Get the file path for a track from config.
 fn track_file<'a>(project: &'a Project, track_id: &str) -> Option<&'a str> {
     project
@@ -1294,6 +1322,8 @@ fn cmd_add(args: AddArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut project = load_project_cwd()?;
     let _lock = FileLock::acquire_default(&project.frame_dir)?;
 
+    reject_add_to_shelved(&project, &args.track)?;
+
     let prefix = track_prefix(&project, &args.track)
         .ok_or_else(|| format!("no ID prefix configured for track '{}'", args.track))?
         .to_string();
@@ -1324,6 +1354,8 @@ fn cmd_push(args: PushArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut project = load_project_cwd()?;
     let _lock = FileLock::acquire_default(&project.frame_dir)?;
 
+    reject_add_to_shelved(&project, &args.track)?;
+
     let prefix = track_prefix(&project, &args.track)
         .ok_or_else(|| format!("no ID prefix configured for track '{}'", args.track))?
         .to_string();
@@ -1353,6 +1385,7 @@ fn cmd_sub(args: SubArgs) -> Result<(), Box<dyn std::error::Error>> {
     let track_id = find_task_track(&project, &args.id)
         .ok_or_else(|| format!("task not found: {}", args.id))?
         .to_string();
+    reject_add_to_shelved(&project, &track_id)?;
     let token = resolve_mint_namespace(&project.frame_dir)?;
 
     let track = find_track_mut(&mut project, &track_id)
@@ -1408,6 +1441,16 @@ fn cmd_state(args: StateArgs) -> Result<(), Box<dyn std::error::Error>> {
     let track_id = find_task_track(&project, &args.id)
         .ok_or_else(|| format!("task not found: {}", args.id))?
         .to_string();
+
+    // A shelved track is paused work — nothing in it should be marked active.
+    if new_state == TaskState::Active && track_state(&project, &track_id) == Some("shelved") {
+        return Err(format!(
+            "cannot mark '{}' active: its track '{track_id}' is shelved; \
+             activate it first with `fr track activate {track_id}`",
+            args.id
+        )
+        .into());
+    }
 
     let track = find_track_mut(&mut project, &track_id)
         .ok_or_else(|| format!("track not found: {}", track_id))?;
@@ -1717,6 +1760,7 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(ref target_track_id) = args.track {
         // Cross-track move
+        reject_add_to_shelved(&project, target_track_id)?;
         let target_prefix = track_prefix(&project, target_track_id)
             .ok_or_else(|| format!("no ID prefix configured for track '{}'", target_track_id))?
             .to_string();
@@ -1876,6 +1920,8 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
 fn cmd_triage(args: TriageArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut project = load_project_cwd()?;
     let _lock = FileLock::acquire_default(&project.frame_dir)?;
+
+    reject_add_to_shelved(&project, &args.track)?;
 
     let prefix = track_prefix(&project, &args.track)
         .ok_or_else(|| format!("no ID prefix configured for track '{}'", args.track))?
@@ -2474,6 +2520,8 @@ fn cmd_projects_prune(
 fn cmd_import(args: ImportArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut project = load_project_cwd()?;
     let _lock = FileLock::acquire_default(&project.frame_dir)?;
+
+    reject_add_to_shelved(&project, &args.track)?;
 
     let prefix = track_prefix(&project, &args.track)
         .ok_or_else(|| format!("no ID prefix configured for track '{}'", args.track))?

@@ -13,6 +13,9 @@ All notable changes to frame will be documented in this file.
 - `fr check` now reports actor-registry drift: when this clone's gitignored `frame/.actor` token has no row in the committed `frame/actors.toml` (or its row is retired while the clone still holds it), check emits a warning pointing to the fix. Surfaced in both the CLI and the TUI check overlay.
 - `fr check` also flags actor proliferation: when several *active* tokens share one provenance name (typically a hostname, e.g. a machine that auto-claimed a token per git worktree), it warns and suggests the `fr actor merge` to collapse them. Surfaced in the CLI and TUI check overlay.
 
+### Changed
+- Shelved tracks now reject new tasks and task activation. `fr add`, `fr push`, `fr sub`, `fr import`, `fr triage`, and `fr mv --track` into a shelved track fail with a message pointing to `fr track activate`, instead of silently writing to a track meant to be paused (usually the result of a stale `--track` argument). Likewise `fr state <id> active` / `fr start <id>` on a task in a shelved track is rejected. Closing out or re-opening existing work in a shelved track (done/parked/todo) is still allowed.
+
 ### Fixed
 - Mint operations now self-heal a drifted actor registry: if this clone holds a token (`frame/.actor`) that is missing from `frame/actors.toml`, the next `fr add`/`push`/`sub`/triage re-registers it (announced once) instead of silently minting against an absent registry row. This recovers the case where a concurrent clone overwrote the committed registry — or a `git reset`/`restore` reverted an uncommitted claim — leaving the gitignored `.actor` orphaned. A deliberately-retired token is left alone (reported by `fr check` rather than resurrected).
 

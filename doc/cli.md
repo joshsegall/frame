@@ -180,6 +180,8 @@ fr add TRACK TITLE [--after ID] [--found-from ID]
 
 Auto-generates a task ID using the track's configured prefix, minted in this working copy's [actor-token namespace](concepts.md#minting-in-a-token-namespace) (the primary clone mints bare numbers like `EFF-14`; a clone with token `a` mints `EFF-a1`). The **first mint in an unclaimed clone auto-claims** a token and announces it once on stderr.
 
+A [shelved](concepts.md#tracks) track rejects new tasks: `fr add`, `fr push`, `fr sub`, `fr import`, `fr triage`, and `fr mv --track` into it fail with a message pointing to `fr track activate`. Re-activate the track first.
+
 ### `fr push TRACK TITLE`
 
 Add a task to the **top** of a track's Backlog.
@@ -221,7 +223,7 @@ Change a task's state.
 fr state EFF-014 active
 ```
 
-States: `todo`, `active`, `blocked`, `done`, `parked`. Setting a top-level Backlog task to `done` moves it to the Done section immediately.
+States: `todo`, `active`, `blocked`, `done`, `parked`. Setting a top-level Backlog task to `done` moves it to the Done section immediately. Marking a task `active` is rejected when its track is [shelved](concepts.md#tracks) (re-activate the track first with `fr track activate`); other transitions on a shelved track's tasks are allowed.
 
 ### `fr start ID`
 
