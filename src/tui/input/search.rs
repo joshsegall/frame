@@ -215,7 +215,7 @@ fn execute_project_search(app: &mut App) {
     let query = app.project_search_input.clone();
 
     // Compile regex (case-insensitive, fall back to escaped literal)
-    let re = match Regex::new(&format!("(?i){}", &query)) {
+    let re = match Regex::new(&format!("(?i){}", query)) {
         Ok(r) => r,
         Err(_) => match Regex::new(&format!("(?i){}", regex::escape(&query))) {
             Ok(r) => r,

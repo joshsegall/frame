@@ -67,14 +67,12 @@ pub fn fuzzy_score(query: &str, target: &str) -> Option<(i32, Vec<usize>)> {
     let mut search_from = 0;
 
     for &qc in &query_lower {
-        match target_lower[search_from..].iter().position(|&tc| tc == qc) {
-            Some(pos) => {
-                let idx = search_from + pos;
-                matched_indices.push(idx);
-                search_from = idx + 1;
-            }
-            None => return None,
-        }
+        let pos = target_lower[search_from..]
+            .iter()
+            .position(|&tc| tc == qc)?;
+        let idx = search_from + pos;
+        matched_indices.push(idx);
+        search_from = idx + 1;
     }
 
     // Score calculation

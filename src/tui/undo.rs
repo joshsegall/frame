@@ -1506,10 +1506,7 @@ fn apply_forward(
         }
         Operation::TaskDelete { track_id, task, .. } => {
             // Redo delete = remove the task again
-            let task_id = match &task.id {
-                Some(id) => id.clone(),
-                None => return None,
-            };
+            let task_id = task.id.clone()?;
             let track = find_track_mut(tracks, track_id)?;
             let _ = task_ops::remove_task_subtree(track, &task_id);
             Some(track_id.clone())
