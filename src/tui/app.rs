@@ -422,6 +422,9 @@ pub enum TriageSource {
     CrossTrackMove {
         source_track_id: String,
         task_id: String,
+        /// Section the (top-level) task lives in, so a Parked/Done task is moved
+        /// into the same section of the target rather than reopened.
+        section: SectionKind,
     },
     /// Bulk cross-track move of selected tasks
     BulkCrossTrackMove { source_track_id: String },

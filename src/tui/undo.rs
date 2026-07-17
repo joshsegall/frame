@@ -547,14 +547,17 @@ pub enum Operation {
         target_track_id: String,
         task_id_old: String,
         task_id_new: String,
-        /// Index in source backlog (top-level) or parent.subtasks
+        /// Index in the source section (top-level) or parent.subtasks
         source_index: usize,
-        /// Index in target backlog
+        /// Index in the target section
         target_index: usize,
         /// Some if moving a subtask (promotion to top-level)
         source_parent_id: Option<String>,
         /// Original depth of the task before move
         old_depth: usize,
+        /// Section a top-level task occupied (and returns to on undo). Ignored
+        /// for subtask moves, which promote into the target Backlog.
+        section: SectionKind,
     },
     /// A task was reparented (moved to different parent/depth) with ID re-keying
     Reparent {
@@ -955,11 +958,19 @@ fn apply_inverse(
             source_index,
             source_parent_id,
             old_depth,
+            section,
             ..
         } => {
-            // Undo: remove task from target, rename back to old ID, insert into source
+            // Undo: remove task from target, rename back to old ID, insert into source.
+            // A subtask promotes into (and returns from) the target Backlog; a
+            // top-level task uses the section it was moved into.
+            let target_section = if source_parent_id.is_some() {
+                SectionKind::Backlog
+            } else {
+                *section
+            };
             let target_track = find_track_mut(tracks, target_track_id)?;
-            let target_tasks = target_track.section_tasks_mut(SectionKind::Backlog)?;
+            let target_tasks = target_track.section_tasks_mut(target_section)?;
             let idx = target_tasks
                 .iter()
                 .position(|t| t.id.as_deref() == Some(task_id_new))?;
@@ -982,10 +993,12 @@ fn apply_inverse(
                 parent.subtasks.insert(idx, task);
                 parent.mark_dirty();
             } else {
-                // Was top-level — restore depth and insert back into source backlog
+                // Was top-level — restore depth and insert back into the section
+                // it came from.
                 task.depth = *old_depth;
                 let source_track = find_track_mut(tracks, source_track_id)?;
-                let source_tasks = source_track.section_tasks_mut(SectionKind::Backlog)?;
+                source_track.ensure_section(*section);
+                let source_tasks = source_track.section_tasks_mut(*section)?;
                 let idx = (*source_index).min(source_tasks.len());
                 source_tasks.insert(idx, task);
             }
@@ -1387,6 +1400,7 @@ fn apply_forward(
             task_id_new,
             target_index,
             source_parent_id,
+            section,
             ..
         } => {
             // Redo: remove from source, rename to new ID, insert into target
@@ -1403,7 +1417,7 @@ fn apply_forward(
                 task
             } else {
                 let source_track = find_track_mut(tracks, source_track_id)?;
-                let source_tasks = source_track.section_tasks_mut(SectionKind::Backlog)?;
+                let source_tasks = source_track.section_tasks_mut(*section)?;
                 let idx = source_tasks
                     .iter()
                     .position(|t| t.id.as_deref() == Some(task_id_old))?;
@@ -1412,15 +1426,27 @@ fn apply_forward(
 
             let mut task = task;
             task.id = Some(task_id_new.clone().into());
-            task.depth = 0;
+            // A subtask is promoted to top-level (depth 0); a top-level task
+            // keeps its depth.
+            if source_parent_id.is_some() {
+                task.depth = 0;
+            }
             task.mark_dirty();
             // Redo re-applies the moved id, re-keying the subtree in the mover's
             // namespace (recovered from the new id's leaf token).
             let new_parsed = crate::model::task_id::TaskId::parse(task_id_new);
             task_ops::renumber_subtasks(&mut task, task_id_new, new_parsed.leaf_token());
 
+            // A subtask promotes into the target Backlog; a top-level task keeps
+            // its section.
+            let target_section = if source_parent_id.is_some() {
+                SectionKind::Backlog
+            } else {
+                *section
+            };
             let target_track = find_track_mut(tracks, target_track_id)?;
-            let target_tasks = target_track.section_tasks_mut(SectionKind::Backlog)?;
+            target_track.ensure_section(target_section);
+            let target_tasks = target_track.section_tasks_mut(target_section)?;
             let idx = (*target_index).min(target_tasks.len());
             target_tasks.insert(idx, task);
 
@@ -2850,5 +2876,59 @@ mod tests {
         };
         let cursor = expect_inbox(nav_target_for_op(&op, false).unwrap());
         assert_eq!(cursor, Some(2)); // goes to new_index
+    }
+
+    #[test]
+    fn cross_track_move_of_done_task_survives_undo_redo_in_its_section() {
+        // Tracks in the *post-move* state: a completed task has already moved
+        // from src's Done section into tgt's Done section as INF-b2. Undo must
+        // return it to src's Done (not Backlog), and redo must re-land it in
+        // tgt's Done — the section is preserved both ways.
+        let src = parse_track("# Src\n\n## Backlog\n\n## Done\n");
+        let tgt = parse_track(
+            "# Tgt\n\n## Backlog\n\n- [ ] `INF-b1` Existing\n\n## Done\n\n- [x] `INF-b2` Finished\n  - resolved: 2025-05-01",
+        );
+        let mut tracks = vec![("src".to_string(), src), ("tgt".to_string(), tgt)];
+        let mut stack = UndoStack::new();
+        stack.push(Operation::CrossTrackMove {
+            source_track_id: "src".into(),
+            target_track_id: "tgt".into(),
+            task_id_old: "EFF-b8".into(),
+            task_id_new: "INF-b2".into(),
+            source_index: 0,
+            target_index: 0,
+            source_parent_id: None,
+            old_depth: 0,
+            section: SectionKind::Done,
+        });
+
+        // Undo → back in src's Done under the old id; gone from tgt's Done.
+        stack.undo(&mut tracks, None);
+        let src = &tracks[0].1;
+        assert!(
+            src.section_tasks(SectionKind::Done)
+                .iter()
+                .any(|t| t.id.as_deref() == Some("EFF-b8")),
+            "undo should restore the task to the source Done section"
+        );
+        assert!(src.section_tasks(SectionKind::Backlog).is_empty());
+        assert!(
+            !tracks[1]
+                .1
+                .section_tasks(SectionKind::Done)
+                .iter()
+                .any(|t| t.id.as_deref() == Some("INF-b2"))
+        );
+
+        // Redo → back into tgt's Done, still done.
+        stack.redo(&mut tracks, None);
+        let moved = tracks[1]
+            .1
+            .section_tasks(SectionKind::Done)
+            .iter()
+            .find(|t| t.id.as_deref() == Some("INF-b2"))
+            .expect("redo should re-land the task in the target Done section");
+        assert_eq!(moved.state, TaskState::Done);
+        assert!(tracks[0].1.section_tasks(SectionKind::Done).is_empty());
     }
 }

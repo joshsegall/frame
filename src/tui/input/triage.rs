@@ -552,29 +552,17 @@ pub(super) fn begin_cross_track_move(app: &mut App) {
             None => return,
         },
         View::Detail { track_id, task_id } => {
-            // Find task to determine its section
-            let section = if let Some(track) = App::find_track_in_project(&app.project, track_id) {
-                if task_ops::is_top_level_in_section(track, task_id, SectionKind::Backlog) {
-                    SectionKind::Backlog
-                } else if task_ops::find_task_in_track(track, task_id).is_some() {
-                    // Subtask in backlog — will be promoted
-                    SectionKind::Backlog
-                } else {
-                    return;
-                }
-            } else {
-                return;
+            // Find the section holding the task (or its top-level ancestor).
+            let section = match App::find_track_in_project(&app.project, track_id)
+                .and_then(|track| task_ops::find_task_location_any_section(track, task_id))
+            {
+                Some(loc) => loc.section,
+                None => return,
             };
             (track_id.clone(), task_id.clone(), section)
         }
         _ => return,
     };
-
-    // Only allow moving tasks from Backlog
-    if section != SectionKind::Backlog {
-        app.status_message = Some("Can only move backlog tasks".to_string());
-        return;
-    }
 
     // Build candidate tracks: all non-archived tracks except current (show prefix)
     let candidates: Vec<String> = app
@@ -612,6 +600,7 @@ pub(super) fn begin_cross_track_move(app: &mut App) {
         source: TriageSource::CrossTrackMove {
             source_track_id,
             task_id,
+            section,
         },
         step: crate::tui::app::TriageStep::SelectTrack,
         popup_anchor: None,
@@ -626,12 +615,13 @@ pub(super) fn execute_cross_track_move(
     target_track_id: &str,
     position: InsertPosition,
 ) {
-    let (source_track_id, task_id) = match &app.triage_state {
+    let (source_track_id, task_id, section) = match &app.triage_state {
         Some(ts) => match &ts.source {
             TriageSource::CrossTrackMove {
                 source_track_id,
                 task_id,
-            } => (source_track_id.clone(), task_id.clone()),
+                section,
+            } => (source_track_id.clone(), task_id.clone(), *section),
             _ => return,
         },
         None => return,
@@ -690,12 +680,13 @@ pub(super) fn execute_cross_track_move(
         parent.mark_dirty();
         (task, idx)
     } else {
-        // Top-level: remove from source backlog
+        // Top-level: remove from the section it lives in (Backlog, Parked, or
+        // Done) so a completed task can be relocated without reopening it.
         let source_track = match app.find_track_mut(&source_track_id) {
             Some(t) => t,
             None => return,
         };
-        let source_tasks = match source_track.section_tasks_mut(SectionKind::Backlog) {
+        let source_tasks = match source_track.section_tasks_mut(section) {
             Some(t) => t,
             None => return,
         };
@@ -726,12 +717,19 @@ pub(super) fn execute_cross_track_move(
     task.mark_dirty();
     task_ops::renumber_subtasks(&mut task, &new_id, token.as_ref());
 
-    // Insert into target backlog
+    // Insert into the same section on the target (a subtask promotes into the
+    // target Backlog), creating the section if the target lacks it.
+    let target_section = if source_parent_id.is_some() {
+        SectionKind::Backlog
+    } else {
+        section
+    };
     let target_track = match app.find_track_mut(target_track_id) {
         Some(t) => t,
         None => return,
     };
-    let target_tasks = match target_track.section_tasks_mut(SectionKind::Backlog) {
+    target_track.ensure_section(target_section);
+    let target_tasks = match target_track.section_tasks_mut(target_section) {
         Some(t) => t,
         None => return,
     };
@@ -768,6 +766,7 @@ pub(super) fn execute_cross_track_move(
         target_index,
         source_parent_id,
         old_depth,
+        section,
     });
 
     // Save target first (new data), then source (deletion)
@@ -946,6 +945,8 @@ pub(super) fn execute_bulk_cross_track_move(
             target_index,
             source_parent_id: None,
             old_depth: 0,
+            // Bulk move collects only Backlog selections.
+            section: SectionKind::Backlog,
         });
 
         new_ids.push(new_id.to_string());
