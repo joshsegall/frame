@@ -163,6 +163,39 @@ fn test_list_default() {
     assert!(out.contains("M-001"));
     assert!(out.contains("Side Track"));
     assert!(out.contains("S-001"));
+    // Done tasks are omitted from the default listing.
+    assert!(
+        !out.contains("M-000"),
+        "default list should not show done tasks"
+    );
+}
+
+#[test]
+fn test_list_state_done_shows_done_tasks() {
+    // `--state done` must surface the Done section in human output, matching the
+    // `--json` path — previously the human listing only read Backlog/Parked, so
+    // this filter silently returned nothing.
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    // M-000 ("Setup project") is a done task in the fixture's main track.
+    let human = run_fr_ok(tmp.path(), &["list", "main", "--state", "done"]);
+    assert!(
+        human.contains("M-000") && human.contains("Setup project"),
+        "human list --state done should show the done task: {human}"
+    );
+    // Non-done tasks are filtered out.
+    assert!(
+        !human.contains("M-001"),
+        "should not show todo tasks: {human}"
+    );
+
+    // The JSON path already worked; confirm the two agree.
+    let json = run_fr_ok(tmp.path(), &["list", "main", "--state", "done", "--json"]);
+    assert!(
+        json.contains("M-000"),
+        "json list --state done should include M-000"
+    );
 }
 
 #[test]

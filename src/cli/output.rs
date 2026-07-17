@@ -374,19 +374,42 @@ pub fn format_track_listing(
 
     let filtered_backlog: Vec<_> = backlog.iter().filter(filter).collect();
     let filtered_parked: Vec<_> = parked.iter().filter(filter).collect();
+    // Done tasks are only surfaced when explicitly filtered for, matching the
+    // `--json` path (`collect_filtered_tasks`); otherwise the completed pile
+    // would drown out the live backlog.
+    let filtered_done: Vec<_> = if state_filter == Some(TaskState::Done) {
+        track.done().iter().filter(filter).collect()
+    } else {
+        Vec::new()
+    };
 
+    let mut any_shown = false;
     for task in &filtered_backlog {
         for line in format_task_tree(task, 0) {
             lines.push(line);
         }
     }
+    any_shown |= !filtered_backlog.is_empty();
 
     if !filtered_parked.is_empty() {
-        if !filtered_backlog.is_empty() {
+        if any_shown {
             lines.push(String::new());
         }
         lines.push("-- Parked --".to_string());
         for task in &filtered_parked {
+            for line in format_task_tree(task, 0) {
+                lines.push(line);
+            }
+        }
+        any_shown = true;
+    }
+
+    if !filtered_done.is_empty() {
+        if any_shown {
+            lines.push(String::new());
+        }
+        lines.push("-- Done --".to_string());
+        for task in &filtered_done {
             for line in format_task_tree(task, 0) {
                 lines.push(line);
             }
