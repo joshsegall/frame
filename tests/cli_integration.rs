@@ -845,6 +845,92 @@ fn test_mv_after() {
 }
 
 #[test]
+fn test_mv_done_task_cross_track() {
+    // Regression: a completed task lives in the Done section, and `fr mv` used to
+    // only scan the Backlog — so moving it cross-track failed with
+    // "task not found" even though `fr show` found it. It must move and stay done.
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    // M-000 is a done task in the fixture's main track.
+    let out = run_fr_ok(tmp.path(), &["mv", "M-000", "--track", "side"]);
+    assert!(out.contains("(side)"), "unexpected output: {out}");
+
+    // Gone from the source track entirely.
+    let main = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    assert!(!main.contains("Setup project"), "still in source: {main}");
+
+    // Landed in the *target's* Done section, still checked off and with its
+    // resolved date preserved (not reopened into the Backlog).
+    let side = fs::read_to_string(tmp.path().join("frame/tracks/side.md")).unwrap();
+    let done_pos = side
+        .find("## Done")
+        .expect("side should have a Done section");
+    let task_pos = side.find("Setup project").expect("task should be in side");
+    assert!(task_pos > done_pos, "task should be under Done: {side}");
+    assert!(side.contains("resolved:"), "resolved date lost: {side}");
+    // The moved task line is still a checked-off `[x]` box, not reopened.
+    let task_line = side
+        .lines()
+        .find(|l| l.contains("Setup project"))
+        .expect("task line");
+    assert!(
+        task_line.trim_start().starts_with("- [x]"),
+        "task should still be done: {task_line}"
+    );
+}
+
+#[test]
+fn test_mv_parked_task_cross_track() {
+    // A parked task (M-010) moves cross-track and stays parked.
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    run_fr_ok(tmp.path(), &["mv", "M-010", "--track", "side"]);
+    let side = fs::read_to_string(tmp.path().join("frame/tracks/side.md")).unwrap();
+    let parked_pos = side
+        .find("## Parked")
+        .expect("side should gain a Parked section");
+    let task_pos = side
+        .find("Parked idea")
+        .expect("parked task should be in side");
+    assert!(task_pos > parked_pos, "task should be under Parked: {side}");
+}
+
+#[test]
+fn test_commands_understand_actor_token_ids() {
+    // Every id-taking command must accept the actor-token id form (e.g. M-b1),
+    // not just the legacy bare-number form. Claim token `b`, mint tokened ids,
+    // and exercise the id-resolving commands — including the cross-track `mv`
+    // that first surfaced the issue.
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    run_fr_ok(tmp.path(), &["actor", "set", "b"]);
+    // First mint in the `b` namespace → M-b1.
+    let add = run_fr_ok(tmp.path(), &["add", "main", "Tokened task"]);
+    assert!(add.contains("M-b1"), "expected M-b1, got: {add}");
+    run_fr_ok(tmp.path(), &["add", "main", "Second tokened"]); // M-b2
+
+    // Read + metadata commands resolve the tokened id.
+    assert!(run_fr_ok(tmp.path(), &["show", "M-b1"]).contains("Tokened task"));
+    run_fr_ok(tmp.path(), &["tag", "M-b1", "add", "urgent"]);
+    run_fr_ok(tmp.path(), &["dep", "M-b1", "add", "M-b2"]);
+    run_fr_ok(tmp.path(), &["note", "M-b1", "a note"]);
+    run_fr_ok(tmp.path(), &["title", "M-b1", "Renamed"]);
+    run_fr_ok(tmp.path(), &["state", "M-b1", "active"]);
+    run_fr_ok(tmp.path(), &["deps", "M-b1"]);
+
+    // Reorder (same-track) and cross-track move both take the tokened id.
+    run_fr_ok(tmp.path(), &["mv", "M-b2", "--top"]);
+    let out = run_fr_ok(tmp.path(), &["mv", "M-b1", "--track", "side"]);
+    assert!(out.contains("(side)"), "cross-track mv failed: {out}");
+    // Re-minted into the mover's `b` namespace on the target.
+    let side = fs::read_to_string(tmp.path().join("frame/tracks/side.md")).unwrap();
+    assert!(side.contains("S-b1") && side.contains("Renamed"), "{side}");
+}
+
+#[test]
 fn test_inbox_add() {
     let tmp = tempfile::TempDir::new().unwrap();
     create_test_project(tmp.path());

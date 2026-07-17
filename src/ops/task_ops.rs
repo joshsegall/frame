@@ -373,9 +373,13 @@ pub fn move_task(
     task_id: &str,
     position: InsertPosition,
 ) -> Result<(), TaskError> {
+    // Reorder within whatever section holds the task at top level, not just the
+    // Backlog — a Parked or Done task can be repositioned in place too.
+    let section = top_level_section(track, task_id)
+        .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
     let tasks = track
-        .section_tasks_mut(SectionKind::Backlog)
-        .ok_or_else(|| TaskError::InvalidPosition("no backlog section".into()))?;
+        .section_tasks_mut(section)
+        .ok_or_else(|| TaskError::InvalidPosition("no such section".into()))?;
 
     let idx = tasks
         .iter()
@@ -387,8 +391,21 @@ pub fn move_task(
     Ok(())
 }
 
+/// The section that holds `task_id` as a top-level task, if any. Cross-track and
+/// reorder moves operate on whole top-level subtrees, so a completed task in the
+/// Done section (or a Parked one) is located here — not just the Backlog.
+fn top_level_section(track: &Track, task_id: &str) -> Option<SectionKind> {
+    [SectionKind::Backlog, SectionKind::Parked, SectionKind::Done]
+        .into_iter()
+        .find(|&s| is_top_level_in_section(track, task_id, s))
+}
+
 /// Move a task to a different track. Reassigns the task ID using the target
 /// track's prefix. Updates dependency references across all provided tracks.
+///
+/// The task is located in whichever section holds it at top level (Backlog,
+/// Parked, or Done) and is inserted into the *same* section in the target, so a
+/// Done task keeps its completed state instead of silently reopening.
 pub fn move_task_to_track(
     source_track: &mut Track,
     target_track: &mut Track,
@@ -398,10 +415,12 @@ pub fn move_task_to_track(
     all_tracks_for_dep_update: &mut [(String, Track)],
     token: Option<&Token>,
 ) -> Result<String, TaskError> {
-    // Remove from source backlog
+    // Remove from whichever section holds the task at top level.
+    let section = top_level_section(source_track, task_id)
+        .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
     let source_tasks = source_track
-        .section_tasks_mut(SectionKind::Backlog)
-        .ok_or_else(|| TaskError::InvalidPosition("no backlog section in source".into()))?;
+        .section_tasks_mut(section)
+        .ok_or_else(|| TaskError::InvalidPosition("no such section in source".into()))?;
 
     let idx = source_tasks
         .iter()
@@ -422,10 +441,13 @@ pub fn move_task_to_track(
     // Re-key the subtree into the mover's namespace too.
     renumber_subtasks(&mut task, &new_id, token);
 
-    // Insert into target
+    // Insert into the same section in the target, creating it if the target
+    // track doesn't have it yet (e.g. moving a Done task into a track that has
+    // never had one).
+    target_track.ensure_section(section);
     let target_tasks = target_track
-        .section_tasks_mut(SectionKind::Backlog)
-        .ok_or_else(|| TaskError::InvalidPosition("no backlog section in target".into()))?;
+        .section_tasks_mut(section)
+        .ok_or_else(|| TaskError::InvalidPosition("no such section in target".into()))?;
     insert_at(target_tasks, task, &position)?;
 
     // Update dep references across all tracks
@@ -2318,6 +2340,81 @@ mod tests {
         let moved = find_task_in_track(&target, "INF-c1").unwrap();
         assert_eq!(moved.subtasks[0].id.as_deref(), Some("INF-c1.c1"));
         assert_eq!(moved.subtasks[1].id.as_deref(), Some("INF-c1.c2"));
+    }
+
+    #[test]
+    fn test_cross_track_move_of_done_task_preserves_done_section() {
+        // A completed task (in the Done section) can be moved cross-track without
+        // reopening it: it lands in the *target's* Done section, keeping its
+        // resolved date. Regression for the "task not found" bug where the move
+        // only scanned the Backlog section.
+        let mut source = parse_track(
+            "# Eff\n\n## Backlog\n\n## Done\n\n- [x] `EFF-b8` Finished\n  - resolved: 2025-05-01",
+        );
+        let mut target = parse_track("# Inf\n\n## Backlog\n\n- [ ] `INF-b1` Existing\n\n## Done");
+
+        let new_id = move_task_to_track(
+            &mut source,
+            &mut target,
+            "EFF-b8",
+            InsertPosition::Bottom,
+            "INF",
+            &mut [],
+            Some(&ns("b")),
+        )
+        .unwrap();
+
+        assert_eq!(new_id, "INF-b2");
+        assert!(find_task_in_track(&source, "EFF-b8").is_none());
+        // Landed in the target's Done section (not the Backlog), still done.
+        let moved = target
+            .section_tasks(SectionKind::Done)
+            .iter()
+            .find(|t| t.id.as_deref() == Some("INF-b2"))
+            .expect("moved task should be in the target Done section");
+        assert_eq!(moved.state, TaskState::Done);
+        assert!(moved.metadata.iter().any(|m| m.key() == "resolved"));
+    }
+
+    #[test]
+    fn test_cross_track_move_of_parked_task_preserves_parked_section() {
+        // A parked task lands in the target's Parked section, created on demand
+        // when the target has never had one.
+        let mut source =
+            parse_track("# Eff\n\n## Backlog\n\n## Parked\n\n- [~] `EFF-b3` Someday\n\n## Done");
+        let mut target = parse_track("# Inf\n\n## Backlog\n\n## Done");
+
+        let new_id = move_task_to_track(
+            &mut source,
+            &mut target,
+            "EFF-b3",
+            InsertPosition::Bottom,
+            "INF",
+            &mut [],
+            Some(&ns("b")),
+        )
+        .unwrap();
+
+        assert_eq!(new_id, "INF-b1");
+        let moved = target
+            .section_tasks(SectionKind::Parked)
+            .iter()
+            .find(|t| t.id.as_deref() == Some("INF-b1"))
+            .expect("moved task should be in the target Parked section");
+        assert_eq!(moved.state, TaskState::Parked);
+    }
+
+    #[test]
+    fn test_move_task_reorders_within_done_section() {
+        // Same-track reorder finds a task in the Done section, not only the
+        // Backlog.
+        let mut track = parse_track(
+            "# Eff\n\n## Backlog\n\n## Done\n\n- [x] `EFF-b1` First\n- [x] `EFF-b2` Second",
+        );
+        move_task(&mut track, "EFF-b2", InsertPosition::Top).unwrap();
+        let done = track.section_tasks(SectionKind::Done);
+        assert_eq!(done[0].id.as_deref(), Some("EFF-b2"));
+        assert_eq!(done[1].id.as_deref(), Some("EFF-b1"));
     }
 
     #[test]
