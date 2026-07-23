@@ -13,15 +13,15 @@ expression: output
    │ Esc        Back / close              d          Edit deps             │
    │                                      n/N        Edit note             │
    │ Task State                           w/Alt+w    Toggle note wrap      │
-   │ Space      Cycle state                                                │
-   │ x          Mark done                 Other                            │
-   │ o          Set todo                  /          Search                │
-   │ b          Set blocked               >          Command palette       │
-   │ ~          Set parked                J          Jump to task          │
-   │ c          Toggle cc tag             D          Show deps             │
-   │ M          Move to track             .          Repeat last action    │
-   │                                      T          Tag colors            │
-   │ Views                                P          Projects              │
-   │ 1-9        Track N                   z/u        Undo                  │
-   │ 0/`        Tracks overview           Z          Redo                  │
+   │ Space      Cycle state               y          Copy task md          │
+   │ x          Mark done                                                  │
+   │ o          Set todo                  Other                            │
+   │ b          Set blocked               /          Search                │
+   │ ~          Set parked                >          Command palette       │
+   │ c          Toggle cc tag             J          Jump to task          │
+   │ M          Move to track             D          Show deps             │
+   │                                      .          Repeat last action    │
+   │ Views                                T          Tag colors            │
+   │ 1-9        Track N                   P          Projects              │
+   │ 0/`        Tracks overview           z/u        Undo                  │
    └ ▼ ────────────────────────────────────────────────────────────────────┘

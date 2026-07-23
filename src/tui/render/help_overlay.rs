@@ -318,6 +318,7 @@ fn build_detail_columns() -> (Vec<HelpEntry>, Vec<HelpEntry>) {
         HelpEntry::Binding("d".into(), "Edit deps".into()),
         HelpEntry::Binding("n/N".into(), "Edit note".into()),
         HelpEntry::Binding("w/Alt+w".into(), "Toggle note wrap".into()),
+        HelpEntry::Binding("y".into(), "Copy task md".into()),
         HelpEntry::Blank,
     ];
     right.extend(other_entries(true, false, true));

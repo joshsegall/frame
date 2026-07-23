@@ -324,6 +324,7 @@ With selection active (Select mode):
 | Key | Action |
 |-----|--------|
 | `w` | Toggle note wrap |
+| `y` | Copy task markdown to clipboard |
 | `D` | Open dependency popup |
 | `.` | Repeat last action |
 | `Esc`, `Backspace` | Return to origin view (Track or Recent) |

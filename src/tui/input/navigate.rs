@@ -588,6 +588,11 @@ pub(super) fn handle_navigate(app: &mut App, key: KeyEvent) {
             );
         }
 
+        // Copy the current task's markdown to the clipboard (detail view only)
+        (KeyModifiers::NONE, KeyCode::Char('y')) if matches!(app.view, View::Detail { .. }) => {
+            copy_detail_task_to_clipboard(app);
+        }
+
         // Move mode (track, tracks, or inbox view)
         (KeyModifiers::NONE, KeyCode::Char('m')) => {
             if matches!(app.view, View::Inbox) {
@@ -976,6 +981,26 @@ fn board_toggle_mode(app: &mut App) {
 }
 
 /// Open detail view from board cursor
+/// Copy the current detail-view task's markdown to the clipboard.
+///
+/// Serializes the full task block (task line + metadata + all subtasks) exactly
+/// as it appears in the track file, joins it with newlines, and copies it via the
+/// same clipboard mechanism used by the note editor.
+fn copy_detail_task_to_clipboard(app: &mut App) {
+    let View::Detail { track_id, task_id } = &app.view else {
+        return;
+    };
+    let Some(track) = App::find_track_in_project(&app.project, track_id) else {
+        return;
+    };
+    let Some(task) = crate::ops::task_ops::find_task_in_track(track, task_id) else {
+        return;
+    };
+    let markdown = crate::parse::serialize_tasks(std::slice::from_ref(task), 0).join("\n");
+    clipboard_set(&format!("{}\n", markdown));
+    app.status_message = Some("Copied task to clipboard".into());
+}
+
 fn board_open_detail(app: &mut App) {
     if let Some((track_id, task_id)) = app.board_cursor_task_id() {
         app.open_detail(track_id, task_id);
