@@ -2646,18 +2646,65 @@ fn cmd_actor(args: ActorCmd, json: bool) -> Result<(), Box<dyn std::error::Error
 }
 
 /// Read registry + this clone's token, claim `token`, and persist both files.
+///
+/// A clone-wide (shared) claim also clears this working copy's local
+/// `frame/.actor`, which would otherwise keep winning resolution and make the
+/// claim look like a no-op. Returns the outcome and the cleared override's
+/// token, if any.
 fn finalize_claim(
     frame_dir: &std::path::Path,
     reg: &mut actors::ActorRegistry,
     token: &str,
     name: &str,
     scope: actors::TokenScope,
-) -> Result<actors::ClaimOutcome, Box<dyn std::error::Error>> {
+) -> Result<(actors::ClaimOutcome, Option<String>), Box<dyn std::error::Error>> {
     let current = actors::read_actor_token(frame_dir);
     let outcome = reg.claim(token, name, current.as_deref(), &actors::today())?;
     actors::write_actors(frame_dir, reg)?;
     actors::write_actor_token_scoped(frame_dir, token, scope)?;
-    Ok(outcome)
+    // Only when the shared file is a distinct path: a non-git project writes the
+    // "shared" token *into* the local file, so clearing it would undo the claim.
+    let cleared =
+        if scope == actors::TokenScope::Shared && actors::shared_actor_path(frame_dir).is_some() {
+            actors::clear_local_actor_token(frame_dir)?
+        } else {
+            None
+        };
+    Ok((outcome, cleared))
+}
+
+/// Warn, on stderr, about anything that keeps a just-written token from taking
+/// effect where the user expects: a local override this claim removed, or a
+/// local override in the *main* working tree that still shadows a clone-wide
+/// claim made from a linked worktree.
+fn report_claim_scope(
+    frame_dir: &std::path::Path,
+    token: &str,
+    scope: actors::TokenScope,
+    cleared_local: Option<String>,
+) {
+    if let Some(held) = cleared_local.filter(|h| h != token) {
+        eprintln!(
+            "note: removed this working copy's local frame/.actor (held '{}') so the \
+             clone-wide token applies here.",
+            held
+        );
+    }
+    if scope != actors::TokenScope::Shared {
+        return;
+    }
+    if let Some(main_frame) = crate::io::git::main_worktree_frame_dir(frame_dir)
+        && let Some(main_token) = actors::read_local_actor_token(&main_frame)
+        && main_token != token
+    {
+        let main_root = main_frame.parent().unwrap_or(&main_frame).display();
+        eprintln!(
+            "note: the main working tree ({}) has a local frame/.actor holding '{}', which \
+             overrides the shared token there. Run `fr actor set {}` in it (or delete that \
+             file) to put the whole clone on '{}'.",
+            main_root, main_token, token, token
+        );
+    }
 }
 
 fn thin_frontier_notice(reg: &actors::ActorRegistry) {
@@ -2934,17 +2981,16 @@ fn cmd_actor_status(json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let reg = actors::read_actors(frame_dir)?;
     let local = actors::read_local_actor_token(frame_dir);
     let shared = actors::read_shared_actor_token(frame_dir);
-    let token = actors::read_actor_token(frame_dir);
+    let (token, token_source) = actors::actor_token_with_source(frame_dir);
     let entry = token.as_ref().and_then(|t| reg.actors.get(t));
     let frontier_remaining = reg.never_used_frontier().len();
-    // How this clone resolved its token: a local override, an inherited shared
-    // token, or nothing.
-    let source = if local.is_some() {
-        "local"
-    } else if shared.is_some() {
-        "shared"
-    } else {
-        "none"
+    // How this working copy resolved its token: a local override, the clone-wide
+    // shared token, the main working tree's token (linked worktree), or nothing.
+    let source = match token_source {
+        actors::TokenSource::Local => "local",
+        actors::TokenSource::Shared => "shared",
+        actors::TokenSource::MainWorktree => "inherited",
+        actors::TokenSource::None => "none",
     };
 
     if json {
@@ -2975,22 +3021,50 @@ fn cmd_actor_status(json: bool) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // A one-word note on where a tokened identity came from.
-    let scope_note = match source {
-        "shared" => "  (shared clone token, inherited by worktrees)",
-        "local" if shared.is_some() && shared != local => {
-            "  (local override; shared token differs)"
+    // A short note on where a tokened identity came from.
+    let inherited_note = |main: Option<PathBuf>| match main.as_ref().and_then(|f| f.parent()) {
+        Some(root) => format!(
+            "  (inherited from the main working tree {})",
+            root.display()
+        ),
+        None => "  (inherited from the main working tree)".to_string(),
+    };
+    let scope_note = match token_source {
+        actors::TokenSource::Shared => "  (shared clone token, inherited by worktrees)".to_string(),
+        actors::TokenSource::MainWorktree => {
+            inherited_note(crate::io::git::main_worktree_frame_dir(frame_dir))
         }
-        "local" => "  (local to this worktree)",
-        _ => "",
+        actors::TokenSource::Local if shared.is_some() && shared != local => {
+            "  (local override; shared token differs)".to_string()
+        }
+        actors::TokenSource::Local => "  (local to this worktree)".to_string(),
+        actors::TokenSource::None => String::new(),
     };
 
     match &token {
         None => {
             println!("This working copy is unclaimed (operating as primary / legacy, untokened).");
-            println!(
-                "Run `fr actor claim` to claim a token, or `fr actor set null` to record this clone as primary."
-            );
+            if let crate::io::git::WorktreeKind::Linked { main_root } =
+                crate::io::git::worktree_kind(frame_dir)
+            {
+                // A worktree can't auto-claim on first mint, so say so here
+                // rather than letting the next `fr add` be the messenger.
+                println!(
+                    "This is a linked git worktree, so a mint here will not auto-claim a token."
+                );
+                println!(
+                    "Run `fr actor claim` in the main working tree{} to claim one for the whole \
+                     clone, or `fr actor claim --local` here to run this worktree as its own actor.",
+                    match main_root {
+                        Some(root) => format!(" ({})", root.display()),
+                        None => String::new(),
+                    }
+                );
+            } else {
+                println!(
+                    "Run `fr actor claim` to claim a token, or `fr actor set null` to record this clone as primary."
+                );
+            }
         }
         Some(tok) if tok == "null" => {
             println!("Token: null — primary (untokened){}", scope_note);
@@ -3040,7 +3114,8 @@ fn cmd_actor_claim(args: ActorClaimArgs, json: bool) -> Result<(), Box<dyn std::
     } else {
         actors::TokenScope::Shared
     };
-    finalize_claim(&frame_dir, &mut reg, &token, &name, scope)?;
+    let (_, cleared) = finalize_claim(&frame_dir, &mut reg, &token, &name, scope)?;
+    report_claim_scope(&frame_dir, &token, scope, cleared);
 
     if json {
         println!(
@@ -3076,7 +3151,8 @@ fn cmd_actor_set(args: ActorSetArgs, json: bool) -> Result<(), Box<dyn std::erro
     } else {
         actors::TokenScope::Shared
     };
-    let outcome = finalize_claim(&frame_dir, &mut reg, &args.token, &name, scope)?;
+    let (outcome, cleared) = finalize_claim(&frame_dir, &mut reg, &args.token, &name, scope)?;
+    report_claim_scope(&frame_dir, &args.token, scope, cleared);
 
     let outcome_str = match outcome {
         actors::ClaimOutcome::Created => "created",

@@ -343,6 +343,36 @@ pub fn read_shared_actor_token(frame_dir: &Path) -> Option<String> {
     read_token_file(&shared_actor_path(frame_dir)?)
 }
 
+/// The token recorded in this clone's **main working tree**'s local
+/// `frame/.actor`, when `frame_dir` is inside a linked worktree. `None` from the
+/// main worktree itself, outside git, or when the main tree holds no local
+/// token.
+///
+/// This is what lets a worktree of the *primary* clone inherit `null`: `fr init`
+/// writes the primary's token to the local file only (the shared file is always
+/// a real letter), so without this a worktree of an `fr init`-created project
+/// would see no token at all and auto-claim one.
+pub fn read_main_worktree_actor_token(frame_dir: &Path) -> Option<String> {
+    let main = crate::io::git::main_worktree_frame_dir(frame_dir)?;
+    read_local_actor_token(&main)
+}
+
+/// Where an effective token came from — the three tiers of
+/// [`read_actor_token`], plus "nowhere".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenSource {
+    /// This working copy's own `frame/.actor` override.
+    Local,
+    /// The clone-wide shared file, inherited by every worktree.
+    Shared,
+    /// Inherited from the main working tree's local `frame/.actor` (this is a
+    /// linked worktree of a clone whose identity is recorded only there —
+    /// typically the primary's `null`).
+    MainWorktree,
+    /// No token anywhere: this working copy is unclaimed.
+    None,
+}
+
 /// Read the registry. A missing file is treated as an empty registry (migration
 /// tolerance). A present-but-unparseable file is an error so callers don't
 /// silently clobber a merge-broken registry.
@@ -379,12 +409,17 @@ pub struct ResolvedToken {
 /// Resolve "my token" for a mint operation, the single hook every minting site
 /// calls. The caller must hold the project lock.
 ///
-/// 1. If `frame/.actor` exists, return its token (including `null`).
-/// 2. If absent, **auto-claim**: draw from the frontier, write `.actor`, add the
+/// 1. If this working copy resolves a token ([`actor_token_with_source`] —
+///    local, shared, or inherited from the main worktree), return it (including
+///    `null`).
+/// 2. If none resolves and this is a **linked worktree**, fail: a claim is
+///    committed state, and a worktree is not a new clone (see
+///    [`unclaimed_worktree_error`]).
+/// 3. Otherwise **auto-claim**: draw from the frontier, write the token, add the
 ///    registry row, and return a one-time announcement (the "default to a new
 ///    token" behavior for a fresh clone of an existing project).
-/// 3. If absent **and the frontier is empty**, fail with the routing message so
-///    the mint can abort without creating anything.
+/// 4. If the frontier is empty, fail with the routing message so the mint can
+///    abort without creating anything.
 pub fn resolve_actor_token(frame_dir: &Path) -> Result<ResolvedToken, String> {
     if let Some(token) = read_actor_token(frame_dir) {
         // Self-heal a drifted registry. This clone's identity lives in the
@@ -414,6 +449,17 @@ pub fn resolve_actor_token(frame_dir: &Path) -> Result<ResolvedToken, String> {
             token,
             announcement: None,
         });
+    }
+
+    // A linked worktree never auto-claims. It is the *same clone* as its main
+    // working tree, and a claim is not local bookkeeping — it writes a row into
+    // the committed `actors.toml`. Auto-claiming here would silently split one
+    // clone into two actors and land shared, tracked state in whatever commit
+    // the worktree happens to make next. Route to an explicit decision instead.
+    if let crate::io::git::WorktreeKind::Linked { main_root } =
+        crate::io::git::worktree_kind(frame_dir)
+    {
+        return Err(unclaimed_worktree_error(main_root.as_deref()));
     }
 
     // Unclaimed working copy — auto-claim a token on first mint.
@@ -454,6 +500,24 @@ pub fn resolve_actor_token(frame_dir: &Path) -> Result<ResolvedToken, String> {
     })
 }
 
+/// The routing message for a mint from a linked worktree whose clone has no
+/// actor token anywhere (no local, no shared, and no token in the main working
+/// tree). Names the main worktree when it can be located.
+pub fn unclaimed_worktree_error(main_root: Option<&Path>) -> String {
+    let there = match main_root {
+        Some(root) => format!(" ({})", root.display()),
+        None => String::new(),
+    };
+    format!(
+        "this is a linked git worktree and its clone has no actor token — frame will not \
+         auto-claim one here, because a claim is written to the committed frame/actors.toml \
+         and would split this clone into two actors. Claim one for the whole clone with \
+         `fr actor claim` in the main working tree{}, or run this worktree as its own actor \
+         with `fr actor claim --local`.",
+        there
+    )
+}
+
 /// What namespace an ID-assigning path should mint in, honoring the strict null
 /// policy: the null namespace belongs only to a clone that deliberately took it
 /// (`fr init` or an explicit `fr actor set null`), never to a merely-unclaimed
@@ -479,11 +543,35 @@ pub fn id_scope(frame_dir: &Path) -> IdScope {
     }
 }
 
-/// This working copy's effective token, or `None` if unclaimed. A local
-/// `frame/.actor` (a deliberate per-worktree override) wins; otherwise the
-/// clone-wide shared token, inherited by every worktree, applies.
+/// This working copy's effective token, or `None` if unclaimed. See
+/// [`actor_token_with_source`] for the resolution order.
 pub fn read_actor_token(frame_dir: &Path) -> Option<String> {
-    read_local_actor_token(frame_dir).or_else(|| read_shared_actor_token(frame_dir))
+    actor_token_with_source(frame_dir).0
+}
+
+/// This working copy's effective token and where it came from.
+///
+/// Resolution order, most specific first:
+///
+/// 1. the local `frame/.actor` — a deliberate per-worktree override;
+/// 2. the clone-wide shared token, inherited by every worktree;
+/// 3. the **main working tree**'s local `frame/.actor`, when this is a linked
+///    worktree (the primary's `null` lives only there).
+///
+/// A linked worktree is the same clone as its main working tree, so tier 3 is
+/// inheritance, not a claim: nothing is written and no new actor appears in the
+/// registry.
+pub fn actor_token_with_source(frame_dir: &Path) -> (Option<String>, TokenSource) {
+    if let Some(token) = read_local_actor_token(frame_dir) {
+        return (Some(token), TokenSource::Local);
+    }
+    if let Some(token) = read_shared_actor_token(frame_dir) {
+        return (Some(token), TokenSource::Shared);
+    }
+    if let Some(token) = read_main_worktree_actor_token(frame_dir) {
+        return (Some(token), TokenSource::MainWorktree);
+    }
+    (None, TokenSource::None)
 }
 
 /// Human-facing label for this clone's actor token, as read by
@@ -521,6 +609,23 @@ pub fn write_actor_token_scoped(
         TokenScope::Local => actor_token_path(frame_dir),
     };
     crate::io::recovery::atomic_write(&path, format!("{}\n", token).as_bytes())
+}
+
+/// Remove this working copy's local `frame/.actor` override, if present.
+/// Returns the token it held.
+///
+/// A clone-wide ([`TokenScope::Shared`]) claim must call this: the local file
+/// wins resolution, so leaving it in place would make `fr actor set b` look like
+/// a no-op — it writes the shared token while this working copy keeps reporting
+/// and minting under the stale local one. Only meaningful when a shared file
+/// actually exists (non-git projects write the local file *as* the shared one).
+pub fn clear_local_actor_token(frame_dir: &Path) -> std::io::Result<Option<String>> {
+    let path = actor_token_path(frame_dir);
+    let held = read_local_actor_token(frame_dir);
+    if path.exists() {
+        std::fs::remove_file(&path)?;
+    }
+    Ok(held)
 }
 
 // ---------------------------------------------------------------------------
@@ -861,6 +966,123 @@ state = \"active\"
         write_actor_token_scoped(&frame_dir, "k", TokenScope::Local).unwrap();
         assert_eq!(read_local_actor_token(&frame_dir).as_deref(), Some("k"));
         assert_eq!(read_actor_token(&frame_dir).as_deref(), Some("k"));
+    }
+
+    // --- Linked-worktree inheritance ---
+
+    #[test]
+    fn worktree_inherits_the_main_worktrees_local_token() {
+        let tmp = TempDir::new().unwrap();
+        let Some((main_frame, wt_frame)) = crate::io::git::testutil::repo_with_worktree(tmp.path())
+        else {
+            return; // git unavailable
+        };
+        // The `fr init` shape: the primary's null lives only in the main tree's
+        // local file — there is no shared token at all.
+        write_actor_token(&main_frame, "null").unwrap();
+        write_actors(&main_frame, &reg_with(&[("null", "active")])).unwrap();
+        assert!(read_shared_actor_token(&wt_frame).is_none());
+
+        let (token, source) = actor_token_with_source(&wt_frame);
+        assert_eq!(token.as_deref(), Some("null"));
+        assert_eq!(source, TokenSource::MainWorktree);
+        assert_eq!(id_scope(&wt_frame), IdScope::Mint(None));
+    }
+
+    #[test]
+    fn worktree_mint_inherits_without_claiming_anything() {
+        let tmp = TempDir::new().unwrap();
+        let Some((main_frame, wt_frame)) = crate::io::git::testutil::repo_with_worktree(tmp.path())
+        else {
+            return;
+        };
+        write_actor_token(&main_frame, "null").unwrap();
+        write_actors(&main_frame, &reg_with(&[("null", "active")])).unwrap();
+        // The worktree checkout carries its own copy of the committed registry.
+        write_actors(&wt_frame, &reg_with(&[("null", "active")])).unwrap();
+
+        let resolved = resolve_actor_token(&wt_frame).unwrap();
+        assert_eq!(resolved.token, "null");
+        // Inheritance is silent and writes nothing: no announcement, no new
+        // registry row, no local or shared token file.
+        assert!(resolved.announcement.is_none());
+        assert_eq!(read_actors(&wt_frame).unwrap().actors.len(), 1);
+        assert!(read_local_actor_token(&wt_frame).is_none());
+        assert!(read_shared_actor_token(&wt_frame).is_none());
+    }
+
+    #[test]
+    fn worktree_precedence_is_local_then_shared_then_main() {
+        let tmp = TempDir::new().unwrap();
+        let Some((main_frame, wt_frame)) = crate::io::git::testutil::repo_with_worktree(tmp.path())
+        else {
+            return;
+        };
+        write_actor_token(&main_frame, "null").unwrap();
+        // Inherited from the main tree…
+        assert_eq!(
+            actor_token_with_source(&wt_frame).1,
+            TokenSource::MainWorktree
+        );
+        // …until a clone-wide shared token exists…
+        write_actor_token_scoped(&wt_frame, "d", TokenScope::Shared).unwrap();
+        let (token, source) = actor_token_with_source(&wt_frame);
+        assert_eq!((token.as_deref(), source), (Some("d"), TokenSource::Shared));
+        // …and a deliberate per-worktree override beats both.
+        write_actor_token_scoped(&wt_frame, "k", TokenScope::Local).unwrap();
+        let (token, source) = actor_token_with_source(&wt_frame);
+        assert_eq!((token.as_deref(), source), (Some("k"), TokenSource::Local));
+    }
+
+    #[test]
+    fn unclaimed_worktree_refuses_to_auto_claim() {
+        let tmp = TempDir::new().unwrap();
+        let Some((_main_frame, wt_frame)) =
+            crate::io::git::testutil::repo_with_worktree(tmp.path())
+        else {
+            return;
+        };
+        // No token anywhere in the clone (a project predating actor tokens).
+        let err = resolve_actor_token(&wt_frame).unwrap_err();
+        assert!(err.contains("linked git worktree"), "{err}");
+        assert!(err.contains("fr actor claim --local"), "{err}");
+        // Nothing was claimed — in particular the committed registry is untouched.
+        assert!(read_actor_token(&wt_frame).is_none());
+        assert!(!actors_path(&wt_frame).exists());
+    }
+
+    #[test]
+    fn main_worktree_still_auto_claims_when_unclaimed() {
+        let tmp = TempDir::new().unwrap();
+        let Some((main_frame, _wt_frame)) =
+            crate::io::git::testutil::repo_with_worktree(tmp.path())
+        else {
+            return;
+        };
+        // The guard is scoped to linked worktrees: a clone's own main working
+        // tree keeps the auto-claim-on-first-mint behavior.
+        let resolved = resolve_actor_token(&main_frame).unwrap();
+        assert!(SAFE_ALPHABET.contains(&resolved.token.as_str()));
+        assert!(resolved.announcement.is_some());
+        assert_eq!(
+            read_shared_actor_token(&main_frame).as_deref(),
+            Some(resolved.token.as_str())
+        );
+    }
+
+    #[test]
+    fn clear_local_token_unshadows_a_shared_claim() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+        write_actor_token(&frame_dir, "null").unwrap();
+        assert_eq!(
+            clear_local_actor_token(&frame_dir).unwrap().as_deref(),
+            Some("null")
+        );
+        assert!(read_local_actor_token(&frame_dir).is_none());
+        // Idempotent: clearing an absent override is a no-op, not an error.
+        assert!(clear_local_actor_token(&frame_dir).unwrap().is_none());
     }
 
     #[test]

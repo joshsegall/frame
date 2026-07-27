@@ -142,6 +142,7 @@ fr add api "Handle empty response body #cc-added" --found-from API-003
 Frame identifies work by *working copy* (git clone), via an [actor token](concepts.md#actors). This matters when running multiple agents:
 
 - **Two agent sessions in the same clone** share that clone's single token. They are serialized by frame's file lock (`frame/.lock`), so concurrent `fr` writes don't corrupt each other — no extra setup needed.
-- **Separate clones** (e.g. git worktrees or independent checkouts) are distinct actors. Each should claim its own token with `fr actor claim` so future concurrent ID minting won't collide. The clone that ran `fr init` is the untokened **primary**.
+- **Git worktrees of one clone** share that clone's token too, and inherit it automatically — including the primary's `null`. Running `fr` from a fresh worktree needs no setup and claims nothing; a worktree never auto-claims a token, since a claim is committed state that would split one clone into two actors. To run a worktree as a genuinely distinct, concurrent actor, claim explicitly there with `fr actor claim --local`.
+- **Separate clones** (independent checkouts) are distinct actors. Each auto-claims its own token on first mint, or claim one up front with `fr actor claim`. The clone that ran `fr init` is the untokened **primary**.
 
 In Phase 2 tokens are tracked but not yet used in minted IDs, so existing single-clone setups need no changes.

@@ -178,7 +178,7 @@ fr add TRACK TITLE [--after ID] [--found-from ID]
 | `--after ID` | Insert after this task instead of at bottom |
 | `--found-from ID` | Add note "Found while working on ID" |
 
-Auto-generates a task ID using the track's configured prefix, minted in this working copy's [actor-token namespace](concepts.md#minting-in-a-token-namespace) (the primary clone mints bare numbers like `EFF-14`; a clone with token `a` mints `EFF-a1`). The **first mint in an unclaimed clone auto-claims** a token and announces it once on stderr.
+Auto-generates a task ID using the track's configured prefix, minted in this working copy's [actor-token namespace](concepts.md#minting-in-a-token-namespace) (the primary clone mints bare numbers like `EFF-14`; a clone with token `a` mints `EFF-a1`). The **first mint in an unclaimed clone auto-claims** a token and announces it once on stderr. A linked git worktree inherits its clone's token instead, and never auto-claims: if the clone has no token at all, the mint fails with a message pointing at `fr actor claim` (in the main working tree) or `fr actor claim --local` (here).
 
 A [shelved](concepts.md#tracks) track rejects new tasks: `fr add`, `fr push`, `fr sub`, `fr import`, `fr triage`, and `fr mv --track` into it fail with a message pointing to `fr track activate`. Re-activate the track first.
 
@@ -530,11 +530,11 @@ The `-C` flag also triggers auto-registration if the target project isn't alread
 
 ## Actor Tokens
 
-Each working copy (git clone) holds one **actor token**, recorded in the committed `frame/actors.toml` registry and the gitignored `frame/.actor` file. See [concepts.md](concepts.md#actors) for the model. Tokens are managed today but not yet used in minted IDs.
+Each working copy (git clone) holds one **actor token**, recorded in the committed `frame/actors.toml` registry and the gitignored `frame/.actor` file. A clone's linked git worktrees share its token — via the clone-wide `<git-common-dir>/frame-actor`, or by inheriting the main working tree's `frame/.actor` (which is where the primary's `null` lives). See [concepts.md](concepts.md#actors) for the model. Tokens are managed today but not yet used in minted IDs.
 
 ### `fr actor`
 
-Show this working copy's token and status. `null` is displayed as "primary (untokened)". Warns if the `.actor` token isn't recorded in the registry, and prints a notice when the never-used frontier is nearly empty.
+Show this working copy's token and status. `null` is displayed as "primary (untokened)". Also shows where the token came from — a local `frame/.actor`, the clone-wide shared token, or inherited from the main working tree (naming it) when run in a linked worktree. Warns if the token isn't recorded in the registry, and prints a notice when the never-used frontier is nearly empty. In an unclaimed *worktree* it explains that a mint there won't auto-claim, and gives both ways out.
 
 ```
 fr actor
@@ -553,6 +553,8 @@ fr actor claim --local     # claim only for this worktree (frame/.actor)
 
 `--name` sets the registry provenance (default: the machine hostname). `--local` writes this worktree's `frame/.actor` instead of the shared token, so this one working copy diverges onto its own token — use it to run a worktree as a genuinely distinct, concurrent actor.
 
+A clone-wide (non-`--local`) claim also **removes this working copy's local `frame/.actor`**, if it had one, and says so — the local file wins resolution, so leaving it would make the claim a silent no-op here. When run from a linked worktree, it warns if the *main* working tree still has a local override that shadows the new shared token there.
+
 ### `fr actor set TOKEN [--name NAME] [--local]`
 
 Claim a specific token. Accepts a single safe letter (`a–z` minus `i`, `l`, `o`), a multi-character token (`aa`, `foo`), or `null`. Reclaims a retired token by flipping it back to active. Refuses a token that another working copy already holds (retire it there first, or pick another). Idempotent if this clone already holds the token. Writes the clone-wide shared token by default; `--local` (and always `null`) writes this worktree's `frame/.actor`.
@@ -563,6 +565,8 @@ fr actor set b --local     # override just this worktree
 fr actor set null          # record this clone as the primary (always local)
 fr actor set team-ci --name ci-runner
 ```
+
+As with `fr actor claim`, a non-`--local` `set` clears any local `frame/.actor` that would shadow the new clone-wide token.
 
 `fr actor set null` is also the migration entry point: running it in a project that predates actor tokens creates `frame/actors.toml`.
 
