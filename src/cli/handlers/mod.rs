@@ -1263,6 +1263,19 @@ fn cmd_check(json: bool) -> Result<(), Box<dyn std::error::Error>> {
                             tokens[0],
                         );
                     }
+                    check::CheckWarning::LocalFileCommitted { path, tracked } => {
+                        if *tracked {
+                            println!(
+                                "  {} is tracked by git, but it is local to this working copy — untrack it with `git rm --cached {}` and add `{}` to .gitignore",
+                                path, path, path
+                            );
+                        } else {
+                            println!(
+                                "  {} is not covered by .gitignore, but it is local to this working copy — add `{}` to .gitignore before it gets committed",
+                                path, path
+                            );
+                        }
+                    }
                 }
             }
         }

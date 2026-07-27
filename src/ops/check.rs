@@ -83,6 +83,11 @@ pub enum CheckWarning {
     /// workflow). Consider `fr actor merge` to collapse them.
     #[serde(rename = "actor_name_collision")]
     ActorNameCollision { name: String, tokens: Vec<String> },
+    /// A working-copy-local frame file (see
+    /// [`crate::io::project_io::LOCAL_ONLY_FRAME_FILES`]) is committed to git, or
+    /// isn't covered by `.gitignore` and so will be. `path` is repo-relative.
+    #[serde(rename = "local_file_committed")]
+    LocalFileCommitted { path: String, tracked: bool },
 }
 
 /// Informational messages (not errors or warnings).
@@ -132,6 +137,9 @@ pub fn check_project(project: &Project) -> CheckResult {
 
     // Actor proliferation: several active tokens under one provenance name.
     check_actor_name_collisions(&project.frame_dir, &mut result);
+
+    // Working-copy-local frame files leaking into git.
+    check_local_files_ignored(&project.frame_dir, &mut result);
 
     // Recovery log summary
     if let Some(summary) = crate::io::recovery::recovery_summary(&project.frame_dir) {
@@ -329,6 +337,63 @@ fn check_actor_name_collisions(frame_dir: &Path, result: &mut CheckResult) {
     }
 }
 
+/// Flag working-copy-local frame files that git is carrying, or is about to.
+///
+/// `fr init` writes these to `.gitignore`, but only at init — a project created
+/// before an entry existed never gets it, and nothing notices until the file is
+/// committed (or conflicts on a merge, which the append-only recovery log does
+/// reliably). Two states are worth flagging, strongest first:
+///
+/// - **tracked**: already in the index, so ignore rules no longer apply. Needs
+///   `git rm --cached` as well as a `.gitignore` line.
+/// - **not ignored** (and present on disk): the next `git add -A` commits it.
+///
+/// A project outside git, or one where `git` is unavailable, is a no-op.
+fn check_local_files_ignored(frame_dir: &Path, result: &mut CheckResult) {
+    let Some(paths) = crate::io::git::repo_paths(frame_dir) else {
+        return;
+    };
+    // Everything git is asked about must be repo-relative, so the same strings
+    // can be matched against its output and shown in the fix hints.
+    let Ok(frame_rel) = frame_dir
+        .canonicalize()
+        .as_deref()
+        .unwrap_or(frame_dir)
+        .strip_prefix(&paths.toplevel)
+        .map(|p| p.to_path_buf())
+    else {
+        return;
+    };
+    let rel_paths: Vec<String> = crate::io::project_io::LOCAL_ONLY_FRAME_FILES
+        .iter()
+        .map(|name| frame_rel.join(name).to_string_lossy().into_owned())
+        .collect();
+
+    let tracked = crate::io::git::tracked_paths(&paths.toplevel, &rel_paths).unwrap_or_default();
+    let Some(ignored) = crate::io::git::ignored_paths(&paths.toplevel, &rel_paths) else {
+        return;
+    };
+
+    for (rel, name) in rel_paths
+        .iter()
+        .zip(crate::io::project_io::LOCAL_ONLY_FRAME_FILES)
+    {
+        if tracked.iter().any(|t| t == rel) {
+            result.warnings.push(CheckWarning::LocalFileCommitted {
+                path: rel.clone(),
+                tracked: true,
+            });
+        } else if !ignored.iter().any(|i| i == rel) && frame_dir.join(name).exists() {
+            // Not ignored but not yet committed: only worth reporting for a file
+            // that actually exists, since an absent one can't be added.
+            result.warnings.push(CheckWarning::LocalFileCommitted {
+                path: rel.clone(),
+                tracked: false,
+            });
+        }
+    }
+}
+
 fn collect_all_task_ids(project: &Project) -> HashSet<String> {
     let mut ids = HashSet::new();
     for (_, track) in &project.tracks {
@@ -428,6 +493,123 @@ mod tests {
             config: make_config(),
             tracks: vec![("main".to_string(), track)],
             inbox: None,
+        }
+    }
+
+    // --- Local-only files leaking into git ---
+
+    /// Run git in `cwd`, reporting success. Tests skip themselves when git is
+    /// unavailable rather than failing.
+    fn git(cwd: &Path, args: &[&str]) -> bool {
+        std::process::Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// A git repo containing a frame project, with `gitignore` as its
+    /// `.gitignore` and every local-only file present on disk. `None` when git
+    /// is unavailable.
+    fn repo_with_local_files(root: &Path, gitignore: &str) -> Option<Project> {
+        if !git(root, &["init", "-q"]) {
+            return None;
+        }
+        let frame_dir = root.join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+        std::fs::write(root.join(".gitignore"), gitignore).unwrap();
+        for name in crate::io::project_io::LOCAL_ONLY_FRAME_FILES {
+            std::fs::write(frame_dir.join(name), "local\n").unwrap();
+        }
+        Some(make_project_at(root, "# Main\n\n## Backlog\n\n## Done\n"))
+    }
+
+    fn local_file_warnings(result: &CheckResult) -> Vec<(String, bool)> {
+        result
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                CheckWarning::LocalFileCommitted { path, tracked } => {
+                    Some((path.clone(), *tracked))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The lace case: a `.gitignore` written before `.recovery.log` joined the
+    /// list, so that one file is unignored and will be committed.
+    #[test]
+    fn test_check_local_file_not_ignored() {
+        let tmp = TempDir::new().unwrap();
+        let Some(project) =
+            repo_with_local_files(tmp.path(), "frame/.state.json\nframe/.lock\nframe/.actor\n")
+        else {
+            return; // git unavailable
+        };
+
+        let warnings = local_file_warnings(&check_project(&project));
+        assert_eq!(
+            warnings,
+            vec![("frame/.recovery.log".to_string(), false)],
+            "only the unignored file should be flagged"
+        );
+    }
+
+    /// Once the file is committed, ignore rules no longer apply — it needs
+    /// `git rm --cached`, so it's flagged as tracked even if .gitignore lists it.
+    #[test]
+    fn test_check_local_file_tracked() {
+        let tmp = TempDir::new().unwrap();
+        let Some(project) =
+            repo_with_local_files(tmp.path(), "frame/.state.json\nframe/.lock\nframe/.actor\n")
+        else {
+            return;
+        };
+        if !git(tmp.path(), &["add", "frame/.recovery.log"]) {
+            return;
+        }
+        // Belatedly ignoring a tracked file does not untrack it.
+        std::fs::write(
+            tmp.path().join(".gitignore"),
+            "frame/.state.json\nframe/.lock\nframe/.actor\nframe/.recovery.log\n",
+        )
+        .unwrap();
+
+        let warnings = local_file_warnings(&check_project(&project));
+        assert_eq!(warnings, vec![("frame/.recovery.log".to_string(), true)]);
+    }
+
+    /// A project whose .gitignore covers every local-only file is silent.
+    #[test]
+    fn test_check_local_files_all_ignored() {
+        let tmp = TempDir::new().unwrap();
+        let ignore: String = crate::io::project_io::LOCAL_ONLY_FRAME_FILES
+            .iter()
+            .map(|n| format!("frame/{}\n", n))
+            .collect();
+        let Some(project) = repo_with_local_files(tmp.path(), &ignore) else {
+            return;
+        };
+        assert!(local_file_warnings(&check_project(&project)).is_empty());
+    }
+
+    /// Outside a git repo there is nothing to leak into, so the check is a no-op.
+    #[test]
+    fn test_check_local_files_non_git_project_is_silent() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+        for name in crate::io::project_io::LOCAL_ONLY_FRAME_FILES {
+            std::fs::write(frame_dir.join(name), "local\n").unwrap();
+        }
+        let project = make_project_at(tmp.path(), "# Main\n\n## Backlog\n\n## Done\n");
+        // Guard against the tempdir itself sitting inside a repo.
+        if crate::io::git::repo_paths(&frame_dir).is_none() {
+            assert!(local_file_warnings(&check_project(&project)).is_empty());
         }
     }
 

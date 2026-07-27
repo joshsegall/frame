@@ -768,6 +768,19 @@ pub(super) fn palette_check_project(app: &mut App) {
                         tokens.join(", ")
                     )
                 }
+                check::CheckWarning::LocalFileCommitted { path, tracked } => {
+                    if *tracked {
+                        format!(
+                            "  {} is tracked by git but is local to this working copy",
+                            path
+                        )
+                    } else {
+                        format!(
+                            "  {} is local to this working copy but not gitignored",
+                            path
+                        )
+                    }
+                }
             };
             lines.push(Line::from(Span::styled(msg, yellow)));
         }

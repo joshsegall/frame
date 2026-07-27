@@ -7,6 +7,17 @@ use crate::model::project::Project;
 use crate::model::track::Track;
 use crate::parse::{parse_inbox, parse_track};
 
+/// Files inside `frame/` that belong to a **single working copy** and must never
+/// be committed: per-worktree UI state, the advisory lock, the append-only
+/// recovery log, and this working copy's actor token. Committing any of them
+/// leaks machine-local state into shared history (and the append-only log
+/// conflicts on every merge).
+///
+/// `fr init` writes these to `.gitignore` and `fr check` verifies them, both
+/// from this one list — a project created before an entry was added here won't
+/// have it, which is exactly what the check catches.
+pub const LOCAL_ONLY_FRAME_FILES: [&str; 4] = [".state.json", ".lock", ".recovery.log", ".actor"];
+
 /// Error type for project I/O operations
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectError {

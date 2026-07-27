@@ -1555,11 +1555,15 @@ fn test_init_gitignore_added() {
     fs::create_dir(tmp.path().join(".git")).unwrap();
 
     let out = run_fr_ok(tmp.path(), &["init", "--name", "Git Project"]);
-    assert!(out.contains("added frame/.state.json, frame/.lock, frame/.actor to .gitignore"));
+    // The summary names exactly what was added — all four local-only files.
+    assert!(out.contains(
+        "added frame/.state.json, frame/.lock, frame/.recovery.log, frame/.actor to .gitignore"
+    ));
 
     let gitignore = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
     assert!(gitignore.contains("frame/.state.json"));
     assert!(gitignore.contains("frame/.lock"));
+    assert!(gitignore.contains("frame/.recovery.log"));
     assert!(gitignore.contains("frame/.actor"));
 }
 
@@ -1594,13 +1598,22 @@ fn test_init_gitignore_partial() {
     fs::write(tmp.path().join(".gitignore"), "frame/.lock\n").unwrap();
 
     let out = run_fr_ok(tmp.path(), &["init", "--name", "Partial"]);
-    // Should still add the missing entry
-    assert!(out.contains("added frame/.state.json, frame/.lock, frame/.actor to .gitignore"));
+    // Should add exactly the missing entries, and say so — the pre-existing
+    // `frame/.lock` is not re-added and must not be named.
+    assert!(
+        out.contains("added frame/.state.json, frame/.recovery.log, frame/.actor to .gitignore")
+    );
 
     let gitignore = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
     assert!(gitignore.contains("frame/.state.json"));
-    // Original entry should still be there
-    assert!(gitignore.contains("frame/.lock"));
+    // Original entry should still be there, exactly once.
+    assert_eq!(
+        gitignore
+            .lines()
+            .filter(|l| l.trim() == "frame/.lock")
+            .count(),
+        1
+    );
 }
 
 // ---------------------------------------------------------------------------

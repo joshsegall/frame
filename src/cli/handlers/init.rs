@@ -92,31 +92,31 @@ fn render_project_toml(
 }
 
 /// Add Frame-specific entries to .gitignore if a git repo exists.
-/// Returns true if entries were actually added.
-fn update_gitignore(cwd: &std::path::Path) -> bool {
+/// Returns the entries actually added (empty when there was nothing to do).
+fn update_gitignore(cwd: &std::path::Path) -> Vec<String> {
     // Only act if this is a git repo (has .git dir or file)
     if !cwd.join(".git").exists() {
-        return false;
+        return Vec::new();
     }
 
     let gitignore_path = cwd.join(".gitignore");
     let existing = fs::read_to_string(&gitignore_path).unwrap_or_default();
 
-    let entries = [
-        "frame/.state.json",
-        "frame/.lock",
-        "frame/.recovery.log",
-        "frame/.actor",
-    ];
+    // One list, shared with `fr check`, which catches projects whose .gitignore
+    // predates an entry (this runs at init only).
+    let entries: Vec<String> = crate::io::project_io::LOCAL_ONLY_FRAME_FILES
+        .iter()
+        .map(|name| format!("frame/{}", name))
+        .collect();
     let mut to_add = Vec::new();
     for entry in &entries {
-        if !existing.lines().any(|line| line.trim() == *entry) {
-            to_add.push(*entry);
+        if !existing.lines().any(|line| line.trim() == entry) {
+            to_add.push(entry.clone());
         }
     }
 
     if to_add.is_empty() {
-        return false;
+        return Vec::new();
     }
 
     let mut content = existing;
@@ -130,7 +130,11 @@ fn update_gitignore(cwd: &std::path::Path) -> bool {
         content.push('\n');
     }
 
-    fs::write(&gitignore_path, content).is_ok()
+    if fs::write(&gitignore_path, content).is_ok() {
+        to_add
+    } else {
+        Vec::new()
+    }
 }
 
 pub fn cmd_init(args: InitArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -215,7 +219,7 @@ pub fn cmd_init(args: InitArgs) -> Result<(), Box<dyn std::error::Error>> {
     crate::io::registry::register_project(&name, &cwd);
 
     // Update .gitignore
-    let gitignore_updated = update_gitignore(&cwd);
+    let gitignore_added = update_gitignore(&cwd);
 
     // Print summary
     println!("[>] frame initialized");
@@ -226,9 +230,9 @@ pub fn cmd_init(args: InitArgs) -> Result<(), Box<dyn std::error::Error>> {
         println!("  tracks/{}.md", id);
     }
 
-    if gitignore_updated {
+    if !gitignore_added.is_empty() {
         println!();
-        println!("  added frame/.state.json, frame/.lock, frame/.actor to .gitignore");
+        println!("  added {} to .gitignore", gitignore_added.join(", "));
     }
 
     Ok(())
@@ -358,8 +362,8 @@ mod tests {
     #[test]
     fn test_update_gitignore_no_git() {
         let tmp = tempfile::TempDir::new().unwrap();
-        // No .git dir — should return false
-        assert!(!update_gitignore(tmp.path()));
+        // No .git dir — nothing to add
+        assert!(update_gitignore(tmp.path()).is_empty());
         assert!(!tmp.path().join(".gitignore").exists());
     }
 
@@ -368,11 +372,19 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         fs::create_dir(tmp.path().join(".git")).unwrap();
 
-        assert!(update_gitignore(tmp.path()));
+        // Every local-only file is added, and reported back for the summary.
+        let added = update_gitignore(tmp.path());
+        assert_eq!(
+            added.len(),
+            crate::io::project_io::LOCAL_ONLY_FRAME_FILES.len()
+        );
 
         let content = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
-        assert!(content.contains("frame/.state.json"));
-        assert!(content.contains("frame/.lock"));
+        for name in crate::io::project_io::LOCAL_ONLY_FRAME_FILES {
+            let entry = format!("frame/{}", name);
+            assert!(content.contains(&entry), "missing {entry}");
+            assert!(added.contains(&entry), "unreported {entry}");
+        }
         assert!(content.contains("# frame (added by fr init)"));
     }
 
@@ -386,7 +398,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!update_gitignore(tmp.path()));
+        assert!(update_gitignore(tmp.path()).is_empty());
     }
 
     #[test]
@@ -395,7 +407,7 @@ mod tests {
         fs::create_dir(tmp.path().join(".git")).unwrap();
         fs::write(tmp.path().join(".gitignore"), "*.log\n").unwrap();
 
-        assert!(update_gitignore(tmp.path()));
+        assert!(!update_gitignore(tmp.path()).is_empty());
 
         let content = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
         assert!(content.starts_with("*.log\n"));

@@ -145,6 +145,8 @@ fr deps EFF-014
 
 Validate project integrity (read-only). Reports dangling dependencies, broken refs/specs, duplicate IDs, missing metadata, and format warnings. Also flags actor issues: this clone's token drifting from `actors.toml`, and **multiple active tokens sharing one provenance name** (a sign a machine has accumulated tokens — e.g. a git-worktree-per-session workflow — with a suggested `fr actor merge` to collapse them).
 
+Finally, it flags **working-copy-local frame files leaking into git** — `frame/.state.json`, `frame/.lock`, `frame/.recovery.log`, and `frame/.actor`. `fr init` writes all four to `.gitignore`, but only at init, so a project created before an entry existed never gets it. Check reports a file that git already **tracks** (needs `git rm --cached <path>` as well as a `.gitignore` line — ignore rules don't apply to files already in the index) and one that exists but **isn't ignored** (the next `git add -A` commits it). Committing these leaks machine-local state into shared history; the append-only recovery log also conflicts on every merge that touches it. Projects outside git are skipped.
+
 ### `fr info`
 
 Show project identity at a glance (read-only — never claims a token):

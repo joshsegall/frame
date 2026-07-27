@@ -134,6 +134,39 @@ pub fn main_worktree_frame_dir(frame_dir: &Path) -> Option<PathBuf> {
     candidate.is_dir().then_some(candidate)
 }
 
+/// Run `git` in `toplevel` over `rel_paths` and collect the repo-relative paths
+/// it prints. `None` when git is unavailable or errors out (exit 128); an exit
+/// status of 1 with no output is a legitimate empty result, not a failure —
+/// `check-ignore` uses it to mean "nothing matched".
+fn git_paths(toplevel: &Path, args: &[&str], rel_paths: &[String]) -> Option<Vec<String>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(toplevel)
+        .args(args)
+        .arg("--")
+        .args(rel_paths)
+        .output()
+        .ok()?;
+    if output.status.code() == Some(128) {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    Some(text.lines().map(|l| l.trim().to_string()).collect())
+}
+
+/// Which of `rel_paths` (repo-relative) git already **tracks** — i.e. they are in
+/// the index and their contents are committed (or staged) into shared history.
+pub fn tracked_paths(toplevel: &Path, rel_paths: &[String]) -> Option<Vec<String>> {
+    git_paths(toplevel, &["ls-files", "--cached"], rel_paths)
+}
+
+/// Which of `rel_paths` (repo-relative) `.gitignore` covers. A *tracked* path is
+/// reported as not ignored — which is the honest answer for "will this get
+/// committed?", since ignore rules don't apply to files already in the index.
+pub fn ignored_paths(toplevel: &Path, rel_paths: &[String]) -> Option<Vec<String>> {
+    git_paths(toplevel, &["check-ignore"], rel_paths)
+}
+
 #[cfg(test)]
 pub(crate) mod testutil {
     use std::path::{Path, PathBuf};
