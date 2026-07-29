@@ -66,35 +66,35 @@ pub fn parse_inbox(source: &str) -> (Inbox, Vec<String>) {
                 }
             }
 
-            // Collect body lines (indented lines until blank line or next item)
+            // Collect body lines (indented lines until blank line or next item).
+            //
+            // Both boundaries below are absolute — never conditioned on
+            // code-fence state. `serialize_inbox` indents every body line by 2,
+            // so a `- ` at column 0 is always the next item, never body content.
+            // Suspending that check inside a fence once let an unbalanced fence
+            // in one body absorb every item after it; triaging the swallowing
+            // item then took the absorbed items with it. Blank lines inside a
+            // fenced block are already covered by `has_continuation_at_indent`.
             let mut body_lines = Vec::new();
-            let mut in_code_fence = false;
             while idx < lines.len() {
                 let body_line = &lines[idx];
                 let body_trimmed = body_line.trim();
 
-                // Track fenced code blocks so blank lines inside them don't end the body
-                if body_trimmed.starts_with("```") {
-                    in_code_fence = !in_code_fence;
+                if body_trimmed.is_empty() {
+                    // Blank line — check if more body content follows
+                    // (indented lines at 1+ spaces). If so, this is a
+                    // paragraph break within the body, not the item separator.
+                    if has_continuation_at_indent(&lines, idx + 1, 1) {
+                        body_lines.push(String::new());
+                        idx += 1;
+                        continue;
+                    }
+                    break;
                 }
 
-                if !in_code_fence {
-                    if body_trimmed.is_empty() {
-                        // Blank line — check if more body content follows
-                        // (indented lines at 1+ spaces). If so, this is a
-                        // paragraph break within the body, not the item separator.
-                        if has_continuation_at_indent(&lines, idx + 1, 1) {
-                            body_lines.push(String::new());
-                            idx += 1;
-                            continue;
-                        }
-                        break;
-                    }
-
-                    if body_trimmed.starts_with("- ") && !body_line.starts_with(' ') {
-                        // Next item at top level
-                        break;
-                    }
+                if body_trimmed.starts_with("- ") && !body_line.starts_with(' ') {
+                    // Next item at top level
+                    break;
                 }
 
                 // Body line — strip 2 spaces of indent if present
@@ -258,6 +258,50 @@ mod tests {
         assert!(body.contains("\n\n"));
 
         assert_eq!(inbox.items[1].title, "Next item");
+    }
+
+    /// The next-item boundary is absolute. Regression: suspending it inside a
+    /// code fence let an unbalanced fence in one body absorb every later item,
+    /// so triaging the swallowing item carried them off with it.
+    #[test]
+    fn test_parse_inbox_unbalanced_fence_does_not_swallow_later_items() {
+        let source = "\
+# Inbox
+
+- First item with an unbalanced fence
+  Example:
+  ```
+- Second item
+- Third item
+";
+        let (inbox, _) = parse_inbox(source);
+        assert_eq!(inbox.items.len(), 3);
+        assert_eq!(inbox.items[0].title, "First item with an unbalanced fence");
+        assert_eq!(inbox.items[1].title, "Second item");
+        assert_eq!(inbox.items[2].title, "Third item");
+
+        // The first item keeps its own body — and only its own.
+        let body = inbox.items[0].body.as_ref().unwrap();
+        assert_eq!(body, "Example:\n```");
+    }
+
+    /// An unbalanced fence in the *last* item has no later items to swallow, but
+    /// must still leave the body intact.
+    #[test]
+    fn test_parse_inbox_unbalanced_fence_in_last_item() {
+        let source = "\
+# Inbox
+
+- Only item
+  ```rust
+  fn main() {}
+";
+        let (inbox, _) = parse_inbox(source);
+        assert_eq!(inbox.items.len(), 1);
+        assert_eq!(
+            inbox.items[0].body.as_deref(),
+            Some("```rust\nfn main() {}")
+        );
     }
 
     #[test]

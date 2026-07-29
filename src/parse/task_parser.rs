@@ -330,31 +330,29 @@ fn parse_metadata(lines: &[String], idx: usize, indent: usize) -> (Metadata, usi
     }
 }
 
-/// Parse a multiline note block, respecting code fences.
-/// Lines are at `block_indent` or deeper. Returns the note text and next line.
+/// Parse a multiline note block. Lines are at `block_indent` or deeper.
+/// Returns the note text and next line.
+///
+/// The block's extent is determined by **indentation alone** — deliberately, and
+/// never by code-fence state. [`serialize_task`](crate::parse::serialize_tasks)
+/// re-indents every note line to `block_indent`, so any line less indented than
+/// that was never note content. Tracking fences here instead once let an
+/// unbalanced fence in a note body absorb the rest of the track file — sibling
+/// tasks and `## Done` included — and a later rewrite then demoted or dropped
+/// them. Blank lines inside a fenced block are already handled by
+/// `has_continuation_at_indent`, so fence awareness buys nothing and costs
+/// round-trip safety.
+///
+/// The one shape this cannot represent is a fenced block containing flush-left
+/// lines: the note ends at the first such line. The serializer would indent
+/// those lines anyway (corrupting the code), so that content was never
+/// round-trippable — this just makes the boundary explicit.
 fn parse_note_block(lines: &[String], start_idx: usize, block_indent: usize) -> (String, usize) {
     let mut note_lines = Vec::new();
     let mut idx = start_idx;
-    let mut in_code_fence = false;
 
     while idx < lines.len() {
         let line = &lines[idx];
-        let line_indent = count_indent(line);
-
-        if in_code_fence {
-            // Inside a code fence, consume everything until closing fence
-            note_lines.push(strip_block_indent(line, block_indent));
-            if line.trim().starts_with("```") && idx != start_idx {
-                // Check that this is actually a closing fence at the block indent
-                if line_indent >= block_indent
-                    && line[block_indent..].trim_start().starts_with("```")
-                {
-                    in_code_fence = false;
-                }
-            }
-            idx += 1;
-            continue;
-        }
 
         if line.trim().is_empty() {
             // Blank line inside note — include it
@@ -368,19 +366,12 @@ fn parse_note_block(lines: &[String], start_idx: usize, block_indent: usize) -> 
             }
         }
 
-        if line_indent < block_indent {
-            // Dedented — no longer part of the note
+        if count_indent(line) < block_indent {
+            // Dedented — no longer part of the note. This bound is absolute.
             break;
         }
 
-        let stripped = strip_block_indent(line, block_indent);
-
-        // Check for code fence opening
-        if stripped.trim_start().starts_with("```") {
-            in_code_fence = true;
-        }
-
-        note_lines.push(stripped);
+        note_lines.push(strip_block_indent(line, block_indent));
         idx += 1;
     }
 
@@ -392,9 +383,15 @@ fn parse_note_block(lines: &[String], start_idx: usize, block_indent: usize) -> 
     (note_lines.join("\n"), idx)
 }
 
-/// Strip block indent from a line, preserving relative indentation
+/// Strip block indent from a line, preserving relative indentation.
+///
+/// Guards on *indent*, not byte length: a shorter-indented line must be trimmed,
+/// not sliced. Slicing on length alone ate real characters (`## Done` → `one`)
+/// and could panic mid-UTF-8 (`line[4..]` inside a `§`). With the indent guard,
+/// the first `block_indent` bytes are known to be ASCII spaces, so the slice is
+/// char-boundary-safe.
 fn strip_block_indent(line: &str, block_indent: usize) -> String {
-    if line.len() >= block_indent {
+    if count_indent(line) >= block_indent {
         line[block_indent..].to_string()
     } else if line.trim().is_empty() {
         String::new()
@@ -525,6 +522,104 @@ mod tests {
         } else {
             panic!("Expected Note metadata");
         }
+    }
+
+    /// A note whose fences don't pair up must not let the note absorb anything
+    /// past its indentation. Regression: an unbalanced fence used to swallow the
+    /// rest of the track file — sibling tasks and `## Done` alike — because the
+    /// in-fence branch had no indent bound.
+    #[test]
+    fn test_note_with_unbalanced_fence_stops_at_dedent() {
+        let input = lines(
+            "- [ ] `DOC-029` Fence hazard\n\
+             \x20\x20- note:\n\
+             \x20\x20\x20\x20§13.4 mentions three fence kinds:\n\
+             \x20\x20\x20\x20\x20\x20```lace\n\
+             \x20\x20\x20\x20\x20\x20```rust\n\
+             \x20\x20\x20\x20\x20\x20```\n\
+             \x20\x20\x20\x20Check the spec.\n\
+             - [ ] `DOC-030` Sibling task\n\
+             \x20\x20- added: 2026-07-29",
+        );
+        let (tasks, next_idx) = parse_tasks(&input, 0, 0, 0);
+
+        // Both top-level tasks survive; the note did not eat the sibling.
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].id.as_deref(), Some("DOC-029"));
+        assert_eq!(tasks[1].id.as_deref(), Some("DOC-030"));
+        assert_eq!(next_idx, input.len());
+
+        let Metadata::Note(note) = &tasks[0].metadata[0] else {
+            panic!("Expected Note metadata");
+        };
+        // The note keeps its own lines verbatim, relative indent intact...
+        assert!(note.contains("  ```lace"));
+        assert!(note.contains("Check the spec."));
+        // ...and nothing from beyond its indentation.
+        assert!(!note.contains("DOC-030"));
+    }
+
+    /// A single unclosed fence is the minimal form of the same hazard, and the
+    /// one most likely to arrive by paste.
+    #[test]
+    fn test_note_with_single_unclosed_fence_stops_at_section_header() {
+        let input = lines(
+            "- [ ] `DOC-029` Fence hazard\n\
+             \x20\x20- note:\n\
+             \x20\x20\x20\x20Uses one bare fence:\n\
+             \x20\x20\x20\x20```\n\
+             \n\
+             ## Done\n\
+             \n\
+             - [x] `DOC-025` Done ticket",
+        );
+        let (tasks, next_idx) = parse_tasks(&input, 0, 0, 0);
+
+        assert_eq!(tasks.len(), 1);
+        let Metadata::Note(note) = &tasks[0].metadata[0] else {
+            panic!("Expected Note metadata");
+        };
+        assert_eq!(note, "Uses one bare fence:\n```");
+        // Parsing stopped before `## Done` so the track parser still sees it.
+        assert!(next_idx < input.len());
+        assert!(input[next_idx..].iter().any(|l| l == "## Done"));
+    }
+
+    /// `strip_block_indent` slices bytes. It must only do so once the line is
+    /// known to carry `block_indent` ASCII spaces — otherwise a dedented line
+    /// with a multi-byte char straddling that offset panics mid-UTF-8.
+    #[test]
+    fn test_note_with_unbalanced_fence_and_multibyte_dedent_does_not_panic() {
+        let input = lines(
+            "- [ ] `DOC-029` Fence hazard\n\
+             \x20\x20- note:\n\
+             \x20\x20\x20\x20Unclosed:\n\
+             \x20\x20\x20\x20```\n\
+             \n\
+             x§§y\n\
+             \n\
+             ## Done",
+        );
+        // Panicked at `line[4..]` (inside '§') before the indent guard.
+        let (tasks, _) = parse_tasks(&input, 0, 0, 0);
+        assert_eq!(tasks.len(), 1);
+        let Metadata::Note(note) = &tasks[0].metadata[0] else {
+            panic!("Expected Note metadata");
+        };
+        // The dedented line is not note content, so it is not mangled into one.
+        assert!(!note.contains('§'));
+    }
+
+    #[test]
+    fn test_strip_block_indent_shorter_indent_is_trimmed_not_sliced() {
+        // Length >= block_indent but indent < block_indent: trim, never slice.
+        assert_eq!(strip_block_indent("## Done", 4), "## Done");
+        assert_eq!(strip_block_indent("  - [x] `X-1` T", 4), "- [x] `X-1` T");
+        // Multi-byte char straddling the byte offset must not panic.
+        assert_eq!(strip_block_indent("x§§y", 4), "x§§y");
+        // At or past block_indent: slice, preserving relative indent.
+        assert_eq!(strip_block_indent("    code", 4), "code");
+        assert_eq!(strip_block_indent("      code", 4), "  code");
     }
 
     #[test]

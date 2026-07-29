@@ -1276,6 +1276,31 @@ fn cmd_check(json: bool) -> Result<(), Box<dyn std::error::Error>> {
                             );
                         }
                     }
+                    check::CheckWarning::UnclosedNoteFence {
+                        track_id,
+                        task_id,
+                        title,
+                        fence,
+                    } => {
+                        let who = match task_id {
+                            Some(id) => id.clone(),
+                            None => format!("\"{}\"", title),
+                        };
+                        println!(
+                            "  [{}] {} note leaves a code fence open ({}) — frame parses it fine, but markdown renderers will treat the rest of the file as code",
+                            track_id, who, fence
+                        );
+                    }
+                    check::CheckWarning::UnclosedInboxFence {
+                        index,
+                        title,
+                        fence,
+                    } => {
+                        println!(
+                            "  inbox item {} (\"{}\") leaves a code fence open ({}) — frame parses it fine, but markdown renderers will treat the rest of the file as code",
+                            index, title, fence
+                        );
+                    }
                 }
             }
         }

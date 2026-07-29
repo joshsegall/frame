@@ -88,6 +88,28 @@ pub enum CheckWarning {
     /// isn't covered by `.gitignore` and so will be. `path` is repo-relative.
     #[serde(rename = "local_file_committed")]
     LocalFileCommitted { path: String, tracked: bool },
+    /// A task note leaves a code fence open. Frame parses the note correctly
+    /// either way — note extent is bound by indentation, not fence state — but
+    /// markdown renderers will swallow the rest of the file into a code block.
+    #[serde(rename = "unclosed_note_fence")]
+    UnclosedNoteFence {
+        track_id: String,
+        /// `None` for a task that has no ID yet; `title` identifies it instead.
+        task_id: Option<String>,
+        title: String,
+        /// The unclosed opening fence, trimmed (e.g. ```` ```rust ````).
+        fence: String,
+    },
+    /// An inbox item body leaves a code fence open. Same rendering hazard as
+    /// [`CheckWarning::UnclosedNoteFence`].
+    #[serde(rename = "unclosed_inbox_fence")]
+    UnclosedInboxFence {
+        /// 1-based index, matching `fr inbox` and `fr triage`.
+        index: usize,
+        title: String,
+        /// The unclosed opening fence, trimmed.
+        fence: String,
+    },
 }
 
 /// Informational messages (not errors or warnings).
@@ -140,6 +162,11 @@ pub fn check_project(project: &Project) -> CheckResult {
 
     // Working-copy-local frame files leaking into git.
     check_local_files_ignored(&project.frame_dir, &mut result);
+
+    // Inbox item bodies that leave a code fence open.
+    if let Some(ref inbox) = project.inbox {
+        check_inbox(inbox, &mut result);
+    }
 
     // Recovery log summary
     if let Some(summary) = crate::io::recovery::recovery_summary(&project.frame_dir) {
@@ -272,6 +299,16 @@ fn check_task(
                     });
                 }
             }
+            Metadata::Note(note) => {
+                if let Some(fence) = unclosed_fence(note) {
+                    result.warnings.push(CheckWarning::UnclosedNoteFence {
+                        track_id: track_id.to_string(),
+                        task_id: task.id.as_ref().map(|id| id.to_string()),
+                        title: task.title.clone(),
+                        fence,
+                    });
+                }
+            }
             _ => {}
         }
     }
@@ -283,8 +320,71 @@ fn check_task(
 }
 
 // ---------------------------------------------------------------------------
+// Inbox validation
+// ---------------------------------------------------------------------------
+
+fn check_inbox(inbox: &crate::model::inbox::Inbox, result: &mut CheckResult) {
+    for (i, item) in inbox.items.iter().enumerate() {
+        if let Some(ref body) = item.body
+            && let Some(fence) = unclosed_fence(body)
+        {
+            result.warnings.push(CheckWarning::UnclosedInboxFence {
+                index: i + 1,
+                title: item.title.clone(),
+                fence,
+            });
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Find a fenced code block left open at the end of `body`, returning its
+/// opening fence line (trimmed), or `None` if every fence is closed.
+///
+/// Follows CommonMark: an opener is 3+ backticks optionally followed by an info
+/// string (which may not itself contain a backtick); a closer is 3+ backticks —
+/// at least as many as the opener — followed by nothing but whitespace. So
+/// ```` ```rust ```` *cannot* close a block, it is content inside one.
+///
+/// Frame's own parsers are indifferent to fence balance: note and inbox-body
+/// extents are bound by indentation alone. Markdown renderers are not — an
+/// unclosed fence swallows the remainder of the document into a code block,
+/// which is why this is worth a warning even though the file parses correctly.
+///
+/// Tilde fences (`~~~`) are not considered; frame has only ever special-cased
+/// backticks.
+fn unclosed_fence(body: &str) -> Option<String> {
+    let mut open: Option<(usize, String)> = None;
+
+    for line in body.lines() {
+        let trimmed = line.trim();
+        // Backticks are ASCII, so this char count doubles as a byte offset.
+        let ticks = trimmed.chars().take_while(|c| *c == '`').count();
+        if ticks < 3 {
+            continue;
+        }
+        let rest = &trimmed[ticks..];
+
+        match open {
+            None => {
+                // An info string containing a backtick disqualifies the opener.
+                if !rest.contains('`') {
+                    open = Some((ticks, trimmed.to_string()));
+                }
+            }
+            Some((open_ticks, _)) => {
+                if ticks >= open_ticks && rest.trim().is_empty() {
+                    open = None;
+                }
+            }
+        }
+    }
+
+    open.map(|(_, fence)| fence)
+}
 
 /// Compare this clone's `.actor` token against the committed registry. A held
 /// token that is missing from, or retired in, `actors.toml` is drift worth
@@ -1085,6 +1185,168 @@ mod tests {
             w,
             CheckWarning::LostTask { task_id, .. } if task_id == "M-001"
         )));
+    }
+
+    // --- Unclosed code fence warnings ---
+
+    /// `unclosed_fence` follows CommonMark, so a fence with an info string is not
+    /// a closer. These are the cases that decide false positives either way.
+    #[test]
+    fn test_unclosed_fence_detection() {
+        // Balanced: opener with info string, bare closer.
+        assert_eq!(unclosed_fence("```rust\nfn main() {}\n```"), None);
+        // Three markers, but the middle one has an info string so it is content
+        // inside the block, not a closer — the trailing bare fence closes it.
+        // This is the shape from the original bug report; it renders fine.
+        assert_eq!(unclosed_fence("```lace\n```rust\n```"), None);
+        // Prose with no fences at all.
+        assert_eq!(unclosed_fence("just some prose\nover two lines"), None);
+        // Inline code spans are not fences.
+        assert_eq!(unclosed_fence("call `foo()` then `bar()`"), None);
+        // A longer closer is valid; a shorter one is not.
+        assert_eq!(unclosed_fence("```\ncode\n`````"), None);
+        assert_eq!(unclosed_fence("`````\ncode\n```").as_deref(), Some("`````"));
+
+        // Unclosed: a single bare fence.
+        assert_eq!(unclosed_fence("Example:\n```").as_deref(), Some("```"));
+        // Unclosed: opener with info string, never closed.
+        assert_eq!(
+            unclosed_fence("```rust\nfn main() {}").as_deref(),
+            Some("```rust")
+        );
+        // Reopened after a clean pair, then left open.
+        assert_eq!(
+            unclosed_fence("```\na\n```\nprose\n```py").as_deref(),
+            Some("```py")
+        );
+    }
+
+    #[test]
+    fn test_warn_unclosed_note_fence() {
+        let tmp = TempDir::new().unwrap();
+        let project = make_project_at(
+            tmp.path(),
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Task with an unclosed fence
+  - added: 2025-05-01
+  - note:
+    Example:
+    ```rust
+    fn main() {}
+
+## Done
+",
+        );
+
+        let result = check_project(&project);
+        assert!(result.warnings.iter().any(|w| matches!(
+            w,
+            CheckWarning::UnclosedNoteFence { task_id, fence, .. }
+                if task_id.as_deref() == Some("M-001") && fence == "```rust"
+        )));
+        // A rendering nit, not a structural problem.
+        assert!(result.valid);
+    }
+
+    /// The shape from the bug report parses *and* renders correctly, so it must
+    /// not warn — otherwise the fix trades corruption for a false alarm.
+    #[test]
+    fn test_no_fence_warning_for_balanced_note() {
+        let tmp = TempDir::new().unwrap();
+        let project = make_project_at(
+            tmp.path(),
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Task with balanced fences
+  - added: 2025-05-01
+  - note:
+    §13.4 mentions three fence kinds:
+      ```lace
+      ```rust
+      ```
+    Check the spec.
+
+## Done
+",
+        );
+
+        let result = check_project(&project);
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| matches!(w, CheckWarning::UnclosedNoteFence { .. }))
+        );
+    }
+
+    #[test]
+    fn test_warn_unclosed_note_fence_on_task_without_id() {
+        let tmp = TempDir::new().unwrap();
+        let project = make_project_at(
+            tmp.path(),
+            "\
+# Main
+
+## Backlog
+
+- [ ] Unnamed task
+  - note:
+    ```
+
+## Done
+",
+        );
+
+        let result = check_project(&project);
+        assert!(result.warnings.iter().any(|w| matches!(
+            w,
+            CheckWarning::UnclosedNoteFence { task_id, title, .. }
+                if task_id.is_none() && title == "Unnamed task"
+        )));
+    }
+
+    #[test]
+    fn test_warn_unclosed_inbox_fence() {
+        let tmp = TempDir::new().unwrap();
+        let mut project = make_project_at(tmp.path(), "# Main\n\n## Backlog\n\n## Done\n");
+        let (inbox, _) = crate::parse::parse_inbox(
+            "\
+# Inbox
+
+- Balanced item
+  ```
+  code
+  ```
+
+- Item with an unclosed fence
+  Example:
+  ```py
+
+- Trailing item
+",
+        );
+        project.inbox = Some(inbox);
+
+        let result = check_project(&project);
+        let fence_warnings: Vec<_> = result
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                CheckWarning::UnclosedInboxFence { index, fence, .. } => Some((*index, fence)),
+                _ => None,
+            })
+            .collect();
+        // Only the middle item warns, and it is reported by its 1-based index.
+        assert_eq!(fence_warnings.len(), 1);
+        assert_eq!(fence_warnings[0].0, 2);
+        assert_eq!(fence_warnings[0].1, "```py");
     }
 
     #[test]

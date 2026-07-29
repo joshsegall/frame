@@ -101,6 +101,110 @@ fn round_trip_code_in_notes() {
     assert_track_round_trip("code_in_notes.md");
 }
 
+#[test]
+fn round_trip_unclosed_fence_in_notes() {
+    assert_track_round_trip("unclosed_fence_in_notes.md");
+}
+
+/// A note with unbalanced code fences must not absorb anything past its own
+/// indentation — not sibling tasks, not `## Parked` / `## Done`, not the done
+/// tasks inside them.
+///
+/// Regression: `parse_note_block` used to consume every line after an unclosed
+/// fence to EOF. Rewriting the affected task then either demoted the swallowed
+/// tail into note text or dropped it from the file entirely, silently.
+#[test]
+fn unclosed_fence_in_note_does_not_absorb_the_rest_of_the_track() {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/unclosed_fence_in_notes.md");
+    let source = fs::read_to_string(&path).unwrap();
+
+    let track = parse_track(&source);
+
+    let sections: Vec<_> = track
+        .nodes
+        .iter()
+        .filter_map(|n| match n {
+            frame::model::track::TrackNode::Section { kind, tasks, .. } => Some((*kind, tasks)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sections.len(), 3, "all three sections must survive parsing");
+
+    let backlog = sections
+        .iter()
+        .find(|(k, _)| *k == frame::model::track::SectionKind::Backlog)
+        .map(|(_, t)| *t)
+        .unwrap();
+    let ids: Vec<_> = backlog.iter().map(|t| t.id.as_ref().unwrap()).collect();
+    assert_eq!(
+        ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+        vec!["UF-001", "UF-002", "UF-003"],
+    );
+
+    let done = sections
+        .iter()
+        .find(|(k, _)| *k == frame::model::track::SectionKind::Done)
+        .map(|(_, t)| *t)
+        .unwrap();
+    assert_eq!(done.len(), 2, "done tasks must not be absorbed into a note");
+
+    // Each note keeps its own content, and only its own.
+    let note_of = |id: &str| -> String {
+        frame::ops::task_ops::find_task_in_track(&track, id)
+            .unwrap()
+            .metadata
+            .iter()
+            .find_map(|m| match m {
+                frame::model::task::Metadata::Note(n) => Some(n.clone()),
+                _ => None,
+            })
+            .unwrap()
+    };
+    assert_eq!(note_of("UF-001"), "Example:\n```");
+    let uf2 = note_of("UF-002");
+    assert!(uf2.contains("  ```lace"), "relative indent preserved");
+    assert!(uf2.ends_with("Check the spec."));
+    assert!(!uf2.contains("UF-003"));
+}
+
+/// The corruption only reached disk once the affected task was *rewritten*, so
+/// exercise the dirty (canonical) serialization path explicitly: rewriting a
+/// task whose note has an unclosed fence must leave the rest of the file intact
+/// and must be idempotent.
+#[test]
+fn rewriting_a_task_with_an_unclosed_fence_note_preserves_the_track() {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/unclosed_fence_in_notes.md");
+    let source = fs::read_to_string(&path).unwrap();
+
+    let mut track = parse_track(&source);
+
+    // A real edit to the offending task — this is what `fr note` does.
+    frame::ops::task_ops::set_note(&mut track, "UF-001", "Example:\n```\nand more".to_string())
+        .unwrap();
+
+    let output = serialize_track(&track);
+    let reparsed = parse_track(&output);
+
+    // Nothing else moved: every other task still resolves.
+    for id in ["UF-002", "UF-003", "UF-004", "UF-005"] {
+        assert!(
+            frame::ops::task_ops::find_task_in_track(&reparsed, id).is_some(),
+            "{} was lost when UF-001 was rewritten",
+            id
+        );
+    }
+    assert_eq!(
+        output.matches("\n## ").count(),
+        3,
+        "section headers must survive the rewrite"
+    );
+
+    // Second pass is byte-stable — the note text does not grow or drift.
+    assert_eq!(serialize_track(&reparsed), output);
+}
+
 // ============================================================================
 // Inbox round-trip tests
 // ============================================================================

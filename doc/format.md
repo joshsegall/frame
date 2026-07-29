@@ -136,7 +136,14 @@ Metadata lines are indented under their task (task indent + 2 spaces) and start 
     Text after code block.
 ```
 
-Multi-line notes: continuation lines are indented under the `note:` key. Blank lines within the note are preserved. Fenced code blocks (`` ``` ``) are tracked to avoid parsing their contents as tasks or metadata.
+Multi-line notes: continuation lines are indented under the `note:` key. Blank lines within the note are preserved.
+
+**A note's extent is set by indentation alone.** Every line indented to the note's block indent (or deeper) is note content — including lines that look like tasks or metadata, so a `- [ ]` or `- dep:` inside a note stays note text. The first line indented *less* than that ends the note, with no exceptions: code fences (`` ``` ``) are not tracked, and an unbalanced fence therefore cannot extend a note past its own indentation. The serializer re-indents every note line to the block indent, which is what makes the rule symmetric and the round-trip safe.
+
+Two consequences worth knowing:
+
+- A fenced block inside a note cannot contain flush-left lines — the note ends at the first one. Indent the whole block with the rest of the note.
+- An unclosed fence is preserved verbatim and parses fine, but breaks downstream markdown rendering. [`fr check`](cli.md#fr-check) warns about it.
 
 ## Nesting
 

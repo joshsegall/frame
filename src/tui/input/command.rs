@@ -781,6 +781,31 @@ pub(super) fn palette_check_project(app: &mut App) {
                         )
                     }
                 }
+                check::CheckWarning::UnclosedNoteFence {
+                    track_id,
+                    task_id,
+                    title,
+                    fence,
+                } => {
+                    let who = match task_id {
+                        Some(id) => id.clone(),
+                        None => format!("\"{}\"", title),
+                    };
+                    format!(
+                        "  [{}] {} note leaves a code fence open ({}) — breaks markdown rendering",
+                        track_id, who, fence
+                    )
+                }
+                check::CheckWarning::UnclosedInboxFence {
+                    index,
+                    title,
+                    fence,
+                } => {
+                    format!(
+                        "  inbox item {} (\"{}\") leaves a code fence open ({}) — breaks markdown rendering",
+                        index, title, fence
+                    )
+                }
             };
             lines.push(Line::from(Span::styled(msg, yellow)));
         }
