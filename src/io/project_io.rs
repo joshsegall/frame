@@ -9,14 +9,23 @@ use crate::parse::{parse_inbox, parse_track};
 
 /// Files inside `frame/` that belong to a **single working copy** and must never
 /// be committed: per-worktree UI state, the advisory lock, the append-only
-/// recovery log, and this working copy's actor token. Committing any of them
+/// recovery log, this working copy's actor token, and the ID frontier store with
+/// its lock (which only land here for a project outside git — inside git the
+/// frontier lives under `.git/`, see [`crate::io::ids`]). Committing any of them
 /// leaks machine-local state into shared history (and the append-only log
 /// conflicts on every merge).
 ///
 /// `fr init` writes these to `.gitignore` and `fr check` verifies them, both
 /// from this one list — a project created before an entry was added here won't
 /// have it, which is exactly what the check catches.
-pub const LOCAL_ONLY_FRAME_FILES: [&str; 4] = [".state.json", ".lock", ".recovery.log", ".actor"];
+pub const LOCAL_ONLY_FRAME_FILES: [&str; 6] = [
+    ".state.json",
+    ".lock",
+    ".recovery.log",
+    ".actor",
+    crate::io::ids::LOCAL_STORE,
+    crate::io::ids::LOCAL_LOCK,
+];
 
 /// Error type for project I/O operations
 #[derive(Debug, thiserror::Error)]

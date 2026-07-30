@@ -5,6 +5,7 @@ use crate::model::SectionKind;
 use crate::model::task::Task;
 use crate::model::task_id::TaskId;
 use crate::model::track::Track;
+use crate::ops::ids::Mint;
 use crate::ops::task_ops::{self, InsertPosition};
 
 use crate::tui::app::{App, DetailRegion, Mode, MoveState, View};
@@ -152,21 +153,22 @@ pub(super) fn handle_move(app: &mut App, key: KeyEvent) {
                                     }
                                 };
 
+                                let frame_dir = app.project.frame_dir.clone();
                                 let track_mut = app.find_track_mut(&track_id);
                                 if let Some(track_mut) = track_mut {
-                                    // Compute the new ID by scanning in the mover's
-                                    // namespace; the re-keyed segments carry the
-                                    // mover's token.
+                                    // Compute the new ID in the mover's namespace;
+                                    // the re-keyed segments carry the mover's token.
                                     let new_id = match &cur_loc.parent_id {
                                         None => {
-                                            let next = task_ops::next_id_number(
-                                                track_mut,
+                                            let mint = Mint::new(
+                                                &frame_dir,
+                                                &track_id,
                                                 &prefix,
                                                 token.as_ref(),
                                             );
                                             TaskId::with_number(
                                                 &prefix,
-                                                next as u32,
+                                                mint.next(track_mut),
                                                 token.as_ref(),
                                             )
                                         }

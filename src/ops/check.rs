@@ -627,6 +627,17 @@ mod tests {
         Some(make_project_at(root, "# Main\n\n## Backlog\n\n## Done\n"))
     }
 
+    /// A `.gitignore` covering every local-only frame file except `omit` —
+    /// derived from the one list, so adding an entry there can't silently make
+    /// these tests weaker.
+    fn gitignore_without(omit: &str) -> String {
+        crate::io::project_io::LOCAL_ONLY_FRAME_FILES
+            .iter()
+            .filter(|name| **name != omit)
+            .map(|name| format!("frame/{}\n", name))
+            .collect()
+    }
+
     fn local_file_warnings(result: &CheckResult) -> Vec<(String, bool)> {
         result
             .warnings
@@ -645,8 +656,7 @@ mod tests {
     #[test]
     fn test_check_local_file_not_ignored() {
         let tmp = TempDir::new().unwrap();
-        let Some(project) =
-            repo_with_local_files(tmp.path(), "frame/.state.json\nframe/.lock\nframe/.actor\n")
+        let Some(project) = repo_with_local_files(tmp.path(), &gitignore_without(".recovery.log"))
         else {
             return; // git unavailable
         };
@@ -664,8 +674,7 @@ mod tests {
     #[test]
     fn test_check_local_file_tracked() {
         let tmp = TempDir::new().unwrap();
-        let Some(project) =
-            repo_with_local_files(tmp.path(), "frame/.state.json\nframe/.lock\nframe/.actor\n")
+        let Some(project) = repo_with_local_files(tmp.path(), &gitignore_without(".recovery.log"))
         else {
             return;
         };
@@ -673,11 +682,7 @@ mod tests {
             return;
         }
         // Belatedly ignoring a tracked file does not untrack it.
-        std::fs::write(
-            tmp.path().join(".gitignore"),
-            "frame/.state.json\nframe/.lock\nframe/.actor\nframe/.recovery.log\n",
-        )
-        .unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), gitignore_without("")).unwrap();
 
         let warnings = local_file_warnings(&check_project(&project));
         assert_eq!(warnings, vec![("frame/.recovery.log".to_string(), true)]);

@@ -1547,6 +1547,17 @@ fn test_init_force_reinitialize() {
     assert!(toml_content.contains("\"Second\""));
 }
 
+/// The `.gitignore` entries `fr init` is expected to add, in order, skipping any
+/// in `already_present`. Derived from the one list so adding an entry there
+/// updates these expectations instead of breaking them.
+fn expected_gitignore_entries(already_present: &[&str]) -> Vec<String> {
+    frame::io::project_io::LOCAL_ONLY_FRAME_FILES
+        .iter()
+        .filter(|name| !already_present.contains(*name))
+        .map(|name| format!("frame/{}", name))
+        .collect()
+}
+
 #[test]
 fn test_init_gitignore_added() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1555,16 +1566,14 @@ fn test_init_gitignore_added() {
     fs::create_dir(tmp.path().join(".git")).unwrap();
 
     let out = run_fr_ok(tmp.path(), &["init", "--name", "Git Project"]);
-    // The summary names exactly what was added — all four local-only files.
-    assert!(out.contains(
-        "added frame/.state.json, frame/.lock, frame/.recovery.log, frame/.actor to .gitignore"
-    ));
+    // The summary names exactly what was added — every local-only file.
+    let entries = expected_gitignore_entries(&[]);
+    assert!(out.contains(&format!("added {} to .gitignore", entries.join(", "))));
 
     let gitignore = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
-    assert!(gitignore.contains("frame/.state.json"));
-    assert!(gitignore.contains("frame/.lock"));
-    assert!(gitignore.contains("frame/.recovery.log"));
-    assert!(gitignore.contains("frame/.actor"));
+    for entry in &entries {
+        assert!(gitignore.contains(entry), "missing {entry}");
+    }
 }
 
 #[test]
@@ -1600,9 +1609,8 @@ fn test_init_gitignore_partial() {
     let out = run_fr_ok(tmp.path(), &["init", "--name", "Partial"]);
     // Should add exactly the missing entries, and say so — the pre-existing
     // `frame/.lock` is not re-added and must not be named.
-    assert!(
-        out.contains("added frame/.state.json, frame/.recovery.log, frame/.actor to .gitignore")
-    );
+    let entries = expected_gitignore_entries(&[".lock"]);
+    assert!(out.contains(&format!("added {} to .gitignore", entries.join(", "))));
 
     let gitignore = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
     assert!(gitignore.contains("frame/.state.json"));
@@ -2631,4 +2639,127 @@ fn test_info_human_unclaimed() {
 
     let out = run_fr_ok(tmp.path(), &["info"]);
     assert!(out.contains("unclaimed"), "out: {out}");
+}
+
+// ---------------------------------------------------------------------------
+// ID frontier — durable and shared across worktrees of a clone
+// ---------------------------------------------------------------------------
+
+fn git(dir: &Path, args: &[&str]) -> bool {
+    Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// A clone whose frame project is committed, plus a linked worktree of it —
+/// the shape that used to mint duplicate IDs. `.actor` stays gitignored, so the
+/// worktree inherits the main tree's `null` token and both mint in one namespace.
+/// `None` when git is unavailable.
+fn clone_with_worktree(tmp: &Path) -> Option<(PathBuf, PathBuf)> {
+    let main = tmp.join("main");
+    fs::create_dir_all(&main).unwrap();
+    create_test_project(&main);
+    let ignore: String = frame::io::project_io::LOCAL_ONLY_FRAME_FILES
+        .iter()
+        .map(|name| format!("frame/{}\n", name))
+        .collect();
+    fs::write(main.join(".gitignore"), ignore).unwrap();
+
+    if !git(&main, &["init", "-q"]) {
+        return None;
+    }
+    git(&main, &["add", "-A"]);
+    let committed = git(
+        &main,
+        &[
+            "-c",
+            "user.name=frame-test",
+            "-c",
+            "user.email=frame@test.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+    );
+    if !committed {
+        return None;
+    }
+    let worktree = tmp.join("wt");
+    if !git(
+        &main,
+        &["worktree", "add", "-q", "--detach", worktree.to_str()?],
+    ) {
+        return None;
+    }
+    Some((main, worktree))
+}
+
+/// The reported bug: two worktrees of one clone, each scanning only its own
+/// working copy, minting the same ID. The clone-shared frontier prevents it even
+/// though the first task is still uncommitted and invisible to the second tree.
+#[test]
+fn test_worktrees_of_one_clone_do_not_mint_the_same_id() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let Some((main, worktree)) = clone_with_worktree(tmp.path()) else {
+        return; // git unavailable
+    };
+
+    // The fixture's highest main-track number is M-010.
+    let first = run_fr_ok(&main, &["add", "main", "from main"]);
+    assert_eq!(first.trim(), "M-011");
+
+    // The worktree's copy of tracks/main.md predates that add, so its own scan
+    // still tops out at M-010 — it must not reissue M-011.
+    let second = run_fr_ok(&worktree, &["add", "main", "from worktree"]);
+    assert_eq!(
+        second.trim(),
+        "M-012",
+        "worktree reissued a number the main tree already handed out"
+    );
+
+    // Back in the main tree, still monotonic.
+    let third = run_fr_ok(&main, &["add", "main", "from main again"]);
+    assert_eq!(third.trim(), "M-013");
+
+    // The frontier lives under .git/, shared by both trees and uncommittable.
+    assert!(main.join(".git/frame-ids.toml").is_file());
+    let (status, _, ok) = run_fr(&main, &["--json", "check"]);
+    assert!(ok, "check should pass: {status}");
+}
+
+/// Archived tasks keep their numbers: `fr clean` moving a done task out of the
+/// live track must not free its number for reuse.
+#[test]
+fn test_archived_ids_are_not_reissued() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    fs::create_dir_all(tmp.path().join("frame/archive")).unwrap();
+    fs::write(
+        tmp.path().join("frame/archive/main.md"),
+        "# Archive — main\n\n- [x] `M-050` archived task\n  - resolved: 2025-06-01\n",
+    )
+    .unwrap();
+
+    let out = run_fr_ok(tmp.path(), &["add", "main", "after archiving"]);
+    assert_eq!(out.trim(), "M-051", "mint ignored the archive");
+}
+
+/// A deleted task's number stays spent — the frontier never walks backwards.
+#[test]
+fn test_deleted_ids_are_not_reissued() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    let first = run_fr_ok(tmp.path(), &["add", "main", "doomed"]);
+    assert_eq!(first.trim(), "M-011");
+    run_fr_ok(tmp.path(), &["delete", "M-011", "--yes"]);
+
+    let second = run_fr_ok(tmp.path(), &["add", "main", "next"]);
+    assert_eq!(second.trim(), "M-012", "deleted number was reissued");
 }

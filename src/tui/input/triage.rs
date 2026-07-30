@@ -2,6 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::model::SectionKind;
 use crate::model::task_id::TaskId;
+use crate::ops::ids::Mint;
 use crate::ops::task_ops::{self, InsertPosition};
 use crate::util::unicode;
 
@@ -489,6 +490,8 @@ pub(super) fn execute_triage(app: &mut App, track_id: &str, position: InsertPosi
         Err(()) => return,
     };
 
+    let frame_dir = app.project.frame_dir.clone();
+    let mint = Mint::new(&frame_dir, track_id, &prefix, token.as_ref());
     let inbox = match &mut app.project.inbox {
         Some(inbox) => inbox,
         None => return,
@@ -498,14 +501,7 @@ pub(super) fn execute_triage(app: &mut App, track_id: &str, position: InsertPosi
         None => return,
     };
 
-    let task_id = match crate::ops::inbox_ops::triage(
-        inbox,
-        inbox_index,
-        track,
-        position,
-        &prefix,
-        token.as_ref(),
-    ) {
+    let task_id = match crate::ops::inbox_ops::triage(inbox, inbox_index, track, position, mint) {
         Ok(id) => id,
         Err(_) => return,
     };
@@ -707,8 +703,14 @@ pub(super) fn execute_cross_track_move(
         None => return,
     };
     // Re-mint the new id (and subtree) in the mover's namespace.
-    let new_num = task_ops::next_id_number(target_track, &target_prefix, token.as_ref());
-    let new_id = TaskId::with_number(&target_prefix, new_num as u32, token.as_ref());
+    let mint = Mint::new(
+        &app.project.frame_dir,
+        target_track_id,
+        &target_prefix,
+        token.as_ref(),
+    );
+    let new_num = mint.next(target_track);
+    let new_id = TaskId::with_number(&target_prefix, new_num, token.as_ref());
     let old_id = task_id.clone();
 
     // Set new ID and depth
@@ -873,8 +875,14 @@ pub(super) fn execute_bulk_cross_track_move(
             None => continue,
         };
         // Re-mint each moved id in the mover's namespace.
-        let new_num = task_ops::next_id_number(target_track, &target_prefix, token.as_ref());
-        let new_id = TaskId::with_number(&target_prefix, new_num as u32, token.as_ref());
+        let mint = Mint::new(
+            &app.project.frame_dir,
+            target_track_id,
+            &target_prefix,
+            token.as_ref(),
+        );
+        let new_num = mint.next(target_track);
+        let new_id = TaskId::with_number(&target_prefix, new_num, token.as_ref());
 
         // Remove from source
         let source_track = match app.find_track_mut(&source_track_id) {

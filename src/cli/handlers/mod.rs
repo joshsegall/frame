@@ -21,6 +21,7 @@ use crate::model::inbox::Inbox;
 use crate::model::project::Project;
 use crate::model::task::{Metadata, Task, TaskState};
 use crate::model::track::{Track, TrackNode};
+use crate::ops::ids::Mint;
 use crate::ops::{actor_merge, check, clean, import, inbox_ops, search, task_ops, track_ops};
 
 // ---------------------------------------------------------------------------
@@ -1373,10 +1374,12 @@ fn cmd_add(args: AddArgs) -> Result<(), Box<dyn std::error::Error>> {
         task_ops::InsertPosition::Bottom
     };
 
+    let frame_dir = project.frame_dir.clone();
     let track = find_track_mut(&mut project, &args.track)
         .ok_or_else(|| format!("track not found: {}", args.track))?;
 
-    let id = task_ops::add_task(track, args.title.clone(), position, &prefix, token.as_ref())?;
+    let mint = Mint::new(&frame_dir, &args.track, &prefix, token.as_ref());
+    let id = task_ops::add_task(track, args.title.clone(), position, mint)?;
 
     // If --found-from, add a note
     if let Some(ref from_id) = args.found_from {
@@ -1399,6 +1402,7 @@ fn cmd_push(args: PushArgs) -> Result<(), Box<dyn std::error::Error>> {
         .to_string();
     let token = resolve_mint_namespace(&project.frame_dir)?;
 
+    let frame_dir = project.frame_dir.clone();
     let track = find_track_mut(&mut project, &args.track)
         .ok_or_else(|| format!("track not found: {}", args.track))?;
 
@@ -1406,8 +1410,7 @@ fn cmd_push(args: PushArgs) -> Result<(), Box<dyn std::error::Error>> {
         track,
         args.title.clone(),
         task_ops::InsertPosition::Top,
-        &prefix,
-        token.as_ref(),
+        Mint::new(&frame_dir, &args.track, &prefix, token.as_ref()),
     )?;
 
     save_track(&project, &args.track)?;
@@ -1687,6 +1690,8 @@ fn cmd_title(args: TitleArgs) -> Result<(), Box<dyn std::error::Error>> {
 fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut project = load_project_cwd()?;
     let _lock = FileLock::acquire_default(&project.frame_dir)?;
+    // Taken before the tracks are borrowed mutably below.
+    let frame_dir = project.frame_dir.clone();
 
     // Validate flag conflicts
     if args.promote && args.parent.is_some() {
@@ -1750,9 +1755,8 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
             &args.id,
             None,
             sibling_index,
-            &prefix,
+            Mint::new(&frame_dir, &source_track_id, &prefix, token.as_ref()),
             &mut other_tracks,
-            token.as_ref(),
         )?;
 
         save_track(&project, &source_track_id)?;
@@ -1786,9 +1790,8 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
             &args.id,
             Some(parent_id),
             usize::MAX,
-            &prefix,
+            Mint::new(&frame_dir, &source_track_id, &prefix, token.as_ref()),
             &mut other_tracks,
-            token.as_ref(),
         )?;
 
         save_track(&project, &source_track_id)?;
@@ -1849,9 +1852,8 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
             target_track,
             &args.id,
             position,
-            &target_prefix,
+            Mint::new(&frame_dir, target_track_id, &target_prefix, token.as_ref()),
             &mut [], // dep references are rewritten across all tracks below
-            token.as_ref(),
         )?;
 
         // Rewrite dep references to the moved task across ALL tracks (the same
@@ -1984,10 +1986,12 @@ fn cmd_triage(args: TriageArgs) -> Result<(), Box<dyn std::error::Error>> {
         .position(|(id, _)| id == &args.track)
         .ok_or_else(|| format!("track not found: {}", args.track))?;
 
+    let frame_dir = project.frame_dir.clone();
     let inbox = project.inbox.as_mut().ok_or("no inbox.md found")?;
     let track = &mut project.tracks[track_idx].1;
 
-    let task_id = inbox_ops::triage(inbox, index, track, position, &prefix, token.as_ref())?;
+    let mint = Mint::new(&frame_dir, &args.track, &prefix, token.as_ref());
+    let task_id = inbox_ops::triage(inbox, index, track, position, mint)?;
 
     // Save track first (new data), then inbox (deletion)
     save_track(&project, &args.track)?;
@@ -2577,10 +2581,12 @@ fn cmd_import(args: ImportArgs) -> Result<(), Box<dyn std::error::Error>> {
     let markdown = std::fs::read_to_string(&args.file)
         .map_err(|e| format!("could not read {}: {}", args.file, e))?;
 
+    let frame_dir = project.frame_dir.clone();
     let track = find_track_mut(&mut project, &args.track)
         .ok_or_else(|| format!("track not found: {}", args.track))?;
 
-    let result = import::import_tasks(&markdown, track, position, &prefix, token.as_ref())?;
+    let mint = Mint::new(&frame_dir, &args.track, &prefix, token.as_ref());
+    let result = import::import_tasks(&markdown, track, position, mint)?;
 
     save_track(&project, &args.track)?;
 

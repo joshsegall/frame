@@ -1,6 +1,7 @@
 pub mod actors;
 pub mod config_io;
 pub mod git;
+pub mod ids;
 pub mod lock;
 pub mod project_io;
 pub mod recovery;

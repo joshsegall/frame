@@ -9,6 +9,11 @@ use std::time::{Duration, Instant};
 pub struct FileLock {
     _file: File,
     path: PathBuf,
+    /// Whether releasing the lock also unlinks the lock file. Safe for the
+    /// project lock, whose file is only ever locked in place; **not** safe for a
+    /// lock guarding a file that gets replaced by `rename(2)` — see
+    /// [`FileLock::acquire_at`].
+    remove_on_drop: bool,
 }
 
 /// Error type for lock operations
@@ -29,7 +34,25 @@ impl FileLock {
     /// Acquire an advisory lock on the frame directory.
     /// Blocks up to `timeout` waiting for the lock.
     pub fn acquire(frame_dir: &Path, timeout: Duration) -> Result<Self, LockError> {
-        let lock_path = frame_dir.join(".lock");
+        Self::lock_file(frame_dir.join(".lock"), timeout, true)
+    }
+
+    /// Acquire an advisory lock on an arbitrary path, leaving the lock file in
+    /// place when the lock is released.
+    ///
+    /// A lock guarding a file that is replaced by `rename(2)` **must** use a
+    /// dedicated lock file locked this way. Unlinking it would let a waiter
+    /// inherit the lock on an unlinked inode while a newcomer creates a fresh
+    /// file and locks that — two writers, one "lock".
+    pub fn acquire_at(lock_path: &Path, timeout: Duration) -> Result<Self, LockError> {
+        Self::lock_file(lock_path.to_path_buf(), timeout, false)
+    }
+
+    fn lock_file(
+        lock_path: PathBuf,
+        timeout: Duration,
+        remove_on_drop: bool,
+    ) -> Result<Self, LockError> {
         let file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -47,6 +70,7 @@ impl FileLock {
                     return Ok(FileLock {
                         _file: file,
                         path: lock_path,
+                        remove_on_drop,
                     });
                 }
                 Err(_) if start.elapsed() < timeout => {
@@ -69,7 +93,9 @@ impl Drop for FileLock {
     fn drop(&mut self) {
         // Lock is released automatically when the file is dropped (flock semantics)
         // Optionally clean up the lock file
-        let _ = fs::remove_file(&self.path);
+        if self.remove_on_drop {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
 

@@ -392,11 +392,13 @@ mod tests {
     fn test_update_gitignore_skips_existing() {
         let tmp = tempfile::TempDir::new().unwrap();
         fs::create_dir(tmp.path().join(".git")).unwrap();
-        fs::write(
-            tmp.path().join(".gitignore"),
-            "frame/.state.json\nframe/.lock\nframe/.recovery.log\nframe/.actor\n",
-        )
-        .unwrap();
+        // Derived from the one list, so adding an entry there can't silently
+        // turn this into a weaker test.
+        let existing: String = crate::io::project_io::LOCAL_ONLY_FRAME_FILES
+            .iter()
+            .map(|n| format!("frame/{}\n", n))
+            .collect();
+        fs::write(tmp.path().join(".gitignore"), existing).unwrap();
 
         assert!(update_gitignore(tmp.path()).is_empty());
     }

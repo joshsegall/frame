@@ -35,6 +35,7 @@
 use std::collections::{HashMap, HashSet};
 
 use frame::model::{SectionKind, Task, TaskId, Token, Track};
+use frame::ops::ids::Mint;
 use frame::ops::task_ops::{InsertPosition, add_subtask, add_task};
 use frame::parse::parse_track;
 use proptest::prelude::*;
@@ -212,8 +213,7 @@ fn build_ancestor(ops: &[AncestorOp]) -> Track {
                     &mut track,
                     "task".into(),
                     InsertPosition::Bottom,
-                    PREFIX,
-                    ns.as_ref(),
+                    Mint::scan_only(PREFIX, ns.as_ref()),
                 )
                 .expect("ancestor add_task");
             }
@@ -224,8 +224,7 @@ fn build_ancestor(ops: &[AncestorOp]) -> Track {
                         &mut track,
                         "task".into(),
                         InsertPosition::Bottom,
-                        PREFIX,
-                        ns.as_ref(),
+                        Mint::scan_only(PREFIX, ns.as_ref()),
                     )
                     .expect("ancestor add_task (sub fallback)");
                 } else {
@@ -252,8 +251,7 @@ fn apply_actor(ancestor: &Track, token: &Option<Token>, ops: &[ActorOp]) -> Acto
                     &mut track,
                     "task".into(),
                     InsertPosition::Bottom,
-                    PREFIX,
-                    token.as_ref(),
+                    Mint::scan_only(PREFIX, token.as_ref()),
                 )
                 .expect("actor add_task");
                 addable.push((id.clone(), 0));
@@ -267,8 +265,7 @@ fn apply_actor(ancestor: &Track, token: &Option<Token>, ops: &[ActorOp]) -> Acto
                         &mut track,
                         "task".into(),
                         InsertPosition::Bottom,
-                        PREFIX,
-                        token.as_ref(),
+                        Mint::scan_only(PREFIX, token.as_ref()),
                     )
                     .expect("actor add_task (sub fallback)");
                     addable.push((id.clone(), 0));

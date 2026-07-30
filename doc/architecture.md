@@ -49,6 +49,23 @@ Task IDs use a prefix-per-track mapping defined in `[ids.prefixes]` in `project.
 
 **Code**: `src/ops/task_ops.rs` (ID assignment, cross-track move, reparent), `src/ops/track_ops.rs` (prefix management), `src/io/config_io.rs` (config mutations)
 
+## ID Frontier (Durable Mint)
+
+A max-scan alone is not a frontier: it moves **backwards** whenever the live maximum drops. `fr clean` archiving a done task, `fr delete`, or a second git worktree whose working copy hasn't merged the other's new tasks all lower it, and the next mint reissues a number that is already spoken for. The worktree case is the sharp one — worktrees of one clone inherit a single actor token, so they mint in the same namespace from different views.
+
+So a mint takes `max(scan floor, recorded frontier) + 1`:
+
+- **Scan floor** — what this working copy can see: the live track *plus* `archive/<track>.md` and `archive/_tracks/<track>.md`, so archiving a task never frees its number.
+- **Recorded frontier** — a durable record of every number handed out, in a file shared by all worktrees of the clone: `<git-common-dir>/frame-ids.toml` (inside git — the same path from every linked worktree, and uncommittable by construction) or `frame/.ids.toml` (outside git, where no worktrees exist to coordinate with). Keyed by `(project, prefix, namespace)`, so it never grows with the number of tasks.
+
+The record is written **before** the task is, so a number is spoken for from the instant it's handed out. Numbers are never reused and gaps are expected, so an abandoned mint costs nothing — no leases, no expiry, no reclaiming.
+
+**Single chokepoint**: `ops::ids::Mint` — every mint path (add, triage, import, cross-track move, promote, `fr clean`'s ID assignment and duplicate resolution) goes through it. `Mint::scan_only` opts out for callers holding a bare `Track` with no project on disk (tests). Two allocators stay outside: child IDs (`PARENT.N`, numbered per parent — two worktrees adding a subtask to the same parent can still collide) and `fr actor merge`, which renumbers a whole namespace in bulk into *another* clone's namespace, whose frontier is a different file.
+
+**Failure handling**: the store is regenerable cache and every degraded path lands on the old scan-only behavior, never a wrong answer or a failed mint. Absent → empty. Unparsable → moved aside to `.bak`, empty. Unwritable, or lock contention past 5s → mint from the floor alone. Writes are temp-file + rename under a **separate, never-removed** lock file (`frame-ids.lock`): deleting the lock would let a waiter hold the lock on an unlinked inode while a newcomer locks a fresh file.
+
+**Code**: `src/io/ids.rs` (store, locking, recovery), `src/ops/ids.rs` (`Mint`, floor computation)
+
 ## TUI State Model
 
 The TUI has two orthogonal state axes:

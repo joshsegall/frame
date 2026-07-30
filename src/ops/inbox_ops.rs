@@ -2,8 +2,9 @@ use chrono::Local;
 
 use crate::model::inbox::{Inbox, InboxItem};
 use crate::model::task::{Metadata, Task, TaskState};
-use crate::model::task_id::{TaskId, Token};
+use crate::model::task_id::TaskId;
 use crate::model::track::{SectionKind, Track, TrackNode};
+use crate::ops::ids::Mint;
 use crate::ops::task_ops::{InsertPosition, TaskError};
 
 /// Error type for inbox operations
@@ -32,8 +33,7 @@ pub fn triage(
     index: usize,
     track: &mut Track,
     position: InsertPosition,
-    prefix: &str,
-    token: Option<&Token>,
+    mint: Mint<'_>,
 ) -> Result<String, InboxError> {
     if index >= inbox.items.len() {
         return Err(InboxError::IndexOutOfRange(index));
@@ -71,8 +71,8 @@ pub fn triage(
     let item = inbox.items.remove(index);
 
     // Build the task from the inbox item
-    let next_num = next_id_for_track(track, prefix, token);
-    let id = TaskId::with_number(prefix, next_num as u32, token);
+    let next_num = mint.next(track);
+    let id = TaskId::with_number(mint.prefix(), next_num, mint.token());
 
     let mut task = Task::new(TaskState::Todo, Some(id.clone()), item.title);
     task.tags = item.tags;
@@ -108,16 +108,10 @@ fn today_str() -> String {
     Local::now().format("%Y-%m-%d").to_string()
 }
 
-fn next_id_for_track(track: &Track, prefix: &str, token: Option<&Token>) -> usize {
-    let mut max = 0usize;
-    let prefix_dash = format!("{}-", prefix);
-    crate::ops::task_ops::find_max_id_in_track(track, &prefix_dash, token, &mut max);
-    max + 1
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::task_id::Token;
     use crate::parse::{parse_inbox, parse_track};
 
     fn sample_inbox() -> Inbox {
@@ -171,7 +165,14 @@ mod tests {
     fn test_triage_bottom() {
         let mut inbox = sample_inbox();
         let mut track = sample_track();
-        let id = triage(&mut inbox, 0, &mut track, InsertPosition::Bottom, "T", None).unwrap();
+        let id = triage(
+            &mut inbox,
+            0,
+            &mut track,
+            InsertPosition::Bottom,
+            Mint::scan_only("T", None),
+        )
+        .unwrap();
         assert_eq!(id, "T-003");
         assert_eq!(inbox.items.len(), 2);
         let tasks = track.backlog();
@@ -191,7 +192,14 @@ mod tests {
     fn test_triage_top() {
         let mut inbox = sample_inbox();
         let mut track = sample_track();
-        let id = triage(&mut inbox, 1, &mut track, InsertPosition::Top, "T", None).unwrap();
+        let id = triage(
+            &mut inbox,
+            1,
+            &mut track,
+            InsertPosition::Top,
+            Mint::scan_only("T", None),
+        )
+        .unwrap();
         assert_eq!(id, "T-003");
         assert_eq!(track.backlog()[0].title, "Think about perform semantics");
     }
@@ -205,8 +213,7 @@ mod tests {
             2,
             &mut track,
             InsertPosition::After("T-001".into()),
-            "T",
-            None,
+            Mint::scan_only("T", None),
         )
         .unwrap();
         assert_eq!(id, "T-003");
@@ -222,8 +229,7 @@ mod tests {
             10,
             &mut track,
             InsertPosition::Bottom,
-            "T",
-            None,
+            Mint::scan_only("T", None),
         );
         assert!(result.is_err());
     }
@@ -240,7 +246,13 @@ mod tests {
 ## Done
 ",
         );
-        let result = triage(&mut inbox, 0, &mut track, InsertPosition::Bottom, "T", None);
+        let result = triage(
+            &mut inbox,
+            0,
+            &mut track,
+            InsertPosition::Bottom,
+            Mint::scan_only("T", None),
+        );
         assert!(result.is_err());
         // Inbox must be unchanged
         assert_eq!(inbox.items.len(), original_len);
@@ -257,8 +269,7 @@ mod tests {
             0,
             &mut track,
             InsertPosition::After("NONEXISTENT".into()),
-            "T",
-            None,
+            Mint::scan_only("T", None),
         );
         assert!(result.is_err());
         // Inbox must be unchanged
@@ -276,8 +287,7 @@ mod tests {
             10,
             &mut track,
             InsertPosition::Bottom,
-            "T",
-            None,
+            Mint::scan_only("T", None),
         );
         assert!(result.is_err());
         assert_eq!(inbox.items.len(), original_len);
@@ -288,7 +298,14 @@ mod tests {
         let mut inbox = sample_inbox();
         let mut track = sample_track();
         // Item at index 2 ("Quick note") has no body
-        let _id = triage(&mut inbox, 2, &mut track, InsertPosition::Bottom, "T", None).unwrap();
+        let _id = triage(
+            &mut inbox,
+            2,
+            &mut track,
+            InsertPosition::Bottom,
+            Mint::scan_only("T", None),
+        )
+        .unwrap();
         let tasks = track.backlog();
         let triaged = &tasks[2];
         assert!(!triaged.metadata.iter().any(|m| m.key() == "note"));
@@ -305,8 +322,7 @@ mod tests {
             0,
             &mut track,
             InsertPosition::Bottom,
-            "T",
-            Some(&token),
+            Mint::scan_only("T", Some(&token)),
         )
         .unwrap();
         assert_eq!(id, "T-a1");

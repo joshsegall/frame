@@ -2,6 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::model::SectionKind;
 use crate::model::task::{Metadata, Task};
+use crate::ops::ids::Mint;
 use crate::ops::task_ops::{self};
 
 use crate::tui::app::{
@@ -1183,6 +1184,8 @@ pub(super) fn confirm_import_tasks(app: &mut App, track_id: &str, file_path: &st
         }
     };
 
+    let frame_dir = app.project.frame_dir.clone();
+    let mint = Mint::new(&frame_dir, track_id, &prefix, token.as_ref());
     let track = match app.project.tracks.iter_mut().find(|(id, _)| id == track_id) {
         Some((_, t)) => t,
         None => return,
@@ -1191,13 +1194,7 @@ pub(super) fn confirm_import_tasks(app: &mut App, track_id: &str, file_path: &st
     // Record position before import (top of backlog)
     let position = track.backlog().len();
 
-    match import::import_tasks(
-        &markdown,
-        track,
-        task_ops::InsertPosition::Bottom,
-        &prefix,
-        token.as_ref(),
-    ) {
+    match import::import_tasks(&markdown, track, task_ops::InsertPosition::Bottom, mint) {
         Ok(result) => {
             let count = result.total_count;
             let top_level = result.assigned_ids.len();

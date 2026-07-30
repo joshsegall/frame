@@ -3,6 +3,7 @@ use chrono::Local;
 use crate::model::task::{Metadata, Task, TaskState};
 use crate::model::task_id::{TaskId, Token};
 use crate::model::track::{SectionKind, Track, TrackNode};
+use crate::ops::ids::Mint;
 use crate::parse::parse_title_and_tags;
 
 /// Error type for task operations
@@ -121,11 +122,10 @@ pub fn add_task(
     track: &mut Track,
     title: String,
     position: InsertPosition,
-    prefix: &str,
-    token: Option<&Token>,
+    mint: Mint<'_>,
 ) -> Result<String, TaskError> {
-    let next_num = next_id_number(track, prefix, token);
-    let id = TaskId::with_number(prefix, next_num as u32, token);
+    let next_num = mint.next(track);
+    let id = TaskId::with_number(mint.prefix(), next_num, mint.token());
 
     let (parsed_title, tags) = parse_title_and_tags(&title);
     let mut task = Task::new(TaskState::Todo, Some(id.clone()), parsed_title);
@@ -411,10 +411,10 @@ pub fn move_task_to_track(
     target_track: &mut Track,
     task_id: &str,
     position: InsertPosition,
-    target_prefix: &str,
+    target_mint: Mint<'_>,
     all_tracks_for_dep_update: &mut [(String, Track)],
-    token: Option<&Token>,
 ) -> Result<String, TaskError> {
+    let token = target_mint.token();
     // Remove from whichever section holds the task at top level.
     let section = top_level_section(source_track, task_id)
         .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
@@ -429,11 +429,11 @@ pub fn move_task_to_track(
 
     let mut task = source_tasks.remove(idx);
 
-    // Assign a new ID by max-scanning the target in the *mover's* namespace
-    // (`token`): only the mover writes its own namespace, so this re-mint can't
-    // collide with the target track's own actors, who are invisible to the scan.
-    let next_num = next_id_number(target_track, target_prefix, token);
-    let new_id = TaskId::with_number(target_prefix, next_num as u32, token);
+    // Assign a new ID in the *mover's* namespace: only the mover writes its own
+    // namespace, so this re-mint can't collide with the target track's other
+    // actors, who are invisible to the scan.
+    let next_num = target_mint.next(target_track);
+    let new_id = TaskId::with_number(target_mint.prefix(), next_num, token);
     let old_id = task.id.clone();
     task.id = Some(new_id.clone());
     task.mark_dirty();
@@ -512,16 +512,6 @@ fn remove_metadata(task: &mut Task, key: &str) {
     task.metadata.retain(|m| m.key() != key);
 }
 
-/// Find the next available ID number for a given prefix in a track, scoped to
-/// the `token` namespace (`None` = null). Two clones minting in different
-/// namespaces never collide because each scans only its own.
-pub fn next_id_number(track: &Track, prefix: &str, token: Option<&Token>) -> usize {
-    let mut max = 0usize;
-    let prefix_dash = format!("{}-", prefix);
-    find_max_id_in_track(track, &prefix_dash, token, &mut max);
-    max + 1
-}
-
 /// Scan a track for the highest ID number with the given prefix (e.g. "T-") in
 /// the `token` namespace (`None` = null). Updates `max` if a higher number is
 /// found.
@@ -529,14 +519,33 @@ pub fn next_id_number(track: &Track, prefix: &str, token: Option<&Token>) -> usi
 /// Only structured IDs under the prefix whose first segment is in `token`'s
 /// namespace are considered; `Raw` IDs and segments in other namespaces are
 /// invisible and never perturb `max`.
+///
+/// This is a *scan*, not a frontier: it sees only what is in this track right
+/// now. Minting goes through [`crate::ops::ids::Mint`], which treats the scan as
+/// a floor under the durable, clone-shared record.
 pub fn find_max_id_in_track(
     track: &Track,
     prefix_dash: &str,
     token: Option<&Token>,
     max: &mut usize,
 ) {
+    for node in &track.nodes {
+        if let TrackNode::Section { tasks, .. } = node {
+            find_max_id_in_tasks(tasks, prefix_dash, token, max);
+        }
+    }
+}
+
+/// [`find_max_id_in_track`] over a bare task list — the shape archived done
+/// tasks parse into.
+pub fn find_max_id_in_tasks(
+    tasks: &[Task],
+    prefix_dash: &str,
+    token: Option<&Token>,
+    max: &mut usize,
+) {
     let prefix = prefix_dash.strip_suffix('-').unwrap_or(prefix_dash);
-    for_each_task_in_track(track, &mut |task: &Task| {
+    for_each_task(tasks, &mut |task: &Task| {
         if let Some(id) = &task.id
             && let Some(n) = id.top_level_number(prefix, token)
             && (n as usize) > *max
@@ -619,15 +628,6 @@ fn task_id_exists_in_tracks(task_id: &str, all_tracks: &[(String, Track)]) -> bo
     all_tracks
         .iter()
         .any(|(_, track)| find_task_in_track(track, task_id).is_some())
-}
-
-/// Iterate over all tasks in a track (all sections, including subtasks).
-fn for_each_task_in_track(track: &Track, f: &mut dyn FnMut(&Task)) {
-    for node in &track.nodes {
-        if let TrackNode::Section { tasks, .. } = node {
-            for_each_task(tasks, f);
-        }
-    }
 }
 
 fn for_each_task(tasks: &[Task], f: &mut dyn FnMut(&Task)) {
@@ -924,17 +924,17 @@ fn next_child_id(parent: &Task, parent_id: &str, token: Option<&Token>) -> TaskI
 /// - `new_parent_id`: None = promote to top-level, Some(id) = reparent under that task.
 /// - `sibling_index`: position among the new parent's children (or top-level tasks).
 ///   Use `usize::MAX` to append at the end.
-/// - `prefix`: the track's ID prefix (e.g., "EFF") for generating new IDs.
+/// - `mint`: the namespace and frontier a promotion to top-level mints from.
 /// - `all_tracks`: all tracks in the project for updating dep references.
 pub fn reparent_task(
     track: &mut Track,
     task_id: &str,
     new_parent_id: Option<&str>,
     sibling_index: usize,
-    prefix: &str,
+    mint: Mint<'_>,
     all_tracks: &mut [(String, Track)],
-    token: Option<&Token>,
 ) -> Result<ReparentResult, TaskError> {
+    let token = mint.token();
     // 1. Validate task exists
     let _old_location = find_task_location_any_section(track, task_id)
         .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
@@ -977,8 +977,8 @@ pub fn reparent_task(
     let new_id = match &new_parent_id {
         None => {
             // Promote to top-level: next available top-level ID in the namespace.
-            let next_num = next_id_number(track, prefix, token);
-            TaskId::with_number(prefix, next_num as u32, token)
+            let next_num = mint.next(track);
+            TaskId::with_number(mint.prefix(), next_num, token)
         }
         Some(pid) => {
             // Reparent under parent: find next available child slot.
@@ -1181,8 +1181,7 @@ mod tests {
             &mut track,
             "New task".into(),
             InsertPosition::Bottom,
-            "T",
-            None,
+            Mint::scan_only("T", None),
         )
         .unwrap();
         assert_eq!(id, "T-011");
@@ -1205,8 +1204,7 @@ mod tests {
             &mut track,
             "Top task".into(),
             InsertPosition::Top,
-            "T",
-            None,
+            Mint::scan_only("T", None),
         )
         .unwrap();
         assert_eq!(id, "T-011");
@@ -1220,8 +1218,7 @@ mod tests {
             &mut track,
             "After first".into(),
             InsertPosition::After("T-001".into()),
-            "T",
-            None,
+            Mint::scan_only("T", None),
         )
         .unwrap();
         assert_eq!(id, "T-011");
@@ -1701,9 +1698,8 @@ mod tests {
             "T-003.1",
             None, // promote to top-level
             usize::MAX,
-            "T",
+            Mint::scan_only("T", None),
             &mut all_tracks,
-            None,
         )
         .unwrap();
 
@@ -1734,9 +1730,8 @@ mod tests {
             "T-001",
             Some("T-002"),
             usize::MAX,
-            "T",
+            Mint::scan_only("T", None),
             &mut all_tracks,
-            None,
         )
         .unwrap();
 
@@ -1766,9 +1761,8 @@ mod tests {
             "T-001",
             Some("T-003"),
             0,
-            "T",
+            Mint::scan_only("T", None),
             &mut all_tracks,
-            None,
         )
         .unwrap();
 
@@ -1814,9 +1808,8 @@ mod tests {
             "D-002",
             Some("D-001.1.1"),
             usize::MAX,
-            "D",
+            Mint::scan_only("D", None),
             &mut all_tracks,
-            None,
         );
         assert!(matches!(result, Err(TaskError::DepthExceeded)));
     }
@@ -1845,9 +1838,8 @@ mod tests {
             "D-002",
             Some("D-001.1"),
             usize::MAX,
-            "D",
+            Mint::scan_only("D", None),
             &mut all_tracks,
-            None,
         );
         assert!(matches!(result, Err(TaskError::DepthExceeded)));
     }
@@ -1863,9 +1855,8 @@ mod tests {
             "T-003",
             Some("T-003.1"),
             usize::MAX,
-            "T",
+            Mint::scan_only("T", None),
             &mut all_tracks,
-            None,
         );
         assert!(matches!(result, Err(TaskError::CycleDetected)));
     }
@@ -1881,9 +1872,8 @@ mod tests {
             "T-001",
             Some("T-001"),
             usize::MAX,
-            "T",
+            Mint::scan_only("T", None),
             &mut all_tracks,
-            None,
         );
         assert!(matches!(result, Err(TaskError::CycleDetected)));
     }
@@ -2033,9 +2023,8 @@ mod tests {
             "T-001",
             Some("T-003"),
             usize::MAX,
-            "T",
+            Mint::scan_only("T", None),
             &mut all_tracks,
-            None,
         )
         .unwrap();
 
@@ -2057,7 +2046,13 @@ mod tests {
 
 ## Done",
         );
-        let id = add_task(&mut track, "New".into(), InsertPosition::Bottom, "T", None).unwrap();
+        let id = add_task(
+            &mut track,
+            "New".into(),
+            InsertPosition::Bottom,
+            Mint::scan_only("T", None),
+        )
+        .unwrap();
         assert_eq!(id, "T-006");
     }
 
@@ -2089,8 +2084,7 @@ mod tests {
                 &mut track,
                 "New".into(),
                 InsertPosition::Bottom,
-                "EFF",
-                token,
+                Mint::scan_only("EFF", token),
             )
             .unwrap()
         };
@@ -2115,7 +2109,13 @@ mod tests {
 ## Done";
         let mut t1 = parse_track(src);
         assert_eq!(
-            add_task(&mut t1, "N".into(), InsertPosition::Bottom, "EFF", None).unwrap(),
+            add_task(
+                &mut t1,
+                "N".into(),
+                InsertPosition::Bottom,
+                Mint::scan_only("EFF", None)
+            )
+            .unwrap(),
             "EFF-015"
         );
         let mut t2 = parse_track(src);
@@ -2124,8 +2124,7 @@ mod tests {
                 &mut t2,
                 "N".into(),
                 InsertPosition::Bottom,
-                "EFF",
-                Some(&ns("a"))
+                Mint::scan_only("EFF", Some(&ns("a")))
             )
             .unwrap(),
             "EFF-a15"
@@ -2168,8 +2167,7 @@ mod tests {
             &mut track,
             "New".into(),
             InsertPosition::Bottom,
-            "EFF",
-            Some(&ns("b")),
+            Mint::scan_only("EFF", Some(&ns("b"))),
         )
         .unwrap();
         assert_eq!(id, "EFF-b10");
@@ -2239,8 +2237,7 @@ mod tests {
             &mut track,
             "Inserted".into(),
             InsertPosition::After("EFF-a14".into()),
-            "EFF",
-            Some(&ns("a")),
+            Mint::scan_only("EFF", Some(&ns("a"))),
         )
         .unwrap();
         let backlog = track.backlog();
@@ -2298,9 +2295,8 @@ mod tests {
             &mut target,
             "EFF-a14",
             InsertPosition::Bottom,
-            "INF",
+            Mint::scan_only("INF", Some(&ns("c"))),
             &mut others,
-            Some(&ns("c")),
         )
         .unwrap();
 
@@ -2330,9 +2326,8 @@ mod tests {
             &mut target,
             "EFF-a14",
             InsertPosition::Bottom,
-            "INF",
+            Mint::scan_only("INF", Some(&ns("c"))),
             &mut [],
-            Some(&ns("c")),
         )
         .unwrap();
 
@@ -2358,9 +2353,8 @@ mod tests {
             &mut target,
             "EFF-b8",
             InsertPosition::Bottom,
-            "INF",
+            Mint::scan_only("INF", Some(&ns("b"))),
             &mut [],
-            Some(&ns("b")),
         )
         .unwrap();
 
@@ -2389,9 +2383,8 @@ mod tests {
             &mut target,
             "EFF-b3",
             InsertPosition::Bottom,
-            "INF",
+            Mint::scan_only("INF", Some(&ns("b"))),
             &mut [],
-            Some(&ns("b")),
         )
         .unwrap();
 
@@ -2432,9 +2425,8 @@ mod tests {
             "EFF-a14.b2",
             None,
             usize::MAX,
-            "EFF",
+            Mint::scan_only("EFF", Some(&ns("c"))),
             &mut others,
-            Some(&ns("c")),
         )
         .unwrap();
 
@@ -2460,9 +2452,8 @@ mod tests {
             "EFF-a14",
             Some("EFF-a20"),
             usize::MAX,
-            "EFF",
+            Mint::scan_only("EFF", Some(&ns("c"))),
             &mut others,
-            Some(&ns("c")),
         )
         .unwrap();
 

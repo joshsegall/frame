@@ -2,6 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::model::SectionKind;
 use crate::model::task::Metadata;
+use crate::ops::ids::Mint;
 use crate::ops::task_ops::{self, InsertPosition};
 use crate::util::unicode;
 
@@ -209,16 +210,17 @@ pub(super) fn add_task_action(app: &mut App, pos: AddPosition) {
         }
     };
 
+    let frame_dir = app.project.frame_dir.clone();
     let track = match app.find_track_mut(&track_id) {
         Some(t) => t,
         None => return,
     };
 
-    let task_id =
-        match task_ops::add_task(track, String::new(), insert_pos, &prefix, token.as_ref()) {
-            Ok(id) => id,
-            Err(_) => return,
-        };
+    let mint = Mint::new(&frame_dir, &track_id, &prefix, token.as_ref());
+    let task_id = match task_ops::add_task(track, String::new(), insert_pos, mint) {
+        Ok(id) => id,
+        Err(_) => return,
+    };
 
     // Enter EDIT mode for the new task's title
     app.edit_buffer.clear();
@@ -510,6 +512,7 @@ pub(super) fn outdent_new_subtask(app: &mut App) {
         move_cursor_to_task(app, &track_id, &new_id);
     } else {
         // Parent is top-level — insert a new top-level task after the parent
+        let frame_dir = app.project.frame_dir.clone();
         let track = match app.find_track_mut(&track_id) {
             Some(t) => t,
             None => return,
@@ -518,8 +521,7 @@ pub(super) fn outdent_new_subtask(app: &mut App) {
             track,
             String::new(),
             InsertPosition::After(parent_id),
-            &prefix,
-            token.as_ref(),
+            Mint::new(&frame_dir, &track_id, &prefix, token.as_ref()),
         ) {
             Ok(id) => id,
             Err(_) => return,
@@ -1112,6 +1114,7 @@ pub(super) fn confirm_edit(app: &mut App) {
                         Ok(t) => t,
                         Err(()) => return,
                     };
+                    let frame_dir = app.project.frame_dir.clone();
                     let track = match app.find_track_mut(&track_id) {
                         Some(t) => t,
                         None => return,
@@ -1123,8 +1126,7 @@ pub(super) fn confirm_edit(app: &mut App) {
                             track,
                             title.clone(),
                             InsertPosition::Bottom,
-                            &prefix,
-                            token.as_ref(),
+                            Mint::new(&frame_dir, &track_id, &prefix, token.as_ref()),
                         );
                     }
 

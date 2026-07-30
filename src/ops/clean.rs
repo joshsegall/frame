@@ -8,7 +8,8 @@ use crate::model::project::Project;
 use crate::model::task::{Metadata, Task, TaskState};
 use crate::model::task_id::{TaskId, Token};
 use crate::model::track::{SectionKind, Track, TrackNode};
-use crate::ops::task_ops::{find_max_id_in_track, renumber_subtasks};
+use crate::ops::ids::Mint;
+use crate::ops::task_ops::renumber_subtasks;
 
 /// Result of a clean operation
 #[derive(Debug, Default)]
@@ -128,7 +129,8 @@ pub fn ensure_ids_and_dates(project: &mut Project, scope: IdScope) -> Vec<String
         let prefix = project.config.ids.prefixes.get(track_id.as_str()).cloned();
 
         if let (Some(pfx), IdScope::Mint(ns)) = (&prefix, &scope) {
-            assign_missing_ids(track, track_id, pfx, ns.as_ref(), &mut result);
+            let mint = Mint::new(&project.frame_dir, track_id, pfx, ns.as_ref());
+            assign_missing_ids(track, track_id, mint, &mut result);
         }
         assign_missing_dates(track, track_id, &mut result);
 
@@ -260,7 +262,8 @@ pub fn clean_project(project: &mut Project, scope: IdScope) -> CleanResult {
 
         // 1. Assign missing IDs (minting — only when this clone owns a namespace)
         if let (Some(pfx), IdScope::Mint(ns)) = (&prefix, &scope) {
-            assign_missing_ids(track, track_id, pfx, ns.as_ref(), &mut result);
+            let mint = Mint::new(&project.frame_dir, track_id, pfx, ns.as_ref());
+            assign_missing_ids(track, track_id, mint, &mut result);
         }
 
         // 2. Assign missing added dates
@@ -301,22 +304,37 @@ pub fn clean_project(project: &mut Project, scope: IdScope) -> CleanResult {
 // 1. Assign missing IDs
 // ---------------------------------------------------------------------------
 
-fn assign_missing_ids(
-    track: &mut Track,
-    track_id: &str,
-    prefix: &str,
-    token: Option<&Token>,
-    result: &mut CleanResult,
-) {
-    let prefix_dash = format!("{}-", prefix);
-    let mut max = 0usize;
-    find_max_id_in_track(track, &prefix_dash, token, &mut max);
+fn assign_missing_ids(track: &mut Track, track_id: &str, mint: Mint<'_>, result: &mut CleanResult) {
+    // Reserve exactly as many numbers as there are ID-less top-level tasks, in
+    // one reservation, then walk them out in order. Subtasks are numbered
+    // relative to their parent, so they need nothing reserved — but they are
+    // still assigned when no top-level task is missing an ID.
+    let needed = count_missing_top_level_ids(track);
+    let mut max = if needed > 0 {
+        (mint.next_n(track, needed) - 1) as usize
+    } else {
+        0
+    };
 
+    let (prefix, token) = (mint.prefix(), mint.token());
     for node in &mut track.nodes {
         if let TrackNode::Section { tasks, .. } = node {
             assign_ids_in_tasks(tasks, track_id, prefix, token, &mut max, result);
         }
     }
+}
+
+/// How many top-level tasks are missing an ID — the size of the block
+/// [`assign_ids_in_tasks`] is about to consume. Subtasks are numbered relative to
+/// their parent, so they need nothing from the track's frontier.
+fn count_missing_top_level_ids(track: &Track) -> u32 {
+    let mut n = 0;
+    for node in &track.nodes {
+        if let TrackNode::Section { tasks, .. } = node {
+            n += tasks.iter().filter(|t| t.id.is_none()).count() as u32;
+        }
+    }
+    n
 }
 
 fn assign_ids_in_tasks(
@@ -510,9 +528,8 @@ fn resolve_duplicate_ids(project: &mut Project, token: Option<&Token>, result: &
             .get(dup_track_id.as_str())
             .cloned();
         let Some(pfx) = prefix else { continue };
-        let prefix_dash = format!("{}-", pfx);
 
-        // Find the track and compute max+1
+        // Find the track the duplicate lives in
         let track = project
             .tracks
             .iter()
@@ -520,20 +537,17 @@ fn resolve_duplicate_ids(project: &mut Project, token: Option<&Token>, result: &
             .map(|(_, t)| t);
         let Some(track) = track else { continue };
 
-        let mut max = 0usize;
-        find_max_id_in_track(track, &prefix_dash, token, &mut max);
-        // Also account for any already-assigned new IDs in this batch (same namespace)
-        for new_id in reassignments.values().flatten() {
-            if let Some(n) = TaskId::parse(new_id)
-                .top_level_number(&pfx, token)
-                .map(|n| n as usize)
-                .filter(|&n| n > max)
-            {
-                max = n;
-            }
-        }
+        // Reassignments already computed in this batch aren't in the track yet,
+        // so they have to be floored in explicitly.
+        let staged = reassignments
+            .values()
+            .flatten()
+            .filter_map(|new_id| TaskId::parse(new_id).top_level_number(&pfx, token))
+            .max()
+            .unwrap_or(0);
 
-        let new_id = TaskId::with_number(&pfx, (max + 1) as u32, token).to_string();
+        let mint = Mint::new(&project.frame_dir, dup_track_id, &pfx, token);
+        let new_id = TaskId::with_number(&pfx, mint.next_above(track, staged), token).to_string();
         reassignments
             .entry(old_id.clone())
             .or_default()

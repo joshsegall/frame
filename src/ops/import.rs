@@ -3,7 +3,8 @@ use chrono::Local;
 use crate::model::task::{Metadata, Task};
 use crate::model::task_id::{TaskId, Token};
 use crate::model::track::{SectionKind, Track};
-use crate::ops::task_ops::{InsertPosition, TaskError, find_max_id_in_track};
+use crate::ops::ids::Mint;
+use crate::ops::task_ops::{InsertPosition, TaskError};
 use crate::parse::parse_tasks;
 
 /// Error type for import operations
@@ -31,8 +32,7 @@ pub fn import_tasks(
     markdown: &str,
     track: &mut Track,
     position: InsertPosition,
-    prefix: &str,
-    token: Option<&Token>,
+    mint: Mint<'_>,
 ) -> Result<ImportResult, ImportError> {
     let lines: Vec<String> = markdown.lines().map(|l| l.to_string()).collect();
 
@@ -43,13 +43,9 @@ pub fn import_tasks(
         return Err(ImportError::NoTasks);
     }
 
-    // Find the next available ID number for this prefix
-    let start_num = {
-        let mut max = 0usize;
-        let prefix_dash = format!("{}-", prefix);
-        find_max_id_in_track(track, &prefix_dash, token, &mut max);
-        max + 1
-    };
+    let (prefix, token) = (mint.prefix(), mint.token());
+    // Reserve the whole block up front: one reservation, contiguous numbers.
+    let start_num = mint.next_n(track, tasks.len() as u32) as usize;
 
     let today = today_str();
     let mut assigned_ids = Vec::new();
@@ -254,8 +250,7 @@ Some description text here.
             simple_import_md(),
             &mut track,
             InsertPosition::Bottom,
-            "T",
-            None,
+            Mint::scan_only("T", None),
         )
         .unwrap();
 
@@ -283,8 +278,7 @@ Some description text here.
             simple_import_md(),
             &mut track,
             InsertPosition::Top,
-            "T",
-            None,
+            Mint::scan_only("T", None),
         )
         .unwrap();
 
@@ -306,8 +300,7 @@ Some description text here.
             simple_import_md(),
             &mut track,
             InsertPosition::After("T-001".into()),
-            "T",
-            None,
+            Mint::scan_only("T", None),
         )
         .unwrap();
 
@@ -331,8 +324,7 @@ Some description text here.
             import_with_subtasks_md(),
             &mut track,
             InsertPosition::Bottom,
-            "T",
-            None,
+            Mint::scan_only("T", None),
         )
         .unwrap();
 
@@ -365,8 +357,7 @@ Some description text here.
             import_with_headers_md(),
             &mut track,
             InsertPosition::Bottom,
-            "T",
-            None,
+            Mint::scan_only("T", None),
         )
         .unwrap();
 
@@ -387,8 +378,7 @@ Some description text here.
             import_with_metadata_md(),
             &mut track,
             InsertPosition::Bottom,
-            "T",
-            None,
+            Mint::scan_only("T", None),
         )
         .unwrap();
 
@@ -428,8 +418,7 @@ Some description text here.
             import_with_blank_lines_md(),
             &mut track,
             InsertPosition::Bottom,
-            "T",
-            None,
+            Mint::scan_only("T", None),
         )
         .unwrap();
 
@@ -447,7 +436,12 @@ Some description text here.
     #[test]
     fn test_import_empty_file() {
         let mut track = sample_track();
-        let result = import_tasks("", &mut track, InsertPosition::Bottom, "T", None);
+        let result = import_tasks(
+            "",
+            &mut track,
+            InsertPosition::Bottom,
+            Mint::scan_only("T", None),
+        );
         assert!(matches!(result, Err(ImportError::NoTasks)));
     }
 
@@ -458,8 +452,7 @@ Some description text here.
             "# Just a header\n\nSome text but no tasks.\n",
             &mut track,
             InsertPosition::Bottom,
-            "T",
-            None,
+            Mint::scan_only("T", None),
         );
         assert!(matches!(result, Err(ImportError::NoTasks)));
     }
@@ -471,8 +464,7 @@ Some description text here.
             simple_import_md(),
             &mut track,
             InsertPosition::After("T-999".into()),
-            "T",
-            None,
+            Mint::scan_only("T", None),
         );
         assert!(result.is_err());
     }
@@ -486,8 +478,7 @@ Some description text here.
             import_with_subtasks_md(),
             &mut track,
             InsertPosition::Bottom,
-            "T",
-            None,
+            Mint::scan_only("T", None),
         )
         .unwrap();
 
@@ -516,8 +507,7 @@ Some description text here.
             simple_import_md(),
             &mut track,
             InsertPosition::Bottom,
-            "T",
-            None,
+            Mint::scan_only("T", None),
         )
         .unwrap();
 
@@ -534,7 +524,13 @@ Some description text here.
     - [ ] Sub-sub level
 ";
         let mut track = sample_track();
-        let result = import_tasks(md, &mut track, InsertPosition::Bottom, "T", None).unwrap();
+        let result = import_tasks(
+            md,
+            &mut track,
+            InsertPosition::Bottom,
+            Mint::scan_only("T", None),
+        )
+        .unwrap();
 
         assert_eq!(result.assigned_ids, vec!["T-003"]);
         assert_eq!(result.total_count, 3);
@@ -566,8 +562,7 @@ Some description text here.
             import_with_subtasks_md(),
             &mut track,
             InsertPosition::Bottom,
-            "T",
-            Some(&token),
+            Mint::scan_only("T", Some(&token)),
         )
         .unwrap();
         // Empty `a` namespace → first is T-a1; subtasks carry the token too.
