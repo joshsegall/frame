@@ -8,8 +8,8 @@ Developer reference for frame's internal design. Each section explains a design 
 src/
   model/    Data types: Task, Track, Inbox, ProjectConfig, Project
   parse/    Markdown parser + serializer pairs (task, track, inbox)
-  io/       Project discovery, file locking, config I/O, UI state, file watcher, project registry
-  ops/      Business logic: task CRUD, track management, inbox, search, clean, check, import
+  io/       Project discovery, file locking, config I/O, UI state, file watcher, project registry, ID frontier
+  ops/      Business logic: task CRUD, ID minting, track management, inbox, search, clean, check, import
   cli/      CLI interface (clap commands, handlers, JSON/human output)
   tui/      TUI interface: app state, undo, command palette, input handling, rendering
 ```

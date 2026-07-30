@@ -75,9 +75,11 @@ prefix   = the track's configured prefix (e.g. EFF)
 
 A segment is a maximal run of lowercase letters (the optional token) followed by
 a maximal run of digits (the number); because letters and digits are disjoint no
-delimiter is needed between them. Today frame mints only tokenless (null
-namespace) IDs like `EFF-014` and `EFF-014.2`; the optional token (e.g.
-`EFF-a14`) is reserved for future use.
+delimiter is needed between them. The token names the
+[actor-token namespace](concepts.md#actors) the segment was minted in: the
+primary working copy mints tokenless (null-namespace) IDs like `EFF-014` and
+`EFF-014.2`, while a clone holding token `a` mints `EFF-a14`, and a subtask added
+there under someone else's task reads `EFF-014.a1`.
 
 **Literal passthrough**: any backtick-wrapped ID that does not match this grammar
 (including legacy or hand-written IDs) is preserved verbatim on round-trip and is

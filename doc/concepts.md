@@ -70,8 +70,9 @@ EFF-001.1.2      # sub-subtask
 The prefix mapping (e.g., `effects` -> `EFF`) is configured in `project.toml` under `[ids.prefixes]`.
 
 Each dotted segment may optionally carry a leading lowercase **token** before its
-number (e.g. `EFF-a14`), reserved for future namespacing; frame currently mints
-only tokenless IDs. An ID's position is a stable handle, not its priority —
+number (e.g. `EFF-a14`): the [actor-token namespace](#actors) of the working copy
+that minted that segment. The primary clone mints tokenless numbers like
+`EFF-001`. An ID's position is a stable handle, not its priority —
 ordering within a section is positional, and `added:` is the authority for
 relative age. IDs that don't match the grammar are kept verbatim and ignored by
 ID minting (see `doc/format.md`).
@@ -139,6 +140,8 @@ Three files track this:
 - **`<git-common-dir>/frame-actor`** (the *shared* token): a single line holding the clone-wide token that every git **worktree** inherits by default. It lives under the git common directory (`git rev-parse --git-common-dir`, e.g. `<root>/.git/frame-actor`), which resolves to the same path from the main working tree and every linked worktree — so a worktree-per-session workflow keeps *one* actor identity instead of each worktree auto-claiming its own. It's outside every working tree, so it's never committed. Projects not in a git repo have no shared token and use only the local file.
 - **`frame/.actor`** (gitignored, the *local* token): a single line that overrides the shared token for this one working copy. Like `.state.json` and `.lock`, it's local and never committed. The primary records its `null` here (see below); a worktree writes one only via an explicit `fr actor claim --local` / `fr actor set --local` to deliberately diverge onto its own token.
 
+A fourth file, alongside the shared token and equally machine-local, records the **ID frontier** — the highest number handed out per prefix and namespace: **`<git-common-dir>/frame-ids.toml`** (or `frame/.ids.toml` outside git). It's what stops two worktrees of one clone from minting the same ID; `fr info` shows it. Unlike the three above it holds no identity, only bookkeeping, and is safe to delete — see [ID Frontier](architecture.md#id-frontier-durable-mint).
+
 **Resolution precedence** is local, then shared, then the main working tree:
 
 1. this working copy's `frame/.actor`, if present;
@@ -156,13 +159,22 @@ Manage tokens with the `fr actor` commands (see `doc/cli.md`).
 
 An ID is a `prefix-segment(.segment)*` chain, and **each segment carries its own token** — the token of whoever minted that segment. The primary (`null`) clone mints bare numbers (`EFF-14`, `EFF-15`); a clone with token `a` mints `EFF-a1`, `EFF-a2`, …; token `b` mints `EFF-b1`, and so on. A subtask's *last* segment carries the adding clone's token while the parent's segments are preserved verbatim, so actor `b` adding a child under `EFF-a14` produces `EFF-a14.b1`.
 
-Numbers auto-increment by scanning **only the minter's own namespace** for the highest existing number and adding one (an empty namespace starts at 1). Because the scan ignores every other namespace — including `null` versus tokened — two unsynced clones can each mint freely and never produce the same ID. Reclaiming a retired token continues its sequence automatically, since the next number derives from the max already present.
+Numbers auto-increment within **the minter's own namespace** (an empty namespace starts at 1). Because numbering ignores every other namespace — including `null` versus tokened — two unsynced clones can each mint freely and never produce the same ID. Reclaiming a retired token continues its sequence automatically.
+
+The next number is the highest **already spoken for** in that namespace, plus one — taking the higher of two sources:
+
+- a **scan** of what this working copy can see: the track, plus its `archive/` files, so a done task archived by `fr clean` keeps its number;
+- the **recorded frontier**, a durable note of every number handed out, shared by all git worktrees of the clone.
+
+The second is what makes the frontier only ever move forward. A scan alone slips backwards whenever the live maximum drops — a task archived, a task deleted, or a sibling worktree whose checkout hasn't merged your new tasks yet — and the next mint would reissue a number. Numbers are never reused, and gaps are entirely normal: an ID that gets abandoned before it lands simply stays spent. See [ID Frontier](architecture.md#id-frontier-durable-mint) for where the record lives and how it recovers from being deleted or corrupted.
 
 A working copy resolves its token (local, then shared, then the main working tree) the first time it mints. A **fresh clone** with no token anywhere **auto-claims** one from the frontier on its first mint and writes it to the *shared* file — so sibling worktrees of that clone inherit it rather than each auto-claiming their own. It announces the claim once. (The primary already recorded `null` locally at `fr init`, so it keeps minting bare numbers.) If every token is taken and the clone is still unclaimed, the mint fails and routes you to `fr actor set <token>` rather than guessing.
 
 **A linked worktree never auto-claims.** If nothing resolves for it — a clone with no token anywhere, e.g. a project predating actor tokens — the mint fails with a routing message instead of claiming. A claim is not local bookkeeping: it writes a row into the committed `actors.toml`, so auto-claiming from a worktree would silently split one clone into two actors and land shared, tracked state in whatever commit that worktree makes next. The fix is one explicit choice: `fr actor claim` in the main working tree to claim for the whole clone, or `fr actor claim --local` in the worktree to run it as its own actor.
 
-Because worktrees share one token but have **separate checkouts** and **separate locks** (`frame/.lock` is per-worktree), two worktrees can still produce a colliding id — by minting at the same moment, or by each minting against a track file at a different commit. That's a deliberate trade: an occasional collision — caught by `fr check`'s duplicate-id report and repaired by `fr actor merge` — in exchange for never silently proliferating a new actor per worktree. To run genuinely concurrent worktrees as distinct actors, give one an explicit `fr actor claim --local`.
+**Worktrees of one clone don't collide.** They share a token, so they mint in the same namespace, and they have separate checkouts and separate locks (`frame/.lock` is per-worktree) — so neither can see the other's uncommitted tasks. What keeps them apart is the recorded frontier, which lives outside every working tree (under `.git/`) and is therefore shared by all of them: a number handed out in one worktree is unavailable in the others from that instant, committed or not. Sharing one token per clone costs nothing in collisions. To run worktrees as genuinely *distinct* actors — separate namespaces, separate provenance — give one an explicit `fr actor claim --local`.
+
+One case the frontier does not cover: two worktrees adding a **subtask to the same parent task**. Subtask numbers are counted per parent rather than from the namespace frontier, so both can produce `EFF-a14.b1`. `fr check`'s duplicate-ID report catches it.
 
 **Strict null policy.** The null namespace belongs *only* to a clone that deliberately took it — the one that ran `fr init`, or one that ran an explicit `fr actor set null` — and to that clone's linked worktrees, which are the same clone. A clone with no token anywhere is **not** the null actor, so it must never mint null-namespace IDs. Explicit mints handle this by auto-claiming a letter (above; the frontier never offers `null`). Background and passive paths — TUI startup auto-assign, post-external-change auto-clean, `fr clean --dry-run` previews — go further: on an unclaimed clone they **skip ID assignment entirely**, leaving tasks ID-less rather than falling back to null. The blank IDs are filled later, when an explicit action resolves (and if needed claims) a token. This is what keeps a machine that doesn't own `null` from silently re-introducing cross-clone ID collisions.
 

@@ -5,6 +5,7 @@ The frame CLI binary is `fr`. Run with no arguments to launch the TUI.
 **Global flags**:
 - `--json` — output as JSON (on commands that support it)
 - `-C <path>` / `--project-dir <path>` — run against a different project directory without changing the working directory
+- `-V` / `--version` — version plus the commit the binary was built from (`fr 0.1.6 (ad763b0)`); omits the commit when the build didn't come from a git checkout
 
 ## Project Init
 
@@ -541,7 +542,7 @@ The `-C` flag also triggers auto-registration if the target project isn't alread
 
 ## Actor Tokens
 
-Each working copy (git clone) holds one **actor token**, recorded in the committed `frame/actors.toml` registry and the gitignored `frame/.actor` file. A clone's linked git worktrees share its token — via the clone-wide `<git-common-dir>/frame-actor`, or by inheriting the main working tree's `frame/.actor` (which is where the primary's `null` lives). See [concepts.md](concepts.md#actors) for the model. Tokens are managed today but not yet used in minted IDs.
+Each working copy (git clone) holds one **actor token**, recorded in the committed `frame/actors.toml` registry and the gitignored `frame/.actor` file. A clone's linked git worktrees share its token — via the clone-wide `<git-common-dir>/frame-actor`, or by inheriting the main working tree's `frame/.actor` (which is where the primary's `null` lives). See [concepts.md](concepts.md#actors) for the model. Every minted ID carries its minter's token, so separate clones never collide; worktrees of one clone share a token and are kept apart by the [ID frontier](architecture.md#id-frontier-durable-mint) instead.
 
 ### `fr actor`
 
