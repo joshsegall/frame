@@ -100,6 +100,30 @@ pub enum CheckWarning {
         /// The unclosed opening fence, trimmed (e.g. ```` ```rust ````).
         fence: String,
     },
+    /// One task ID held by two tasks, at least one of them **archived** — a
+    /// number that was handed out twice. `locations` lists every holder: track
+    /// IDs for live tasks, `archive/…` paths for archived ones.
+    ///
+    /// Neither the duplicate-ID error nor `fr clean`'s duplicate resolution sees
+    /// this: both compare live tracks only. Minting used to as well, so an
+    /// archived number could be reissued silently (fixed by the durable frontier
+    /// in [`crate::io::ids`] — this catches what happened before, and any archive
+    /// edited by hand since).
+    #[serde(rename = "archived_id_collision")]
+    ArchivedIdCollision {
+        task_id: String,
+        locations: Vec<String>,
+    },
+    /// The durable ID frontier store exists but doesn't parse. The next mint
+    /// moves it aside and falls back to scanning, which cannot see another
+    /// worktree's uncommitted tasks — so IDs can collide until it refills.
+    #[serde(rename = "id_frontier_unreadable")]
+    IdFrontierUnreadable { path: String, detail: String },
+    /// A `.bak` beside the frontier store: it was unreadable once and got reset.
+    /// Numbers minted in that window may have been reissued. Informational —
+    /// deleting the `.bak` clears it.
+    #[serde(rename = "id_frontier_was_reset")]
+    IdFrontierWasReset { path: String },
     /// An inbox item body leaves a code fence open. Same rendering hazard as
     /// [`CheckWarning::UnclosedNoteFence`].
     #[serde(rename = "unclosed_inbox_fence")]
@@ -162,6 +186,13 @@ pub fn check_project(project: &Project) -> CheckResult {
 
     // Working-copy-local frame files leaking into git.
     check_local_files_ignored(&project.frame_dir, &mut result);
+
+    // Numbers handed out twice, where one holder is archived (invisible to the
+    // live-tracks-only duplicate check above).
+    check_archived_id_collisions(project, &mut result);
+
+    // The durable ID frontier store: unreadable, or reset at some point.
+    check_id_frontier(&project.frame_dir, &mut result);
 
     // Inbox item bodies that leave a code fence open.
     if let Some(ref inbox) = project.inbox {
@@ -535,6 +566,109 @@ fn find_duplicate_ids(project: &Project) -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// ID frontier and archive collisions
+// ---------------------------------------------------------------------------
+
+/// Flag task IDs held by two tasks where at least one is archived.
+///
+/// [`find_duplicate_ids`] compares live tracks against each other, and so does
+/// `fr clean`'s duplicate resolution — an archived task holding the same number as
+/// a live one is invisible to both. That is exactly what a reissued number looks
+/// like after `fr clean` archived the original.
+fn check_archived_id_collisions(project: &Project, result: &mut CheckResult) {
+    use std::collections::HashMap;
+
+    let mut live: HashMap<String, Vec<String>> = HashMap::new();
+    for (track_id, track) in &project.tracks {
+        for node in &track.nodes {
+            if let TrackNode::Section { tasks, .. } = node {
+                collect_id_locations(tasks, track_id, &mut live);
+            }
+        }
+    }
+
+    let mut archived: HashMap<String, Vec<String>> = HashMap::new();
+    for (label, tasks) in archived_task_lists(&project.frame_dir) {
+        collect_id_locations(&tasks, &label, &mut archived);
+    }
+
+    // Only IDs present in an archive can be reported here; a live-only duplicate
+    // is already a `DuplicateId` error.
+    let mut ids: Vec<&String> = archived.keys().collect();
+    ids.sort();
+    for id in ids {
+        let in_archives = &archived[id];
+        let mut locations = live.get(id).cloned().unwrap_or_default();
+        if locations.len() + in_archives.len() < 2 {
+            continue;
+        }
+        locations.extend(in_archives.iter().cloned());
+        result.warnings.push(CheckWarning::ArchivedIdCollision {
+            task_id: id.clone(),
+            locations,
+        });
+    }
+}
+
+/// Every archived task list, each labelled by the path it came from:
+/// `archive/<track>.md` for done-task archives, `archive/_tracks/<track>.md` for
+/// whole tracks that were archived. Unreadable files contribute nothing.
+fn archived_task_lists(frame_dir: &Path) -> Vec<(String, Vec<Task>)> {
+    let mut out = Vec::new();
+
+    if let Ok(archives) = crate::io::project_io::load_archives(frame_dir) {
+        for (track_id, tasks) in archives {
+            out.push((format!("archive/{}.md", track_id), tasks));
+        }
+    }
+
+    let whole_tracks = frame_dir.join("archive").join("_tracks");
+    if let Ok(entries) = std::fs::read_dir(&whole_tracks) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let track = crate::parse::parse_track(&content);
+            let mut tasks = Vec::new();
+            for node in &track.nodes {
+                if let TrackNode::Section { tasks: section, .. } = node {
+                    tasks.extend(section.iter().cloned());
+                }
+            }
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            out.push((format!("archive/_tracks/{}", name), tasks));
+        }
+    }
+
+    out
+}
+
+/// Report a frontier store that can't be read, or one that was reset earlier.
+/// Read-only: unlike a mint, this leaves an unreadable store in place so the
+/// warning is actionable while the file is still there.
+fn check_id_frontier(frame_dir: &Path, result: &mut CheckResult) {
+    let health = crate::io::ids::health(frame_dir);
+
+    if let crate::io::ids::StoreState::Unparsable(detail) = &health.state {
+        result.warnings.push(CheckWarning::IdFrontierUnreadable {
+            path: health.path.display().to_string(),
+            // TOML errors span several lines; the first carries the location.
+            detail: detail.lines().next().unwrap_or_default().trim().to_string(),
+        });
+    }
+
+    if let Some(backup) = &health.reset_backup {
+        result.warnings.push(CheckWarning::IdFrontierWasReset {
+            path: backup.display().to_string(),
+        });
+    }
+}
+
 fn collect_id_locations(
     tasks: &[Task],
     track_id: &str,
@@ -594,6 +728,167 @@ mod tests {
             tracks: vec![("main".to_string(), track)],
             inbox: None,
         }
+    }
+
+    // --- Archived-ID collisions and the ID frontier ---
+
+    fn archived_id_warnings(result: &CheckResult) -> Vec<(String, Vec<String>)> {
+        result
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                CheckWarning::ArchivedIdCollision { task_id, locations } => {
+                    Some((task_id.clone(), locations.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A live task holding a number an archived task already has — what a
+    /// reissued number looks like after `fr clean` archived the original.
+    #[test]
+    fn test_check_live_id_colliding_with_an_archived_one() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(frame_dir.join("archive")).unwrap();
+        std::fs::write(
+            frame_dir.join("archive/main.md"),
+            "# Archive \u{2014} main\n\n- [x] `M-005` archived work\n  - resolved: 2025-06-01\n",
+        )
+        .unwrap();
+
+        let project = make_project_at(
+            tmp.path(),
+            "# Main\n\n## Backlog\n\n- [ ] `M-005` reissued\n  - added: 2025-07-01\n\n## Done\n",
+        );
+        let warnings = archived_id_warnings(&check_project(&project));
+        assert_eq!(
+            warnings,
+            vec![(
+                "M-005".to_string(),
+                vec!["main".to_string(), "archive/main.md".to_string()]
+            )]
+        );
+    }
+
+    /// Two archived tasks sharing a number: no live task involved, still a
+    /// number handed out twice.
+    #[test]
+    fn test_check_collision_between_two_archives() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(frame_dir.join("archive/_tracks")).unwrap();
+        std::fs::write(
+            frame_dir.join("archive/main.md"),
+            "# Archive \u{2014} main\n\n- [x] `M-007` done once\n",
+        )
+        .unwrap();
+        std::fs::write(
+            frame_dir.join("archive/_tracks/old.md"),
+            "# Old\n\n## Backlog\n\n- [ ] `M-007` same number\n\n## Done\n",
+        )
+        .unwrap();
+
+        let project = make_project_at(tmp.path(), "# Main\n\n## Backlog\n\n## Done\n");
+        let warnings = archived_id_warnings(&check_project(&project));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].0, "M-007");
+        assert_eq!(warnings[0].1.len(), 2);
+    }
+
+    /// Distinct namespaces are distinct IDs: `M-a5` archived does not collide
+    /// with a live `M-005`.
+    #[test]
+    fn test_check_archived_id_in_another_namespace_is_not_a_collision() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(frame_dir.join("archive")).unwrap();
+        std::fs::write(
+            frame_dir.join("archive/main.md"),
+            "# Archive \u{2014} main\n\n- [x] `M-a5` another actor\n",
+        )
+        .unwrap();
+
+        let project = make_project_at(
+            tmp.path(),
+            "# Main\n\n## Backlog\n\n- [ ] `M-005` mine\n\n## Done\n",
+        );
+        assert!(archived_id_warnings(&check_project(&project)).is_empty());
+    }
+
+    /// An archive holding a number nothing else uses is just history.
+    #[test]
+    fn test_check_archive_without_collision_is_silent() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(frame_dir.join("archive")).unwrap();
+        std::fs::write(
+            frame_dir.join("archive/main.md"),
+            "# Archive \u{2014} main\n\n- [x] `M-002` old work\n",
+        )
+        .unwrap();
+
+        let project = make_project_at(
+            tmp.path(),
+            "# Main\n\n## Backlog\n\n- [ ] `M-009` current\n\n## Done\n",
+        );
+        assert!(archived_id_warnings(&check_project(&project)).is_empty());
+    }
+
+    fn frontier_warnings(result: &CheckResult) -> Vec<String> {
+        result
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                CheckWarning::IdFrontierUnreadable { path, .. } => {
+                    Some(format!("unreadable {path}"))
+                }
+                CheckWarning::IdFrontierWasReset { path } => Some(format!("reset {path}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_check_flags_an_unreadable_id_frontier() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+        let store = crate::io::ids::locate(&frame_dir).data;
+        std::fs::write(&store, "not toml {{{").unwrap();
+
+        let project = make_project_at(tmp.path(), "# Main\n\n## Backlog\n\n## Done\n");
+        let warnings = frontier_warnings(&check_project(&project));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].starts_with("unreadable"));
+        // Reporting must not reset it — the fix is to the file check named.
+        assert!(store.is_file());
+    }
+
+    #[test]
+    fn test_check_flags_a_reset_id_frontier() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+        let store = crate::io::ids::locate(&frame_dir).data;
+        std::fs::write(store.with_extension("toml.bak"), "old\n").unwrap();
+
+        let project = make_project_at(tmp.path(), "# Main\n\n## Backlog\n\n## Done\n");
+        let warnings = frontier_warnings(&check_project(&project));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].starts_with("reset"));
+    }
+
+    #[test]
+    fn test_check_healthy_id_frontier_is_silent() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+        crate::io::ids::reserve(&frame_dir, "M", None, 0, 1);
+
+        let project = make_project_at(tmp.path(), "# Main\n\n## Backlog\n\n## Done\n");
+        assert!(frontier_warnings(&check_project(&project)).is_empty());
     }
 
     // --- Local-only files leaking into git ---

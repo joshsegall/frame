@@ -2763,3 +2763,62 @@ fn test_deleted_ids_are_not_reissued() {
     let second = run_fr_ok(tmp.path(), &["add", "main", "next"]);
     assert_eq!(second.trim(), "M-012", "deleted number was reissued");
 }
+
+/// A reissued number that `fr clean` can't see: one holder live, one archived.
+/// Surfaced by `fr check` in human and JSON output.
+#[test]
+fn test_check_flags_a_live_id_colliding_with_an_archived_one() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    fs::create_dir_all(tmp.path().join("frame/archive")).unwrap();
+    // M-001 is live in the fixture's main track.
+    fs::write(
+        tmp.path().join("frame/archive/main.md"),
+        "# Archive — main\n\n- [x] `M-001` archived work\n  - resolved: 2025-06-01\n",
+    )
+    .unwrap();
+
+    let human = run_fr_ok(tmp.path(), &["check"]);
+    assert!(
+        human.contains("M-001 is held by 2 tasks, including an archived one"),
+        "check should flag the collision: {human}"
+    );
+    assert!(human.contains("archive/main.md"), "{human}");
+
+    let json = run_fr_ok(tmp.path(), &["check", "--json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let warnings = parsed["warnings"].as_array().unwrap();
+    let collision = warnings
+        .iter()
+        .find(|w| w["type"] == "archived_id_collision")
+        .expect("archived_id_collision warning");
+    assert_eq!(collision["task_id"], "M-001");
+    // A warning, not an error — there is no automatic repair, and this fires on
+    // data that predates the durable frontier.
+    assert_eq!(parsed["valid"], true);
+}
+
+/// A frontier store that doesn't parse is reported, not silently reset.
+#[test]
+fn test_check_flags_an_unreadable_id_frontier() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    // Outside git, the store is working-copy-local.
+    let store = tmp.path().join("frame/.ids.toml");
+    fs::write(&store, "not toml {{{").unwrap();
+
+    let human = run_fr_ok(tmp.path(), &["check"]);
+    assert!(
+        human.contains("is unreadable"),
+        "check should flag the store: {human}"
+    );
+    assert!(store.is_file(), "check must not reset the store");
+
+    // The next mint does reset it, leaving the .bak that check then reports.
+    run_fr_ok(tmp.path(), &["add", "main", "after reset"]);
+    let human = run_fr_ok(tmp.path(), &["check"]);
+    assert!(
+        human.contains("ID frontier was reset"),
+        "check should flag the leftover .bak: {human}"
+    );
+}

@@ -1,7 +1,9 @@
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "fr", about = concat!("[>] frame v", env!("CARGO_PKG_VERSION"), " - your backlog is plain text"), version)]
+// The banner stays on the bare crate version; only `--version` (and `fr info`)
+// carry the build's commit.
+#[command(name = "fr", about = concat!("[>] frame v", env!("CARGO_PKG_VERSION"), " - your backlog is plain text"), version = crate::version::LONG)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,

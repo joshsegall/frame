@@ -145,7 +145,9 @@ fr deps EFF-014
 
 Validate project integrity (read-only). Reports dangling dependencies, broken refs/specs, duplicate IDs, missing metadata, and format warnings. Also flags actor issues: this clone's token drifting from `actors.toml`, and **multiple active tokens sharing one provenance name** (a sign a machine has accumulated tokens — e.g. a git-worktree-per-session workflow — with a suggested `fr actor merge` to collapse them).
 
-It flags **working-copy-local frame files leaking into git** — `frame/.state.json`, `frame/.lock`, `frame/.recovery.log`, and `frame/.actor`. `fr init` writes all four to `.gitignore`, but only at init, so a project created before an entry existed never gets it. Check reports a file that git already **tracks** (needs `git rm --cached <path>` as well as a `.gitignore` line — ignore rules don't apply to files already in the index) and one that exists but **isn't ignored** (the next `git add -A` commits it). Committing these leaks machine-local state into shared history; the append-only recovery log also conflicts on every merge that touches it. Projects outside git are skipped.
+It flags **numbers that were handed out twice where one holder is archived** — a live task and an archived one sharing an ID, or two archived tasks sharing one. Nothing else catches this: the duplicate-ID *error* and `fr clean`'s duplicate resolution both compare live tracks only, and minting did too before the [ID frontier](architecture.md#id-frontier-durable-mint) became durable. It's a warning, not an error, because there is no automatic repair — renumber or retitle the live task by hand. It also reports an **unreadable ID frontier store** (the next mint resets it and falls back to scanning, which can't see another worktree's uncommitted tasks) and a leftover `frame-ids.toml.bak`, which means the frontier *was* reset at some point and numbers minted in that window may have been reissued. Deleting the `.bak` clears that one.
+
+It flags **working-copy-local frame files leaking into git** — `frame/.state.json`, `frame/.lock`, `frame/.recovery.log`, `frame/.actor`, and (for projects outside git, where the frontier store is working-copy-local) `frame/.ids.toml` and `frame/.ids.lock`. `fr init` writes them all to `.gitignore`, but only at init, so a project created before an entry existed never gets it. Check reports a file that git already **tracks** (needs `git rm --cached <path>` as well as a `.gitignore` line — ignore rules don't apply to files already in the index) and one that exists but **isn't ignored** (the next `git add -A` commits it). Committing these leaks machine-local state into shared history; the append-only recovery log also conflicts on every merge that touches it. Projects outside git are skipped.
 
 Finally, it warns about **task notes and inbox item bodies that leave a code fence open**. Frame itself parses these correctly — a note's extent is set by [indentation, not fence state](format.md#metadata) — but an unclosed fence makes every markdown renderer downstream (GitHub, editor previews) swallow the rest of the file into a code block. The warning names the offending opener, e.g. ` ```rust `. Fence balance follows CommonMark, so a fence carrying an info string cannot close a block: ` ```lace ` / ` ```rust ` / ` ``` ` is balanced and does *not* warn.
 
@@ -155,17 +157,22 @@ Show project identity at a glance (read-only — never claims a token):
 
 | Field      | Description                                                        |
 |------------|--------------------------------------------------------------------|
-| `version`  | `fr` crate version                                                 |
+| `version`  | `fr` crate version, plus the commit the binary was built from       |
 | `project`  | project name from `project.toml`                                   |
 | `frame_dir`| absolute path to the discovered `frame/` directory                 |
 | `actor`    | this clone's token — the literal token, `primary` (null), or `unclaimed` |
 | `tracks`   | count of active tracks                                             |
+| `frontier` | last ID number handed out per prefix in this clone's namespace, and the [frontier store](architecture.md#id-frontier-durable-mint) it came from |
 
 ```
 fr info [--json]
 ```
 
-With `--json`, the `actor` field distinguishes all three states for machine consumers: a literal token string (`"a"`), `"null"` for the primary clone, and JSON `null` when unclaimed. The JSON object also includes `shelved_tracks` and `archived_tracks` counts.
+`version` shows the build's short commit in parentheses (`0.1.6 (ad763b0)`), as does `fr --version`. Nothing else does: the `--help` banner and the JSON `version` field stay on the bare crate version, so anything parsing a version string doesn't have to cope with a suffix — the JSON reports the commit separately in `commit` (`null` when the binary wasn't built from a git checkout).
+
+`frontier` is normally invisible; it's what to look at when a minted ID isn't the number you expected. It reads `none recorded` before this clone has minted anything, and `unreadable` when the store is corrupt (which `fr check` explains).
+
+With `--json`, the `actor` field distinguishes all three states for machine consumers: a literal token string (`"a"`), `"null"` for the primary clone, and JSON `null` when unclaimed. The JSON object also includes `shelved_tracks` and `archived_tracks` counts, and an `id_frontier` object (`path`, `state`, `namespace`, and `recorded` as a prefix → number map).
 
 ## Task Creation
 

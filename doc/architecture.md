@@ -64,7 +64,9 @@ The record is written **before** the task is, so a number is spoken for from the
 
 **Failure handling**: the store is regenerable cache and every degraded path lands on the old scan-only behavior, never a wrong answer or a failed mint. Absent → empty. Unparsable → moved aside to `.bak`, empty. Unwritable, or lock contention past 5s → mint from the floor alone. Writes are temp-file + rename under a **separate, never-removed** lock file (`frame-ids.lock`): deleting the lock would let a waiter hold the lock on an unlinked inode while a newcomer locks a fresh file.
 
-**Code**: `src/io/ids.rs` (store, locking, recovery), `src/ops/ids.rs` (`Mint`, floor computation)
+**`fr check` integration**: three read-only reports, none of which mutate the store (a mint resets an unreadable one; check leaves it there so the warning is actionable). A **number handed out twice with one holder archived** — invisible to the duplicate-ID error and to `fr clean`, both of which compare live tracks only. An **unreadable store**. And a leftover **`frame-ids.toml.bak`**, meaning the frontier was reset once, so numbers from that window may have been reissued. `fr info` shows the recorded frontier per prefix and the store's path.
+
+**Code**: `src/io/ids.rs` (store, locking, recovery, health probes), `src/ops/ids.rs` (`Mint`, floor computation), `src/ops/check.rs` (`check_archived_id_collisions`, `check_id_frontier`)
 
 ## TUI State Model
 

@@ -5,3 +5,4 @@ pub mod ops;
 pub mod parse;
 pub mod tui;
 pub mod util;
+pub mod version;

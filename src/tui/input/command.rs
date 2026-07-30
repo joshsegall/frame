@@ -807,6 +807,23 @@ pub(super) fn palette_check_project(app: &mut App) {
                         index, title, fence
                     )
                 }
+                check::CheckWarning::ArchivedIdCollision { task_id, locations } => {
+                    format!(
+                        "  {} held by {} tasks incl. an archived one: {}",
+                        task_id,
+                        locations.len(),
+                        locations.join(", ")
+                    )
+                }
+                check::CheckWarning::IdFrontierUnreadable { path, detail } => {
+                    format!("  ID frontier {} is unreadable ({})", path, detail)
+                }
+                check::CheckWarning::IdFrontierWasReset { path } => {
+                    format!(
+                        "  ID frontier was reset once ({}) — IDs from that window may collide",
+                        path
+                    )
+                }
             };
             lines.push(Line::from(Span::styled(msg, yellow)));
         }

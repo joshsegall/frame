@@ -170,17 +170,32 @@ impl Frontier {
     }
 }
 
-/// Read the store. An absent file is empty; an unparsable one is moved aside to
-/// `<name>.bak` and treated as empty, so a corrupt store costs the frontier but
-/// never a failed mint.
-fn read(path: &Path) -> Frontier {
+/// Where an unreadable store gets moved aside to. Left in place as the only
+/// lasting evidence that a frontier was lost; `fr check` reports it.
+fn backup_path(data: &Path) -> PathBuf {
+    data.with_extension("toml.bak")
+}
+
+/// Parse the store without touching it. `Ok(None)` means there is no store yet;
+/// `Err` carries the parse failure for reporting.
+fn parse(path: &Path) -> Result<Option<Frontier>, String> {
     let Ok(text) = fs::read_to_string(path) else {
-        return Frontier::default();
+        return Ok(None);
     };
-    match toml::from_str::<Frontier>(&text) {
-        Ok(frontier) => frontier,
+    toml::from_str::<Frontier>(&text)
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
+/// Read the store for a mint. An absent store is empty; an unparsable one is
+/// moved aside to `<name>.bak` and treated as empty, so a corrupt store costs the
+/// frontier but never a failed mint.
+fn read_or_reset(path: &Path) -> Frontier {
+    match parse(path) {
+        Ok(Some(frontier)) => frontier,
+        Ok(None) => Frontier::default(),
         Err(_) => {
-            let _ = fs::rename(path, path.with_extension("toml.bak"));
+            let _ = fs::rename(path, backup_path(path));
             Frontier::default()
         }
     }
@@ -201,11 +216,78 @@ fn write(path: &Path, frontier: &Frontier) {
 // ---------------------------------------------------------------------------
 
 /// The highest number recorded for a namespace, or 0 when nothing is recorded
-/// (no store, no entry, or an unreadable store). Read-only: takes no lock and
-/// hands out nothing.
+/// (no store, no entry, or an unreadable store). Read-only: takes no lock, hands
+/// out nothing, and leaves even an unreadable store where it is.
 pub fn recorded(frame_dir: &Path, prefix: &str, token: Option<&Token>) -> u32 {
     let at = locate(frame_dir);
-    read(&at.data).get(&at.project, prefix, namespace_key(token))
+    parse(&at.data)
+        .ok()
+        .flatten()
+        .map(|f| f.get(&at.project, prefix, namespace_key(token)))
+        .unwrap_or(0)
+}
+
+/// Every prefix with a recorded frontier in `token`'s namespace, highest number
+/// handed out for each. Read-only, for `fr info`.
+pub fn recorded_by_prefix(frame_dir: &Path, token: Option<&Token>) -> BTreeMap<String, u32> {
+    let at = locate(frame_dir);
+    let namespace = namespace_key(token);
+    let Ok(Some(frontier)) = parse(&at.data) else {
+        return BTreeMap::new();
+    };
+    frontier
+        .projects
+        .get(&at.project)
+        .map(|prefixes| {
+            prefixes
+                .iter()
+                .filter_map(|(prefix, namespaces)| {
+                    namespaces.get(namespace).map(|n| (prefix.clone(), *n))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What state the store is in. Read-only — unlike a mint, which resets an
+/// unparsable store, this reports it so `fr check` can say so before the frontier
+/// is lost.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreState {
+    /// Nothing recorded yet: minting relies on the scan floor alone. Normal for a
+    /// project that hasn't minted since the store existed.
+    Absent,
+    /// Parses cleanly.
+    Ok,
+    /// Present but unparsable. The next mint moves it aside and the recorded
+    /// frontier is lost, dropping back to scan-only minting.
+    Unparsable(String),
+}
+
+/// The store's location and condition, for `fr check`.
+#[derive(Debug, Clone)]
+pub struct StoreHealth {
+    pub path: PathBuf,
+    pub state: StoreState,
+    /// A `.bak` left behind by an earlier reset — the frontier was lost at least
+    /// once, so numbers may have been reissued in that window.
+    pub reset_backup: Option<PathBuf>,
+}
+
+/// Inspect the store without modifying it.
+pub fn health(frame_dir: &Path) -> StoreHealth {
+    let at = locate(frame_dir);
+    let state = match parse(&at.data) {
+        Ok(Some(_)) => StoreState::Ok,
+        Ok(None) => StoreState::Absent,
+        Err(detail) => StoreState::Unparsable(detail),
+    };
+    let backup = backup_path(&at.data);
+    StoreHealth {
+        path: at.data,
+        state,
+        reset_backup: backup.is_file().then_some(backup),
+    }
 }
 
 /// Reserve `n` consecutive numbers above `floor` for the given namespace and
@@ -228,7 +310,7 @@ pub fn reserve(frame_dir: &Path, prefix: &str, token: Option<&Token>, floor: u32
         return floor.max(recorded(frame_dir, prefix, token)) + 1;
     };
 
-    let mut frontier = read(&at.data);
+    let mut frontier = read_or_reset(&at.data);
     let start = floor.max(frontier.get(&at.project, prefix, namespace)) + 1;
     frontier.version = FORMAT_VERSION;
     frontier.raise(&at.project, prefix, namespace, start + n - 1);
@@ -360,6 +442,62 @@ mod tests {
         assert_eq!(at.data, frame.join(LOCAL_STORE));
         assert_eq!(at.lock, frame.join(LOCAL_LOCK));
         assert_eq!(at.project, ".");
+    }
+
+    #[test]
+    fn health_reports_absent_ok_and_unparsable_without_touching_the_store() {
+        let tmp = TempDir::new().unwrap();
+        let frame = frame_dir(&tmp);
+
+        assert_eq!(health(&frame).state, StoreState::Absent);
+        assert!(health(&frame).reset_backup.is_none());
+
+        reserve(&frame, "T", None, 0, 1);
+        assert_eq!(health(&frame).state, StoreState::Ok);
+
+        let at = locate(&frame);
+        fs::write(&at.data, "not toml {{{").unwrap();
+        assert!(matches!(health(&frame).state, StoreState::Unparsable(_)));
+        // Probing must not reset it — that's a mint's job, and check needs to
+        // report the problem while it is still there.
+        assert!(at.data.is_file());
+        assert!(!backup_path(&at.data).exists());
+        assert_eq!(recorded(&frame, "T", None), 0);
+        assert!(recorded_by_prefix(&frame, None).is_empty());
+    }
+
+    #[test]
+    fn health_surfaces_a_leftover_reset_backup() {
+        let tmp = TempDir::new().unwrap();
+        let frame = frame_dir(&tmp);
+        reserve(&frame, "T", None, 0, 5);
+        let at = locate(&frame);
+        fs::write(&at.data, "not toml {{{").unwrap();
+
+        // A mint resets it, leaving the .bak as evidence the frontier was lost.
+        reserve(&frame, "T", None, 0, 1);
+        let health = health(&frame);
+        assert_eq!(health.state, StoreState::Ok);
+        assert_eq!(health.reset_backup, Some(backup_path(&at.data)));
+    }
+
+    #[test]
+    fn recorded_by_prefix_lists_one_namespace() {
+        let tmp = TempDir::new().unwrap();
+        let frame = frame_dir(&tmp);
+        let token = Token::new("c").unwrap();
+        reserve(&frame, "DEM", None, 0, 4);
+        reserve(&frame, "ENG", None, 0, 2);
+        reserve(&frame, "DEM", Some(&token), 0, 9);
+
+        let null_ns = recorded_by_prefix(&frame, None);
+        assert_eq!(null_ns.get("DEM"), Some(&4));
+        assert_eq!(null_ns.get("ENG"), Some(&2));
+        assert_eq!(null_ns.len(), 2);
+
+        let c_ns = recorded_by_prefix(&frame, Some(&token));
+        assert_eq!(c_ns.get("DEM"), Some(&9));
+        assert_eq!(c_ns.len(), 1);
     }
 
     #[test]

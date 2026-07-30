@@ -883,9 +883,18 @@ fn cmd_info(json: bool) -> Result<(), Box<dyn std::error::Error>> {
     // Non-claiming read of this clone's token.
     let token = actors::read_actor_token(frame_dir);
 
-    let version = env!("CARGO_PKG_VERSION");
     let name = &project.config.project.name;
     let frame_dir_str = frame_dir.display().to_string();
+
+    // The ID frontier this clone mints against, in its own namespace: what the
+    // durable store has recorded, per track prefix. Read-only.
+    // `"null"` (the primary) and an unclaimed clone both map to the null
+    // namespace; a letter token maps to its own.
+    let namespace = token
+        .as_deref()
+        .and_then(crate::model::task_id::actor_namespace);
+    let frontier_health = crate::io::ids::health(frame_dir);
+    let frontier = crate::io::ids::recorded_by_prefix(frame_dir, namespace.as_ref());
 
     let active = project
         .config
@@ -903,8 +912,24 @@ fn cmd_info(json: bool) -> Result<(), Box<dyn std::error::Error>> {
 
     if json {
         #[derive(serde::Serialize)]
+        struct FrontierJson {
+            /// The durable store this clone mints against.
+            path: String,
+            /// `ok`, `absent`, or `unparsable`.
+            state: &'static str,
+            /// `null` for the primary/unclaimed namespace, else the token.
+            namespace: String,
+            /// Prefix → highest number handed out in that namespace.
+            recorded: std::collections::BTreeMap<String, u32>,
+        }
+        #[derive(serde::Serialize)]
         struct InfoJson {
+            /// Bare crate version, so consumers can parse it as-is. The build's
+            /// commit is a separate field.
             version: String,
+            /// Short commit this binary was built from, or `null` when it wasn't
+            /// built from a git checkout.
+            commit: Option<String>,
             project: String,
             frame_dir: String,
             /// Literal token (`"a"`), `"null"` for primary, or JSON `null` when
@@ -913,21 +938,35 @@ fn cmd_info(json: bool) -> Result<(), Box<dyn std::error::Error>> {
             tracks: usize,
             shelved_tracks: usize,
             archived_tracks: usize,
+            id_frontier: FrontierJson,
         }
         let info = InfoJson {
-            version: version.to_string(),
+            version: crate::version::VERSION.to_string(),
+            commit: crate::version::COMMIT.map(str::to_string),
             project: name.clone(),
             frame_dir: frame_dir_str,
             actor: token.clone(),
             tracks: active,
             shelved_tracks: shelved,
             archived_tracks: archived,
+            id_frontier: FrontierJson {
+                path: frontier_health.path.display().to_string(),
+                state: match frontier_health.state {
+                    crate::io::ids::StoreState::Ok => "ok",
+                    crate::io::ids::StoreState::Absent => "absent",
+                    crate::io::ids::StoreState::Unparsable(_) => "unparsable",
+                },
+                namespace: namespace
+                    .as_ref()
+                    .map_or_else(|| "null".to_string(), |t| t.as_str().to_string()),
+                recorded: frontier,
+            },
         };
         println!("{}", serde_json::to_string_pretty(&info)?);
         return Ok(());
     }
 
-    println!("{:<10} {}", "version", version);
+    println!("{:<10} {}", "version", crate::version::LONG);
     println!("{:<10} {}", "project", name);
     println!("{:<10} {}", "frame_dir", frame_dir_str);
     println!("{:<10} {}", "actor", actors::actor_label(token.as_deref()));
@@ -939,6 +978,25 @@ fn cmd_info(json: bool) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         println!("{:<10} {}", "tracks", active);
     }
+
+    // The durable ID frontier: the last number handed out per prefix in this
+    // clone's namespace. Normally invisible, and the thing to look at when a
+    // minted ID isn't the number you expected.
+    let summary = match &frontier_health.state {
+        crate::io::ids::StoreState::Unparsable(_) => "unreadable".to_string(),
+        _ if frontier.is_empty() => "none recorded".to_string(),
+        _ => frontier
+            .iter()
+            .map(|(prefix, n)| format!("{} {}", prefix, n))
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
+    println!(
+        "{:<10} {}  ({})",
+        "frontier",
+        summary,
+        frontier_health.path.display()
+    );
     Ok(())
 }
 
@@ -1300,6 +1358,26 @@ fn cmd_check(json: bool) -> Result<(), Box<dyn std::error::Error>> {
                         println!(
                             "  inbox item {} (\"{}\") leaves a code fence open ({}) — frame parses it fine, but markdown renderers will treat the rest of the file as code",
                             index, title, fence
+                        );
+                    }
+                    check::CheckWarning::ArchivedIdCollision { task_id, locations } => {
+                        println!(
+                            "  {} is held by {} tasks, including an archived one: {} — the number was handed out twice. Retitle or renumber the live task by hand; `fr clean` only dedups live tracks",
+                            task_id,
+                            locations.len(),
+                            locations.join(", ")
+                        );
+                    }
+                    check::CheckWarning::IdFrontierUnreadable { path, detail } => {
+                        println!(
+                            "  the ID frontier at {} is unreadable ({}) — the next mint resets it and falls back to scanning, which can't see another worktree's uncommitted tasks. Fix or delete the file",
+                            path, detail
+                        );
+                    }
+                    check::CheckWarning::IdFrontierWasReset { path } => {
+                        println!(
+                            "  {} shows the ID frontier was reset after becoming unreadable — numbers minted in that window may have been reissued. Delete the file to clear this warning",
+                            path
                         );
                     }
                 }
