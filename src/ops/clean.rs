@@ -822,29 +822,16 @@ fn archive_done_tasks(project: &mut Project, result: &mut CleanResult) {
         // The top `retain` entries stay; the rest get archived
         let retain_indices: HashSet<usize> = indexed.iter().take(retain).map(|(i, _)| *i).collect();
 
-        // Serialize only the non-retained tasks for the archive file
         let tasks_to_archive: Vec<&Task> = done_tasks
             .iter()
             .enumerate()
             .filter(|(i, _)| !retain_indices.contains(i))
             .map(|(_, t)| t)
             .collect();
-        let archive_content = {
-            let lines = crate::parse::serialize_tasks(
-                &tasks_to_archive
-                    .iter()
-                    .copied()
-                    .cloned()
-                    .collect::<Vec<_>>(),
-                0,
-            );
-            lines.join("\n")
-        };
-        if archive_content.is_empty() {
+        if tasks_to_archive.is_empty() {
             continue;
         }
 
-        // Build archive file content
         let archive_path = project
             .frame_dir
             .join("archive")
@@ -853,19 +840,67 @@ fn archive_done_tasks(project: &mut Project, result: &mut CleanResult) {
             let _ = std::fs::create_dir_all(parent);
         }
         let existing = std::fs::read_to_string(&archive_path).unwrap_or_default();
-        let new_content = if existing.is_empty() {
-            format!("# Archive — {}\n\n{}", track_id, archive_content)
-        } else {
-            format!("{}\n{}", existing.trim_end(), archive_content)
-        };
 
-        // Write archive — if this fails, leave tasks in place
-        if crate::io::recovery::atomic_write(&archive_path, new_content.as_bytes()).is_err() {
-            eprintln!(
-                "warning: could not write archive for {}, skipping",
-                track_id
+        // Appending is not idempotent, so a task the archive already holds must
+        // not be written a second time. That state is reachable: the archive is
+        // written *before* the track is updated (below), deliberately, so a task
+        // is never lost if the second write doesn't land — but if it doesn't (a
+        // crash, or a `git checkout`/`reset` reverting the track file), the task
+        // stays in Done and the next clean would archive it again.
+        let already_archived = archived_task_ids(&existing);
+        let (fresh, duplicates): (Vec<&Task>, Vec<&Task>) =
+            tasks_to_archive.iter().partition(|task| {
+                task.id
+                    .as_ref()
+                    .is_none_or(|id| !already_archived.contains(id.as_str()))
+            });
+
+        // The live copy of an already-archived task is about to be dropped from
+        // the track. It should be identical to the archived one, but if it was
+        // edited after that first write those edits would vanish silently — so
+        // preserve it where anything lost goes.
+        for task in &duplicates {
+            let id = task.id.as_ref().map(|i| i.to_string()).unwrap_or_default();
+            crate::io::recovery::log_recovery(
+                &project.frame_dir,
+                crate::io::recovery::RecoveryEntry {
+                    timestamp: chrono::Utc::now(),
+                    category: crate::io::recovery::RecoveryCategory::Conflict,
+                    description: format!(
+                        "{} was already in archive/{}.md — live copy removed from the track, not appended again",
+                        id, track_id
+                    ),
+                    fields: vec![
+                        ("track".to_string(), track_id.clone()),
+                        ("task".to_string(), id),
+                    ],
+                    body: crate::parse::serialize_tasks(&[(*task).clone()], 0).join("\n"),
+                },
             );
-            continue;
+        }
+
+        let archive_content =
+            crate::parse::serialize_tasks(&fresh.iter().copied().cloned().collect::<Vec<_>>(), 0)
+                .join("\n");
+
+        // Nothing new to append (every task was already archived): skip the
+        // write, but still extract below — leaving them in Done would make every
+        // future clean retry the same no-op.
+        if !archive_content.is_empty() {
+            let new_content = if existing.is_empty() {
+                format!("# Archive — {}\n\n{}", track_id, archive_content)
+            } else {
+                format!("{}\n{}", existing.trim_end(), archive_content)
+            };
+
+            // Write archive — if this fails, leave tasks in place
+            if crate::io::recovery::atomic_write(&archive_path, new_content.as_bytes()).is_err() {
+                eprintln!(
+                    "warning: could not write archive for {}, skipping",
+                    track_id
+                );
+                continue;
+            }
         }
 
         // Only NOW extract non-retained tasks from the Done section
@@ -878,6 +913,25 @@ fn archive_done_tasks(project: &mut Project, result: &mut CleanResult) {
             });
         }
     }
+}
+
+/// The task IDs an archive file already holds, read straight from its task lines
+/// (`- [x] \`ID\` …`) rather than parsed into tasks — this only needs to know
+/// which IDs are present, and a raw scan can't be thrown off by note bodies or
+/// hand-editing.
+fn archived_task_ids(existing: &str) -> HashSet<String> {
+    existing
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("- [") {
+                return None;
+            }
+            let (_, after) = trimmed.split_once('`')?;
+            let (id, _) = after.split_once('`')?;
+            (!id.is_empty()).then(|| id.to_string())
+        })
+        .collect()
 }
 
 /// Remove done tasks from the track EXCEPT those at the given indices.
@@ -1401,6 +1455,143 @@ mod tests {
         // Archive file should exist
         let archive_path = root.join("frame/archive/main.md");
         assert!(archive_path.exists());
+    }
+
+    /// A task the archive already holds must not be appended twice.
+    ///
+    /// Reachable because the archive is written before the track is updated: if
+    /// that second write is lost (crash, or a git revert of the track file), the
+    /// task is still in Done and the next clean would archive it again. This is
+    /// what produced a doubled archive in a real project.
+    #[test]
+    fn test_archive_does_not_duplicate_an_already_archived_task() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("frame/archive")).unwrap();
+
+        // The state left behind by an interrupted clean: already in the archive,
+        // still in Done.
+        std::fs::write(
+            root.join("frame/archive/main.md"),
+            "# Archive \u{2014} main\n\n- [x] `M-001` First\n  - resolved: 2025-05-01\n",
+        )
+        .unwrap();
+
+        let track = parse_track(
+            "\
+# Main
+
+## Backlog
+
+## Done
+
+- [x] `M-001` First
+  - added: 2025-01-01
+  - resolved: 2025-05-01
+- [x] `M-002` Second
+  - added: 2025-01-02
+  - resolved: 2025-05-02
+",
+        );
+
+        let mut config = make_config(vec![("main", "M")]);
+        config.clean.done_threshold = 1;
+        config.clean.done_retain = 0;
+
+        let mut project = Project {
+            root: root.to_path_buf(),
+            frame_dir: root.join("frame"),
+            config,
+            tracks: vec![("main".to_string(), track)],
+            inbox: None,
+        };
+
+        clean_project(&mut project, IdScope::Mint(None));
+
+        let archive = std::fs::read_to_string(root.join("frame/archive/main.md")).unwrap();
+        assert_eq!(
+            archive.matches("`M-001`").count(),
+            1,
+            "M-001 was appended twice:\n{archive}"
+        );
+        assert_eq!(
+            archive.matches("`M-002`").count(),
+            1,
+            "M-002 should be archived once:\n{archive}"
+        );
+        // Both leave the track either way — leaving the duplicate in Done would
+        // make every future clean retry it.
+        assert!(project.tracks[0].1.done().is_empty());
+
+        // The live copy of the skipped task is preserved where lost data goes.
+        let log = std::fs::read_to_string(root.join("frame/.recovery.log")).unwrap();
+        assert!(log.contains("M-001"), "recovery log should hold it:\n{log}");
+        assert!(log.contains("already in archive/main.md"), "{log}");
+    }
+
+    /// Every task already archived: nothing to append, but Done still drains.
+    #[test]
+    fn test_archive_all_duplicates_still_clears_done() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("frame/archive")).unwrap();
+        let original = "# Archive \u{2014} main\n\n- [x] `M-001` First\n  - resolved: 2025-05-01\n";
+        std::fs::write(root.join("frame/archive/main.md"), original).unwrap();
+
+        let track = parse_track(
+            "\
+# Main
+
+## Backlog
+
+## Done
+
+- [x] `M-001` First
+  - added: 2025-01-01
+  - resolved: 2025-05-01
+",
+        );
+
+        let mut config = make_config(vec![("main", "M")]);
+        config.clean.done_threshold = 0;
+        config.clean.done_retain = 0;
+
+        let mut project = Project {
+            root: root.to_path_buf(),
+            frame_dir: root.join("frame"),
+            config,
+            tracks: vec![("main".to_string(), track)],
+            inbox: None,
+        };
+
+        clean_project(&mut project, IdScope::Mint(None));
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("frame/archive/main.md")).unwrap(),
+            original,
+            "archive should be untouched when there is nothing new to append"
+        );
+        assert!(project.tracks[0].1.done().is_empty());
+    }
+
+    #[test]
+    fn test_archived_task_ids_reads_task_lines_only() {
+        let ids = archived_task_ids(
+            "\
+# Archive \u{2014} main
+
+- [x] `M-001` First
+  - note:
+    A note mentioning `M-999` in prose, and a fake `- [x] `M-998`` line.
+  - [x] `M-001.1` Subtask
+- [x] `M-a7` Another namespace
+",
+        );
+        assert!(ids.contains("M-001"));
+        assert!(ids.contains("M-001.1"), "subtask lines count too");
+        assert!(ids.contains("M-a7"));
+        assert!(!ids.contains("M-999"), "prose is not a task line");
+        assert_eq!(ids.len(), 3, "{ids:?}");
     }
 
     #[test]

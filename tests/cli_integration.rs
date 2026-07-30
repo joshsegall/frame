@@ -2780,22 +2780,68 @@ fn test_check_flags_a_live_id_colliding_with_an_archived_one() {
 
     let human = run_fr_ok(tmp.path(), &["check"]);
     assert!(
-        human.contains("M-001 is held by 2 tasks, including an archived one"),
-        "check should flag the collision: {human}"
+        human.contains("M-001 is live in main but is also archived in archive/main.md"),
+        "check should flag the reissue: {human}"
     );
-    assert!(human.contains("archive/main.md"), "{human}");
+    assert!(human.contains("the number was reissued"), "{human}");
 
     let json = run_fr_ok(tmp.path(), &["check", "--json"]);
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
     let warnings = parsed["warnings"].as_array().unwrap();
-    let collision = warnings
+    let reissue = warnings
         .iter()
-        .find(|w| w["type"] == "archived_id_collision")
-        .expect("archived_id_collision warning");
-    assert_eq!(collision["task_id"], "M-001");
+        .find(|w| w["type"] == "id_reissued_after_archive")
+        .expect("id_reissued_after_archive warning");
+    assert_eq!(reissue["task_id"], "M-001");
+    assert_eq!(reissue["tracks"][0], "main");
+    assert_eq!(reissue["archives"][0], "archive/main.md");
     // A warning, not an error — there is no automatic repair, and this fires on
     // data that predates the durable frontier.
     assert_eq!(parsed["valid"], true);
+}
+
+/// The Lace shape: one archive file holding the same task twice, no live task
+/// involved. Reported as duplicated *history* — not as a reissued number, and
+/// without naming the same file twice as if two files were involved.
+#[test]
+fn test_check_flags_a_duplicated_archive_entry() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    fs::create_dir_all(tmp.path().join("frame/archive")).unwrap();
+    // M-900 is in no live track; the archive holds it twice.
+    fs::write(
+        tmp.path().join("frame/archive/main.md"),
+        "# Archive — main\n\n- [x] `M-900` archived work\n  - resolved: 2025-06-01\n- [x] `M-900` archived work\n  - resolved: 2025-06-01\n",
+    )
+    .unwrap();
+
+    let human = run_fr_ok(tmp.path(), &["check"]);
+    assert!(
+        human.contains("M-900 appears 2 times in archive/main.md and in no live track"),
+        "check should flag duplicated history: {human}"
+    );
+    assert!(
+        human.contains("no number was reissued"),
+        "and must not claim a reissue: {human}"
+    );
+
+    let json = run_fr_ok(tmp.path(), &["check", "--json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let warnings = parsed["warnings"].as_array().unwrap();
+    let duplicate = warnings
+        .iter()
+        .find(|w| w["type"] == "duplicate_archived_id")
+        .expect("duplicate_archived_id warning");
+    assert_eq!(duplicate["task_id"], "M-900");
+    assert_eq!(duplicate["total"], 2);
+    // One file, named once.
+    assert_eq!(duplicate["archives"].as_array().unwrap().len(), 1);
+    assert!(
+        !warnings
+            .iter()
+            .any(|w| w["type"] == "id_reissued_after_archive"),
+        "must not also report a reissue: {json}"
+    );
 }
 
 /// A frontier store that doesn't parse is reported, not silently reset.

@@ -100,19 +100,40 @@ pub enum CheckWarning {
         /// The unclosed opening fence, trimmed (e.g. ```` ```rust ````).
         fence: String,
     },
-    /// One task ID held by two tasks, at least one of them **archived** — a
-    /// number that was handed out twice. `locations` lists every holder: track
-    /// IDs for live tasks, `archive/…` paths for archived ones.
+    /// A **live** task holding an ID an **archived** task already has: the number
+    /// was reissued after the original left the live track.
     ///
     /// Neither the duplicate-ID error nor `fr clean`'s duplicate resolution sees
-    /// this: both compare live tracks only. Minting used to as well, so an
-    /// archived number could be reissued silently (fixed by the durable frontier
-    /// in [`crate::io::ids`] — this catches what happened before, and any archive
-    /// edited by hand since).
-    #[serde(rename = "archived_id_collision")]
-    ArchivedIdCollision {
+    /// this — both compare live tracks only — and minting used to as well, which
+    /// is how a number could be reissued silently. The durable frontier in
+    /// [`crate::io::ids`] closed that; this catches what happened before it, and
+    /// anything hand-edited since. There is no automatic repair: renumbering a
+    /// live task rewrites an ID other work may already reference.
+    #[serde(rename = "id_reissued_after_archive")]
+    IdReissuedAfterArchive {
         task_id: String,
-        locations: Vec<String>,
+        /// Live track(s) holding it.
+        tracks: Vec<String>,
+        /// Archive paths also holding it.
+        archives: Vec<String>,
+    },
+    /// One task ID appearing more than once **inside the archives**, with no live
+    /// task involved: the same task's history was written twice, not a number
+    /// handed out twice.
+    ///
+    /// `fr clean` appends to an archive *before* removing the tasks from the
+    /// track, so nothing is lost if the second write doesn't land — but until
+    /// that append became idempotent, a lost track update meant the next clean
+    /// appended the same batch again. Deduplicating is safe and manual: the
+    /// copies are historical records, and nothing but this check reads them.
+    #[serde(rename = "duplicate_archived_id")]
+    DuplicateArchivedId {
+        task_id: String,
+        /// How many times the ID appears across the archives.
+        total: usize,
+        /// The distinct archive paths involved (one path when a single file holds
+        /// every copy, which is the usual shape).
+        archives: Vec<String>,
     },
     /// The durable ID frontier store exists but doesn't parse. The next mint
     /// moves it aside and falls back to scanning, which cannot see another
@@ -570,12 +591,13 @@ fn find_duplicate_ids(project: &Project) -> Vec<(String, Vec<String>)> {
 // ID frontier and archive collisions
 // ---------------------------------------------------------------------------
 
-/// Flag task IDs held by two tasks where at least one is archived.
+/// Flag task IDs involving an archive more than once, split by which of two very
+/// different problems it is: a number **reissued** while an archived task still
+/// holds it, or the same task's history **duplicated** inside the archives.
 ///
 /// [`find_duplicate_ids`] compares live tracks against each other, and so does
-/// `fr clean`'s duplicate resolution — an archived task holding the same number as
-/// a live one is invisible to both. That is exactly what a reissued number looks
-/// like after `fr clean` archived the original.
+/// `fr clean`'s duplicate resolution — anything an archive holds is invisible to
+/// both.
 fn check_archived_id_collisions(project: &Project, result: &mut CheckResult) {
     use std::collections::HashMap;
 
@@ -593,22 +615,41 @@ fn check_archived_id_collisions(project: &Project, result: &mut CheckResult) {
         collect_id_locations(&tasks, &label, &mut archived);
     }
 
-    // Only IDs present in an archive can be reported here; a live-only duplicate
-    // is already a `DuplicateId` error.
+    // Only IDs an archive holds are reported here; a live-only duplicate is
+    // already a `DuplicateId` error.
     let mut ids: Vec<&String> = archived.keys().collect();
     ids.sort();
     for id in ids {
         let in_archives = &archived[id];
-        let mut locations = live.get(id).cloned().unwrap_or_default();
-        if locations.len() + in_archives.len() < 2 {
-            continue;
+        let in_tracks = live.get(id).cloned().unwrap_or_default();
+
+        if !in_tracks.is_empty() {
+            // A live task and an archived one share the number.
+            result.warnings.push(CheckWarning::IdReissuedAfterArchive {
+                task_id: id.clone(),
+                tracks: in_tracks,
+                archives: dedup_sorted(in_archives),
+            });
+        } else if in_archives.len() > 1 {
+            // Archives only: the same task was archived more than once. The
+            // repeated path is the point, so report the count and the distinct
+            // files rather than the same name twice.
+            result.warnings.push(CheckWarning::DuplicateArchivedId {
+                task_id: id.clone(),
+                total: in_archives.len(),
+                archives: dedup_sorted(in_archives),
+            });
         }
-        locations.extend(in_archives.iter().cloned());
-        result.warnings.push(CheckWarning::ArchivedIdCollision {
-            task_id: id.clone(),
-            locations,
-        });
     }
+}
+
+/// The distinct entries of `labels`, sorted — several copies in one archive file
+/// collapse to that one path.
+fn dedup_sorted(labels: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = labels.to_vec();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Every archived task list, each labelled by the path it came from:
@@ -732,21 +773,40 @@ mod tests {
 
     // --- Archived-ID collisions and the ID frontier ---
 
-    fn archived_id_warnings(result: &CheckResult) -> Vec<(String, Vec<String>)> {
+    /// (task_id, tracks, archives) for each reissued-number warning.
+    fn reissue_warnings(result: &CheckResult) -> Vec<(String, Vec<String>, Vec<String>)> {
         result
             .warnings
             .iter()
             .filter_map(|w| match w {
-                CheckWarning::ArchivedIdCollision { task_id, locations } => {
-                    Some((task_id.clone(), locations.clone()))
-                }
+                CheckWarning::IdReissuedAfterArchive {
+                    task_id,
+                    tracks,
+                    archives,
+                } => Some((task_id.clone(), tracks.clone(), archives.clone())),
                 _ => None,
             })
             .collect()
     }
 
-    /// A live task holding a number an archived task already has — what a
-    /// reissued number looks like after `fr clean` archived the original.
+    /// (task_id, total, archives) for each duplicated-archive-entry warning.
+    fn duplicate_archive_warnings(result: &CheckResult) -> Vec<(String, usize, Vec<String>)> {
+        result
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                CheckWarning::DuplicateArchivedId {
+                    task_id,
+                    total,
+                    archives,
+                } => Some((task_id.clone(), *total, archives.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A live task holding a number an archived task already has: the number was
+    /// reissued after the original was archived.
     #[test]
     fn test_check_live_id_colliding_with_an_archived_one() {
         let tmp = TempDir::new().unwrap();
@@ -762,20 +822,47 @@ mod tests {
             tmp.path(),
             "# Main\n\n## Backlog\n\n- [ ] `M-005` reissued\n  - added: 2025-07-01\n\n## Done\n",
         );
-        let warnings = archived_id_warnings(&check_project(&project));
+        let result = check_project(&project);
         assert_eq!(
-            warnings,
+            reissue_warnings(&result),
             vec![(
                 "M-005".to_string(),
-                vec!["main".to_string(), "archive/main.md".to_string()]
+                vec!["main".to_string()],
+                vec!["archive/main.md".to_string()]
             )]
         );
+        // Not the duplicated-history problem.
+        assert!(duplicate_archive_warnings(&result).is_empty());
     }
 
-    /// Two archived tasks sharing a number: no live task involved, still a
-    /// number handed out twice.
+    /// The same task archived twice into one file — duplicated history, not a
+    /// reissued number. The repeated path collapses to one entry with a count,
+    /// rather than being listed twice as if two different files held it.
     #[test]
-    fn test_check_collision_between_two_archives() {
+    fn test_check_duplicate_entry_within_one_archive() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(frame_dir.join("archive")).unwrap();
+        std::fs::write(
+            frame_dir.join("archive/main.md"),
+            "# Archive \u{2014} main\n\n- [x] `M-007` done\n  - resolved: 2025-06-01\n- [x] `M-007` done\n  - resolved: 2025-06-01\n",
+        )
+        .unwrap();
+
+        let project = make_project_at(tmp.path(), "# Main\n\n## Backlog\n\n## Done\n");
+        let result = check_project(&project);
+        assert_eq!(
+            duplicate_archive_warnings(&result),
+            vec![("M-007".to_string(), 2, vec!["archive/main.md".to_string()])]
+        );
+        // No live task is involved, so nothing was reissued.
+        assert!(reissue_warnings(&result).is_empty());
+    }
+
+    /// One ID across two different archive files: still duplicated history, and
+    /// both paths are named.
+    #[test]
+    fn test_check_duplicate_entry_across_two_archives() {
         let tmp = TempDir::new().unwrap();
         let frame_dir = tmp.path().join("frame");
         std::fs::create_dir_all(frame_dir.join("archive/_tracks")).unwrap();
@@ -791,10 +878,18 @@ mod tests {
         .unwrap();
 
         let project = make_project_at(tmp.path(), "# Main\n\n## Backlog\n\n## Done\n");
-        let warnings = archived_id_warnings(&check_project(&project));
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert_eq!(warnings[0].0, "M-007");
-        assert_eq!(warnings[0].1.len(), 2);
+        let warnings = duplicate_archive_warnings(&check_project(&project));
+        assert_eq!(
+            warnings,
+            vec![(
+                "M-007".to_string(),
+                2,
+                vec![
+                    "archive/_tracks/old.md".to_string(),
+                    "archive/main.md".to_string()
+                ]
+            )]
+        );
     }
 
     /// Distinct namespaces are distinct IDs: `M-a5` archived does not collide
@@ -814,7 +909,9 @@ mod tests {
             tmp.path(),
             "# Main\n\n## Backlog\n\n- [ ] `M-005` mine\n\n## Done\n",
         );
-        assert!(archived_id_warnings(&check_project(&project)).is_empty());
+        let result = check_project(&project);
+        assert!(reissue_warnings(&result).is_empty());
+        assert!(duplicate_archive_warnings(&result).is_empty());
     }
 
     /// An archive holding a number nothing else uses is just history.
@@ -833,7 +930,9 @@ mod tests {
             tmp.path(),
             "# Main\n\n## Backlog\n\n- [ ] `M-009` current\n\n## Done\n",
         );
-        assert!(archived_id_warnings(&check_project(&project)).is_empty());
+        let result = check_project(&project);
+        assert!(reissue_warnings(&result).is_empty());
+        assert!(duplicate_archive_warnings(&result).is_empty());
     }
 
     fn frontier_warnings(result: &CheckResult) -> Vec<String> {

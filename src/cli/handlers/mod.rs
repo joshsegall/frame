@@ -1360,12 +1360,28 @@ fn cmd_check(json: bool) -> Result<(), Box<dyn std::error::Error>> {
                             index, title, fence
                         );
                     }
-                    check::CheckWarning::ArchivedIdCollision { task_id, locations } => {
+                    check::CheckWarning::IdReissuedAfterArchive {
+                        task_id,
+                        tracks,
+                        archives,
+                    } => {
                         println!(
-                            "  {} is held by {} tasks, including an archived one: {} — the number was handed out twice. Retitle or renumber the live task by hand; `fr clean` only dedups live tracks",
+                            "  {} is live in {} but is also archived in {} — the number was reissued after the original was archived. Renumber the live task by hand; `fr clean` only dedups live tracks",
                             task_id,
-                            locations.len(),
-                            locations.join(", ")
+                            tracks.join(", "),
+                            archives.join(", ")
+                        );
+                    }
+                    check::CheckWarning::DuplicateArchivedId {
+                        task_id,
+                        total,
+                        archives,
+                    } => {
+                        println!(
+                            "  {} appears {} times in {} and in no live track — the same task was archived more than once, so its history is duplicated (a clean whose archive write landed while its track update was lost). Delete the extra copies; no number was reissued",
+                            task_id,
+                            total,
+                            archives.join(", ")
                         );
                     }
                     check::CheckWarning::IdFrontierUnreadable { path, detail } => {

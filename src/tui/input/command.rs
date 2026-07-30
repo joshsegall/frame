@@ -807,12 +807,28 @@ pub(super) fn palette_check_project(app: &mut App) {
                         index, title, fence
                     )
                 }
-                check::CheckWarning::ArchivedIdCollision { task_id, locations } => {
+                check::CheckWarning::IdReissuedAfterArchive {
+                    task_id,
+                    tracks,
+                    archives,
+                } => {
                     format!(
-                        "  {} held by {} tasks incl. an archived one: {}",
+                        "  {} live in {} but also archived in {} — number reissued",
                         task_id,
-                        locations.len(),
-                        locations.join(", ")
+                        tracks.join(", "),
+                        archives.join(", ")
+                    )
+                }
+                check::CheckWarning::DuplicateArchivedId {
+                    task_id,
+                    total,
+                    archives,
+                } => {
+                    format!(
+                        "  {} archived {}× in {} — duplicated history, not a reissued number",
+                        task_id,
+                        total,
+                        archives.join(", ")
                     )
                 }
                 check::CheckWarning::IdFrontierUnreadable { path, detail } => {
