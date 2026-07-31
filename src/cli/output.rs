@@ -344,21 +344,39 @@ pub fn format_track_header(track_id: &str, track: &Track) -> String {
     format!("== {} ({}) ==", track.title, track_id)
 }
 
-/// Format a track's task listing
-pub fn format_track_listing(
-    track_id: &str,
-    track: &Track,
+/// The tasks a `fr list` invocation shows from one track, grouped the way the
+/// human surface presents them.
+///
+/// One selection with two consumers: `--json` flattens it with [`Self::all`],
+/// the human surface renders it with section headers. Having two
+/// implementations of the selection is what `b664a3e` fixed — the human path
+/// read only Backlog and Parked while the JSON path already included Done — and
+/// the fix left both implementations in place. `tests/parity.rs` asserts the two
+/// surfaces still agree; this type is why they cannot stop agreeing.
+pub struct FilteredTasks<'a> {
+    pub backlog: Vec<&'a Task>,
+    pub parked: Vec<&'a Task>,
+    pub done: Vec<&'a Task>,
+}
+
+impl<'a> FilteredTasks<'a> {
+    /// Every selected task, in the order the human surface prints its sections.
+    pub fn all(&self) -> impl Iterator<Item = &'a Task> + '_ {
+        self.backlog
+            .iter()
+            .chain(&self.parked)
+            .chain(&self.done)
+            .copied()
+    }
+}
+
+/// Select the tasks a `fr list` invocation shows from one track.
+pub fn select_tasks<'a>(
+    track: &'a Track,
     state_filter: Option<TaskState>,
     tag_filter: Option<&str>,
-) -> Vec<String> {
-    let mut lines = Vec::new();
-    lines.push(format_track_header(track_id, track));
-    lines.push(String::new());
-
-    let backlog = track.backlog();
-    let parked = track.parked();
-
-    let filter = |task: &&Task| -> bool {
+) -> FilteredTasks<'a> {
+    let matches = |task: &&Task| -> bool {
         if let Some(sf) = state_filter
             && task.state != sf
         {
@@ -372,31 +390,39 @@ pub fn format_track_listing(
         true
     };
 
-    let filtered_backlog: Vec<_> = backlog.iter().filter(filter).collect();
-    let filtered_parked: Vec<_> = parked.iter().filter(filter).collect();
-    // Done tasks are only surfaced when explicitly filtered for, matching the
-    // `--json` path (`collect_filtered_tasks`); otherwise the completed pile
-    // would drown out the live backlog.
-    let filtered_done: Vec<_> = if state_filter == Some(TaskState::Done) {
-        track.done().iter().filter(filter).collect()
-    } else {
-        Vec::new()
-    };
+    FilteredTasks {
+        backlog: track.backlog().iter().filter(matches).collect(),
+        parked: track.parked().iter().filter(matches).collect(),
+        // Done tasks are only surfaced when explicitly filtered for; otherwise
+        // the completed pile would drown out the live backlog.
+        done: if state_filter == Some(TaskState::Done) {
+            track.done().iter().filter(matches).collect()
+        } else {
+            Vec::new()
+        },
+    }
+}
+
+/// Format a track's task listing
+pub fn format_track_listing(track_id: &str, track: &Track, tasks: &FilteredTasks) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(format_track_header(track_id, track));
+    lines.push(String::new());
 
     let mut any_shown = false;
-    for task in &filtered_backlog {
+    for task in &tasks.backlog {
         for line in format_task_tree(task, 0) {
             lines.push(line);
         }
     }
-    any_shown |= !filtered_backlog.is_empty();
+    any_shown |= !tasks.backlog.is_empty();
 
-    if !filtered_parked.is_empty() {
+    if !tasks.parked.is_empty() {
         if any_shown {
             lines.push(String::new());
         }
         lines.push("-- Parked --".to_string());
-        for task in &filtered_parked {
+        for task in &tasks.parked {
             for line in format_task_tree(task, 0) {
                 lines.push(line);
             }
@@ -404,12 +430,12 @@ pub fn format_track_listing(
         any_shown = true;
     }
 
-    if !filtered_done.is_empty() {
+    if !tasks.done.is_empty() {
         if any_shown {
             lines.push(String::new());
         }
         lines.push("-- Done --".to_string());
-        for task in &filtered_done {
+        for task in &tasks.done {
             for line in format_task_tree(task, 0) {
                 lines.push(line);
             }

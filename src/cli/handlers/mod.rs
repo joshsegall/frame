@@ -279,53 +279,34 @@ fn cmd_list(args: ListArgs, json: bool) -> Result<(), Box<dyn std::error::Error>
         .map_err(Box::<dyn std::error::Error>::from)?;
     let tag_filter = args.tag.as_deref();
 
+    // Both surfaces walk the same tracks, in the same order, with the same
+    // tasks selected from each. Only the rendering below differs.
+    let listed: Vec<(&String, &Track)> = project
+        .tracks
+        .iter()
+        .filter(|(track_id, _)| track_is_listed(&project, track_id, &args))
+        .map(|(track_id, track)| (track_id, track))
+        .collect();
+
     if json {
-        let mut results = Vec::new();
-        for (track_id, track) in &project.tracks {
-            if let Some(ref filter_track) = args.track {
-                if track_id != filter_track {
-                    continue;
-                }
-            } else if !args.all {
-                let is_active = project
-                    .config
-                    .tracks
-                    .iter()
-                    .any(|tc| tc.id == *track_id && tc.state == "active");
-                if !is_active {
-                    continue;
-                }
-            }
-            let tasks = collect_filtered_tasks(track, state_filter, tag_filter);
-            results.push(TaskListJson {
-                track: track_id.clone(),
-                tasks: tasks.iter().map(|t| task_to_json(t)).collect(),
-            });
-        }
+        let results: Vec<TaskListJson> = listed
+            .iter()
+            .map(|(track_id, track)| TaskListJson {
+                track: (*track_id).clone(),
+                tasks: select_tasks(track, state_filter, tag_filter)
+                    .all()
+                    .map(task_to_json)
+                    .collect(),
+            })
+            .collect();
         println!("{}", serde_json::to_string_pretty(&results)?);
     } else {
-        let mut first = true;
-        for (track_id, track) in &project.tracks {
-            if let Some(ref filter_track) = args.track {
-                if track_id != filter_track {
-                    continue;
-                }
-            } else if !args.all {
-                let is_active = project
-                    .config
-                    .tracks
-                    .iter()
-                    .any(|tc| tc.id == *track_id && tc.state == "active");
-                if !is_active {
-                    continue;
-                }
-            }
-            if !first {
+        for (i, (track_id, track)) in listed.iter().enumerate() {
+            if i > 0 {
                 println!();
             }
-            first = false;
-            let lines = format_track_listing(track_id, track, state_filter, tag_filter);
-            for line in &lines {
+            let tasks = select_tasks(track, state_filter, tag_filter);
+            for line in format_track_listing(track_id, track, &tasks) {
                 println!("{}", line);
             }
         }
@@ -333,38 +314,20 @@ fn cmd_list(args: ListArgs, json: bool) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
-fn collect_filtered_tasks<'a>(
-    track: &'a Track,
-    state_filter: Option<TaskState>,
-    tag_filter: Option<&str>,
-) -> Vec<&'a Task> {
-    let mut result = Vec::new();
-    let backlog = track.backlog();
-    let parked = track.parked();
-    let done = track.done();
-
-    let filter = |task: &&Task| -> bool {
-        if let Some(sf) = state_filter
-            && task.state != sf
-        {
-            return false;
+/// Whether `fr list` shows this track: the one named by the positional
+/// argument, or — with no argument and without `--all` — every active track.
+fn track_is_listed(project: &Project, track_id: &str, args: &ListArgs) -> bool {
+    match args.track {
+        Some(ref only) => track_id == only,
+        None => {
+            args.all
+                || project
+                    .config
+                    .tracks
+                    .iter()
+                    .any(|tc| tc.id == track_id && tc.state == "active")
         }
-        if let Some(tf) = tag_filter
-            && !task.tags.iter().any(|t| t == tf)
-        {
-            return false;
-        }
-        true
-    };
-
-    result.extend(backlog.iter().filter(filter));
-    result.extend(parked.iter().filter(filter));
-    // Include done tasks only if explicitly filtered for
-    if state_filter == Some(TaskState::Done) {
-        result.extend(done.iter().filter(filter));
     }
-
-    result
 }
 
 fn cmd_show(args: ShowArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
