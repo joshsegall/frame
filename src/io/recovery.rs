@@ -95,6 +95,7 @@ pub fn recovery_log_path(frame_dir: &Path) -> PathBuf {
 
 /// Write `content` to `path` atomically using a temp file + rename.
 pub fn atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
+    crate::io::fault::maybe_fail(path)?;
     let dir = path.parent().unwrap_or(Path::new("."));
     let mut tmp = NamedTempFile::new_in(dir)?;
     tmp.write_all(content)?;

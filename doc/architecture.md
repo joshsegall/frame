@@ -131,6 +131,16 @@ Done tasks have a grace period to prevent accidental section moves:
 
 **Subtree unity**: `move_task_between_sections()` moves the entire subtask tree together. Only top-level tasks in a section can be moved — subtasks don't move independently.
 
+### Multi-file writes: add before remove
+
+Single-file writes are atomic — `recovery::atomic_write` is temp-file + rename, so a crash leaves either the old file or the new one. The exposure is operations that are only complete after *two or more* files are written, where an interruption in between leaves the project half-updated.
+
+**The rule: whichever write creates must run before the write that destroys.** An interruption then leaves the work duplicated, never missing. That direction matters more than it looks: a duplicate is visible, and often self-healing or repairable, while a task that exists nowhere is indistinguishable from one that never existed — no check can detect it and no repair can recover it. `fr clean` archives before it drains Done, `fr triage` writes the track before it rewrites the inbox, and `fr mv --track` writes the target before the source.
+
+`fr mv --track` used to do the opposite, and lost the task outright when the target write failed. Its recovery-log fallback covered a *failing write* but not a process death, which is the window the ordering exists for. Fixed, and pinned by the crash-injection tests below.
+
+**Verified, not assumed.** `io::fault` (debug builds only) fails a write selected by path — `FRAME_FAIL_WRITE=tracks/b.md` — so a test can cut one step of a real sequence and inspect what survived. The tests assert on files on disk rather than on the recovery log, because the log only catches a write that returns an error and would be skipped by an abrupt death; disk state is what survives either. Covered: cross-track move (both windows), track archival, `fr actor merge` with the registry write cut, and `fr check --fix` partway through its plan. Each asserts the work survives and that re-running converges.
+
 **Archival is idempotent, and archive-first**: `fr clean` appends the batch to `archive/<track>.md` and *only then* removes those tasks from the track, so a failure between the two writes can never lose a task. The cost of that ordering is that the losing state — archived, but still in Done — is reachable (a crash, or a `git checkout`/`reset` reverting the track file). So the append skips any task whose ID the archive already holds, and drains it from Done regardless: leaving it there would make every future `fr clean` retry the same batch. The live copy that gets dropped *should* be identical to the archived one, but if it was edited after the first write it goes to the recovery log rather than vanishing. Without this, a lost track update meant the next clean appended the batch a second time — which is how a real project ended up with 20 tasks recorded twice, caught later by `fr check`'s duplicate-archive warning.
 
 **Code**: `src/tui/app.rs` (PendingMove, PendingMoveKind, flush_expired_pending_moves), `src/ops/task_ops.rs` (move_task_between_sections, is_top_level_in_section), `src/ops/clean.rs` (archive_done_tasks, archived_task_ids)

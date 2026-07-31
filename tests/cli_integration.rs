@@ -137,6 +137,24 @@ fn run_fr(dir: &Path, args: &[&str]) -> (String, String, bool) {
     (stdout, stderr, output.status.success())
 }
 
+/// Run `fr` with extra environment variables. Used by the crash-injection tests
+/// to fail a specific write via `FRAME_FAIL_WRITE` (see `src/io/fault.rs`).
+fn run_fr_env(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> (String, String, bool) {
+    let mut cmd = Command::new(fr_bin());
+    cmd.args(args)
+        .current_dir(dir)
+        .env("XDG_CONFIG_HOME", dir.join(".xdg-config"));
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let output = cmd.output().expect("failed to run fr");
+    (
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+        output.status.success(),
+    )
+}
+
 /// Run `fr` expecting success, return stdout.
 fn run_fr_ok(dir: &Path, args: &[&str]) -> String {
     let (stdout, stderr, success) = run_fr(dir, args);
@@ -3063,5 +3081,250 @@ fn test_check_fix_adds_only_the_reported_gitignore_entry() {
     assert!(
         !gitignore.contains("frame/.state.json"),
         "should not add entries check did not report: {gitignore}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Crash injection: multi-file write sequences
+//
+// Single-file writes are atomic (temp file + rename), so the exposure is
+// operations that are only complete after two or more files are written. These
+// use `FRAME_FAIL_WRITE` (see `src/io/fault.rs`) to cut one specific write of a
+// real sequence and then assert on **files on disk** — not on the recovery log,
+// which only catches a write that returns an error and would be skipped
+// entirely by an abrupt death.
+// ---------------------------------------------------------------------------
+
+/// Two tracks, one task in the first, ready to be moved.
+fn two_track_project(root: &Path) {
+    run_fr_ok(
+        root,
+        &[
+            "init", "--name", "p", "--track", "a", "A", "--track", "b", "B",
+        ],
+    );
+    run_fr_ok(root, &["add", "a", "the task to move"]);
+}
+
+/// Which track files still mention the task.
+fn tracks_holding(root: &Path, needle: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let dir = root.join("frame/tracks");
+    let mut entries: Vec<_> = fs::read_dir(&dir)
+        .expect("tracks dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect();
+    entries.sort();
+    for path in entries {
+        if fs::read_to_string(&path)
+            .map(|c| c.contains(needle))
+            .unwrap_or(false)
+        {
+            out.push(path.file_name().unwrap().to_string_lossy().into_owned());
+        }
+    }
+    out
+}
+
+/// A cross-track move writes the target before the source, so an interruption
+/// between the two cannot leave the task in neither track.
+///
+/// Failing the *target* write is the case that used to lose data: the source had
+/// already been saved with the task removed, and a task in no track is
+/// indistinguishable from one that never existed, so nothing could detect or
+/// repair it.
+#[test]
+fn test_cross_track_move_survives_target_write_failure() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    two_track_project(tmp.path());
+
+    let (_, _, ok) = run_fr_env(
+        tmp.path(),
+        &["mv", "A-001", "--track", "b"],
+        &[("FRAME_FAIL_WRITE", "tracks/b.md")],
+    );
+    assert!(!ok, "the injected failure should fail the command");
+
+    assert_eq!(
+        tracks_holding(tmp.path(), "the task to move"),
+        vec!["a.md"],
+        "task must remain in the source track when the target write is cut"
+    );
+}
+
+/// The other window: the target landed, the source write is cut. The task is now
+/// in both tracks — under different ids, since the move re-mints into the mover's
+/// namespace. That is a duplicate for a human to reconcile, which is the price of
+/// never losing it.
+#[test]
+fn test_cross_track_move_survives_source_write_failure() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    two_track_project(tmp.path());
+
+    let (_, _, ok) = run_fr_env(
+        tmp.path(),
+        &["mv", "A-001", "--track", "b"],
+        &[("FRAME_FAIL_WRITE", "tracks/a.md")],
+    );
+    assert!(!ok, "the injected failure should fail the command");
+
+    let holding = tracks_holding(tmp.path(), "the task to move");
+    assert!(
+        holding.contains(&"b.md".to_string()),
+        "target should hold the moved task: {holding:?}"
+    );
+    assert!(
+        !holding.is_empty(),
+        "the task must survive somewhere, whichever write is cut"
+    );
+}
+
+/// Archiving a track is two steps — mark it archived in config, then move the
+/// file into `archive/_tracks/`. Interrupted between them the config says
+/// archived while the file is still in `tracks/`; re-running must finish the job
+/// rather than wedge.
+#[test]
+fn test_track_archive_recovers_from_interrupted_file_move() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    two_track_project(tmp.path());
+
+    let (_, _, ok) = run_fr_env(
+        tmp.path(),
+        &["track", "archive", "a"],
+        &[("FRAME_FAIL_WRITE", "tracks/a.md")],
+    );
+    assert!(!ok, "the injected failure should fail the command");
+
+    // The half-applied state: config updated, file not yet moved.
+    let config = fs::read_to_string(tmp.path().join("frame/project.toml")).unwrap();
+    assert!(config.contains("archived"), "config was written first");
+    assert!(
+        tmp.path().join("frame/tracks/a.md").exists(),
+        "the file move is what was cut"
+    );
+
+    // Re-running completes it.
+    run_fr_ok(tmp.path(), &["track", "archive", "a"]);
+    assert!(
+        !tmp.path().join("frame/tracks/a.md").exists(),
+        "re-running should move the file out of tracks/"
+    );
+    assert!(
+        tmp.path().join("frame/archive/_tracks/a.md").exists(),
+        "and into archive/_tracks/"
+    );
+}
+
+/// `fr check --fix` applies a plan of independent repairs. Cutting one must not
+/// prevent a re-run from applying the rest, and must not apply anything twice.
+#[test]
+fn test_check_fix_converges_after_a_partial_application() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    // Two tracks with an unclosed fence each, so the plan has two writes.
+    for (file, id) in [("main.md", "M-500"), ("side.md", "S-500")] {
+        fs::write(
+            tmp.path().join("frame/tracks").join(file),
+            format!(
+                "# T\n\n## Backlog\n\n- [ ] `{id}` Open fence\n  - note:\n    ```rust\n    let x = 1;\n\n## Done\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    let (_, _, ok) = run_fr_env(
+        tmp.path(),
+        &["check", "--fix"],
+        &[("FRAME_FAIL_WRITE", "tracks/side.md")],
+    );
+    assert!(!ok, "the injected failure should fail the command");
+
+    // Re-run without injection: whatever is left gets repaired.
+    run_fr_ok(tmp.path(), &["check", "--fix"]);
+
+    let recheck = run_fr_ok(tmp.path(), &["check"]);
+    assert!(
+        !recheck.contains("code fence open"),
+        "both fences should be closed after the re-run: {recheck}"
+    );
+
+    // Nothing was applied twice: each note carries exactly one closing fence, so
+    // the opener plus the closer is two markers, not three.
+    for file in ["main.md", "side.md"] {
+        let content = fs::read_to_string(tmp.path().join("frame/tracks").join(file)).unwrap();
+        assert_eq!(
+            content.matches("```").count(),
+            2,
+            "{file} should have one opener and one closer:\n{content}"
+        );
+    }
+}
+
+/// Fault injection must be inert unless asked for — otherwise every other test
+/// in the suite would be running against a rigged write path.
+#[test]
+fn test_fault_injection_is_off_by_default() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    two_track_project(tmp.path());
+
+    run_fr_ok(tmp.path(), &["mv", "A-001", "--track", "b"]);
+    assert_eq!(
+        tracks_holding(tmp.path(), "the task to move"),
+        vec!["b.md"],
+        "an uninjected move should complete normally"
+    );
+}
+
+/// `fr actor merge` renumbers ids across tracks and archives, then retires the
+/// source tokens in `actors.toml`. Cutting the registry write leaves the ids
+/// remapped while the source token is still active — the state where a naive
+/// implementation would wedge, because there are no source-namespace ids left to
+/// find on a retry. Re-running must still finish the retirement.
+#[test]
+fn test_actor_merge_converges_when_the_registry_write_is_cut() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    run_fr_ok(tmp.path(), &["init", "--name", "p", "--track", "a", "A"]);
+
+    run_fr_ok(tmp.path(), &["actor", "set", "x"]);
+    run_fr_ok(tmp.path(), &["add", "a", "from x"]);
+    run_fr_ok(tmp.path(), &["actor", "set", "y"]);
+    run_fr_ok(tmp.path(), &["add", "a", "from y"]);
+
+    let (_, _, ok) = run_fr_env(
+        tmp.path(),
+        &["actor", "merge", "x", "--into", "y"],
+        &[("FRAME_FAIL_WRITE", "actors.toml")],
+    );
+    assert!(!ok, "the injected failure should fail the command");
+
+    // Ids were remapped before the registry write was attempted.
+    let track = fs::read_to_string(tmp.path().join("frame/tracks/a.md")).unwrap();
+    assert!(
+        !track.contains("`A-x"),
+        "no id should remain in the merged-away namespace: {track}"
+    );
+    // But the token is still active.
+    let listing = run_fr_ok(tmp.path(), &["actor", "list"]);
+    assert!(
+        listing
+            .lines()
+            .any(|l| l.contains(" x ") && l.contains("active")),
+        "x should still be active after the cut: {listing}"
+    );
+
+    // Re-running completes the retirement rather than wedging.
+    run_fr_ok(tmp.path(), &["actor", "merge", "x", "--into", "y"]);
+    let listing = run_fr_ok(tmp.path(), &["actor", "list"]);
+    assert!(
+        listing
+            .lines()
+            .any(|l| l.contains(" x ") && l.contains("retired")),
+        "x should be retired after the re-run: {listing}"
+    );
+
+    assert!(
+        run_fr_ok(tmp.path(), &["check"]).contains("valid"),
+        "project should be consistent after recovery"
     );
 }

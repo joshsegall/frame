@@ -2085,32 +2085,56 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
         // released. This also covers dependents in the source and target tracks.
         task_ops::update_dep_references(&mut project.tracks, &args.id, &new_id);
 
-        // Save both tracks — if target save fails, log to recovery
-        save_track(&project, &source_track_id)?;
-        if let Err(e) = save_track(&project, target_track_id) {
-            // Source was saved (task removed), target failed (task not written).
-            // The task data is still in-memory on target_track — log it to recovery.
-            let target_file = project
+        // **Target first, then source.** A cross-track move is two writes, and
+        // whichever runs first decides what an interruption between them leaves
+        // behind. Writing the source first removes the task before it exists
+        // anywhere else, so a crash in the window loses it outright — and
+        // nothing can detect that, because a task in neither track is
+        // indistinguishable from a task that never existed.
+        //
+        // This is the ordering `fr clean` already documents for archival
+        // ("append to the archive first, remove from the track second, so a
+        // failure between the two writes can never lose a task") and that
+        // `fr triage` uses for the inbox. `fr mv --track` was the outlier.
+        //
+        // The cost is that an interruption now leaves the task in *both*
+        // tracks. Because the move re-mints into the mover's namespace, the two
+        // copies carry different ids, so this is not a duplicate-id that
+        // `fr check` reports and `fr clean` resolves — it is the same work
+        // appearing twice, for a human to reconcile. Visible and recoverable
+        // beats silent and not.
+        save_track(&project, target_track_id)?;
+        if let Err(e) = save_track(&project, &source_track_id) {
+            // Target holds the task under its new id; source still holds it
+            // under the old one. Nothing is lost, so this is a warning about a
+            // duplicate rather than a rescue of dropped data.
+            let source_file = project
                 .config
                 .tracks
                 .iter()
-                .find(|tc| tc.id == *target_track_id)
+                .find(|tc| tc.id == source_track_id)
                 .map(|tc| tc.file.as_str())
                 .unwrap_or("unknown");
-            let content = crate::parse::serialize_track(&project.tracks[target_idx].1);
             crate::io::recovery::log_recovery(
                 &project.frame_dir,
                 crate::io::recovery::RecoveryEntry {
                     timestamp: chrono::Utc::now(),
                     category: crate::io::recovery::RecoveryCategory::Write,
-                    description: format!("cross-track move: target write failed for {}", new_id),
+                    description: format!(
+                        "cross-track move: source write failed after {new_id} was written to \
+                         the target — the task now exists in both tracks"
+                    ),
                     fields: vec![
-                        ("Source".to_string(), source_track_id.clone()),
-                        ("Target".to_string(), target_file.to_string()),
-                        ("TaskID".to_string(), new_id.clone()),
+                        ("Source".to_string(), source_file.to_string()),
+                        ("Target".to_string(), target_track_id.to_string()),
+                        ("OldID".to_string(), args.id.clone()),
+                        ("NewID".to_string(), new_id.clone()),
                         ("Error".to_string(), e.to_string()),
                     ],
-                    body: content,
+                    body: format!(
+                        "{} is in {} and {} is in {}. Delete whichever copy is wrong.",
+                        args.id, source_file, new_id, target_track_id
+                    ),
                 },
             );
             return Err(e.into());

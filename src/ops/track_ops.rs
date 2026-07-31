@@ -373,6 +373,10 @@ pub fn archive_track_file(
     let archive_dir = frame_dir.join("archive").join("_tracks");
     fs::create_dir_all(&archive_dir).map_err(ProjectError::IoError)?;
     let dest = archive_dir.join(format!("{}.md", track_id));
+    // The only project write that isn't an `atomic_write`, so it needs the fault
+    // hook of its own — archiving a track is a two-step sequence (config, then
+    // this) and this is its second step.
+    crate::io::fault::maybe_fail(&source).map_err(ProjectError::IoError)?;
     fs::rename(&source, &dest).map_err(ProjectError::IoError)?;
     Ok(())
 }

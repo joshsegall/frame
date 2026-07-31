@@ -1,5 +1,6 @@
 pub mod actors;
 pub mod config_io;
+pub mod fault;
 pub mod git;
 pub mod ids;
 pub mod lock;
