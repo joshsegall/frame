@@ -1082,10 +1082,6 @@ pub struct App {
     pub show_startup_hints: bool,
     /// Effective note wrap setting (override > config > true)
     pub note_wrap: bool,
-    /// Recovery notification message (shown in status bar)
-    pub recovery_message: Option<String>,
-    /// When the recovery message was set
-    pub recovery_message_at: Option<Instant>,
     /// Whether to show the recovery log overlay
     pub show_recovery_log: bool,
     /// Scroll offset for recovery log overlay
@@ -1250,8 +1246,6 @@ impl App {
             tab_scroll: 0,
             show_startup_hints: true,
             note_wrap,
-            recovery_message: None,
-            recovery_message_at: None,
             show_recovery_log: false,
             recovery_log_scroll: 0,
             recovery_log_lines: Vec::new(),
@@ -2468,31 +2462,40 @@ impl App {
         }
     }
 
-    /// Show a save error as a status message, if any.
-    pub fn show_save_error(&mut self, result: Result<(), Box<dyn std::error::Error>>) {
-        if let Err(e) = result {
-            self.status_message = Some(format!("Save error: {}", e));
-        }
-    }
+    // ---- Saving -------------------------------------------------------
+    //
+    // The `_logged` forms are the only way in. The fallible ones are private
+    // because a public `save_track` is an invitation to `let _ = ...`, which is
+    // how 61 sites came to discard their errors: a failed save left the TUI
+    // showing state that was not on disk, with nothing recorded anywhere.
+    //
+    // A failure is recorded, not announced. Mid-flow in a TUI a transient error
+    // toast is noise the user cannot act on; the recovery log is durable and is
+    // surfaced afterwards by `fr recovery` and `fr check`, which is where it can
+    // be acted on. (A *sustained* failure — an unwritable frame/, or a lock held
+    // past the timeout — deserves a persistent indicator rather than a toast;
+    // that is tracked separately.)
+    //
+    // The lock is acquired by the entry points, never by the inner writes, so a
+    // multi-file operation can hold one lock across all of them. `FileLock` is
+    // not re-entrant, so an inner write that re-acquired would deadlock.
 
-    /// Save the inbox to disk with file locking. Records save time.
-    pub fn save_inbox(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    /// Write the inbox. **Assumes the project lock is held.**
+    fn save_inbox_locked(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let inbox = self.project.inbox.as_ref().ok_or("no inbox loaded")?;
-        let _lock = FileLock::acquire_default(&self.project.frame_dir)?;
         project_io::save_inbox(&self.project.frame_dir, inbox)?;
         self.last_save_at = Some(Instant::now());
         Ok(())
     }
 
-    /// Save a track to disk with file locking. Records save time and mtime.
-    pub fn save_track(&mut self, track_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    /// Write one track. **Assumes the project lock is held.**
+    fn save_track_locked(&mut self, track_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         let file = self
             .track_file(track_id)
             .ok_or("track not found")?
             .to_string();
         let track =
             Self::find_track_in_project(&self.project, track_id).ok_or("track not found")?;
-        let _lock = FileLock::acquire_default(&self.project.frame_dir)?;
         project_io::save_track(&self.project.frame_dir, &file, track)?;
         self.last_save_at = Some(Instant::now());
         // Record the new mtime so we know this is our write
@@ -2503,40 +2506,77 @@ impl App {
         Ok(())
     }
 
-    /// Save track, logging to recovery on failure and setting status message.
+    /// Record a failed save. Never surfaces to the UI — see the note above.
+    fn log_save_failure(&self, what: &str, e: &dyn std::fmt::Display) {
+        crate::io::recovery::log_recovery(
+            &self.project.frame_dir,
+            crate::io::recovery::RecoveryEntry {
+                timestamp: chrono::Utc::now(),
+                category: crate::io::recovery::RecoveryCategory::Write,
+                description: format!("{what} save failed"),
+                fields: vec![("Error".to_string(), e.to_string())],
+                body: String::new(),
+            },
+        );
+    }
+
+    /// Save one track, recording any failure.
     pub fn save_track_logged(&mut self, track_id: &str) {
-        if let Err(e) = self.save_track(track_id) {
-            crate::io::recovery::log_recovery(
-                &self.project.frame_dir,
-                crate::io::recovery::RecoveryEntry {
-                    timestamp: chrono::Utc::now(),
-                    category: crate::io::recovery::RecoveryCategory::Write,
-                    description: format!("track save failed: {}", track_id),
-                    fields: vec![("Error".to_string(), e.to_string())],
-                    body: String::new(),
-                },
-            );
-            self.recovery_message = Some(format!("Save failed for {}: {}", track_id, e));
-            self.recovery_message_at = Some(Instant::now());
+        match FileLock::acquire_default(&self.project.frame_dir) {
+            Ok(_lock) => {
+                if let Err(e) = self.save_track_locked(track_id) {
+                    self.log_save_failure(&format!("track {track_id}"), &e);
+                }
+            }
+            Err(e) => self.log_save_failure(&format!("track {track_id}"), &e),
         }
     }
 
-    /// Save inbox, logging to recovery on failure and setting status message.
+    /// Save the inbox, recording any failure.
     pub fn save_inbox_logged(&mut self) {
-        if let Err(e) = self.save_inbox() {
-            crate::io::recovery::log_recovery(
-                &self.project.frame_dir,
-                crate::io::recovery::RecoveryEntry {
-                    timestamp: chrono::Utc::now(),
-                    category: crate::io::recovery::RecoveryCategory::Write,
-                    description: "inbox save failed".to_string(),
-                    fields: vec![("Error".to_string(), e.to_string())],
-                    body: String::new(),
-                },
-            );
-            self.recovery_message = Some(format!("Inbox save failed: {}", e));
-            self.recovery_message_at = Some(Instant::now());
+        match FileLock::acquire_default(&self.project.frame_dir) {
+            Ok(_lock) => {
+                if let Err(e) = self.save_inbox_locked() {
+                    self.log_save_failure("inbox", &e);
+                }
+            }
+            Err(e) => self.log_save_failure("inbox", &e),
         }
+    }
+
+    /// Save several tracks, and optionally the inbox, under a **single** lock.
+    ///
+    /// Use this for any operation that is only complete once more than one file
+    /// is written — a cross-track move, a triage. Saving them one at a time takes
+    /// and releases the lock between each, leaving a window another process can
+    /// write into: the ordering is then correct but not atomic.
+    ///
+    /// Each failure is recorded individually; one failing does not stop the rest,
+    /// because a partial write is still better than abandoning the remainder.
+    pub fn save_batch_logged(&mut self, track_ids: &[&str], inbox: bool) {
+        let lock = match FileLock::acquire_default(&self.project.frame_dir) {
+            Ok(lock) => lock,
+            Err(e) => {
+                for id in track_ids {
+                    self.log_save_failure(&format!("track {id}"), &e);
+                }
+                if inbox {
+                    self.log_save_failure("inbox", &e);
+                }
+                return;
+            }
+        };
+
+        for id in track_ids {
+            if let Err(e) = self.save_track_locked(id) {
+                self.log_save_failure(&format!("track {id}"), &e);
+            }
+        }
+        if inbox && let Err(e) = self.save_inbox_locked() {
+            self.log_save_failure("inbox", &e);
+        }
+
+        drop(lock);
     }
 
     /// Resolve the task ID from the current cursor position in a track view.
@@ -2665,7 +2705,7 @@ impl App {
         let scope = crate::io::actors::id_scope(&self.project.frame_dir);
         let modified_tracks = crate::ops::clean::ensure_ids_and_dates(&mut self.project, scope);
         for track_id in &modified_tracks {
-            let _ = self.save_track(track_id);
+            self.save_track_logged(track_id);
         }
 
         // Push sync marker to undo stack
@@ -3412,7 +3452,23 @@ pub fn run(project_dir_override: Option<&str>) -> Result<(), Box<dyn std::error:
                     .find(|(id, _)| id == track_id)
                     .map(|(_, t)| t)
                 {
-                    let _ = project_io::save_track(&project.frame_dir, file, track);
+                    // No `App` exists yet, so there is nothing to hold a status
+                    // on — but the failure still has to be recorded rather than
+                    // dropped.
+                    if let Err(e) = project_io::save_track(&project.frame_dir, file, track) {
+                        crate::io::recovery::log_recovery(
+                            &project.frame_dir,
+                            crate::io::recovery::RecoveryEntry {
+                                timestamp: chrono::Utc::now(),
+                                category: crate::io::recovery::RecoveryCategory::Write,
+                                description: format!(
+                                    "startup id/date assignment: track {track_id} save failed"
+                                ),
+                                fields: vec![("Error".to_string(), e.to_string())],
+                                body: String::new(),
+                            },
+                        );
+                    }
                 }
             }
         }
@@ -3870,7 +3926,7 @@ fn run_auto_clean(app: &mut App) {
 
         // Save affected tracks
         for track_id in &affected_tracks {
-            let _ = app.save_track(track_id);
+            app.save_track_logged(track_id);
         }
 
         // Add sync marker to undo stack so user can't undo past the external change
@@ -4313,5 +4369,116 @@ mod tests {
             index.get("EFF-14").map(Vec::as_slice),
             Some(&["EFF-c3".to_string()][..])
         );
+    }
+
+    // ---- Saving --------------------------------------------------------
+
+    /// A project on disk, so the save paths have somewhere real to write.
+    fn app_on_disk(dir: &std::path::Path) -> App {
+        use crate::model::config::{CleanConfig, IdConfig, ProjectConfig, ProjectInfo, UiConfig};
+        let frame_dir = dir.join("frame");
+        std::fs::create_dir_all(frame_dir.join("tracks")).unwrap();
+        std::fs::write(
+            frame_dir.join("tracks/a.md"),
+            "# A\n\n## Backlog\n\n- [ ] `A-001` One\n\n## Done\n",
+        )
+        .unwrap();
+        std::fs::write(frame_dir.join("inbox.md"), "# Inbox\n").unwrap();
+        let config = ProjectConfig {
+            project: ProjectInfo {
+                name: "saves".into(),
+            },
+            agent: Default::default(),
+            tracks: vec![TrackConfig {
+                id: "a".into(),
+                name: "A".into(),
+                state: "active".into(),
+                file: "tracks/a.md".into(),
+            }],
+            clean: CleanConfig::default(),
+            ids: IdConfig::default(),
+            ui: UiConfig::default(),
+        };
+        let project = crate::model::project::Project {
+            root: dir.to_path_buf(),
+            frame_dir,
+            config,
+            tracks: vec![(
+                "a".into(),
+                crate::parse::parse_track("# A\n\n## Backlog\n\n- [ ] `A-001` One\n\n## Done\n"),
+            )],
+            inbox: Some(crate::parse::parse_inbox("# Inbox\n").0),
+        };
+        App::new(project)
+    }
+
+    /// The point of item 5: a failed save is recorded, not discarded. 61 sites
+    /// used to `let _ = ...` it away, leaving the TUI showing state that was not
+    /// on disk with nothing written down anywhere.
+    #[test]
+    fn save_failure_is_recorded() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+
+        // A track id that resolves to no file — the shape `let _ =` hid.
+        app.save_track_logged("nonexistent");
+
+        let log = crate::io::recovery::recovery_log_path(&app.project.frame_dir);
+        let text = std::fs::read_to_string(&log).expect("a failure should be logged");
+        assert!(text.contains("nonexistent"), "{text}");
+        assert!(text.contains("save failed"), "{text}");
+    }
+
+    #[test]
+    fn successful_save_records_nothing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+
+        app.save_track_logged("a");
+        app.save_inbox_logged();
+
+        let log = crate::io::recovery::recovery_log_path(&app.project.frame_dir);
+        assert!(
+            !log.exists(),
+            "a clean save must not write to the recovery log"
+        );
+    }
+
+    /// A batch takes one lock for every write, so a multi-file operation cannot
+    /// be interleaved by another writer partway through. All the writes land.
+    #[test]
+    fn batch_save_writes_everything_under_one_lock() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+
+        if let Some(inbox) = app.project.inbox.as_mut() {
+            let mut item = crate::model::inbox::InboxItem::new("captured".into());
+            item.dirty = true;
+            inbox.items.push(item);
+        }
+        app.save_batch_logged(&["a"], true);
+
+        let inbox = std::fs::read_to_string(app.project.frame_dir.join("inbox.md")).unwrap();
+        assert!(inbox.contains("captured"), "inbox written: {inbox}");
+        assert!(app.project.frame_dir.join("tracks/a.md").exists());
+
+        let log = crate::io::recovery::recovery_log_path(&app.project.frame_dir);
+        assert!(!log.exists(), "nothing failed, so nothing logged");
+    }
+
+    /// One failure in a batch does not abandon the rest — a partial write beats
+    /// giving up on the remainder — and each failure is recorded separately.
+    #[test]
+    fn batch_save_reports_each_failure_and_continues() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+
+        app.save_batch_logged(&["nonexistent", "a"], false);
+
+        let log = crate::io::recovery::recovery_log_path(&app.project.frame_dir);
+        let text = std::fs::read_to_string(&log).expect("the bad track should be logged");
+        assert!(text.contains("nonexistent"), "{text}");
+        // The good one still landed.
+        assert!(app.project.frame_dir.join("tracks/a.md").exists());
     }
 }

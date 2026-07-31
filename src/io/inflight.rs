@@ -71,10 +71,14 @@ pub fn marker_path(frame_dir: &Path) -> PathBuf {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Operation {
-    /// A task moved between tracks, re-minted into the mover's namespace.
+    /// One or more tasks moved between tracks, re-minted into the mover's
+    /// namespace.
+    ///
+    /// A list rather than a single pair because the TUI's bulk move writes the
+    /// same two files for N tasks, and an interruption duplicates all of them.
+    /// The CLI's `fr mv --track` passes one.
     CrossTrackMove {
-        old_id: String,
-        new_id: String,
+        moves: Vec<MovedTask>,
         source_track: String,
         target_track: String,
     },
@@ -104,6 +108,13 @@ impl Operation {
             Operation::Triage { .. } => "triage",
         }
     }
+}
+
+/// One task's before/after ids in a [`Operation::CrossTrackMove`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MovedTask {
+    pub old_id: String,
+    pub new_id: String,
 }
 
 /// The on-disk marker.
@@ -195,8 +206,10 @@ mod tests {
 
     fn op() -> Operation {
         Operation::CrossTrackMove {
-            old_id: "A-001".into(),
-            new_id: "B-001".into(),
+            moves: vec![MovedTask {
+                old_id: "A-001".into(),
+                new_id: "B-001".into(),
+            }],
             source_track: "a".into(),
             target_track: "b".into(),
         }

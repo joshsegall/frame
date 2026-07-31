@@ -51,7 +51,7 @@ pub(super) fn toggle_cc_tag(app: &mut App) {
     } else {
         let _ = task_ops::add_tag(track, &task_id, "cc");
     }
-    let _ = app.save_track(&track_id);
+    app.save_track_logged(&track_id);
 
     // Record repeatable action
     app.last_action = Some(RepeatableAction::ToggleCcTag);
@@ -1092,7 +1092,7 @@ pub(super) fn confirm_edit(app: &mut App) {
                     } else {
                         remove_task_from_section(track, &task_id, SectionKind::Backlog);
                     }
-                    let _ = app.save_track(&track_id);
+                    app.save_track_logged(&track_id);
                 }
             } else if changed {
                 // Non-empty title, file changed externally — merge
@@ -1154,7 +1154,7 @@ pub(super) fn confirm_edit(app: &mut App) {
                             title: title.clone(),
                         });
                     }
-                    let _ = app.save_track(&track_id);
+                    app.save_track_logged(&track_id);
                 }
             } else {
                 // No external changes — apply title to the in-memory placeholder and save
@@ -1187,7 +1187,7 @@ pub(super) fn confirm_edit(app: &mut App) {
                         title: title.clone(),
                     });
                 }
-                let _ = app.save_track(&track_id);
+                app.save_track_logged(&track_id);
             }
             drain_pending_for_track(app, &track_id);
         }
@@ -1229,7 +1229,7 @@ pub(super) fn confirm_edit(app: &mut App) {
                                 new_title: title,
                             });
 
-                            let _ = app.save_track(&track_id);
+                            app.save_track_logged(&track_id);
 
                             // Record repeatable action
                             app.last_action =
@@ -1251,7 +1251,7 @@ pub(super) fn confirm_edit(app: &mut App) {
                         new_title: title,
                     });
 
-                    let _ = app.save_track(&track_id);
+                    app.save_track_logged(&track_id);
 
                     // Record repeatable action
                     app.last_action = Some(RepeatableAction::EnterEdit(RepeatEditRegion::Title));
@@ -1297,7 +1297,7 @@ pub(super) fn confirm_edit(app: &mut App) {
                 task.tags = new_tags;
                 task.mark_dirty();
             }
-            let _ = app.save_track(&track_id);
+            app.save_track_logged(&track_id);
 
             if new_value != original_tags {
                 app.undo_stack.push(Operation::FieldEdit {
@@ -1336,7 +1336,7 @@ pub(super) fn confirm_edit(app: &mut App) {
                     }
                     app.undo_stack.push(Operation::InboxAdd { index, title });
                 }
-                let _ = app.save_inbox();
+                app.save_inbox_logged();
             }
         }
         EditTarget::ExistingInboxTitle {
@@ -1356,7 +1356,7 @@ pub(super) fn confirm_edit(app: &mut App) {
                     old_title: original_title,
                     new_title,
                 });
-                let _ = app.save_inbox();
+                app.save_inbox_logged();
             }
         }
         EditTarget::ExistingInboxTags {
@@ -1390,7 +1390,7 @@ pub(super) fn confirm_edit(app: &mut App) {
                     new_tags,
                 });
             }
-            let _ = app.save_inbox();
+            app.save_inbox_logged();
         }
         EditTarget::NewTrackName => {
             let name = app.edit_buffer.clone();
@@ -1496,7 +1496,7 @@ pub(super) fn confirm_edit(app: &mut App) {
 
             // Update track file header (first line: "# Name")
             update_track_header(app, &track_id, &new_name);
-            let _ = app.save_track(&track_id);
+            app.save_track_logged(&track_id);
 
             app.undo_stack.push(Operation::TrackNameEdit {
                 track_id: track_id.clone(),
@@ -1678,7 +1678,7 @@ pub(super) fn cancel_edit(app: &mut App) {
                 } else {
                     remove_task_from_section(track, &task_id, SectionKind::Backlog);
                 }
-                let _ = app.save_track(&track_id);
+                app.save_track_logged(&track_id);
             }
 
             // Restore cursor to pre-edit position
@@ -2704,7 +2704,7 @@ pub(super) fn confirm_detail_multiline(app: &mut App) {
         }
     };
     let _ = task_ops::set_note(track, &task_id, new_value.clone());
-    let _ = app.save_track(&track_id);
+    app.save_track_logged(&track_id);
 
     if new_value != original {
         app.undo_stack.push(Operation::FieldEdit {
@@ -2759,7 +2759,7 @@ pub(super) fn confirm_inbox_note_edit(app: &mut App, item_index: usize) {
         item.body = new_body.clone();
         item.dirty = true;
     }
-    let _ = app.save_inbox();
+    app.save_inbox_logged();
 
     if new_body != old_body {
         app.undo_stack.push(Operation::InboxNoteEdit {
@@ -2820,7 +2820,7 @@ pub(super) fn confirm_detail_edit(app: &mut App) {
                     new_title: new_value,
                 });
 
-                let _ = app.save_track(&track_id);
+                app.save_track_logged(&track_id);
             }
         }
         DetailRegion::Tags => {
@@ -2843,7 +2843,7 @@ pub(super) fn confirm_detail_edit(app: &mut App) {
                 task.tags = new_tags;
                 task.mark_dirty();
             }
-            let _ = app.save_track(&track_id);
+            app.save_track_logged(&track_id);
 
             if new_value != original {
                 app.undo_stack.push(Operation::FieldEdit {
@@ -2879,7 +2879,7 @@ pub(super) fn confirm_detail_edit(app: &mut App) {
                 }
                 task.mark_dirty();
             }
-            let _ = app.save_track(&track_id);
+            app.save_track_logged(&track_id);
 
             if new_value != original {
                 app.undo_stack.push(Operation::FieldEdit {
@@ -2908,7 +2908,7 @@ pub(super) fn confirm_detail_edit(app: &mut App) {
                     task.mark_dirty();
                 }
             }
-            let _ = app.save_track(&track_id);
+            app.save_track_logged(&track_id);
 
             if new_value != original {
                 app.undo_stack.push(Operation::FieldEdit {
@@ -2943,7 +2943,7 @@ pub(super) fn confirm_detail_edit(app: &mut App) {
                 }
                 task.mark_dirty();
             }
-            let _ = app.save_track(&track_id);
+            app.save_track_logged(&track_id);
 
             if new_value != original {
                 app.undo_stack.push(Operation::FieldEdit {

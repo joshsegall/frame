@@ -67,7 +67,7 @@ pub(super) fn confirm_inbox_delete(app: &mut App, index: usize) {
 
     let item = inbox.items.remove(index);
     app.undo_stack.push(Operation::InboxDelete { index, item });
-    let _ = app.save_inbox();
+    app.save_inbox_logged();
 
     // Clamp cursor
     let count = app.inbox_count();
@@ -197,7 +197,7 @@ pub(super) fn reopen_recent_task(app: &mut App) {
         let inbox = app.project.inbox.as_mut();
         let _ = app.undo_stack.undo(&mut app.project.tracks, inbox);
 
-        let _ = app.save_track(&track_id);
+        app.save_track_logged(&track_id);
         app.status_message = Some("Re-closed".into());
         return;
     }
@@ -262,7 +262,7 @@ pub(super) fn reopen_recent_task(app: &mut App) {
         old_state: Some(old_state),
     });
 
-    let _ = app.save_track(&track_id);
+    app.save_track_logged(&track_id);
 
     let track_name = app.track_name(&track_id).to_string();
     app.status_message = Some(format!("Reopening in {}...", track_name));

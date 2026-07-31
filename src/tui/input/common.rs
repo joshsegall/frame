@@ -416,7 +416,7 @@ pub(super) fn collect_bulk_task_ids(op: Option<&Operation>) -> HashSet<String> {
 pub(super) fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo: bool) {
     match nav {
         UndoNavTarget::Task { track_id, .. } => {
-            let _ = app.save_track(track_id);
+            app.save_track_logged(track_id);
             // For cross-track moves (including bulk), also save other tracks
             let op = if is_undo {
                 app.undo_stack.peek_last_redo()
@@ -488,7 +488,7 @@ pub(super) fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo
                 }
             }
             for other in &extra_tracks {
-                let _ = app.save_track(other);
+                app.save_track_logged(other);
             }
         }
         UndoNavTarget::TracksView { track_id } => {
@@ -533,7 +533,7 @@ pub(super) fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo
                     save_config(app);
                     // Update track file header
                     update_track_header(app, &tid, target_name);
-                    let _ = app.save_track(&tid);
+                    app.save_track_logged(&tid);
                 }
                 Some(Operation::TrackShelve {
                     track_id: tid,
@@ -743,10 +743,13 @@ pub(super) fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo
                     None
                 }
             };
-            if let Some(tid) = triage_track_id {
-                let _ = app.save_track(&tid);
+            // One lock across both writes — undoing a triage restores the
+            // inbox item and removes the task, and a writer slipping between
+            // the two would see the item in both places.
+            match triage_track_id {
+                Some(tid) => app.save_batch_logged(&[&tid], true),
+                None => app.save_inbox_logged(),
             }
-            let _ = app.save_inbox();
         }
         UndoNavTarget::Recent { .. } => {
             // Reopen or SectionMove undo/redo: save the affected track
@@ -763,7 +766,7 @@ pub(super) fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo
                 }
             };
             if let Some(tid) = affected_track_id {
-                let _ = app.save_track(&tid);
+                app.save_track_logged(&tid);
             }
         }
     }
@@ -1108,7 +1111,7 @@ pub(super) fn task_state_action(app: &mut App, action: StateAction) {
         }
     }
 
-    let _ = app.save_track(&track_id);
+    app.save_track_logged(&track_id);
 }
 
 // ---------------------------------------------------------------------------

@@ -339,7 +339,7 @@ pub(super) fn execute_prefix_rename(app: &mut App) {
             save_config(app);
 
             // Save the target track
-            let _ = app.save_track(&track_id);
+            app.save_track_logged(&track_id);
 
             // Save all other affected tracks (those with updated dep references)
             let affected_tracks: Vec<String> = app
@@ -350,7 +350,7 @@ pub(super) fn execute_prefix_rename(app: &mut App) {
                 .map(|(tid, _)| tid.clone())
                 .collect();
             for tid in &affected_tracks {
-                let _ = app.save_track(tid);
+                app.save_track_logged(tid);
             }
 
             // Push sync marker (no undo for prefix rename)

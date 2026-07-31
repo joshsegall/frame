@@ -142,7 +142,7 @@ pub(super) fn handle_move(app: &mut App, key: KeyEvent) {
                                                     original_sibling_index,
                                                 );
                                             }
-                                            let _ = app.save_track(&track_id);
+                                            app.save_track_logged(&track_id);
                                         }
                                         app.mode = if app.selection.is_empty() {
                                             Mode::Navigate
@@ -211,7 +211,7 @@ pub(super) fn handle_move(app: &mut App, key: KeyEvent) {
                                             );
                                         }
 
-                                        let _ = app.save_track(&track_id);
+                                        app.save_track_logged(&track_id);
                                         // Save other tracks that may have had deps updated
                                         if !id_mappings.is_empty() {
                                             let other_track_ids: Vec<String> = app
@@ -222,7 +222,7 @@ pub(super) fn handle_move(app: &mut App, key: KeyEvent) {
                                                 .map(|(tid, _)| tid.clone())
                                                 .collect();
                                             for tid in &other_track_ids {
-                                                let _ = app.save_track(tid);
+                                                app.save_track_logged(tid);
                                             }
                                         }
 
@@ -330,7 +330,7 @@ pub(super) fn handle_move(app: &mut App, key: KeyEvent) {
                             let idx = (insert_pos + i).min(backlog.len());
                             backlog.insert(idx, task);
                         }
-                        let _ = app.save_track(&track_id);
+                        app.save_track_logged(&track_id);
                         if !ops.is_empty() {
                             app.undo_stack.push(Operation::Bulk(ops));
                         }
@@ -387,7 +387,7 @@ pub(super) fn handle_move(app: &mut App, key: KeyEvent) {
                                     original_sibling_index,
                                 );
                             }
-                            let _ = app.save_track(&track_id);
+                            app.save_track_logged(&track_id);
                         }
                     }
                     MoveState::InboxItem { original_index } => {
@@ -400,7 +400,7 @@ pub(super) fn handle_move(app: &mut App, key: KeyEvent) {
                                 inbox.items.insert(restore, item);
                             }
                         }
-                        let _ = app.save_inbox();
+                        app.save_inbox_logged();
                         app.inbox_cursor = original_index;
                     }
                     MoveState::Track {
@@ -435,7 +435,7 @@ pub(super) fn handle_move(app: &mut App, key: KeyEvent) {
                             let idx = orig_idx.min(backlog.len());
                             backlog.insert(idx, task);
                         }
-                        let _ = app.save_track(&track_id);
+                        app.save_track_logged(&track_id);
                     }
                 }
             }
@@ -697,7 +697,7 @@ pub(super) fn move_task_in_list(app: &mut App, direction: i32) {
             if new_idx != cur_idx {
                 let task = backlog.remove(cur_idx);
                 backlog.insert(new_idx, task);
-                let _ = app.save_track(&track_id);
+                app.save_track_logged(&track_id);
                 move_cursor_to_task(app, &track_id, &task_id);
             }
         }
@@ -726,7 +726,7 @@ pub(super) fn move_task_in_list(app: &mut App, direction: i32) {
                 };
                 parent_mut.subtasks.swap(cur_idx, new_idx);
                 parent_mut.mark_dirty();
-                let _ = app.save_track(&track_id);
+                app.save_track_logged(&track_id);
                 move_cursor_to_task(app, &track_id, &task_id);
             } else {
                 // At boundary: cross to adjacent parent
@@ -767,7 +767,7 @@ pub(super) fn move_task_in_list(app: &mut App, direction: i32) {
                             SectionKind::Backlog,
                             insert_idx,
                         );
-                        let _ = app.save_track(&track_id);
+                        app.save_track_logged(&track_id);
                         update_move_force_expanded(app);
                         move_cursor_to_task(app, &track_id, &task_id);
                     }
@@ -863,7 +863,7 @@ pub(super) fn move_task_to_boundary(app: &mut App, to_top: bool) {
             }
         }
     }
-    let _ = app.save_track(&track_id);
+    app.save_track_logged(&track_id);
     move_cursor_to_task(app, &track_id, &task_id);
 }
 
@@ -930,7 +930,7 @@ pub(super) fn move_task_outdent(app: &mut App) {
         insert_idx,
     );
 
-    let _ = app.save_track(&track_id);
+    app.save_track_logged(&track_id);
     update_move_force_expanded(app);
     move_cursor_to_task(app, &track_id, &task_id);
 }
@@ -1020,7 +1020,7 @@ pub(super) fn move_task_indent(app: &mut App) {
         insert_idx,
     );
 
-    let _ = app.save_track(&track_id);
+    app.save_track_logged(&track_id);
     update_move_force_expanded(app);
     move_cursor_to_task(app, &track_id, &task_id);
 }
@@ -1042,7 +1042,7 @@ pub(super) fn move_inbox_item(app: &mut App, direction: i32) {
     if new_idx != cur {
         inbox.items.swap(cur, new_idx);
         app.inbox_cursor = new_idx;
-        let _ = app.save_inbox();
+        app.save_inbox_logged();
     }
 }
 
@@ -1067,7 +1067,7 @@ pub(super) fn move_inbox_to_boundary(app: &mut App, to_top: bool) {
         inbox.items.push(item);
         app.inbox_cursor = inbox.items.len() - 1;
     }
-    let _ = app.save_inbox();
+    app.save_inbox_logged();
 }
 
 /// Move an active track up or down in the tracks list.

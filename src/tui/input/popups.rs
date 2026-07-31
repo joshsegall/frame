@@ -567,11 +567,31 @@ pub(super) fn handle_project_picker_key(app: &mut App, key: KeyEvent) {
                                         .find(|(id, _)| id == track_id)
                                         .map(|(_, t)| t)
                                     {
-                                        let _ = crate::io::project_io::save_track(
+                                        // Mid project-switch: the old `App` is
+                                        // gone and the new one does not exist,
+                                        // so record rather than drop.
+                                        if let Err(e) = crate::io::project_io::save_track(
                                             &project.frame_dir,
                                             file,
                                             track,
-                                        );
+                                        ) {
+                                            crate::io::recovery::log_recovery(
+                                                &project.frame_dir,
+                                                crate::io::recovery::RecoveryEntry {
+                                                    timestamp: chrono::Utc::now(),
+                                                    category:
+                                                        crate::io::recovery::RecoveryCategory::Write,
+                                                    description: format!(
+                                                        "project switch: track {track_id} save failed"
+                                                    ),
+                                                    fields: vec![(
+                                                        "Error".to_string(),
+                                                        e.to_string(),
+                                                    )],
+                                                    body: String::new(),
+                                                },
+                                            );
+                                        }
                                     }
                                 }
                             }

@@ -484,6 +484,8 @@ pub(super) fn execute_triage(app: &mut App, track_id: &str, position: InsertPosi
         None => return,
     };
 
+    // Captured before `inbox_item` is moved into the undo entry.
+    let triaged_title = inbox_item.title.clone();
     let prefix = app.track_prefix(track_id).unwrap_or("").to_string();
     let token = match app.resolve_mint_namespace() {
         Ok(t) => t,
@@ -514,9 +516,24 @@ pub(super) fn execute_triage(app: &mut App, track_id: &str, position: InsertPosi
         task_id,
     });
 
-    // Save track first (new data), then inbox (deletion)
-    app.save_track_logged(track_id);
-    app.save_inbox_logged();
+    // Track first (new data), then inbox (deletion), under one lock: an
+    // interruption must leave the item duplicated rather than lost, and a
+    // writer slipping between the two would defeat that. The marker lets the
+    // next command finish the deletion.
+    let marker = crate::io::inflight::InFlight::begin(
+        &app.project.frame_dir,
+        crate::io::inflight::Operation::Triage {
+            index: inbox_index + 1,
+            title: triaged_title,
+            track_id: track_id.to_string(),
+        },
+        "triage (TUI)",
+    )
+    .ok();
+    app.save_batch_logged(&[track_id], true);
+    if let Some(marker) = marker {
+        marker.commit();
+    }
 
     // Advance cursor (or clamp to last item)
     let count = app.inbox_count();
@@ -771,9 +788,32 @@ pub(super) fn execute_cross_track_move(
         section,
     });
 
-    // Save target first (new data), then source (deletion)
-    app.save_track_logged(target_track_id);
-    app.save_track_logged(&source_track_id);
+    // Target before source, under one lock — see doc/architecture.md,
+    // "Multi-file writes": whichever write creates must run before the one that
+    // destroys, and dropping the lock between them makes the ordering correct
+    // but not atomic.
+    //
+    // The marker records the intent first, so a crash between the two writes is
+    // completed by the next command rather than leaving the task in both tracks
+    // under different ids — a state nothing can detect. Failing to write it is
+    // not worth aborting the move over: degrade to no marker.
+    let marker = crate::io::inflight::InFlight::begin(
+        &app.project.frame_dir,
+        crate::io::inflight::Operation::CrossTrackMove {
+            moves: vec![crate::io::inflight::MovedTask {
+                old_id: old_id.clone(),
+                new_id: new_id.to_string(),
+            }],
+            source_track: source_track_id.clone(),
+            target_track: target_track_id.to_string(),
+        },
+        "cross-track move (TUI)",
+    )
+    .ok();
+    app.save_batch_logged(&[target_track_id, &source_track_id], false);
+    if let Some(marker) = marker {
+        marker.commit();
+    }
 
     // Cursor management
     let was_detail = matches!(app.view, View::Detail { .. });
@@ -867,6 +907,8 @@ pub(super) fn execute_bulk_cross_track_move(
 
     let mut ops: Vec<Operation> = Vec::new();
     let mut new_ids: Vec<String> = Vec::new();
+    // (old, new) for every task in the batch, for the in-flight marker.
+    let mut moved_pairs: Vec<crate::io::inflight::MovedTask> = Vec::new();
 
     for task_id in &selected_ids {
         // Get next ID number (must re-query each time since we're inserting)
@@ -944,6 +986,11 @@ pub(super) fn execute_bulk_cross_track_move(
         // Update dep references across all tracks
         task_ops::update_dep_references(&mut app.project.tracks, &old_id, &new_id);
 
+        moved_pairs.push(crate::io::inflight::MovedTask {
+            old_id: old_id.clone(),
+            new_id: new_id.to_string(),
+        });
+
         ops.push(Operation::CrossTrackMove {
             source_track_id: source_track_id.clone(),
             target_track_id: target_track_id.to_string(),
@@ -961,9 +1008,23 @@ pub(super) fn execute_bulk_cross_track_move(
     }
 
     if !ops.is_empty() {
-        // Save target first (new data), then source (deletion)
-        app.save_track_logged(target_track_id);
-        app.save_track_logged(&source_track_id);
+        // Target before source, under one lock, with the intent recorded — as
+        // above. A bulk move carries every task in one marker, so an
+        // interruption partway through the batch is recovered task by task.
+        let marker = crate::io::inflight::InFlight::begin(
+            &app.project.frame_dir,
+            crate::io::inflight::Operation::CrossTrackMove {
+                moves: moved_pairs,
+                source_track: source_track_id.clone(),
+                target_track: target_track_id.to_string(),
+            },
+            "bulk cross-track move (TUI)",
+        )
+        .ok();
+        app.save_batch_logged(&[target_track_id, &source_track_id], false);
+        if let Some(marker) = marker {
+            marker.commit();
+        }
 
         let count = ops.len();
         app.undo_stack.push(Operation::Bulk(ops));

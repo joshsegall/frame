@@ -724,7 +724,7 @@ pub(super) fn repeat_single_tag_apply(app: &mut App, adds: &[String], removes: &
         task.tags = new_tags;
         task.mark_dirty();
     }
-    let _ = app.save_track(&track_id);
+    app.save_track_logged(&track_id);
 
     app.undo_stack.push(Operation::FieldEdit {
         track_id,
@@ -796,7 +796,7 @@ pub(super) fn repeat_bulk_tag_apply(app: &mut App, adds: &[String], removes: &[S
 
     if !ops.is_empty() {
         app.undo_stack.push(Operation::Bulk(ops));
-        let _ = app.save_track(&track_id);
+        app.save_track_logged(&track_id);
     }
 }
 
@@ -851,7 +851,7 @@ pub(super) fn repeat_single_dep_apply(app: &mut App, adds: &[String], removes: &
         }
         task.mark_dirty();
     }
-    let _ = app.save_track(&track_id);
+    app.save_track_logged(&track_id);
 
     app.undo_stack.push(Operation::FieldEdit {
         track_id,
@@ -926,7 +926,7 @@ pub(super) fn repeat_bulk_dep_apply(app: &mut App, adds: &[String], removes: &[S
 
     if !ops.is_empty() {
         app.undo_stack.push(Operation::Bulk(ops));
-        let _ = app.save_track(&track_id);
+        app.save_track_logged(&track_id);
     }
 }
 
@@ -1004,7 +1004,7 @@ pub(super) fn repeat_bulk_cycle(app: &mut App) {
 
     if any_changed {
         app.undo_stack.push(Operation::Bulk(ops));
-        let _ = app.save_track(&track_id);
+        app.save_track_logged(&track_id);
     }
 }
 

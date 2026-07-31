@@ -8,15 +8,6 @@ use crate::tui::app::{
 use super::*;
 
 pub(super) fn handle_navigate(app: &mut App, key: KeyEvent) {
-    // Clear recovery notification on any keypress (after 3s minimum display)
-    if app.recovery_message.is_some()
-        && let Some(at) = app.recovery_message_at
-        && at.elapsed() >= std::time::Duration::from_secs(3)
-    {
-        app.recovery_message = None;
-        app.recovery_message_at = None;
-    }
-
     // Conflict popup intercepts Esc
     if app.conflict_text.is_some() {
         if matches!(key.code, KeyCode::Esc) {

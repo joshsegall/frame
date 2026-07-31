@@ -574,7 +574,7 @@ pub(super) fn compound_done_with_tag(app: &mut App, tag: &str) {
         }
     }
 
-    let _ = app.save_track(&track_id);
+    app.save_track_logged(&track_id);
 }
 
 /// Move the cursor task to the top or bottom of the backlog (palette-only, skips MOVE mode).
@@ -608,7 +608,7 @@ pub(super) fn palette_move_to_boundary(app: &mut App, to_top: bool) {
     let task = backlog.remove(current_idx);
     let new_idx = if to_top { 0 } else { backlog.len() };
     backlog.insert(new_idx, task);
-    let _ = app.save_track(&track_id);
+    app.save_track_logged(&track_id);
 
     app.undo_stack.push(Operation::TaskMove {
         track_id,
@@ -1251,7 +1251,7 @@ pub(super) fn confirm_import_tasks(app: &mut App, track_id: &str, file_path: &st
                 tasks: imported_tasks,
             });
 
-            let _ = app.save_track(track_id);
+            app.save_track_logged(track_id);
 
             app.status_message = Some(format!(
                 "Imported {} tasks ({} top-level)",
@@ -1370,7 +1370,7 @@ pub(super) fn confirm_delete_task(app: &mut App, track_id: &str, task_id: &str) 
     });
 
     // Save
-    let _ = app.save_track(track_id);
+    app.save_track_logged(track_id);
 
     // Navigate away from detail view if we deleted the viewed task
     if let View::Detail {
@@ -1455,7 +1455,7 @@ pub(super) fn confirm_bulk_delete_tasks(app: &mut App, task_ids: &[(String, Stri
         app.undo_stack.push(Operation::BulkTaskDelete { deletions });
 
         for track_id in &tracks_to_save {
-            let _ = app.save_track(track_id);
+            app.save_track_logged(track_id);
         }
 
         app.selection.clear();

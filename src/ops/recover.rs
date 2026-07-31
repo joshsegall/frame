@@ -39,7 +39,7 @@
 //! Every outcome is announced by the caller and written to the recovery log, so
 //! an automatic choice that turns out to be wrong stays visible and reversible.
 
-use crate::io::inflight::{self, Marker, Operation};
+use crate::io::inflight::{self, Marker, MovedTask, Operation};
 use crate::io::project_io;
 use crate::model::project::Project;
 use crate::model::track::TrackNode;
@@ -94,18 +94,10 @@ fn apply(project: &mut Project, marker: &Marker) -> Outcome {
     let operation = marker.operation.name().to_string();
     match &marker.operation {
         Operation::CrossTrackMove {
-            old_id,
-            new_id,
+            moves,
             source_track,
             target_track,
-        } => recover_cross_track_move(
-            project,
-            operation,
-            old_id,
-            new_id,
-            source_track,
-            target_track,
-        ),
+        } => recover_cross_track_move(project, operation, moves, source_track, target_track),
         Operation::TrackArchive { track_id, file } => {
             recover_track_archive(project, operation, track_id, file)
         }
@@ -124,66 +116,79 @@ fn apply(project: &mut Project, marker: &Marker) -> Outcome {
 // Cross-track move
 // ---------------------------------------------------------------------------
 
-/// The target is written before the source, so the possible states are:
-/// neither write landed (nothing to do), or the target landed and the source
-/// still holds the old copy (drop it).
+/// The target is written before the source, so for each moved task the possible
+/// states are: neither write landed (nothing to do), or the target landed and
+/// the source still holds the old copy (drop it).
+///
+/// A bulk move carries many tasks in one marker, and they are recovered
+/// independently — an interruption lands somewhere in the middle of the batch,
+/// so some will need the source copy dropped and others will not.
 fn recover_cross_track_move(
     project: &mut Project,
     operation: String,
-    old_id: &str,
-    new_id: &str,
+    moves: &[MovedTask],
     source_track: &str,
     target_track: &str,
 ) -> Outcome {
-    let target_has_it = project
-        .tracks
-        .iter()
-        .find(|(id, _)| id == target_track)
-        .map(|(_, track)| crate::ops::task_ops::find_task_in_track(track, new_id).is_some())
-        .unwrap_or(false);
+    let mut to_drop = Vec::new();
 
-    let source_has_it = project
-        .tracks
-        .iter()
-        .find(|(id, _)| id == source_track)
-        .map(|(_, track)| crate::ops::task_ops::find_task_in_track(track, old_id).is_some())
-        .unwrap_or(false);
+    for moved in moves {
+        let target_has_it = project
+            .tracks
+            .iter()
+            .find(|(id, _)| id == target_track)
+            .map(|(_, t)| crate::ops::task_ops::find_task_in_track(t, &moved.new_id).is_some())
+            .unwrap_or(false);
+        let source_has_it = project
+            .tracks
+            .iter()
+            .find(|(id, _)| id == source_track)
+            .map(|(_, t)| crate::ops::task_ops::find_task_in_track(t, &moved.old_id).is_some())
+            .unwrap_or(false);
 
-    match (target_has_it, source_has_it) {
-        // The move completed; only the marker was left behind.
-        (true, false) => Outcome::AlreadyComplete { operation },
-        // Nothing landed — the target write was the one that was cut.
-        (false, _) => Outcome::AlreadyComplete { operation },
         // The precondition for the destructive step: the target copy is really
-        // there, so dropping the source copy completes the move.
-        (true, true) => {
-            let Some((_, track)) = project.tracks.iter_mut().find(|(id, _)| id == source_track)
-            else {
-                return Outcome::Indeterminate {
-                    operation,
-                    reason: format!("source track '{source_track}' is gone"),
-                };
-            };
-            if !remove_task(track, old_id) {
-                return Outcome::Indeterminate {
-                    operation,
-                    reason: format!("{old_id} could not be removed from '{source_track}'"),
-                };
-            }
-            if let Err(e) = save_track(project, source_track) {
-                return Outcome::Indeterminate {
-                    operation,
-                    reason: format!("could not write '{source_track}': {e}"),
-                };
-            }
-            Outcome::Completed {
-                operation,
-                steps: vec![format!(
-                    "removed {old_id} from '{source_track}' — it is already in '{target_track}' as {new_id}"
-                )],
-            }
+        // there, so dropping the source copy completes the move. Anything else
+        // means either the move finished or nothing landed — no work either way.
+        if target_has_it && source_has_it {
+            to_drop.push(moved);
         }
     }
+
+    if to_drop.is_empty() {
+        return Outcome::AlreadyComplete { operation };
+    }
+
+    let Some((_, track)) = project.tracks.iter_mut().find(|(id, _)| id == source_track) else {
+        return Outcome::Indeterminate {
+            operation,
+            reason: format!("source track '{source_track}' is gone"),
+        };
+    };
+    let mut steps = Vec::new();
+    for moved in &to_drop {
+        if !remove_task(track, &moved.old_id) {
+            return Outcome::Indeterminate {
+                operation,
+                reason: format!(
+                    "{} could not be removed from '{source_track}'",
+                    moved.old_id
+                ),
+            };
+        }
+        steps.push(format!(
+            "removed {} from '{source_track}' — it is already in '{target_track}' as {}",
+            moved.old_id, moved.new_id
+        ));
+    }
+
+    if let Err(e) = save_track(project, source_track) {
+        return Outcome::Indeterminate {
+            operation,
+            reason: format!("could not write '{source_track}': {e}"),
+        };
+    }
+
+    Outcome::Completed { operation, steps }
 }
 
 /// Remove a top-level task by ID from whichever section holds it.

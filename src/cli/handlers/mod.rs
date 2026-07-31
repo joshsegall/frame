@@ -2159,8 +2159,10 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
         let marker = crate::io::inflight::InFlight::begin(
             &project.frame_dir,
             crate::io::inflight::Operation::CrossTrackMove {
-                old_id: args.id.clone(),
-                new_id: new_id.clone(),
+                moves: vec![crate::io::inflight::MovedTask {
+                    old_id: args.id.clone(),
+                    new_id: new_id.clone(),
+                }],
                 source_track: source_track_id.clone(),
                 target_track: target_track_id.clone(),
             },

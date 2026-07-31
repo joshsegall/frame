@@ -592,7 +592,7 @@ pub(super) fn bulk_state_change(app: &mut App, target_state: crate::model::TaskS
 
     if any_changed {
         app.undo_stack.push(Operation::Bulk(ops));
-        let _ = app.save_track(&track_id);
+        app.save_track_logged(&track_id);
 
         // Record repeatable action
         app.last_action = Some(RepeatableAction::SetState(target_state));
@@ -693,7 +693,7 @@ pub(super) fn confirm_bulk_tag_edit(app: &mut App) {
 
     if !ops.is_empty() {
         app.undo_stack.push(Operation::Bulk(ops));
-        let _ = app.save_track(&track_id);
+        app.save_track_logged(&track_id);
 
         // Record repeatable action
         app.last_action = Some(RepeatableAction::TagEdit {
@@ -801,7 +801,7 @@ pub(super) fn confirm_bulk_dep_edit(app: &mut App) {
 
     if !ops.is_empty() {
         app.undo_stack.push(Operation::Bulk(ops));
-        let _ = app.save_track(&track_id);
+        app.save_track_logged(&track_id);
 
         // Record repeatable action
         app.last_action = Some(RepeatableAction::DepEdit {
