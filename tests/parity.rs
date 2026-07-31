@@ -833,12 +833,14 @@ struct SurfaceCase {
     /// alone — a refusal on one side and a completed write on the other is the
     /// `7071675` shape.
     cli_refuses: bool,
-    /// A divergence this suite found and that is not fixed yet.
+    /// A divergence this suite has found and that is not fixed yet. Set it in
+    /// a struct literal, the way `cli_refuses` is set below.
     ///
-    /// The case is inverted rather than skipped: it asserts the two surfaces
+    /// Such a case is inverted rather than skipped: it asserts the two surfaces
     /// still *disagree*, so landing the fix fails the test until the note comes
     /// off. A skipped case would go on passing forever after the fix, and a
-    /// stale note is exactly the drift this file exists to catch.
+    /// stale note is exactly the drift this file exists to catch. Both notes
+    /// this suite started with are gone because their fixes landed.
     known_divergence: Option<&'static str>,
 }
 
@@ -856,11 +858,6 @@ const fn case(
         cli_refuses: false,
         known_divergence: None,
     }
-}
-
-const fn diverges(mut c: SurfaceCase, note: &'static str) -> SurfaceCase {
-    c.known_divergence = Some(note);
-    c
 }
 
 use Press::{Char, Enter, Space};
@@ -894,18 +891,11 @@ const SURFACE_CASES: &[SurfaceCase] = &[
         &[Char('x')],
     ),
     // -- state changes that cross a section boundary -------------------------
-    diverges(
-        case(
-            "mark a top-level Parked task done",
-            &["state", "M-010", "done"],
-            Start::Track("M-010"),
-            &[Char('x')],
-        ),
-        "`fr state ID done` moves a top-level Parked task into the Done section \
-         (cmd_state handles Backlog *or* Parked as the source). The TUI schedules \
-         PendingMoveKind::ToDone only from Backlog; from Parked the FromParked \
-         move fires instead, landing a done task at the top of the *Backlog* — a \
-         state `fr check` reports as DoneInBacklog.",
+    case(
+        "mark a top-level Parked task done",
+        &["state", "M-010", "done"],
+        Start::Track("M-010"),
+        &[Char('x')],
     ),
     case(
         "unpark a top-level Parked task",

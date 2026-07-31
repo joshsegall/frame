@@ -10,9 +10,8 @@ use crate::ops::search::{self as search_ops, MatchField, search_inbox, search_ta
 use crate::ops::task_ops::{self};
 
 use crate::tui::app::{
-    App, DetailRegion, FlatItem, MatchAnnotation, Mode, PendingMove, PendingMoveKind,
-    RepeatEditRegion, RepeatableAction, SearchResultItem, SearchResultKind, SearchResults, View,
-    resolve_task_from_flat,
+    App, DetailRegion, FlatItem, MatchAnnotation, Mode, RepeatEditRegion, RepeatableAction,
+    SearchResultItem, SearchResultKind, SearchResults, View, resolve_task_from_flat,
 };
 use crate::tui::undo::Operation;
 
@@ -985,17 +984,8 @@ pub(super) fn repeat_bulk_cycle(app: &mut App) {
                 new_resolved,
             });
 
-            if new_state == crate::model::TaskState::Done
-                && let Some(track) = App::find_track_in_project(&app.project, &track_id)
-                && task_ops::is_top_level_in_section(track, task_id, SectionKind::Backlog)
-            {
-                app.pending_moves.push(PendingMove {
-                    kind: PendingMoveKind::ToDone,
-                    track_id: track_id.clone(),
-                    task_id: task_id.clone(),
-                    deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
-                    old_state: Some(old_state),
-                });
+            if new_state == crate::model::TaskState::Done {
+                schedule_move_to_done(app, &track_id, task_id, old_state);
             }
 
             any_changed = true;

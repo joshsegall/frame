@@ -897,6 +897,39 @@ pub(super) enum StateAction {
     ToggleParked,
 }
 
+/// Schedule the section move that follows marking a task done, and report the
+/// section the task sits in at top level (`None` for a subtask, which stays put).
+///
+/// A top-level task moves into the Done section after the grace period — from
+/// the Backlog **or from Parked**. `fr state ID done` has done both since
+/// `e1a8dbe`; the TUI's four "mark done" paths each gated on the Backlog alone,
+/// so a parked task fell through to the un-park move instead and landed at the
+/// top of the Backlog carrying `[x]` and a resolved date — the state `fr check`
+/// reports as `DoneInBacklog`.
+///
+/// One helper, four callers, so the next path to mark a task done cannot pick a
+/// fifth rule.
+pub(super) fn schedule_move_to_done(
+    app: &mut App,
+    track_id: &str,
+    task_id: &str,
+    old_state: crate::model::task::TaskState,
+) -> Option<SectionKind> {
+    let track = App::find_track_in_project(&app.project, track_id)?;
+    let section = task_ops::top_level_section(track, task_id)?;
+    // Already in Done (a hand-edited checkbox, say): nothing to move.
+    if section != SectionKind::Done {
+        app.pending_moves.push(PendingMove {
+            kind: PendingMoveKind::ToDone { from: section },
+            track_id: track_id.to_string(),
+            task_id: task_id.to_string(),
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+            old_state: Some(old_state),
+        });
+    }
+    Some(section)
+}
+
 /// Apply a state change to the task under the cursor.
 pub(super) fn task_state_action(app: &mut App, action: StateAction) {
     let (track_id, task_id) = if let View::Detail { track_id, task_id } = &app.view {
@@ -1047,32 +1080,17 @@ pub(super) fn task_state_action(app: &mut App, action: StateAction) {
             }
         });
 
-        // If task is now Done and is a top-level Backlog task, schedule pending move
-        if new_state == crate::model::task::TaskState::Done {
-            let track_ref = App::find_track_in_project(&app.project, &track_id).unwrap();
-            let is_top_level_backlog =
-                task_ops::is_top_level_in_section(track_ref, &task_id, SectionKind::Backlog);
-            if is_top_level_backlog {
-                app.pending_moves.push(PendingMove {
-                    kind: PendingMoveKind::ToDone,
+        // If the task is now Done, schedule its section move; a subtask has none
+        // and instead gets a grace period before it is hidden.
+        if new_state == crate::model::task::TaskState::Done
+            && schedule_move_to_done(app, &track_id, &task_id, old_state).is_none()
+        {
+            app.pending_subtask_hides
+                .push(crate::tui::app::PendingSubtaskHide {
                     track_id: track_id.clone(),
                     task_id: task_id.clone(),
                     deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
-                    old_state: Some(old_state),
                 });
-            } else {
-                // Subtask (not top-level in any section): schedule hide grace period
-                let is_top_level_parked =
-                    task_ops::is_top_level_in_section(track_ref, &task_id, SectionKind::Parked);
-                if !is_top_level_parked {
-                    app.pending_subtask_hides
-                        .push(crate::tui::app::PendingSubtaskHide {
-                            track_id: track_id.clone(),
-                            task_id: task_id.clone(),
-                            deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
-                        });
-                }
-            }
         }
 
         // If task is now Parked and is a top-level Backlog task, schedule pending move
@@ -1091,10 +1109,14 @@ pub(super) fn task_state_action(app: &mut App, action: StateAction) {
             }
         }
 
-        // If task was Parked and is now something else, and is top-level in Parked section,
-        // schedule pending move back to Backlog
+        // If the task was Parked and is now something else, and is top-level in
+        // the Parked section, schedule a move back to the Backlog. Done is the
+        // exception: it goes to the Done section, scheduled above.
         if old_state == crate::model::task::TaskState::Parked
-            && new_state != crate::model::task::TaskState::Parked
+            && !matches!(
+                new_state,
+                crate::model::task::TaskState::Parked | crate::model::task::TaskState::Done
+            )
         {
             let track_ref = App::find_track_in_project(&app.project, &track_id).unwrap();
             let is_top_level_parked =

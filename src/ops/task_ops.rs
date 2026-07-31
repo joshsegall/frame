@@ -394,7 +394,7 @@ pub fn move_task(
 /// The section that holds `task_id` as a top-level task, if any. Cross-track and
 /// reorder moves operate on whole top-level subtrees, so a completed task in the
 /// Done section (or a Parked one) is located here — not just the Backlog.
-fn top_level_section(track: &Track, task_id: &str) -> Option<SectionKind> {
+pub fn top_level_section(track: &Track, task_id: &str) -> Option<SectionKind> {
     [SectionKind::Backlog, SectionKind::Parked, SectionKind::Done]
         .into_iter()
         .find(|&s| is_top_level_in_section(track, task_id, s))

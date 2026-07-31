@@ -5,10 +5,7 @@ use crate::model::task::{Metadata, Task};
 use crate::ops::ids::Mint;
 use crate::ops::task_ops::{self};
 
-use crate::tui::app::{
-    App, DetailRegion, EditHistory, EditTarget, Mode, PendingMove, PendingMoveKind, StateFilter,
-    View,
-};
+use crate::tui::app::{App, DetailRegion, EditHistory, EditTarget, Mode, StateFilter, View};
 use crate::tui::undo::Operation;
 
 use super::*;
@@ -557,20 +554,7 @@ pub(super) fn compound_done_with_tag(app: &mut App, tag: &str) {
 
         // Schedule pending move to Done section if appropriate
         if new_state == crate::model::TaskState::Done {
-            let is_top_level_backlog = task_ops::is_top_level_in_section(
-                App::find_track_in_project(&app.project, &track_id).unwrap(),
-                &task_id,
-                SectionKind::Backlog,
-            );
-            if is_top_level_backlog {
-                app.pending_moves.push(PendingMove {
-                    kind: PendingMoveKind::ToDone,
-                    track_id: track_id.clone(),
-                    task_id: task_id.clone(),
-                    deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
-                    old_state: Some(old_state),
-                });
-            }
+            schedule_move_to_done(app, &track_id, &task_id, old_state);
         }
     }
 

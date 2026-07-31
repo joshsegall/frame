@@ -466,8 +466,11 @@ pub enum ConfirmAction {
 /// The kind of pending section move (grace period)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingMoveKind {
-    /// Task marked done in Backlog → will move to Done section
-    ToDone,
+    /// Task marked done at top level → will move to the Done section from
+    /// `from`, which is the Backlog or Parked. `fr state ID done` has moved a
+    /// parked task to Done since e1a8dbe; hardcoding Backlog here is what kept
+    /// the TUI from doing the same.
+    ToDone { from: SectionKind },
     /// Task reopened from Done → will move to Backlog
     ToBacklog,
     /// Task parked in Backlog → will move to Parked section
@@ -1366,7 +1369,7 @@ impl App {
                             Some(pm)
                                 if matches!(
                                     pm.kind,
-                                    PendingMoveKind::ToDone | PendingMoveKind::ToParked
+                                    PendingMoveKind::ToDone { .. } | PendingMoveKind::ToParked
                                 ) =>
                             {
                                 pm.old_state.unwrap_or(task.state)
@@ -1685,18 +1688,14 @@ impl App {
         use crate::ops::task_ops::move_task_between_sections;
         let track = self.find_track_mut(&pm.track_id)?;
         match pm.kind {
-            PendingMoveKind::ToDone => {
-                let source_index = move_task_between_sections(
-                    track,
-                    &pm.task_id,
-                    SectionKind::Backlog,
-                    SectionKind::Done,
-                )?;
+            PendingMoveKind::ToDone { from } => {
+                let source_index =
+                    move_task_between_sections(track, &pm.task_id, from, SectionKind::Done)?;
                 // Push SectionMove undo entry
                 self.undo_stack.push(Operation::SectionMove {
                     track_id: pm.track_id.clone(),
                     task_id: pm.task_id.clone(),
-                    from_section: SectionKind::Backlog,
+                    from_section: from,
                     to_section: SectionKind::Done,
                     from_index: source_index,
                 });

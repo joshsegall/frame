@@ -2468,6 +2468,56 @@ mod tests {
     }
 
     #[test]
+    fn section_move_undo_restores_a_parked_task_to_parked() {
+        // A top-level Parked task marked done moves Parked → Done, not
+        // Backlog → Done. Undo has to put it back where it came from; the
+        // TUI hardcoded Backlog as the source until PendingMoveKind::ToDone
+        // started carrying its own.
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec(
+            "t",
+            parse_track(
+                "# Test\n\n## Backlog\n\n- [ ] `T-001` First\n\n## Parked\n\n- [~] `T-010` Parked\n\n## Done\n",
+            ),
+        );
+        {
+            let track = &mut tracks[0].1;
+            let task = track
+                .section_tasks_mut(SectionKind::Parked)
+                .unwrap()
+                .remove(0);
+            track
+                .section_tasks_mut(SectionKind::Done)
+                .unwrap()
+                .insert(0, task);
+        }
+        stack.push(Operation::SectionMove {
+            track_id: "t".into(),
+            task_id: "T-010".into(),
+            from_section: SectionKind::Parked,
+            to_section: SectionKind::Done,
+            from_index: 0,
+        });
+        stack.undo(&mut tracks, None);
+
+        let track = &tracks[0].1;
+        assert_eq!(track.parked()[0].id.as_deref(), Some("T-010"));
+        assert!(
+            track
+                .done()
+                .iter()
+                .all(|t| t.id.as_deref() != Some("T-010"))
+        );
+        assert!(
+            track
+                .backlog()
+                .iter()
+                .all(|t| t.id.as_deref() != Some("T-010")),
+            "undo must not reopen the task into the Backlog"
+        );
+    }
+
+    #[test]
     fn section_move_redo() {
         let mut stack = UndoStack::new();
         let mut tracks = tracks_vec("t", sample_track());
