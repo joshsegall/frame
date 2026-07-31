@@ -2868,3 +2868,200 @@ fn test_check_flags_an_unreadable_id_frontier() {
         "check should flag the leftover .bak: {human}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `fr check --fix`
+// ---------------------------------------------------------------------------
+
+/// A task note and an inbox body that each leave a code fence open.
+fn project_with_open_fences(root: &Path) {
+    create_test_project(root);
+    fs::write(
+        root.join("frame/tracks/main.md"),
+        "\
+# Main Track
+
+## Backlog
+
+- [ ] `M-001` Task with an open fence
+  - added: 2026-07-31
+  - note:
+    Example:
+    ```rust
+    let x = 1;
+
+## Done
+",
+    )
+    .unwrap();
+    fs::write(
+        root.join("frame/inbox.md"),
+        "# Inbox\n\n- Item with an open body fence\n  ```lace\n  perform Ask()\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_check_stays_read_only_without_fix() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    project_with_open_fences(tmp.path());
+
+    let before = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    let out = run_fr_ok(tmp.path(), &["check"]);
+    let after = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+
+    assert!(out.contains("code fence open"), "should report it: {out}");
+    assert_eq!(before, after, "bare `fr check` must not write");
+}
+
+#[test]
+fn test_check_fix_dry_run_writes_nothing() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    project_with_open_fences(tmp.path());
+
+    let before = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    let out = run_fr_ok(tmp.path(), &["check", "--fix", "--dry-run"]);
+    let after = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+
+    assert!(out.contains("close note fence"), "should plan it: {out}");
+    assert!(out.contains("dry run"), "should say so: {out}");
+    assert_eq!(before, after, "--dry-run must not write");
+}
+
+#[test]
+fn test_check_fix_closes_note_and_inbox_fences() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    project_with_open_fences(tmp.path());
+
+    run_fr_ok(tmp.path(), &["check", "--fix"]);
+
+    let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    let inbox = fs::read_to_string(tmp.path().join("frame/inbox.md")).unwrap();
+    assert!(track.contains("let x = 1;"), "content preserved: {track}");
+    assert!(
+        track.matches("```").count() >= 2,
+        "note fence closed: {track}"
+    );
+    assert!(
+        inbox.matches("```").count() >= 2,
+        "inbox fence closed: {inbox}"
+    );
+
+    // The findings are gone, and a second run has nothing to do.
+    let recheck = run_fr_ok(tmp.path(), &["check"]);
+    assert!(
+        !recheck.contains("code fence open"),
+        "fences should be balanced now: {recheck}"
+    );
+    let again = run_fr_ok(tmp.path(), &["check", "--fix"]);
+    assert!(
+        again.contains("nothing to repair"),
+        "--fix must be idempotent: {again}"
+    );
+}
+
+/// A repair that deletes must not run without consent. With stdin closed the
+/// prompt reads nothing, which is not `y`, so the run cancels — the behaviour a
+/// non-interactive caller (CI, an agent) gets by default.
+#[test]
+fn test_check_fix_cancels_deleting_repair_without_yes() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    fs::create_dir_all(tmp.path().join("frame/archive")).unwrap();
+    let archive = "\
+# Main Archive
+
+## Done
+
+- [x] `M-900` Archived twice
+  - resolved: 2026-01-01
+- [x] `M-900` Archived twice
+  - resolved: 2026-01-01
+";
+    fs::write(tmp.path().join("frame/archive/main.md"), archive).unwrap();
+
+    let (stdout, stderr, ok) = run_fr(tmp.path(), &["check", "--fix"]);
+    assert!(ok, "should exit cleanly: {stderr}");
+    assert!(
+        stdout.contains("duplicate archive") || stdout.contains("delete"),
+        "should describe the deleting repair: {stdout}"
+    );
+    assert!(stderr.contains("cancelled"), "should cancel: {stderr}");
+
+    let after = fs::read_to_string(tmp.path().join("frame/archive/main.md")).unwrap();
+    assert_eq!(after, archive, "archive must be untouched after cancelling");
+}
+
+#[test]
+fn test_check_fix_yes_dedupes_archive_and_logs_recovery() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    fs::create_dir_all(tmp.path().join("frame/archive")).unwrap();
+    fs::write(
+        tmp.path().join("frame/archive/main.md"),
+        "\
+# Main Archive
+
+## Done
+
+- [x] `M-900` Archived twice
+  - resolved: 2026-01-01
+- [x] `M-900` Archived twice
+  - resolved: 2026-01-01
+- [x] `M-901` Archived once
+  - resolved: 2026-01-02
+",
+    )
+    .unwrap();
+
+    run_fr_ok(tmp.path(), &["check", "--fix", "--yes"]);
+
+    let after = fs::read_to_string(tmp.path().join("frame/archive/main.md")).unwrap();
+    assert_eq!(
+        after.matches("`M-900`").count(),
+        1,
+        "one copy should remain: {after}"
+    );
+    assert!(after.contains("`M-901`"), "other tasks untouched: {after}");
+
+    // What was removed is recoverable, not gone.
+    let log = run_fr_ok(tmp.path(), &["recovery"]);
+    assert!(
+        log.contains("M-900"),
+        "removed copy should be in the recovery log: {log}"
+    );
+}
+
+/// The plan must correspond to what check reported. `.gitignore` is the case
+/// that made this concrete: check warns only about a local file that *exists*
+/// and is not ignored, so repairing must add that entry — not every entry frame
+/// would write at init.
+#[test]
+fn test_check_fix_adds_only_the_reported_gitignore_entry() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    if !std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(tmp.path())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        return; // no git available
+    }
+    create_test_project(tmp.path());
+    fs::write(tmp.path().join(".gitignore"), "target/\n").unwrap();
+
+    run_fr_ok(tmp.path(), &["check", "--fix"]);
+
+    let gitignore = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+    assert!(
+        gitignore.contains("frame/.actor"),
+        "the reported entry should be added: {gitignore}"
+    );
+    // `.state.json` does not exist in this project, so check never warned about
+    // it and the repair must not invent it.
+    assert!(
+        !gitignore.contains("frame/.state.json"),
+        "should not add entries check did not report: {gitignore}"
+    );
+}

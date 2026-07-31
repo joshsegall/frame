@@ -27,6 +27,50 @@ pub const LOCAL_ONLY_FRAME_FILES: [&str; 6] = [
     crate::io::ids::LOCAL_LOCK,
 ];
 
+/// The `.gitignore` lines [`LOCAL_ONLY_FRAME_FILES`] corresponds to.
+pub fn gitignore_entries() -> Vec<String> {
+    LOCAL_ONLY_FRAME_FILES
+        .iter()
+        .map(|name| format!("frame/{name}"))
+        .collect()
+}
+
+/// Which of [`gitignore_entries`] are absent from `<root>/.gitignore`.
+///
+/// Empty for a project outside git — there is nothing to leak into, and writing a
+/// `.gitignore` where no repo exists would be surprising. Shared by `fr init`,
+/// which writes them at creation, and `fr check --fix`, which adds the ones a
+/// project created before an entry existed never got.
+pub fn gitignore_entries_missing(root: &Path) -> Result<Vec<String>, std::io::Error> {
+    if !root.join(".git").exists() {
+        return Ok(Vec::new());
+    }
+    let existing = fs::read_to_string(root.join(".gitignore")).unwrap_or_default();
+    Ok(gitignore_entries()
+        .into_iter()
+        .filter(|entry| !existing.lines().any(|line| line.trim() == entry))
+        .collect())
+}
+
+/// Append one entry to `<root>/.gitignore`, creating the file if needed.
+///
+/// Idempotent: an entry already present is a no-op, so re-running `--fix` after a
+/// partial run cannot duplicate lines.
+pub fn append_gitignore_entry(root: &Path, entry: &str) -> Result<(), std::io::Error> {
+    let path = root.join(".gitignore");
+    let existing = fs::read_to_string(&path).unwrap_or_default();
+    if existing.lines().any(|line| line.trim() == entry) {
+        return Ok(());
+    }
+    let mut content = existing;
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(entry);
+    content.push('\n');
+    fs::write(&path, content)
+}
+
 /// Error type for project I/O operations
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectError {

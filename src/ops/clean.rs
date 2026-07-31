@@ -44,6 +44,25 @@ pub struct DateAssignment {
     pub track_id: String,
     pub task_id: String,
     pub date: String,
+    pub kind: DateKind,
+}
+
+/// Which date a [`DateAssignment`] filled in. Both are reported the same way, but
+/// naming the field keeps `T-001 → 2026-07-31` from being ambiguous now that
+/// clean fills two kinds of date.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DateKind {
+    Added,
+    Resolved,
+}
+
+impl DateKind {
+    pub fn key(self) -> &'static str {
+        match self {
+            DateKind::Added => "added",
+            DateKind::Resolved => "resolved",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -297,6 +316,12 @@ pub fn clean_project(project: &mut Project, scope: IdScope) -> CleanResult {
     // 7. Archive done tasks past threshold
     archive_done_tasks(project, &mut result);
 
+    // 8. Fill missing resolved dates. After archival by design — see
+    //    `assign_missing_resolved_dates`.
+    for (track_id, track) in &mut project.tracks {
+        assign_missing_resolved_dates(track, track_id, &mut result);
+    }
+
     result
 }
 
@@ -436,9 +461,63 @@ fn assign_dates_in_tasks(
                 track_id: track_id.to_string(),
                 task_id: task.id.as_ref().map(|i| i.to_string()).unwrap_or_default(),
                 date: today.to_string(),
+                kind: DateKind::Added,
             });
         }
+
         assign_dates_in_tasks(&mut task.subtasks, track_id, today, result);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 2b. Assign missing resolved dates
+// ---------------------------------------------------------------------------
+
+/// Fill `resolved:` on done tasks that lack it, matching the condition
+/// `fr check` warns on and the position `fr state <id> done` writes it in (last).
+///
+/// Reachable by ticking a checkbox in the editor, which is a supported workflow,
+/// so it belongs in clean rather than behind `fr check --fix`: a user wants it
+/// filled silently, exactly as `added:` already is.
+///
+/// **Runs after archival, and the order is load-bearing.** Archive retention
+/// ranks done tasks by `resolved:`, treating a missing date as oldest — so a task
+/// with no date is archived first. Filling the date earlier in the run would
+/// stamp it with today, making the oldest task look like the newest completion:
+/// it would be retained over genuinely recent work and surface at the top of
+/// `fr recent`. Filling afterwards leaves that ranking exactly as it was.
+fn assign_missing_resolved_dates(track: &mut Track, track_id: &str, result: &mut CleanResult) {
+    let today = today_str();
+    for node in &mut track.nodes {
+        if let TrackNode::Section { tasks, .. } = node {
+            assign_resolved_in_tasks(tasks, track_id, &today, result);
+        }
+    }
+}
+
+fn assign_resolved_in_tasks(
+    tasks: &mut [Task],
+    track_id: &str,
+    today: &str,
+    result: &mut CleanResult,
+) {
+    for task in tasks.iter_mut() {
+        if task.state == TaskState::Done
+            && !task
+                .metadata
+                .iter()
+                .any(|m| matches!(m, Metadata::Resolved(_)))
+        {
+            task.metadata.push(Metadata::Resolved(today.to_string()));
+            task.mark_dirty();
+            result.dates_assigned.push(DateAssignment {
+                track_id: track_id.to_string(),
+                task_id: task.id.as_ref().map(|i| i.to_string()).unwrap_or_default(),
+                date: today.to_string(),
+                kind: DateKind::Resolved,
+            });
+        }
+        assign_resolved_in_tasks(&mut task.subtasks, track_id, today, result);
     }
 }
 
@@ -1152,6 +1231,128 @@ mod tests {
                 .iter()
                 .any(|m| matches!(m, Metadata::Added(_)))
         );
+    }
+
+    #[test]
+    fn test_assigns_missing_resolved_date() {
+        let mut project = make_project(
+            "\
+# Main
+
+## Done
+
+- [x] `M-001` Has a resolved date
+  - added: 2025-05-01
+  - resolved: 2025-05-02
+- [x] `M-002` Ticked done by hand, no resolved date
+  - added: 2025-05-01
+",
+            vec![("main", "M")],
+        );
+
+        let result = clean_project(&mut project, IdScope::Mint(None));
+
+        let resolved: Vec<_> = result
+            .dates_assigned
+            .iter()
+            .filter(|d| d.kind == DateKind::Resolved)
+            .collect();
+        assert_eq!(resolved.len(), 1, "only the dateless done task");
+        assert_eq!(resolved[0].task_id, "M-002");
+
+        let done = project.tracks[0].1.done();
+        assert!(
+            done[1]
+                .metadata
+                .iter()
+                .any(|m| matches!(m, Metadata::Resolved(_)))
+        );
+    }
+
+    #[test]
+    fn test_resolved_date_is_not_assigned_to_unfinished_tasks() {
+        let mut project = make_project(
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Todo
+  - added: 2025-05-01
+- [~] `M-002` Parked
+  - added: 2025-05-01
+",
+            vec![("main", "M")],
+        );
+
+        let result = clean_project(&mut project, IdScope::Mint(None));
+
+        assert!(
+            !result
+                .dates_assigned
+                .iter()
+                .any(|d| d.kind == DateKind::Resolved),
+            "only done tasks get a resolved date"
+        );
+    }
+
+    /// Filling `resolved:` must not disturb archive retention, which ranks done
+    /// tasks by that date and treats a missing one as oldest. Stamping the date
+    /// before archival would make the oldest task look like the newest
+    /// completion — it would be retained over genuinely recent work. The fill
+    /// therefore runs after archival; this pins the ordering.
+    #[test]
+    fn test_missing_resolved_date_still_archives_first() {
+        let root = PathBuf::from("/tmp/test-resolved-order");
+        let track = parse_track(
+            "\
+# Main
+
+## Done
+
+- [x] `M-001` Dateless — must archive first
+  - added: 2025-01-01
+- [x] `M-002` Older
+  - added: 2025-01-02
+  - resolved: 2025-05-01
+- [x] `M-003` Newest
+  - added: 2025-01-03
+  - resolved: 2025-05-20
+",
+        );
+
+        let mut config = make_config(vec![("main", "M")]);
+        config.clean.done_threshold = 1;
+        config.clean.done_retain = 2;
+
+        let mut project = Project {
+            root: root.clone(),
+            frame_dir: root.join("frame"),
+            config,
+            tracks: vec![("main".to_string(), track)],
+            inbox: None,
+        };
+
+        let result = clean_project(&mut project, IdScope::Mint(None));
+
+        let archived: Vec<&str> = result
+            .tasks_archived
+            .iter()
+            .map(|a| a.task_id.as_str())
+            .collect();
+        assert_eq!(
+            archived,
+            vec!["M-001"],
+            "the dateless task ranks oldest and is archived, not stamped with today"
+        );
+
+        let retained: Vec<&str> = project.tracks[0]
+            .1
+            .done()
+            .iter()
+            .filter_map(|t| t.id.as_deref())
+            .collect();
+        assert_eq!(retained, vec!["M-002", "M-003"]);
     }
 
     #[test]

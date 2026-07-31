@@ -102,18 +102,10 @@ fn update_gitignore(cwd: &std::path::Path) -> Vec<String> {
     let gitignore_path = cwd.join(".gitignore");
     let existing = fs::read_to_string(&gitignore_path).unwrap_or_default();
 
-    // One list, shared with `fr check`, which catches projects whose .gitignore
-    // predates an entry (this runs at init only).
-    let entries: Vec<String> = crate::io::project_io::LOCAL_ONLY_FRAME_FILES
-        .iter()
-        .map(|name| format!("frame/{}", name))
-        .collect();
-    let mut to_add = Vec::new();
-    for entry in &entries {
-        if !existing.lines().any(|line| line.trim() == entry) {
-            to_add.push(entry.clone());
-        }
-    }
+    // One list, shared with `fr check` (which catches projects whose .gitignore
+    // predates an entry, since this runs at init only) and with `fr check --fix`
+    // (which adds them).
+    let to_add = crate::io::project_io::gitignore_entries_missing(cwd).unwrap_or_default();
 
     if to_add.is_empty() {
         return Vec::new();

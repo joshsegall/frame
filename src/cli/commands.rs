@@ -41,8 +41,8 @@ pub enum Commands {
     Recent(RecentArgs),
     /// Show dependency tree for a task
     Deps(DepsArgs),
-    /// Validate project integrity
-    Check,
+    /// Validate project integrity; `--fix` repairs what can be repaired safely
+    Check(CheckArgs),
     /// Show project identity (version, name, frame dir, actor, track count)
     Info,
     /// Add a task to a track's backlog (bottom)
@@ -436,6 +436,19 @@ pub struct TrackRenameArgs {
 // ---------------------------------------------------------------------------
 // Maintenance
 // ---------------------------------------------------------------------------
+
+#[derive(Args)]
+pub struct CheckArgs {
+    /// Apply the repairs check would otherwise only describe
+    #[arg(long)]
+    pub fix: bool,
+    /// With --fix, show the repair plan without writing anything
+    #[arg(long)]
+    pub dry_run: bool,
+    /// With --fix, skip the confirmation prompt for repairs that delete data
+    #[arg(long)]
+    pub yes: bool,
+}
 
 #[derive(Args)]
 pub struct CleanArgs {

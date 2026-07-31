@@ -22,7 +22,7 @@ use crate::model::project::Project;
 use crate::model::task::{Metadata, Task, TaskState};
 use crate::model::track::{Track, TrackNode};
 use crate::ops::ids::Mint;
-use crate::ops::{actor_merge, check, clean, import, inbox_ops, search, task_ops, track_ops};
+use crate::ops::{actor_merge, check, clean, fix, import, inbox_ops, search, task_ops, track_ops};
 
 // ---------------------------------------------------------------------------
 // Dispatch
@@ -70,7 +70,7 @@ pub fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             Commands::Stats(args) => cmd_stats(args, json),
             Commands::Recent(args) => cmd_recent(args, json),
             Commands::Deps(args) => cmd_deps(args),
-            Commands::Check => cmd_check(json),
+            Commands::Check(args) => cmd_check(args, json),
             Commands::Info => cmd_info(json),
 
             // Write commands
@@ -1230,7 +1230,14 @@ fn print_dep_tree(
     }
 }
 
-fn cmd_check(json: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_check(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    // `fr check` with no flags stays read-only, on exactly the code it always
+    // ran. The repair path is a separate function so that promise is visible
+    // rather than asserted.
+    if args.fix {
+        return cmd_check_fix(args, json);
+    }
+
     let project = load_project_cwd()?;
     let result = check::check_project(&project);
 
@@ -1430,6 +1437,129 @@ fn cmd_check(json: bool) -> Result<(), Box<dyn std::error::Error>> {
             println!("✗ project has errors");
         }
     }
+    Ok(())
+}
+
+/// `fr check --fix`: apply the repairs check would otherwise only describe.
+///
+/// All-or-nothing. If any repair in the plan deletes bytes and `--yes` was not
+/// given, the run asks once and cancels entirely on anything but `y` — the
+/// additive repairs included. That is what `cancelled` already means in
+/// `fr delete` and `fr track rename --prefix`, and it keeps a half-applied plan
+/// from being a state anyone has to reason about.
+fn cmd_check_fix(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    // A dry run only previews, so it takes no lock — the same split `fr clean`
+    // makes.
+    let _lock = if args.dry_run {
+        None
+    } else {
+        Some(FileLock::acquire_default(&load_project_cwd()?.frame_dir)?)
+    };
+
+    let mut project = load_project_cwd()?;
+    let plan = fix::plan(&check::check_project(&project));
+
+    if plan.is_empty() {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "planned": [],
+                    "applied": [],
+                    "skipped": [],
+                    "dry_run": args.dry_run,
+                }))?
+            );
+        } else {
+            println!("nothing to repair");
+        }
+        return Ok(());
+    }
+
+    if !json {
+        println!("Repairs:");
+        for repair in &plan {
+            println!("  {}", repair.describe());
+        }
+    }
+
+    if args.dry_run {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "planned": &plan,
+                    "applied": [],
+                    "skipped": [],
+                    "dry_run": true,
+                }))?
+            );
+        } else {
+            println!("(dry run — no changes written)");
+        }
+        return Ok(());
+    }
+
+    let deleting = fix::deleting_count(&plan);
+    if deleting > 0 && !args.yes {
+        eprint!("{deleting} of these delete data. Proceed? [y/n] ");
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            eprintln!("cancelled");
+            return Ok(());
+        }
+    }
+
+    let result = fix::apply(&mut project, &plan);
+
+    for track_id in fix::tracks_touched(&result) {
+        let Some(file) = track_file(&project, &track_id).map(|f| f.to_string()) else {
+            continue;
+        };
+        let Some((_, track)) = project.tracks.iter().find(|(id, _)| *id == track_id) else {
+            continue;
+        };
+        project_io::save_track(&project.frame_dir, &file, track)?;
+    }
+    if fix::inbox_touched(&result)
+        && let Some(inbox) = &project.inbox
+    {
+        project_io::save_inbox(&project.frame_dir, inbox)?;
+    }
+
+    // Re-read from disk and re-check, so the closing report describes what is
+    // actually on disk rather than what we believe we wrote.
+    let after = check::check_project(&load_project_cwd()?);
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "planned": &plan,
+                "applied": &result.applied,
+                "skipped": &result.skipped,
+                "dry_run": false,
+                "remaining": &after,
+            }))?
+        );
+    } else {
+        println!();
+        println!("Applied {} repair(s).", result.applied.len());
+        for skipped in &result.skipped {
+            println!(
+                "  skipped: {} — {}",
+                skipped.repair.describe(),
+                skipped.reason
+            );
+        }
+        println!(
+            "{} error(s), {} warning(s) remain.",
+            after.errors.len(),
+            after.warnings.len()
+        );
+    }
+
     Ok(())
 }
 
@@ -2401,7 +2531,13 @@ fn cmd_clean(args: CleanArgs) -> Result<(), Box<dyn std::error::Error>> {
     if !result.dates_assigned.is_empty() {
         println!("Dates assigned:");
         for d in &result.dates_assigned {
-            println!("  [{}] {} → {}", d.track_id, d.task_id, d.date);
+            println!(
+                "  [{}] {} {}: {}",
+                d.track_id,
+                d.task_id,
+                d.kind.key(),
+                d.date
+            );
         }
     }
     if !result.duplicates_resolved.is_empty() {

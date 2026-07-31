@@ -408,7 +408,7 @@ fn check_inbox(inbox: &crate::model::inbox::Inbox, result: &mut CheckResult) {
 ///
 /// Tilde fences (`~~~`) are not considered; frame has only ever special-cased
 /// backticks.
-fn unclosed_fence(body: &str) -> Option<String> {
+pub(crate) fn unclosed_fence(body: &str) -> Option<String> {
     let mut open: Option<(usize, String)> = None;
 
     for line in body.lines() {

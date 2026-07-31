@@ -217,6 +217,7 @@ fr sub EFF-014 "Test with nested closures"
 | `fr recent --limit <n>` | Limit results (default: 20) |
 | `fr inbox` | List inbox items |
 | `fr check` | Validate project integrity — read-only; see Maintenance for what it covers |
+| `fr check --fix` | **Human's call** — applies repairs. Report findings instead of fixing them |
 | `fr info` | Project identity: version and build commit, name, frame dir, actor token, ID frontier, track count (report which clone you're on) |
 | `fr actor` | Show this working copy's actor token and which tier it resolved from |
 
@@ -323,9 +324,10 @@ Everything below writes identity state shared across the clone, and is the
 
 | Command | Description |
 |---------|-------------|
-| `fr clean` | Assign IDs/dates, archive done tasks, validate |
+| `fr clean` | Assign IDs/dates, archive done tasks, reconcile sections, validate |
 | `fr clean --dry-run` | Preview what clean would do |
 | `fr check` | Read-only validation: deps, refs, duplicate and reissued IDs, unclosed code fences, actor-registry drift, local files leaking into git, ID-frontier health, `#lost` tasks, recovery log |
+| `fr check --fix` | Applies repairs — **do not run unprompted**, see below |
 | `fr delete <ids>...` | **Permanently** delete tasks (`--yes` skips the prompt) |
 | `fr recovery` | View recovery log entries (most recent first) |
 | `fr recovery prune [--all]` | Remove old recovery log entries |
@@ -334,6 +336,12 @@ Everything below writes identity state shared across the clone, and is the
 `fr delete` is permanent and has no undo on the CLI. Prefer `fr state <id>
 parked` for work that is being set aside, or ask the human. Delete only when
 explicitly told to.
+
+`fr check` is read-only and safe to run any time. **`fr check --fix` is not** —
+it rewrites task notes, edits `.gitignore`, and (with `--yes`) deletes duplicate
+archive entries. Report what `fr check` found and let the human decide. `fr
+clean` is the routine maintenance you *can* run: it assigns IDs and dates,
+archives finished work, and reconciles sections.
 
 ---
 

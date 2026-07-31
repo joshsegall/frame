@@ -144,7 +144,7 @@ fr deps EFF-014
 
 ### `fr check`
 
-Validate project integrity (read-only). Reports dangling dependencies, broken refs/specs, duplicate IDs, missing metadata, and format warnings. Also flags actor issues: this clone's token drifting from `actors.toml`, and **multiple active tokens sharing one provenance name** (a sign a machine has accumulated tokens — e.g. a git-worktree-per-session workflow — with a suggested `fr actor merge` to collapse them).
+Validate project integrity. Read-only unless `--fix` is passed. Reports dangling dependencies, broken refs/specs, duplicate IDs, missing metadata, and format warnings. Also flags actor issues: this clone's token drifting from `actors.toml`, and **multiple active tokens sharing one provenance name** (a sign a machine has accumulated tokens — e.g. a git-worktree-per-session workflow — with a suggested `fr actor merge` to collapse them).
 
 It flags **ID collisions involving an archive**, which nothing else catches — the duplicate-ID *error* and `fr clean`'s duplicate resolution both compare live tracks only. These are two different problems and are reported separately:
 
@@ -156,6 +156,32 @@ Both are warnings rather than errors: there is no automatic repair, and they fir
 It flags **working-copy-local frame files leaking into git** — `frame/.state.json`, `frame/.lock`, `frame/.recovery.log`, `frame/.actor`, and (for projects outside git, where the frontier store is working-copy-local) `frame/.ids.toml` and `frame/.ids.lock`. `fr init` writes them all to `.gitignore`, but only at init, so a project created before an entry existed never gets it. Check reports a file that git already **tracks** (needs `git rm --cached <path>` as well as a `.gitignore` line — ignore rules don't apply to files already in the index) and one that exists but **isn't ignored** (the next `git add -A` commits it). Committing these leaks machine-local state into shared history; the append-only recovery log also conflicts on every merge that touches it. Projects outside git are skipped.
 
 Finally, it warns about **task notes and inbox item bodies that leave a code fence open**. Frame itself parses these correctly — a note's extent is set by [indentation, not fence state](format.md#metadata) — but an unclosed fence makes every markdown renderer downstream (GitHub, editor previews) swallow the rest of the file into a code block. The warning names the offending opener, e.g. ` ```rust `. Fence balance follows CommonMark, so a fence carrying an info string cannot close a block: ` ```lace ` / ` ```rust ` / ` ``` ` is balanced and does *not* warn.
+
+#### `fr check --fix`
+
+```
+fr check --fix [--dry-run] [--yes]
+```
+
+Applies the repairs check would otherwise only describe. Bare `fr check` never writes — the repair path is only reached with `--fix`.
+
+The plan is exactly what check reported: one warning in, at most one repair out. Five findings are repairable:
+
+| Finding | Repair | Deletes? |
+|---|---|---|
+| unclosed note fence | append a closing fence to the note | no |
+| unclosed inbox fence | append a closing fence to the body | no |
+| local file not ignored | add the entry to `.gitignore` | no |
+| duplicate archived ID | drop the extra copies, keeping one | **yes** |
+| leftover `frame-ids.toml.bak` | delete the stale backup | **yes** |
+
+Everything else check reports is left alone, because it has no repair that is safe to apply without a decision — renumbering a reissued ID rewrites something other work may reference, a `ref:` can be legitimately absent on the current branch, `fr actor merge` renumbers a whole namespace, and a `#lost` tag exists precisely to be read by a human. A local file git already **tracks** is only half-repairable: the `.gitignore` line is added, but `git rm --cached` is yours to run.
+
+**Confirmation.** Repairs that delete prompt once before anything is written; `--yes` skips the prompt. Declining cancels the whole run, additive repairs included — a run applies its entire plan or none of it. With stdin closed (CI, an agent) the prompt reads nothing, which is not `y`, so the run cancels: pass `--yes` to mean it. Removed archive copies go to the [recovery log](#fr-recovery) before deletion, so a duplicate that was hand-edited after the first write is recoverable.
+
+`--dry-run` prints the plan and writes nothing. Repairs are idempotent — a second `--fix` reports `nothing to repair`. `--json` reports `planned`, `applied`, `skipped`, and the `remaining` check result, re-read from disk after the write.
+
+**This is not `fr clean`.** Clean handles what frame expects to do for you as work proceeds — minting IDs, filling `added:`/`resolved:` dates, resolving duplicate IDs, archiving finished work, reconciling sections — and it runs *unattended*, after every file reload in the TUI when `auto_clean` is on. So it may only do what is correct with nobody watching. `--fix` repairs damage: states that should never have arisen, where a human should have read the diagnosis first. That is the line, and it is not about how destructive a repair is — clean already archives and renumbers.
 
 ### `fr info`
 
@@ -422,7 +448,7 @@ At least one of `--name`, `--new-id`, or `--prefix` is required. Flags can be co
 
 ### `fr clean`
 
-Run project maintenance.
+Run project maintenance — the work frame expects to do for you as tasks come and go.
 
 ```
 fr clean [--dry-run]
@@ -431,10 +457,16 @@ fr clean [--dry-run]
 Actions performed:
 - Assign missing task IDs
 - Add missing `added` dates
+- Add missing `resolved` dates to done tasks
 - Resolve duplicate IDs
 - Archive done tasks exceeding the threshold
+- Move top-level tasks into the section matching their state
 - Report dangling dependencies and broken refs
 - Suggest actions (e.g., "all subtasks done — consider marking done")
+
+**Clean runs unattended**, not only when you ask: with `auto_clean` on (the default) the TUI runs it after every file reload. So everything above must be correct with nobody watching and no output read — that constraint is what decides whether a repair belongs here or behind [`fr check --fix`](#fr-check---fix), which is invoked deliberately after a diagnosis has been read. Destructiveness is not the line: clean already archives tasks and renumbers IDs.
+
+Missing `resolved:` dates are filled *after* archival, deliberately. Archive retention ranks done tasks by that date and treats a missing one as oldest, so stamping it earlier in the run would make the oldest task look like the newest completion — retained over genuinely recent work, and surfacing at the top of `fr recent`.
 
 IDs assigned or reassigned by a real (non-`--dry-run`) clean are minted in this clone's [actor-token namespace](concepts.md#minting-in-a-token-namespace), auto-claiming a token on first use. Archival and thresholds key on task state and `resolved:` dates, not ID structure, so they are unaffected by the token. A `--dry-run` previews without claiming a token or writing anything.
 

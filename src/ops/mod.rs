@@ -1,6 +1,7 @@
 pub mod actor_merge;
 pub mod check;
 pub mod clean;
+pub mod fix;
 pub mod ids;
 pub mod import;
 pub mod inbox_ops;
