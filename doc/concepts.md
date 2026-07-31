@@ -20,9 +20,24 @@ myproject/
         old-track.md
     .lock              # advisory lock file
     .state.json        # TUI state (cursor, scroll, expanded)
+    .inflight          # only present while a multi-file operation is running
 ```
 
 Project discovery walks up from the current directory until it finds a `frame/` folder.
+
+**If you find a `.inflight` file sitting there**, an operation that writes more
+than one file — a cross-track move, a track archival, an actor merge, a triage —
+started and didn't finish, because the process was killed or the disk gave out
+partway through. Nothing is lost: those operations always write the new copy
+before removing the old one, so an interruption duplicates rather than deletes.
+
+You don't need to do anything about it. The next command that writes anything
+finishes the interrupted operation, says what it did, and removes the file.
+`fr check` reports it in the meantime, and `fr recovery` keeps a record
+afterwards. The only case needing a decision is when the project changed
+underneath the interrupted operation — a hand edit, or a `git checkout` in
+between — where frame won't guess: it leaves everything alone, says why, and
+keeps warning until you look and run `fr check --fix --yes`.
 
 ## Tracks
 

@@ -155,6 +155,8 @@ Both are warnings rather than errors: there is no automatic repair, and they fir
 
 It flags **working-copy-local frame files leaking into git** — `frame/.state.json`, `frame/.lock`, `frame/.recovery.log`, `frame/.actor`, and (for projects outside git, where the frontier store is working-copy-local) `frame/.ids.toml` and `frame/.ids.lock`. `fr init` writes them all to `.gitignore`, but only at init, so a project created before an entry existed never gets it. Check reports a file that git already **tracks** (needs `git rm --cached <path>` as well as a `.gitignore` line — ignore rules don't apply to files already in the index) and one that exists but **isn't ignored** (the next `git add -A` commits it). Committing these leaks machine-local state into shared history; the append-only recovery log also conflicts on every merge that touches it. Projects outside git are skipped.
 
+It reports an **interrupted operation**: a multi-file operation that started and did not finish, recorded in `frame/.inflight`. Normally the next write command completes it and clears the marker, so seeing this means either nothing has been written since, or recovery declined to act because a precondition no longer held. See [Multi-file writes](architecture.md) and `fr recovery` for the detail.
+
 Finally, it warns about **task notes and inbox item bodies that leave a code fence open**. Frame itself parses these correctly — a note's extent is set by [indentation, not fence state](format.md#metadata) — but an unclosed fence makes every markdown renderer downstream (GitHub, editor previews) swallow the rest of the file into a code block. The warning names the offending opener, e.g. ` ```rust `. Fence balance follows CommonMark, so a fence carrying an info string cannot close a block: ` ```lace ` / ` ```rust ` / ` ``` ` is balanced and does *not* warn.
 
 #### `fr check --fix`
@@ -165,7 +167,7 @@ fr check --fix [--dry-run] [--yes]
 
 Applies the repairs check would otherwise only describe. Bare `fr check` never writes — the repair path is only reached with `--fix`.
 
-The plan is exactly what check reported: one warning in, at most one repair out. Five findings are repairable:
+The plan is exactly what check reported: one warning in, at most one repair out. Six findings are repairable:
 
 | Finding | Repair | Deletes? |
 |---|---|---|
@@ -174,6 +176,9 @@ The plan is exactly what check reported: one warning in, at most one repair out.
 | local file not ignored | add the entry to `.gitignore` | no |
 | duplicate archived ID | drop the extra copies, keeping one | **yes** |
 | leftover `frame-ids.toml.bak` | delete the stale backup | **yes** |
+| interrupted operation recovery declined | clear the `.inflight` marker | **yes** |
+
+An **interrupted operation** (`frame/.inflight`) is normally not repaired here at all — the next write command completes it automatically and clears the marker. The repair above exists only for the case where recovery declined to act because a precondition no longer held, so the marker would otherwise stand forever with no way to acknowledge it.
 
 Everything else check reports is left alone, because it has no repair that is safe to apply without a decision — renumbering a reissued ID rewrites something other work may reference, a `ref:` can be legitimately absent on the current branch, `fr actor merge` renumbers a whole namespace, and a `#lost` tag exists precisely to be read by a human. A local file git already **tracks** is only half-repairable: the `.gitignore` line is added, but `git rm --cached` is yours to run.
 

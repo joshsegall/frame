@@ -3,6 +3,7 @@ pub mod config_io;
 pub mod fault;
 pub mod git;
 pub mod ids;
+pub mod inflight;
 pub mod lock;
 pub mod project_io;
 pub mod recovery;

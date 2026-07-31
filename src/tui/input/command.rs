@@ -840,6 +840,14 @@ pub(super) fn palette_check_project(app: &mut App) {
                         path
                     )
                 }
+                check::CheckWarning::InterruptedOperation {
+                    command, started, ..
+                } => {
+                    format!(
+                        "  `{}` ({}) did not finish — next write completes it",
+                        command, started
+                    )
+                }
             };
             lines.push(Line::from(Span::styled(msg, yellow)));
         }

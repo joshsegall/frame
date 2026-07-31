@@ -155,6 +155,22 @@ pub enum CheckWarning {
         /// The unclosed opening fence, trimmed.
         fence: String,
     },
+    /// A multi-file operation started and did not finish — an
+    /// [`crate::io::inflight`] marker is still in place.
+    ///
+    /// Normally the next write command completes it and clears the marker, so
+    /// seeing this means either nothing has been written since, or recovery
+    /// declined to act because a precondition no longer held (a hand edit, a
+    /// `git checkout` in between). The recovery log has the detail.
+    #[serde(rename = "interrupted_operation")]
+    InterruptedOperation {
+        /// The operation name, e.g. `mv --track`.
+        operation: String,
+        /// The command as it was run.
+        command: String,
+        /// RFC3339 timestamp of when it started.
+        started: String,
+    },
 }
 
 /// Informational messages (not errors or warnings).
@@ -214,6 +230,7 @@ pub fn check_project(project: &Project) -> CheckResult {
 
     // The durable ID frontier store: unreadable, or reset at some point.
     check_id_frontier(&project.frame_dir, &mut result);
+    check_inflight(&project.frame_dir, &mut result);
 
     // Inbox item bodies that leave a code fence open.
     if let Some(ref inbox) = project.inbox {
@@ -692,6 +709,21 @@ fn archived_task_lists(frame_dir: &Path) -> Vec<(String, Vec<Task>)> {
 /// Report a frontier store that can't be read, or one that was reset earlier.
 /// Read-only: unlike a mint, this leaves an unreadable store in place so the
 /// warning is actionable while the file is still there.
+/// Report an operation that started and did not finish.
+///
+/// Read-only, like everything else here: the marker is left in place. Completing
+/// it is the next write command's job (`crate::ops::recover`), which is also what
+/// clears it.
+fn check_inflight(frame_dir: &Path, result: &mut CheckResult) {
+    if let Some(marker) = crate::io::inflight::read(frame_dir) {
+        result.warnings.push(CheckWarning::InterruptedOperation {
+            operation: marker.operation.name().to_string(),
+            command: marker.command,
+            started: marker.started,
+        });
+    }
+}
+
 fn check_id_frontier(frame_dir: &Path, result: &mut CheckResult) {
     let health = crate::io::ids::health(frame_dir);
 

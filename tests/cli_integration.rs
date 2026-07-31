@@ -3204,11 +3204,11 @@ fn test_track_archive_recovers_from_interrupted_file_move() {
         "the file move is what was cut"
     );
 
-    // Re-running completes it.
-    run_fr_ok(tmp.path(), &["track", "archive", "a"]);
+    // Any following write command recovers it — no need to re-run the archive.
+    run_fr_ok(tmp.path(), &["add", "b", "unrelated"]);
     assert!(
         !tmp.path().join("frame/tracks/a.md").exists(),
-        "re-running should move the file out of tracks/"
+        "recovery should move the file out of tracks/"
     );
     assert!(
         tmp.path().join("frame/archive/_tracks/a.md").exists(),
@@ -3326,5 +3326,186 @@ fn test_actor_merge_converges_when_the_registry_write_is_cut() {
     assert!(
         run_fr_ok(tmp.path(), &["check"]).contains("valid"),
         "project should be consistent after recovery"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// In-flight marker and automatic recovery
+// ---------------------------------------------------------------------------
+
+/// The state after a cut cross-track move is undetectable by any check — the
+/// task is in both tracks under different IDs, which is a legitimate shape. The
+/// marker is what makes it knowable, and the next write command completes the
+/// move rather than leaving a human to work out which copy to delete.
+#[test]
+fn test_interrupted_cross_track_move_is_recovered_by_the_next_write() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    two_track_project(tmp.path());
+
+    let (_, _, ok) = run_fr_env(
+        tmp.path(),
+        &["mv", "A-001", "--track", "b"],
+        &[("FRAME_FAIL_WRITE", "tracks/a.md")],
+    );
+    assert!(!ok);
+
+    // The interrupted state: in both tracks, and a marker recording the intent.
+    assert_eq!(
+        tracks_holding(tmp.path(), "the task to move"),
+        vec!["a.md", "b.md"],
+    );
+    assert!(
+        tmp.path().join("frame/.inflight").exists(),
+        "marker written"
+    );
+
+    // Check reports it, where it would otherwise say the project is valid.
+    let checked = run_fr_ok(tmp.path(), &["check"]);
+    assert!(
+        checked.contains("did not finish"),
+        "check should report the interrupted operation: {checked}"
+    );
+
+    // Any write command completes the move.
+    let (_, stderr, _) = run_fr(tmp.path(), &["add", "a", "something else"]);
+    assert!(
+        stderr.contains("recovered an interrupted"),
+        "recovery should be announced: {stderr}"
+    );
+
+    assert_eq!(
+        tracks_holding(tmp.path(), "the task to move"),
+        vec!["b.md"],
+        "the move should now be complete — target only"
+    );
+    assert!(
+        !tmp.path().join("frame/.inflight").exists(),
+        "marker cleared after recovery"
+    );
+    assert!(run_fr_ok(tmp.path(), &["check"]).contains("valid"));
+}
+
+/// Triage writes the task, then the inbox. Cut in between, the item is both a
+/// task and still in the inbox; recovery drops the inbox copy.
+#[test]
+fn test_interrupted_triage_is_recovered() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    two_track_project(tmp.path());
+    run_fr_ok(tmp.path(), &["inbox", "an idea worth keeping"]);
+
+    let (_, _, ok) = run_fr_env(
+        tmp.path(),
+        &["triage", "1", "--track", "b"],
+        &[("FRAME_FAIL_WRITE", "inbox.md")],
+    );
+    assert!(!ok);
+
+    let inbox = fs::read_to_string(tmp.path().join("frame/inbox.md")).unwrap();
+    assert!(
+        inbox.contains("an idea worth keeping"),
+        "still in the inbox"
+    );
+
+    run_fr_ok(tmp.path(), &["add", "a", "something else"]);
+
+    let inbox = fs::read_to_string(tmp.path().join("frame/inbox.md")).unwrap();
+    assert!(
+        !inbox.contains("an idea worth keeping"),
+        "recovery should remove the inbox copy: {inbox}"
+    );
+    assert!(
+        tracks_holding(tmp.path(), "an idea worth keeping") == vec!["b.md"],
+        "and the task should remain"
+    );
+}
+
+/// `fr actor merge` renumbers before it writes the registry. Cut in between, the
+/// source token is still active with no source-namespace ids left to find — the
+/// case a naive retry cannot work out. The marker records which tokens to retire.
+#[test]
+fn test_interrupted_actor_merge_is_recovered() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    run_fr_ok(tmp.path(), &["init", "--name", "p", "--track", "a", "A"]);
+    run_fr_ok(tmp.path(), &["actor", "set", "x"]);
+    run_fr_ok(tmp.path(), &["add", "a", "from x"]);
+    run_fr_ok(tmp.path(), &["actor", "set", "y"]);
+    run_fr_ok(tmp.path(), &["add", "a", "from y"]);
+
+    let (_, _, ok) = run_fr_env(
+        tmp.path(),
+        &["actor", "merge", "x", "--into", "y"],
+        &[("FRAME_FAIL_WRITE", "actors.toml")],
+    );
+    assert!(!ok);
+
+    run_fr_ok(tmp.path(), &["add", "a", "something else"]);
+
+    let listing = run_fr_ok(tmp.path(), &["actor", "list"]);
+    assert!(
+        listing
+            .lines()
+            .any(|l| l.contains(" x ") && l.contains("retired")),
+        "recovery should retire the merged-away token: {listing}"
+    );
+}
+
+/// A completed operation leaves nothing behind — otherwise every command would
+/// be doing recovery work and the warning would be permanent noise.
+#[test]
+fn test_a_completed_operation_leaves_no_marker() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    two_track_project(tmp.path());
+
+    run_fr_ok(tmp.path(), &["mv", "A-001", "--track", "b"]);
+    assert!(
+        !tmp.path().join("frame/.inflight").exists(),
+        "marker should be cleared on success"
+    );
+    assert!(run_fr_ok(tmp.path(), &["check"]).contains("valid"));
+}
+
+/// When a precondition no longer holds, recovery must not guess. It leaves
+/// everything alone and keeps the marker, so the warning stands until a human
+/// acknowledges it with `fr check --fix --yes`.
+#[test]
+fn test_recovery_declines_when_a_precondition_fails() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    two_track_project(tmp.path());
+    run_fr_ok(tmp.path(), &["inbox", "an orphan idea"]);
+
+    // A marker claiming a triage completed, for a task that does not exist.
+    // Reachable when the world changed between the crash and the recovery.
+    fs::write(
+        tmp.path().join("frame/.inflight"),
+        "command = \"fr triage 1 --track b\"\n\
+         started = \"2026-07-31T00:00:00Z\"\n\
+         kind = \"triage\"\n\
+         index = 1\n\
+         title = \"an orphan idea\"\n\
+         track_id = \"b\"\n",
+    )
+    .unwrap();
+
+    let (_, stderr, _) = run_fr(tmp.path(), &["add", "a", "something else"]);
+    assert!(
+        stderr.contains("could not be completed automatically"),
+        "should decline and say so: {stderr}"
+    );
+
+    let inbox = fs::read_to_string(tmp.path().join("frame/inbox.md")).unwrap();
+    assert!(
+        inbox.contains("an orphan idea"),
+        "the inbox item must not be dropped when the task never landed: {inbox}"
+    );
+    assert!(
+        tmp.path().join("frame/.inflight").exists(),
+        "marker kept so the warning stands"
+    );
+
+    // The escape hatch: acknowledge it.
+    run_fr_ok(tmp.path(), &["check", "--fix", "--yes"]);
+    assert!(
+        !tmp.path().join("frame/.inflight").exists(),
+        "--fix --yes should clear a marker recovery declined to act on"
     );
 }

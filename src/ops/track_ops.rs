@@ -373,6 +373,13 @@ pub fn archive_track_file(
     let archive_dir = frame_dir.join("archive").join("_tracks");
     fs::create_dir_all(&archive_dir).map_err(ProjectError::IoError)?;
     let dest = archive_dir.join(format!("{}.md", track_id));
+
+    // Already moved is success, not failure. Recovery of an interrupted archive
+    // completes the move, and the command the user then runs would otherwise
+    // fail on a job that is already done.
+    if !source.exists() && dest.exists() {
+        return Ok(());
+    }
     // The only project write that isn't an `atomic_write`, so it needs the fault
     // hook of its own — archiving a track is a two-step sequence (config, then
     // this) and this is its second step.

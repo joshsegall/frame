@@ -326,7 +326,7 @@ Everything below writes identity state shared across the clone, and is the
 |---------|-------------|
 | `fr clean` | Assign IDs/dates, archive done tasks, reconcile sections, validate |
 | `fr clean --dry-run` | Preview what clean would do |
-| `fr check` | Read-only validation: deps, refs, duplicate and reissued IDs, unclosed code fences, actor-registry drift, local files leaking into git, ID-frontier health, `#lost` tasks, recovery log |
+| `fr check` | Read-only validation: deps, refs, duplicate and reissued IDs, unclosed code fences, actor-registry drift, local files leaking into git, ID-frontier health, interrupted operations, `#lost` tasks, recovery log |
 | `fr check --fix` | Applies repairs — **do not run unprompted**, see below |
 | `fr delete <ids>...` | **Permanently** delete tasks (`--yes` skips the prompt) |
 | `fr recovery` | View recovery log entries (most recent first) |

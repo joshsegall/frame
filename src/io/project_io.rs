@@ -18,11 +18,12 @@ use crate::parse::{parse_inbox, parse_track};
 /// `fr init` writes these to `.gitignore` and `fr check` verifies them, both
 /// from this one list — a project created before an entry was added here won't
 /// have it, which is exactly what the check catches.
-pub const LOCAL_ONLY_FRAME_FILES: [&str; 6] = [
+pub const LOCAL_ONLY_FRAME_FILES: [&str; 7] = [
     ".state.json",
     ".lock",
     ".recovery.log",
     ".actor",
+    crate::io::inflight::MARKER_FILE,
     crate::io::ids::LOCAL_STORE,
     crate::io::ids::LOCAL_LOCK,
 ];

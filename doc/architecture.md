@@ -8,8 +8,8 @@ Developer reference for frame's internal design. Each section explains a design 
 src/
   model/    Data types: Task, Track, Inbox, ProjectConfig, Project
   parse/    Markdown parser + serializer pairs (task, track, inbox)
-  io/       Project discovery, file locking, config I/O, UI state, file watcher, project registry, ID frontier
-  ops/      Business logic: task CRUD, ID minting, track management, inbox, search, clean, check, import
+  io/       Project discovery, file locking, config I/O, UI state, file watcher, project registry, ID frontier, in-flight marker
+  ops/      Business logic: task CRUD, ID minting, track management, inbox, search, clean, check, fix, recover, import
   cli/      CLI interface (clap commands, handlers, JSON/human output)
   tui/      TUI interface: app state, undo, command palette, input handling, rendering
 ```
@@ -138,6 +138,16 @@ Single-file writes are atomic — `recovery::atomic_write` is temp-file + rename
 **The rule: whichever write creates must run before the write that destroys.** An interruption then leaves the work duplicated, never missing. That direction matters more than it looks: a duplicate is visible, and often self-healing or repairable, while a task that exists nowhere is indistinguishable from one that never existed — no check can detect it and no repair can recover it. `fr clean` archives before it drains Done, `fr triage` writes the track before it rewrites the inbox, and `fr mv --track` writes the target before the source.
 
 `fr mv --track` used to do the opposite, and lost the task outright when the target write failed. Its recovery-log fallback covered a *failing write* but not a process death, which is the window the ordering exists for. Fixed, and pinned by the crash-injection tests below.
+
+**Ordering prevents loss; it does not make the result visible.** After a cut cross-track move the task is in both tracks under *different* IDs, and after a cut archival the config says archived while the file is still in `tracks/`. Both report `✓ project is valid`, and neither is detectable in principle: two tasks with different IDs in two tracks is a legitimate shape, and so is a config entry whose file has not been read yet. The only thing that knows something went wrong is the process that was doing it.
+
+So it writes that down first. `io::inflight` records the operation's **intent** in `frame/.inflight` before the first write; `commit()` removes it after the last. `Drop` removes the file only if committed, so an early `?`, a panic and a kill all converge on the same observable state — which matters, because the gap between "write returned an error" and "process died" is exactly where the old recovery-log mitigation failed.
+
+**Recovery rolls forward, automatically.** `ops::recover` runs on every write command, under the lock the command already takes, and completes the remaining steps: drop the stale source copy, finish the file move, retire the token, remove the triaged inbox item. Rolling *back* would need undo records amounting to a copy of the prior state, which git already holds; rolling forward finishes an intent the user already expressed. Handing it to a human is the worse option, not the safer one — "delete whichever copy is wrong" invites deleting the right one.
+
+What remains is derived by inspecting current state, not from a step log, so nothing has to be written mid-operation to track progress. Every destructive step is gated on a precondition (the target copy really is there; the task really did land). When one fails — a hand edit, a `git checkout` in between — recovery changes nothing, reports it, and leaves the marker so `fr check` keeps saying so until `fr check --fix --yes` acknowledges it. Every outcome goes to the recovery log, including the ones that did nothing: an automatic decision is only defensible if it leaves a trail.
+
+The marker is a **breadcrumb, not a mutex** — no command refuses to run because one exists. `fr clean` is excluded deliberately: its interrupted state is self-healing, and `auto_clean` runs it on every TUI file reload, so a marker per run would be churn with no signal in it.
 
 **Verified, not assumed.** `io::fault` (debug builds only) fails a write selected by path — `FRAME_FAIL_WRITE=tracks/b.md` — so a test can cut one step of a real sequence and inspect what survived. The tests assert on files on disk rather than on the recovery log, because the log only catches a write that returns an error and would be skipped by an abrupt death; disk state is what survives either. Covered: cross-track move (both windows), track archival, `fr actor merge` with the registry write cut, and `fr check --fix` partway through its plan. Each asserts the work survives and that re-running converges.
 

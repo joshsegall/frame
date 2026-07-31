@@ -1403,6 +1403,17 @@ fn cmd_check(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
                             path
                         );
                     }
+                    check::CheckWarning::InterruptedOperation {
+                        operation,
+                        command,
+                        started,
+                    } => {
+                        println!(
+                            "  `{}` started {} did not finish — the next write command completes it. If it keeps appearing, recovery could not act; see `fr recovery`",
+                            command, started
+                        );
+                        let _ = operation;
+                    }
                 }
             }
         }
@@ -1448,15 +1459,18 @@ fn cmd_check(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
 /// `fr delete` and `fr track rename --prefix`, and it keeps a half-applied plan
 /// from being a state anyone has to reason about.
 fn cmd_check_fix(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
-    // A dry run only previews, so it takes no lock — the same split `fr clean`
-    // makes.
+    let mut project = load_project_cwd()?;
+
+    // A dry run only previews, so it takes no lock and runs no recovery — the
+    // same split `fr clean` makes. A real run recovers first, like every other
+    // write path, so the plan is computed against a project that is no longer
+    // mid-operation.
     let _lock = if args.dry_run {
         None
     } else {
-        Some(FileLock::acquire_default(&load_project_cwd()?.frame_dir)?)
+        Some(lock_and_recover(&mut project)?)
     };
 
-    let mut project = load_project_cwd()?;
     let plan = fix::plan(&check::check_project(&project));
 
     if plan.is_empty() {
@@ -1567,6 +1581,41 @@ fn cmd_check_fix(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::
 // Write command handlers
 // ---------------------------------------------------------------------------
 
+/// Take the project lock, completing any interrupted operation first.
+///
+/// Every write command goes through this. A previous `fr` that died partway
+/// through a multi-file operation left a marker (see [`crate::io::inflight`]);
+/// this is where the remaining steps get finished, before the new command
+/// touches anything. The common case is one `stat` that finds no marker.
+///
+/// Recovery may rewrite files the caller has already loaded, so the project is
+/// re-read when anything changed — otherwise the command would operate on a
+/// stale view and undo the repair.
+fn lock_and_recover(project: &mut Project) -> Result<FileLock, Box<dyn std::error::Error>> {
+    let lock = FileLock::acquire_default(&project.frame_dir)?;
+
+    if let Some(outcome) = crate::ops::recover::recover_pending(project) {
+        match &outcome {
+            crate::ops::recover::Outcome::AlreadyComplete { .. } => {}
+            crate::ops::recover::Outcome::Completed { operation, steps } => {
+                eprintln!("recovered an interrupted `fr {operation}`:");
+                for step in steps {
+                    eprintln!("  {step}");
+                }
+            }
+            crate::ops::recover::Outcome::Indeterminate { operation, reason } => {
+                eprintln!(
+                    "warning: an interrupted `fr {operation}` could not be completed \
+                     automatically:\n  {reason}\n  see `fr check` and `fr recovery`"
+                );
+            }
+        }
+        *project = project_io::load_project(&project.root)?;
+    }
+
+    Ok(lock)
+}
+
 /// Resolve this clone's minting namespace for a CLI mint command, auto-claiming
 /// a token on first use and announcing it once to stderr (so stdout stays clean
 /// for the minted ID). A frontier-empty error aborts the mint, creating nothing.
@@ -1583,7 +1632,7 @@ fn resolve_mint_namespace(
 
 fn cmd_add(args: AddArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut project = load_project_cwd()?;
-    let _lock = FileLock::acquire_default(&project.frame_dir)?;
+    let _lock = lock_and_recover(&mut project)?;
 
     reject_add_to_shelved(&project, &args.track)?;
 
@@ -1617,7 +1666,7 @@ fn cmd_add(args: AddArgs) -> Result<(), Box<dyn std::error::Error>> {
 
 fn cmd_push(args: PushArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut project = load_project_cwd()?;
-    let _lock = FileLock::acquire_default(&project.frame_dir)?;
+    let _lock = lock_and_recover(&mut project)?;
 
     reject_add_to_shelved(&project, &args.track)?;
 
@@ -1644,7 +1693,7 @@ fn cmd_push(args: PushArgs) -> Result<(), Box<dyn std::error::Error>> {
 
 fn cmd_sub(args: SubArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut project = load_project_cwd()?;
-    let _lock = FileLock::acquire_default(&project.frame_dir)?;
+    let _lock = lock_and_recover(&mut project)?;
 
     // Find which track the parent task is in
     let track_id = find_task_track(&project, &args.id)
@@ -1665,7 +1714,7 @@ fn cmd_sub(args: SubArgs) -> Result<(), Box<dyn std::error::Error>> {
 
 fn cmd_inbox_add(args: InboxCmd) -> Result<(), Box<dyn std::error::Error>> {
     let mut project = load_project_cwd()?;
-    let _lock = FileLock::acquire_default(&project.frame_dir)?;
+    let _lock = lock_and_recover(&mut project)?;
 
     let text = args.text.unwrap(); // We know it's Some from dispatch
     let inbox = project.inbox.get_or_insert_with(|| Inbox {
@@ -1699,7 +1748,7 @@ fn cmd_state(args: StateArgs) -> Result<(), Box<dyn std::error::Error>> {
     use crate::model::track::SectionKind;
 
     let mut project = load_project_cwd()?;
-    let _lock = FileLock::acquire_default(&project.frame_dir)?;
+    let _lock = lock_and_recover(&mut project)?;
 
     let new_state = parse_task_state(&args.state).map_err(Box::<dyn std::error::Error>::from)?;
 
@@ -1787,7 +1836,7 @@ fn cmd_state(args: StateArgs) -> Result<(), Box<dyn std::error::Error>> {
 
 fn cmd_tag(args: TagArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut project = load_project_cwd()?;
-    let _lock = FileLock::acquire_default(&project.frame_dir)?;
+    let _lock = lock_and_recover(&mut project)?;
 
     let track_id = find_task_track(&project, &args.id)
         .ok_or_else(|| format!("task not found: {}", args.id))?
@@ -1809,7 +1858,7 @@ fn cmd_tag(args: TagArgs) -> Result<(), Box<dyn std::error::Error>> {
 
 fn cmd_dep(args: DepArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut project = load_project_cwd()?;
-    let _lock = FileLock::acquire_default(&project.frame_dir)?;
+    let _lock = lock_and_recover(&mut project)?;
 
     let track_id = find_task_track(&project, &args.id)
         .ok_or_else(|| format!("task not found: {}", args.id))?
@@ -1837,7 +1886,7 @@ fn cmd_dep(args: DepArgs) -> Result<(), Box<dyn std::error::Error>> {
 
 fn cmd_note(args: NoteArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut project = load_project_cwd()?;
-    let _lock = FileLock::acquire_default(&project.frame_dir)?;
+    let _lock = lock_and_recover(&mut project)?;
 
     let track_id = find_task_track(&project, &args.id)
         .ok_or_else(|| format!("task not found: {}", args.id))?
@@ -1859,7 +1908,7 @@ fn cmd_note(args: NoteArgs) -> Result<(), Box<dyn std::error::Error>> {
 
 fn cmd_ref(args: RefArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut project = load_project_cwd()?;
-    let _lock = FileLock::acquire_default(&project.frame_dir)?;
+    let _lock = lock_and_recover(&mut project)?;
 
     let track_id = find_task_track(&project, &args.id)
         .ok_or_else(|| format!("task not found: {}", args.id))?
@@ -1877,7 +1926,7 @@ fn cmd_ref(args: RefArgs) -> Result<(), Box<dyn std::error::Error>> {
 
 fn cmd_spec(args: SpecArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut project = load_project_cwd()?;
-    let _lock = FileLock::acquire_default(&project.frame_dir)?;
+    let _lock = lock_and_recover(&mut project)?;
 
     let track_id = find_task_track(&project, &args.id)
         .ok_or_else(|| format!("task not found: {}", args.id))?
@@ -1895,7 +1944,7 @@ fn cmd_spec(args: SpecArgs) -> Result<(), Box<dyn std::error::Error>> {
 
 fn cmd_title(args: TitleArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut project = load_project_cwd()?;
-    let _lock = FileLock::acquire_default(&project.frame_dir)?;
+    let _lock = lock_and_recover(&mut project)?;
 
     let track_id = find_task_track(&project, &args.id)
         .ok_or_else(|| format!("task not found: {}", args.id))?
@@ -1913,7 +1962,7 @@ fn cmd_title(args: TitleArgs) -> Result<(), Box<dyn std::error::Error>> {
 
 fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut project = load_project_cwd()?;
-    let _lock = FileLock::acquire_default(&project.frame_dir)?;
+    let _lock = lock_and_recover(&mut project)?;
     // Taken before the tracks are borrowed mutably below.
     let frame_dir = project.frame_dir.clone();
 
@@ -2103,6 +2152,21 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
         // `fr check` reports and `fr clean` resolves — it is the same work
         // appearing twice, for a human to reconcile. Visible and recoverable
         // beats silent and not.
+        // Record the intent before the first write. If this command dies between
+        // the two saves, the next one finishes the move rather than leaving the
+        // task in both tracks under different ids — a state nothing else can
+        // detect.
+        let marker = crate::io::inflight::InFlight::begin(
+            &project.frame_dir,
+            crate::io::inflight::Operation::CrossTrackMove {
+                old_id: args.id.clone(),
+                new_id: new_id.clone(),
+                source_track: source_track_id.clone(),
+                target_track: target_track_id.clone(),
+            },
+            &format!("fr mv {} --track {}", args.id, target_track_id),
+        )?;
+
         save_track(&project, target_track_id)?;
         if let Err(e) = save_track(&project, &source_track_id) {
             // Target holds the task under its new id; source still holds it
@@ -2132,11 +2196,15 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
                         ("Error".to_string(), e.to_string()),
                     ],
                     body: format!(
-                        "{} is in {} and {} is in {}. Delete whichever copy is wrong.",
-                        args.id, source_file, new_id, target_track_id
+                        "{} is in {} and {} is in {}. The in-flight marker is still in \
+                         place, so the next write command completes the move by dropping \
+                         {} from {}.",
+                        args.id, source_file, new_id, target_track_id, args.id, source_file
                     ),
                 },
             );
+            // Deliberately not committed: the marker stays, and recovery finishes
+            // the move on the next command.
             return Err(e.into());
         }
         // Persist any other track whose dep references were rewritten. The move
@@ -2150,6 +2218,7 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
                 save_track(&project, other_id)?;
             }
         }
+        marker.commit();
         println!("{} → {} ({})", args.id, new_id, target_track_id);
     } else {
         // Same-track reorder
@@ -2207,7 +2276,7 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
 
 fn cmd_triage(args: TriageArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut project = load_project_cwd()?;
-    let _lock = FileLock::acquire_default(&project.frame_dir)?;
+    let _lock = lock_and_recover(&mut project)?;
 
     reject_add_to_shelved(&project, &args.track)?;
 
@@ -2234,6 +2303,15 @@ fn cmd_triage(args: TriageArgs) -> Result<(), Box<dyn std::error::Error>> {
         .position(|(id, _)| id == &args.track)
         .ok_or_else(|| format!("track not found: {}", args.track))?;
 
+    // Captured before the triage removes it, so recovery can confirm it is the
+    // same item before dropping it from the inbox.
+    let item_title = project
+        .inbox
+        .as_ref()
+        .and_then(|i| i.items.get(index))
+        .map(|i| i.title.clone())
+        .ok_or_else(|| format!("inbox item {} not found", args.index))?;
+
     let frame_dir = project.frame_dir.clone();
     let inbox = project.inbox.as_mut().ok_or("no inbox.md found")?;
     let track = &mut project.tracks[track_idx].1;
@@ -2241,11 +2319,24 @@ fn cmd_triage(args: TriageArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mint = Mint::new(&frame_dir, &args.track, &prefix, token.as_ref());
     let task_id = inbox_ops::triage(inbox, index, track, position, mint)?;
 
+    // Two writes: the task lands, then the inbox item goes. Interrupted between
+    // them the item exists in both places, which nothing else detects.
+    let marker = crate::io::inflight::InFlight::begin(
+        &project.frame_dir,
+        crate::io::inflight::Operation::Triage {
+            index: args.index,
+            title: item_title,
+            track_id: args.track.clone(),
+        },
+        &format!("fr triage {} --track {}", args.index, args.track),
+    )?;
+
     // Save track first (new data), then inbox (deletion)
     save_track(&project, &args.track)?;
     if let Some(ref inbox) = project.inbox {
         project_io::save_inbox(&project.frame_dir, inbox)?;
     }
+    marker.commit();
     println!("{}", task_id);
     Ok(())
 }
@@ -2269,7 +2360,7 @@ fn cmd_track(args: TrackCmd) -> Result<(), Box<dyn std::error::Error>> {
 
 fn cmd_track_new(args: TrackNewArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut project = load_project_cwd()?;
-    let _lock = FileLock::acquire_default(&project.frame_dir)?;
+    let _lock = lock_and_recover(&mut project)?;
 
     let (mut config, mut doc) = config_io::read_config(&project.frame_dir)?;
 
@@ -2293,8 +2384,8 @@ fn cmd_track_state_change(
     track_id: String,
     action: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let project = load_project_cwd()?;
-    let _lock = FileLock::acquire_default(&project.frame_dir)?;
+    let mut project = load_project_cwd()?;
+    let _lock = lock_and_recover(&mut project)?;
 
     let (mut config, mut doc) = config_io::read_config(&project.frame_dir)?;
 
@@ -2312,6 +2403,26 @@ fn cmd_track_state_change(
         _ => unreachable!(),
     }
 
+    // Archiving is two writes — config, then the file move — and interrupted in
+    // between it leaves config claiming the track is archived while the file is
+    // still in tracks/, which `fr check` reports as a perfectly valid project.
+    // Record the intent so the next command finishes the move.
+    let marker = if action == "archive" {
+        match &track_file {
+            Some(file) => Some(crate::io::inflight::InFlight::begin(
+                &project.frame_dir,
+                crate::io::inflight::Operation::TrackArchive {
+                    track_id: track_id.clone(),
+                    file: file.clone(),
+                },
+                &format!("fr track archive {track_id}"),
+            )?),
+            None => None,
+        }
+    } else {
+        None
+    };
+
     config_io::write_config(&project.frame_dir, &doc)?;
 
     // Move the track file to archive/_tracks/ after archiving
@@ -2321,13 +2432,17 @@ fn cmd_track_state_change(
         track_ops::archive_track_file(&project.frame_dir, &track_id, &file)?;
     }
 
+    if let Some(marker) = marker {
+        marker.commit();
+    }
+
     println!("{} → {}d", track_id, action);
     Ok(())
 }
 
 fn cmd_track_mv(args: TrackMvArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut project = load_project_cwd()?;
-    let _lock = FileLock::acquire_default(&project.frame_dir)?;
+    let _lock = lock_and_recover(&mut project)?;
 
     track_ops::reorder_tracks(&mut project.config, &args.id, args.position)?;
 
@@ -2341,16 +2456,16 @@ fn cmd_track_mv(args: TrackMvArgs) -> Result<(), Box<dyn std::error::Error>> {
 
 fn cmd_track_cc_focus(args: CcFocusArgs) -> Result<(), Box<dyn std::error::Error>> {
     if args.clear {
-        let project = load_project_cwd()?;
-        let _lock = FileLock::acquire_default(&project.frame_dir)?;
+        let mut project = load_project_cwd()?;
+        let _lock = lock_and_recover(&mut project)?;
         let (mut config, mut doc) = config_io::read_config(&project.frame_dir)?;
         track_ops::clear_cc_focus(&mut doc, &mut config);
         config_io::write_config(&project.frame_dir, &doc)?;
         println!("cc-focus cleared");
         Ok(())
     } else if let Some(id) = args.id {
-        let project = load_project_cwd()?;
-        let _lock = FileLock::acquire_default(&project.frame_dir)?;
+        let mut project = load_project_cwd()?;
+        let _lock = lock_and_recover(&mut project)?;
         let (mut config, mut doc) = config_io::read_config(&project.frame_dir)?;
         track_ops::set_cc_focus(&mut doc, &mut config, &id)?;
         config_io::write_config(&project.frame_dir, &doc)?;
@@ -2362,8 +2477,8 @@ fn cmd_track_cc_focus(args: CcFocusArgs) -> Result<(), Box<dyn std::error::Error
 }
 
 fn cmd_track_delete(track_id: String) -> Result<(), Box<dyn std::error::Error>> {
-    let project = load_project_cwd()?;
-    let _lock = FileLock::acquire_default(&project.frame_dir)?;
+    let mut project = load_project_cwd()?;
+    let _lock = lock_and_recover(&mut project)?;
 
     // Check if track exists and is empty
     let track =
@@ -2388,7 +2503,7 @@ fn cmd_track_delete(track_id: String) -> Result<(), Box<dyn std::error::Error>> 
 
 fn cmd_track_rename(args: TrackRenameArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut project = load_project_cwd()?;
-    let _lock = FileLock::acquire_default(&project.frame_dir)?;
+    let _lock = lock_and_recover(&mut project)?;
 
     if args.name.is_none() && args.new_id.is_none() && args.prefix.is_none() {
         return Err("specify at least one of --name, --id, or --prefix".into());
@@ -2815,7 +2930,7 @@ fn cmd_projects_prune(
 
 fn cmd_import(args: ImportArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut project = load_project_cwd()?;
-    let _lock = FileLock::acquire_default(&project.frame_dir)?;
+    let _lock = lock_and_recover(&mut project)?;
 
     reject_add_to_shelved(&project, &args.track)?;
 
@@ -2859,7 +2974,7 @@ fn cmd_delete(args: DeleteArgs) -> Result<(), Box<dyn std::error::Error>> {
     use crate::io::recovery;
 
     let mut project = load_project_cwd()?;
-    let _lock = FileLock::acquire_default(&project.frame_dir)?;
+    let _lock = lock_and_recover(&mut project)?;
 
     // Resolve each ID to its track
     let mut to_delete: Vec<(String, String)> = Vec::new(); // (track_id, task_id)
@@ -3150,6 +3265,23 @@ fn cmd_actor_merge(args: ActorMergeArgs, json: bool) -> Result<(), Box<dyn std::
 
     // Persist, unless this is a dry run.
     if !args.dry_run {
+        // Tracks and archives are renumbered before the registry is written, so
+        // an interruption leaves ids already remapped while the source tokens are
+        // still active — silent, and a naive retry finds no source-namespace ids
+        // to work from. The marker records which tokens still need retiring.
+        let marker = crate::io::inflight::InFlight::begin(
+            &project.frame_dir,
+            crate::io::inflight::Operation::ActorMerge {
+                sources: args.from.clone(),
+                target: args.into.clone(),
+            },
+            &format!(
+                "fr actor merge {} --into {}",
+                args.from.join(" "),
+                args.into
+            ),
+        )?;
+
         for tid in &changed_tracks {
             save_track(&project, tid)?;
         }
@@ -3167,6 +3299,7 @@ fn cmd_actor_merge(args: ActorMergeArgs, json: bool) -> Result<(), Box<dyn std::
             reg.retire(tok, &actors::today())?;
         }
         actors::write_actors(&frame_dir, &reg)?;
+        marker.commit();
 
         // The remap is collision-free by construction; verify against a reload.
         if let Ok(reloaded) = project_io::load_project(&project.root) {

@@ -40,8 +40,8 @@ Frame is a markdown-based task tracker (TUI + CLI) where `.md` files are the sou
 
 - **`src/model/`** — Data types: `Task`, `Track`, `Inbox`, `ProjectConfig`, `Project`
 - **`src/parse/`** — Markdown parser and serializer pairs for tasks, tracks, and inbox
-- **`src/io/`** — Project discovery, file locking, config I/O, UI state persistence, file watcher, project registry, durable ID frontier (`ids.rs`)
-- **`src/ops/`** — Business logic: task CRUD, ID minting (`ids.rs` — the one chokepoint), track management, inbox, search, clean, check, import
+- **`src/io/`** — Project discovery, file locking, config I/O, UI state persistence, file watcher, project registry, durable ID frontier (`ids.rs`), in-flight operation marker (`inflight.rs`), debug-only write fault injection (`fault.rs`)
+- **`src/ops/`** — Business logic: task CRUD, ID minting (`ids.rs` — the one chokepoint), track management, inbox, search, clean, check, automatic repair (`fix.rs`), interrupted-operation recovery (`recover.rs`), import
 - **`src/cli/`** — CLI interface (clap commands, handlers, JSON/human output)
 - **`src/tui/`** — TUI interface: app state, undo, input handling, rendering
   - `input/` — Key handling, split into submodules: `common`, `navigate`, `select`, `search`, `edit`, `move_mode`, `triage`, `confirm`, `command`, `popups`, `tracks`, `recent`
@@ -60,9 +60,10 @@ A frame project has a `frame/` directory containing:
 - `.lock` — advisory lock file
 - `.state.json` — TUI state (cursor, scroll, expanded sets)
 - `.actor` — this working copy's actor token (gitignored)
+- `.inflight` — records a multi-file operation in progress; present only while one is running, or after one was interrupted. The next write command completes it (`ops::recover`) and removes it
 - `.ids.toml` / `.ids.lock` — ID frontier, **only for projects outside git**; inside git it lives at `<git-common-dir>/frame-ids.toml` so every worktree of the clone shares one
 
-Working-copy-local files (`.lock`, `.state.json`, `.actor`, `.ids.*`) are listed in one constant, `io::project_io::LOCAL_ONLY_FRAME_FILES`, which drives both `fr init`'s `.gitignore` writing and `fr check`'s leak guard — add new ones there, not in either caller.
+Working-copy-local files (`.lock`, `.state.json`, `.actor`, `.inflight`, `.ids.*`) are listed in one constant, `io::project_io::LOCAL_ONLY_FRAME_FILES`, which drives both `fr init`'s `.gitignore` writing and `fr check`'s leak guard — add new ones there, not in either caller.
 
 ## Documentation
 

@@ -102,6 +102,14 @@ pub enum Repair {
     /// Remove the leftover frontier-store backup. **Deletes.**
     #[serde(rename = "remove_frontier_backup")]
     RemoveFrontierBackup { path: String },
+    /// Clear an in-flight marker that recovery declined to act on. **Deletes.**
+    ///
+    /// Only reachable when automatic recovery found a precondition it could not
+    /// verify, so the operation was left alone and the marker kept. Clearing it
+    /// is the user saying they have looked; without this the warning would stand
+    /// forever with no way to acknowledge it.
+    #[serde(rename = "clear_inflight_marker")]
+    ClearInflightMarker { operation: String, command: String },
 }
 
 impl Repair {
@@ -113,7 +121,9 @@ impl Repair {
             Repair::CloseNoteFence { .. }
             | Repair::CloseInboxFence { .. }
             | Repair::AddGitignoreEntry { .. } => false,
-            Repair::DedupeArchivedTask { .. } | Repair::RemoveFrontierBackup { .. } => true,
+            Repair::DedupeArchivedTask { .. }
+            | Repair::RemoveFrontierBackup { .. }
+            | Repair::ClearInflightMarker { .. } => true,
         }
     }
 
@@ -155,6 +165,11 @@ impl Repair {
             }
             Repair::RemoveFrontierBackup { path } => {
                 format!("delete stale frontier backup {path}")
+            }
+            Repair::ClearInflightMarker { command, .. } => {
+                format!(
+                    "clear the in-flight marker for `{command}` (recovery could not complete it)"
+                )
             }
         }
     }
@@ -234,6 +249,12 @@ pub fn plan(check: &CheckResult) -> Vec<Repair> {
             CheckWarning::IdFrontierWasReset { path } => {
                 plan.push(Repair::RemoveFrontierBackup { path: path.clone() })
             }
+            CheckWarning::InterruptedOperation {
+                operation, command, ..
+            } => plan.push(Repair::ClearInflightMarker {
+                operation: operation.clone(),
+                command: command.clone(),
+            }),
             _ => {}
         }
     }
@@ -324,6 +345,15 @@ pub fn apply(project: &mut Project, plan: &[Repair]) -> FixResult {
                     reason,
                 }),
             },
+            Repair::ClearInflightMarker { .. } => {
+                match crate::io::inflight::clear(&project.frame_dir) {
+                    Ok(()) => result.applied.push(repair.clone()),
+                    Err(e) => result.skipped.push(SkippedRepair {
+                        repair: repair.clone(),
+                        reason: e.to_string(),
+                    }),
+                }
+            }
             Repair::RemoveFrontierBackup { path } => {
                 match std::fs::remove_file(path) {
                     Ok(()) => result.applied.push(repair.clone()),

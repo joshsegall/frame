@@ -5,6 +5,7 @@ pub mod fix;
 pub mod ids;
 pub mod import;
 pub mod inbox_ops;
+pub mod recover;
 pub mod search;
 pub mod task_ops;
 pub mod track_ops;
