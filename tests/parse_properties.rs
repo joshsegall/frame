@@ -27,10 +27,12 @@
 //!   `strip_block_indent` sliced `line[4..]` inside a `§` and took the whole
 //!   process down, so `fr list` panicked outright on an affected file.
 //!
-//! - **P2 — canonical re-serialization preserves what was parsed.** Parse, mark
-//!   every task dirty, serialize, reparse, compare. Marking dirty bypasses
-//!   `source_text` and forces the canonical path — it simulates the next write,
-//!   the step that actually destroyed data.
+//! - **P2 — a canonical rewrite loses nothing.** Parse, mark every task dirty,
+//!   serialize, reparse, and check that every task and every metadata entry
+//!   still exists. Marking dirty bypasses `source_text` and forces the canonical
+//!   path — it simulates the next write, the step that actually destroyed data.
+//!   Stated as conservation rather than equality because a rewrite of malformed
+//!   input may legitimately re-associate content; see `task_identities`.
 //!
 //! - **P3 — conservation against ground truth.** Build a `Track` *model*,
 //!   serialize it, parse it back, compare to the model we started from. This is
@@ -38,10 +40,12 @@
 //!   into a note at parse time, both sides of P2 agree on the corrupted reading
 //!   and pass. P3 knows the true task set because it constructed it.
 //!
-//! - **P4 — canonical form is a fixpoint.** `canon(canon(x)) == canon(x)` where
-//!   `canon(x) = serialize(dirty(parse(x)))`. For damaged input there is no
-//!   ground truth to compare against, but one normalization pass may not be
-//!   followed by a second that changes anything.
+//! - **P4 — repeated rewrites converge.** `canon(x) = serialize(dirty(parse(x)))`
+//!   must reach a fixpoint. For damaged input there is no ground truth to compare
+//!   against, but a file that keeps changing every time it is written is a defect
+//!   regardless. Bounded rather than one-step, because recovering malformed input
+//!   normalizes it and normalization can take a second pass to settle — see
+//!   `MAX_REWRITES_TO_SETTLE`.
 //!
 //! ## Generator constraints
 //!
@@ -104,6 +108,60 @@ fn track_shape(track: &Track) -> TrackShape {
             })
             .collect(),
     }
+}
+
+/// Every task in the track, flattened, tagged with the section holding it.
+///
+/// P2 compares these as sets rather than comparing `TrackShape` outright. A
+/// canonical rewrite of *malformed* input may legitimately re-associate content:
+/// recovering an orphaned task normalizes its indent, and a metadata line that
+/// sat at the wrong depth for the original indent becomes valid metadata for the
+/// normalized one. That is the rewrite gaining fidelity, not losing it, and exact
+/// equality cannot say so. What must never happen is content going missing, which
+/// is what a subset check states directly.
+#[derive(Debug, PartialEq, Eq, Clone)]
+struct TaskIdentity {
+    section: SectionKind,
+    id: Option<String>,
+    title: String,
+}
+
+fn task_identities(track: &Track) -> Vec<TaskIdentity> {
+    fn walk(section: SectionKind, tasks: &[Task], out: &mut Vec<TaskIdentity>) {
+        for task in tasks {
+            out.push(TaskIdentity {
+                section,
+                id: task.id.as_deref().map(str::to_string),
+                title: task.title.clone(),
+            });
+            walk(section, &task.subtasks, out);
+        }
+    }
+    let mut out = Vec::new();
+    for node in &track.nodes {
+        if let TrackNode::Section { kind, tasks, .. } = node {
+            walk(*kind, tasks, &mut out);
+        }
+    }
+    out
+}
+
+/// Every metadata entry in the track, flattened. Compared as a set for the same
+/// reason as `task_identities`.
+fn metadata_entries(track: &Track) -> Vec<Metadata> {
+    fn walk(tasks: &[Task], out: &mut Vec<Metadata>) {
+        for task in tasks {
+            out.extend(task.metadata.iter().cloned());
+            walk(&task.subtasks, out);
+        }
+    }
+    let mut out = Vec::new();
+    for node in &track.nodes {
+        if let TrackNode::Section { tasks, .. } = node {
+            walk(tasks, &mut out);
+        }
+    }
+    out
 }
 
 /// The semantic content of an inbox item, minus source tracking.
@@ -185,6 +243,34 @@ fn trim_trailing_newlines(s: &str) -> &str {
     s.trim_end_matches('\n')
 }
 
+/// How many rewrites P4 allows before the text must stop changing.
+///
+/// One is not enough, and the reason is structural rather than a defect. A
+/// rewrite of malformed input *normalizes*: an orphaned task recovered at the
+/// section's indent is re-emitted at the canonical indent, and only on the next
+/// parse does a metadata line below it sit at the right depth to be adopted. That
+/// is two passes to settle, by construction.
+///
+/// What must never happen is oscillation or unbounded drift — a file that keeps
+/// changing every time it is written. Convergence within a small bound states
+/// that directly, and is the property users actually depend on.
+const MAX_REWRITES_TO_SETTLE: usize = 4;
+
+/// Rewrite repeatedly until the text stops changing. Returns the settled text and
+/// how many rewrites it took, or `Err` with the last two forms if it never
+/// settled within [`MAX_REWRITES_TO_SETTLE`].
+fn settle(source: &str, rewrite: fn(&str) -> String) -> Result<(String, usize), (String, String)> {
+    let mut current = rewrite(source);
+    for pass in 1..=MAX_REWRITES_TO_SETTLE {
+        let next = rewrite(&current);
+        if trim_trailing_newlines(&next) == trim_trailing_newlines(&current) {
+            return Ok((current, pass));
+        }
+        current = next;
+    }
+    Err((current.clone(), rewrite(&current)))
+}
+
 // ---------------------------------------------------------------------------
 // Corpus: the checked-in fixtures, as mutation seeds
 // ---------------------------------------------------------------------------
@@ -236,39 +322,51 @@ const INTERESTING_LINES: &[&str] = &[
     "  - spec: doc/s.md#x",
     "  - note: single line",
     "  - note:",
-    "    ```",
-    "    ```rust",
-    "    ```lace",
-    "    § multi-byte at the slice boundary",
-    // Indent 1, but byte 4 falls *inside* the second '§' (each is 2 bytes:
-    // [0]=' ', [1..3]='§', [3..5]='§'). A note block indent of 4 slicing on byte
-    // length rather than indent splits the character and aborts the process.
-    " §§ dedented mid-character",
-    "    body text",
-    // Note lines that are *more* indented than the block are absent for the same
-    // reason as the orphan lines above: on their own they reduce to a single-line
-    // note with leading whitespace, which is a known-unstable shape. See
-    // `single_line_note_loses_leading_whitespace`. Multi-line notes keep their
-    // relative indentation and are covered by `arb_note` in P3.
+    // Whole note blocks, as single multi-line entries. Drawing the `- note:` key
+    // and its indented body independently would usually strand the body as
+    // orphaned deep content, which is a *different* known defect (see
+    // `DEEP_CONTENT_LINES`). Keeping them together covers fenced, multi-byte and
+    // extra-indented note bodies in the shape they actually occur.
+    "  - note:\n    ```rust\n    let x = 1;\n    ```",
+    "  - note:\n    ```lace\n    let x = perform Ask()",
+    "  - note:\n    § multi-byte at the slice boundary\n    more note text",
+    "  - note:\n      deeper body\n        deeper still",
+    "  - note:\n    body text",
     "- [ ] `T-003` trailing",
-    // Bare indented task lines are deliberately absent from this pool. Lines are
-    // drawn independently, so they would usually land with no parent above them —
-    // and an orphaned subtask is silently dropped by the parser today. See
-    // `orphaned_subtask_is_silently_dropped`, which pins that defect. Leaving
-    // them in would make P1/P4 fail on the known bug on most runs and drown out
-    // everything else they are meant to find. Nesting is still covered, with real
-    // parents, by `arb_task_tree` in P3.
     "not a task line at all",
     "```",
     "§",
 ];
 
+/// Indented content that is not metadata and not attached to a `- note:` key,
+/// plus orphaned task lines. Drawn independently, these land in exactly the
+/// malformed positions the recovery paths exist for: content deeper than the
+/// metadata indent, and subtasks with no parent.
+const DEEP_CONTENT_LINES: &[&str] = &[
+    "    ```",
+    "    ```rust",
+    "    ```lace",
+    "    § multi-byte at the slice boundary",
+    "    body text",
+    "      deeper body",
+    "        deeper still",
+    "  - [ ] `T-003.1` subtask",
+    "    - [ ] `T-003.1.1` deep subtask",
+    "      - [ ] `T-003.1.1.1` past MAX_DEPTH",
+    // Indent 1, but byte 4 falls *inside* the second '§' (each is 2 bytes:
+    // [0]=' ', [1..3]='§', [3..5]='§'). A note block indent of 4 slicing on byte
+    // length rather than indent splits the character and aborts the process.
+    " §§ dedented mid-character",
+];
+
 fn arb_soup() -> impl Strategy<Value = String> {
-    prop::collection::vec(
-        prop::sample::select(INTERESTING_LINES).prop_map(str::to_string),
-        0..40,
-    )
-    .prop_map(|lines| lines.join("\n"))
+    let pool: Vec<&'static str> = INTERESTING_LINES
+        .iter()
+        .chain(DEEP_CONTENT_LINES)
+        .copied()
+        .collect();
+    prop::collection::vec(prop::sample::select(pool).prop_map(str::to_string), 0..40)
+        .prop_map(|lines| lines.join("\n"))
 }
 
 /// A mutation applied to one line of a real fixture.
@@ -613,6 +711,9 @@ proptest! {
     /// Parse, force every task through the canonical path, reparse. Whatever the
     /// first parse understood must survive being written back out. This is the
     /// step that destroyed data in `eff5ec0`.
+    ///
+    /// Stated as conservation rather than equality — see `task_identities` for
+    /// why a rewrite of malformed input may legitimately re-associate content.
     #[test]
     fn p2_track_canonical_rewrite_preserves_content(
         which in 0usize..64,
@@ -627,7 +728,25 @@ proptest! {
         let rewritten = canon_track(&damaged);
         let after = parse_track(&rewritten);
 
-        prop_assert_eq!(track_shape(&before), track_shape(&after));
+        let after_tasks = task_identities(&after);
+        for task in task_identities(&before) {
+            prop_assert!(
+                after_tasks.contains(&task),
+                "task lost by the rewrite: {:?}\nsurvivors: {:?}",
+                task,
+                after_tasks
+            );
+        }
+
+        let after_meta = metadata_entries(&after);
+        for meta in metadata_entries(&before) {
+            prop_assert!(
+                after_meta.contains(&meta),
+                "metadata lost by the rewrite: {:?}\nsurvivors: {:?}",
+                meta,
+                after_meta
+            );
+        }
     }
 
     #[test]
@@ -701,34 +820,39 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
-// P4 — canonical form is a fixpoint
+// P4 — repeated rewrites converge
 // ---------------------------------------------------------------------------
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
     /// For damaged input there is no ground truth to compare against, but
-    /// stability is still checkable: one rewrite may normalize, a second may not
-    /// change anything. A parser that reads its own output differently shows up
-    /// here even when nothing else can judge the result.
+    /// convergence is still checkable: repeated writes must stop changing the
+    /// file. A parser that reads its own output differently shows up here even
+    /// when nothing else can judge the result.
     ///
-    /// Trailing newlines are excluded — see `trim_trailing_newlines`.
+    /// Bounded rather than one-step — see `MAX_REWRITES_TO_SETTLE`. Trailing
+    /// newlines are excluded — see `trim_trailing_newlines`.
     #[test]
-    fn p4_track_canonical_form_is_stable(source in arb_soup()) {
-        let once = canon_track(&source);
-        let twice = canon_track(&once);
-        prop_assert_eq!(trim_trailing_newlines(&once), trim_trailing_newlines(&twice));
+    fn p4_track_rewrites_converge(source in arb_soup()) {
+        if let Err((last, next)) = settle(&source, canon_track) {
+            return Err(TestCaseError::fail(format!(
+                "never settled in {MAX_REWRITES_TO_SETTLE} rewrites\nlast: {last:?}\nnext: {next:?}"
+            )));
+        }
     }
 
     #[test]
-    fn p4_inbox_canonical_form_is_stable(source in arb_soup()) {
-        let once = canon_inbox(&source);
-        let twice = canon_inbox(&once);
-        prop_assert_eq!(trim_trailing_newlines(&once), trim_trailing_newlines(&twice));
+    fn p4_inbox_rewrites_converge(source in arb_soup()) {
+        if let Err((last, next)) = settle(&source, canon_inbox) {
+            return Err(TestCaseError::fail(format!(
+                "never settled in {MAX_REWRITES_TO_SETTLE} rewrites\nlast: {last:?}\nnext: {next:?}"
+            )));
+        }
     }
 
     #[test]
-    fn p4_mutated_fixture_canonical_form_is_stable(
+    fn p4_mutated_fixture_rewrites_converge(
         which in 0usize..64,
         idx in 0usize..512,
         mutation in arb_mutation(),
@@ -737,9 +861,11 @@ proptest! {
         let source = &corpus[which % corpus.len()];
         let damaged = mutate(source, idx, &mutation);
 
-        let once = canon_track(&damaged);
-        let twice = canon_track(&once);
-        prop_assert_eq!(trim_trailing_newlines(&once), trim_trailing_newlines(&twice));
+        if let Err((last, next)) = settle(&damaged, canon_track) {
+            return Err(TestCaseError::fail(format!(
+                "never settled in {MAX_REWRITES_TO_SETTLE} rewrites\nlast: {last:?}\nnext: {next:?}"
+            )));
+        }
     }
 }
 
@@ -776,63 +902,132 @@ fn unclosed_fence_does_not_swallow_the_rest_of_the_file() {
     assert_eq!(track.done()[0].id.as_deref(), Some("T-003"));
 }
 
-/// **Known defect, found by `p4_track_canonical_form_is_stable`.** An indented
-/// task line with no parent above it is silently discarded: it becomes neither a
-/// task in the section nor a literal node, so the next write deletes it from the
-/// file. `fr check` cannot see it either — by the time check runs, the task is
-/// already gone from the parsed model.
+/// Regression: an orphaned task line must survive a write.
 ///
-/// Shapes confirmed, all of which lose the task:
+/// An indented task line with no parent above it used to be consumed by
+/// `parse_tasks` without being recorded anywhere — absent from the model, so the
+/// next write deleted it from the file, and `fr check` could not see it either
+/// because the task was already gone by the time check ran. It is reachable from
+/// a hand edit that removes a parent, from a three-way merge that keeps a subtask
+/// whose parent went away, and from nesting one level past `MAX_DEPTH`.
 ///
-/// - `## Backlog` / `  - [ ] A`            → section with 0 tasks, no literal
-/// - `## Backlog` / `` / `  - [ ] A`       → same, blank absorbed into the header
-/// - two orphans split by a blank line     → the first is dropped, the second
-///   survives only as a literal
+/// It is now parsed at the level it was found in: read at its real indent, but
+/// recorded at the enclosing depth, so a rewrite re-emits it somewhere that
+/// parses back the same way. Over-deep nesting is flattened rather than dropped.
 ///
-/// This is the `eff5ec0` class again: the parser silently drops content, nothing
-/// warns, and the next write commits the loss. It is reachable from a hand edit
-/// that removes a parent task, and from a three-way merge that keeps a subtask
-/// whose parent went away.
-///
-/// Ignored so it does not block CI. Un-ignore when the parser preserves the
-/// line — as a task, promoted or not, or at minimum as a literal.
+/// Every shape below deleted a task before the fix.
 #[test]
-#[ignore = "known defect: an orphaned subtask line is silently dropped by the parser"]
-fn orphaned_subtask_is_silently_dropped() {
+fn orphaned_task_lines_survive_a_write() {
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "orphan directly after the section header",
+            "# Track\n\n## Backlog\n\n  - [ ] `T-001` Orphan",
+            "T-001",
+        ),
+        (
+            "orphan with no blank line after the header",
+            "# Track\n\n## Backlog\n  - [ ] `T-001` Orphan",
+            "T-001",
+        ),
+        (
+            "orphan followed by another section",
+            "# Track\n\n## Backlog\n\n  - [ ] `T-001` Orphan\n\n## Done\n\n- [x] `T-002` Done",
+            "T-001",
+        ),
+        (
+            "nesting one level past MAX_DEPTH, at the end",
+            "# Track\n\n## Backlog\n\n- [ ] `A` a\n  - [ ] `B` b\n    - [ ] `C` c\n      - [ ] `D` d",
+            "`D`",
+        ),
+        (
+            "nesting past MAX_DEPTH with a task following at top level",
+            "# Track\n\n## Backlog\n\n- [ ] `A` a\n  - [ ] `B` b\n    - [ ] `C` c\n      - [ ] `D` d\n- [ ] `E` e",
+            "`D`",
+        ),
+    ];
+
+    for (label, source, needle) in cases {
+        let clean = serialize_track(&parse_track(source));
+        assert!(
+            clean.contains(needle),
+            "{label}: {needle} deleted by a verbatim write: {clean:?}"
+        );
+
+        let once = canon_track(source);
+        assert!(
+            once.contains(needle),
+            "{label}: {needle} deleted by a canonical rewrite: {once:?}"
+        );
+
+        let twice = canon_track(&once);
+        assert_eq!(once, twice, "{label}: canonical form is not stable");
+    }
+}
+
+/// The last of those shapes must also keep the *other* tasks — the earlier
+/// candidate fix (stop parsing and let the line fall through as literal text)
+/// preserved the orphan but truncated the section, dropping `E`.
+#[test]
+fn recovering_an_orphan_does_not_truncate_the_section() {
     let source = "\
 # Track
 
 ## Backlog
 
-  - [ ] `T-001` Orphaned subtask with no parent";
+- [ ] `A` a
+  - [ ] `B` b
+    - [ ] `C` c
+      - [ ] `D` d
+- [ ] `E` e";
 
-    let track = parse_track(source);
-    let rewritten = serialize_track(&track);
+    let rewritten = canon_track(source);
+    for id in ["`A`", "`B`", "`C`", "`D`", "`E`"] {
+        assert!(rewritten.contains(id), "{id} lost: {rewritten:?}");
+    }
+}
+
+/// Regression: content indented deeper than the metadata indent, which is not
+/// recognized metadata and not attached to a `- note:` key, must survive a write.
+///
+/// `parse_single_task`'s metadata loop used to advance past such a line with
+/// `idx += 1; continue`, and `own_end_idx` then included it — so it survived a
+/// verbatim write but disappeared the moment the task went dirty, because the
+/// canonical path rebuilds the task from its fields and the line is in none of
+/// them. The loop now stops and hands the line back to `parse_tasks`, which keeps
+/// it as a task or as literal text on the track.
+///
+/// Pre-existing and independent of the orphaned-task recovery — confirmed
+/// identical before and after that change. It surfaced only because orphaned task
+/// lines are no longer deleted first.
+#[test]
+fn deep_content_after_metadata_survives_a_write() {
+    let source = "\
+# Track
+
+## Backlog
+
+- [ ] `T-001` Task
+  - added: 2025-05-14
+    stray deep content";
+
+    let rewritten = canon_track(source);
 
     assert!(
-        rewritten.contains("T-001"),
-        "orphaned subtask was deleted by the round trip: {rewritten:?}"
+        rewritten.contains("stray deep content"),
+        "deep content deleted by a canonical rewrite: {rewritten:?}"
     );
 }
 
-/// **Known defect, found by `p4_track_canonical_form_is_stable`.** A note that
-/// reduces to a single line with leading whitespace has no faithful single-line
-/// representation, so the indentation is lost on the *second* write.
+/// Regression: a note that reduces to a single line with leading or trailing
+/// whitespace must keep it.
 ///
-/// `Note("  deeper body")` serializes to `- note:   deeper body`, which re-parses
-/// as `Note("deeper body")` — the parser trims after the key, and there is no
-/// way to tell the two apart. Multi-line notes are unaffected: they take the
-/// block form, which preserves relative indentation and is stable.
-///
-/// Minor next to the orphan-drop above — indentation on a one-line note, not a
-/// task — but it is the same failure mode: the file changes under a write that
-/// was not asked to change it. The fix is on the serializer side: use the block
-/// form whenever the note has leading whitespace.
-///
-/// Ignored so it does not block CI. Un-ignore when the round trip is stable.
+/// `parse_metadata` trims the value after the key, so `- note:   x` re-reads as
+/// `Note("x")` — the single-line form cannot carry the whitespace, and the
+/// indentation was lost on the *second* write. The serializer now routes any
+/// untrimmed note to the indented block form, which `strip_block_indent` reverses
+/// exactly.
 #[test]
-#[ignore = "known defect: a single-line note loses leading whitespace on rewrite"]
-fn single_line_note_loses_leading_whitespace() {
+fn single_line_note_keeps_surrounding_whitespace() {
     let source = "\
 # Track
 
@@ -844,8 +1039,16 @@ fn single_line_note_loses_leading_whitespace() {
 
     let once = canon_track(source);
     let twice = canon_track(&once);
-
     assert_eq!(once, twice, "note indentation changed on the second write");
+
+    let parsed = parse_track(&once);
+    let Some(Metadata::Note(note)) = parsed.backlog()[0].metadata.first() else {
+        panic!("expected a note, got {:?}", parsed.backlog()[0].metadata);
+    };
+    assert_eq!(
+        note, "  indented one-liner",
+        "leading whitespace was dropped"
+    );
 }
 
 /// Multi-byte content at and around the note boundary, including a dedented line

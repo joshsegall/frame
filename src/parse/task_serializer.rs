@@ -68,7 +68,18 @@ fn serialize_task(task: &Task, indent: usize, lines: &mut Vec<String>) {
                 lines.push(format!("{}- spec: {}", meta_indent, spec));
             }
             Metadata::Note(note) => {
-                if note.contains('\n') {
+                // The single-line form `- note: <text>` cannot carry leading or
+                // trailing whitespace: `parse_metadata` trims the value on read,
+                // so `Note("  x")` came back as `Note("x")` on the next write. The
+                // indented block form preserves it, since `strip_block_indent`
+                // removes exactly the block indent and keeps the rest.
+                //
+                // An empty note goes to the block form for a related reason: the
+                // single-line form writes `- note: ` with a trailing space, which
+                // the parser reads back as an *empty* value and so routes to the
+                // block form on the next write. The two forms disagreed on the
+                // trailing space and the file changed on every other write.
+                if note.contains('\n') || note.is_empty() || note.trim() != note {
                     // Multiline note
                     lines.push(format!("{}- note:", meta_indent));
                     let block_indent = " ".repeat(indent + 4);

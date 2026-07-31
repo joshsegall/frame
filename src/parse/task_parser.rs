@@ -29,8 +29,22 @@ pub fn parse_tasks(
                 // Dedented — we're done with this nesting level
                 break;
             } else {
-                // More indented than expected but not part of a task above — skip
-                idx += 1;
+                // More indented than expected, and not claimed by the task above:
+                // `parse_single_task` takes its own metadata and subtasks before
+                // returning, so anything still here is orphaned — a hand edit that
+                // removed a parent, a merge that kept a subtask whose parent went
+                // away, or nesting past MAX_DEPTH.
+                //
+                // This used to `idx += 1`, which consumed the line without
+                // recording it anywhere: the task was absent from the model, so
+                // the next write deleted it from the file and `fr check` could not
+                // see it either. Parse it at *this* level instead — its own lines
+                // are read at their real indent, but it is recorded at our depth,
+                // so a rewrite re-emits it somewhere that parses back the same
+                // way. Over-deep nesting is flattened rather than dropped.
+                let (task, next_idx) = parse_single_task(lines, idx, task_indent, depth);
+                tasks.push(task);
+                idx = next_idx;
             }
         } else {
             // Not a task line. Blank lines and orphaned deeper-indent content
@@ -96,12 +110,21 @@ fn parse_single_task(
             continue;
         }
 
-        // Check if this is a continuation line at deeper indent (shouldn't happen
-        // in well-formed input, but stop parsing)
+        // Deeper-indented content that is not metadata and not a subtask. This
+        // used to `idx += 1; continue`, which folded the line into this task's
+        // `source_text` — it survived a verbatim write but vanished the moment
+        // the task went dirty, because the canonical path rebuilds the task from
+        // its fields and the line is in none of them.
+        //
+        // Stop instead, and hand the line back to `parse_tasks`, which keeps it:
+        // as a task if it looks like one, otherwise as literal text on the track.
+        // The cost is that metadata *after* stray content is no longer collected
+        // onto this task — it becomes literal text too. Trading a silent deletion
+        // for a visible mis-grouping is the right way round, and both shapes are
+        // malformed input either way.
         let line_indent = count_indent(line);
         if line_indent > indent && !line.trim().is_empty() {
-            idx += 1;
-            continue;
+            break;
         }
 
         // Blank line — check if more metadata or subtasks follow.
