@@ -102,28 +102,25 @@ fn update_gitignore(cwd: &std::path::Path) -> Vec<String> {
     let gitignore_path = cwd.join(".gitignore");
     let existing = fs::read_to_string(&gitignore_path).unwrap_or_default();
 
-    // One list, shared with `fr check` (which catches projects whose .gitignore
-    // predates an entry, since this runs at init only) and with `fr check --fix`
-    // (which adds them).
-    let to_add = crate::io::project_io::gitignore_entries_missing(cwd).unwrap_or_default();
-
-    if to_add.is_empty() {
+    // One blanket pattern rather than an entry per file, so a file added to
+    // frame/ later is covered without every existing project needing an edit.
+    // `fr check` catches projects whose `.gitignore` predates this.
+    if crate::io::project_io::gitignore_pattern_present(cwd) {
         return Vec::new();
     }
+    let pattern = crate::io::project_io::gitignore_pattern();
 
     let mut content = existing;
     // Ensure we start on a fresh line
     if !content.is_empty() && !content.ends_with('\n') {
         content.push('\n');
     }
-    content.push_str("\n# frame (added by fr init)\n");
-    for entry in &to_add {
-        content.push_str(entry);
-        content.push('\n');
-    }
+    content.push_str("\n# frame — working-copy-local files (never commit these)\n");
+    content.push_str(&pattern);
+    content.push('\n');
 
     if fs::write(&gitignore_path, content).is_ok() {
-        to_add
+        vec![pattern]
     } else {
         Vec::new()
     }
@@ -360,39 +357,56 @@ mod tests {
     }
 
     #[test]
-    fn test_update_gitignore_creates_entries() {
+    fn test_update_gitignore_writes_the_blanket_pattern() {
         let tmp = tempfile::TempDir::new().unwrap();
         fs::create_dir(tmp.path().join(".git")).unwrap();
 
-        // Every local-only file is added, and reported back for the summary.
         let added = update_gitignore(tmp.path());
-        assert_eq!(
-            added.len(),
-            crate::io::project_io::LOCAL_ONLY_FRAME_FILES.len()
-        );
+        assert_eq!(added, vec![crate::io::project_io::gitignore_pattern()]);
 
         let content = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        assert!(content.contains("frame/.*"), "pattern missing: {content}");
+        assert!(content.contains("working-copy-local"));
+
+        // One line, not an entry per file — that is the whole point.
         for name in crate::io::project_io::LOCAL_ONLY_FRAME_FILES {
-            let entry = format!("frame/{}", name);
-            assert!(content.contains(&entry), "missing {entry}");
-            assert!(added.contains(&entry), "unreported {entry}");
+            assert!(
+                !content.contains(&format!("frame/{name}")),
+                "should not enumerate {name}: {content}"
+            );
         }
-        assert!(content.contains("# frame (added by fr init)"));
     }
 
     #[test]
-    fn test_update_gitignore_skips_existing() {
+    fn test_update_gitignore_skips_when_pattern_present() {
         let tmp = tempfile::TempDir::new().unwrap();
         fs::create_dir(tmp.path().join(".git")).unwrap();
-        // Derived from the one list, so adding an entry there can't silently
-        // turn this into a weaker test.
-        let existing: String = crate::io::project_io::LOCAL_ONLY_FRAME_FILES
-            .iter()
-            .map(|n| format!("frame/{}\n", n))
-            .collect();
-        fs::write(tmp.path().join(".gitignore"), existing).unwrap();
+        fs::write(tmp.path().join(".gitignore"), "frame/.*\n").unwrap();
 
         assert!(update_gitignore(tmp.path()).is_empty());
+    }
+
+    /// A project whose `.gitignore` predates the pattern has the files
+    /// enumerated. It still gets the pattern, so the *next* local-only file is
+    /// covered without another round of edits — the failure mode that made this
+    /// change worth making.
+    #[test]
+    fn test_update_gitignore_migrates_an_enumerated_gitignore() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        fs::create_dir(tmp.path().join(".git")).unwrap();
+        let enumerated: String = crate::io::project_io::LOCAL_ONLY_FRAME_FILES
+            .iter()
+            .map(|n| format!("frame/{n}\n"))
+            .collect();
+        fs::write(tmp.path().join(".gitignore"), &enumerated).unwrap();
+
+        assert!(!update_gitignore(tmp.path()).is_empty());
+
+        let content = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        assert!(content.contains("frame/.*"));
+        // The old lines are left alone — redundant, but removing lines from
+        // someone's .gitignore is more invasive than adding one.
+        assert!(content.contains("frame/.state.json"));
     }
 
     #[test]
@@ -405,7 +419,6 @@ mod tests {
 
         let content = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
         assert!(content.starts_with("*.log\n"));
-        assert!(content.contains("frame/.state.json"));
-        assert!(content.contains("frame/.lock"));
+        assert!(content.contains("frame/.*"));
     }
 }

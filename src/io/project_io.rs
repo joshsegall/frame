@@ -15,9 +15,9 @@ use crate::parse::{parse_inbox, parse_track};
 /// leaks machine-local state into shared history (and the append-only log
 /// conflicts on every merge).
 ///
-/// `fr init` writes these to `.gitignore` and `fr check` verifies them, both
-/// from this one list — a project created before an entry was added here won't
-/// have it, which is exactly what the check catches.
+/// `fr check` verifies these against git from this one list. `.gitignore`
+/// coverage is a single pattern rather than an entry each — see
+/// [`gitignore_pattern_for`].
 pub const LOCAL_ONLY_FRAME_FILES: [&str; 7] = [
     ".state.json",
     ".lock",
@@ -28,29 +28,47 @@ pub const LOCAL_ONLY_FRAME_FILES: [&str; 7] = [
     crate::io::ids::LOCAL_LOCK,
 ];
 
-/// The `.gitignore` lines [`LOCAL_ONLY_FRAME_FILES`] corresponds to.
-pub fn gitignore_entries() -> Vec<String> {
-    LOCAL_ONLY_FRAME_FILES
-        .iter()
-        .map(|name| format!("frame/{name}"))
-        .collect()
+/// The `.gitignore` pattern covering every working-copy-local file, for a frame
+/// directory at `frame_rel` relative to the repo root (usually just `frame`).
+///
+/// One blanket pattern rather than an entry per file, because enumeration cannot
+/// cover a file that does not exist yet: a project created before an entry was
+/// added to [`LOCAL_ONLY_FRAME_FILES`] never got that line, and had to be told
+/// about it after the fact. `frame/.*` covers the next one automatically.
+///
+/// **The rule this depends on: nothing under `frame/` that needs to be committed
+/// may start with a dot.** That is already the convention — `actors.toml` is the
+/// one deliberately shared machine-relevant file and is deliberately not a
+/// dotfile. If a committed dotfile ever becomes necessary, a `!frame/.foo` line
+/// placed after this one is the escape hatch.
+///
+/// Matches dotfiles *directly* inside the frame directory, not nested ones
+/// (`frame/archive/.x` is not covered). Every local-only file lives at the top
+/// level, and keeping it that way is part of the same rule.
+pub fn gitignore_pattern_for(frame_rel: &str) -> String {
+    format!("{}/.*", frame_rel.trim_end_matches('/'))
 }
 
-/// Which of [`gitignore_entries`] are absent from `<root>/.gitignore`.
+/// The pattern for a conventional project, whose frame directory is `frame/` at
+/// the repo root.
+pub fn gitignore_pattern() -> String {
+    gitignore_pattern_for("frame")
+}
+
+/// Whether `<root>/.gitignore` already covers working-copy-local files, i.e.
+/// whether [`gitignore_pattern`] is present.
 ///
-/// Empty for a project outside git — there is nothing to leak into, and writing a
-/// `.gitignore` where no repo exists would be surprising. Shared by `fr init`,
-/// which writes them at creation, and `fr check --fix`, which adds the ones a
-/// project created before an entry existed never got.
-pub fn gitignore_entries_missing(root: &Path) -> Result<Vec<String>, std::io::Error> {
+/// `false` for a project outside git — there is nothing to leak into, and writing
+/// a `.gitignore` where no repo exists would be surprising.
+pub fn gitignore_pattern_present(root: &Path) -> bool {
     if !root.join(".git").exists() {
-        return Ok(Vec::new());
+        return true;
     }
-    let existing = fs::read_to_string(root.join(".gitignore")).unwrap_or_default();
-    Ok(gitignore_entries()
-        .into_iter()
-        .filter(|entry| !existing.lines().any(|line| line.trim() == entry))
-        .collect())
+    let pattern = gitignore_pattern();
+    fs::read_to_string(root.join(".gitignore"))
+        .unwrap_or_default()
+        .lines()
+        .any(|line| line.trim() == pattern)
 }
 
 /// Append one entry to `<root>/.gitignore`, creating the file if needed.

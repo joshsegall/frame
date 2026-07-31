@@ -23,7 +23,7 @@ fr init [--name NAME] [--track ID NAME]... [--force]
 | `--track ID NAME` | Create an initial track (repeatable) |
 | `--force` | Reinitialize even if `frame/` already exists |
 
-Creates `frame/` with `project.toml`, `inbox.md`, and any specified track files. If the directory is a git repository, adds `frame/.state.json` and `frame/.lock` to `.gitignore`.
+Creates `frame/` with `project.toml`, `inbox.md`, and any specified track files. If the directory is a git repository, adds `frame/.*` to `.gitignore` — one pattern covering every working-copy-local file, present and future. See [`fr check`](#fr-check) for what those are and why they must not be committed.
 
 ## Reading Commands
 
@@ -153,7 +153,11 @@ It flags **ID collisions involving an archive**, which nothing else catches — 
 
 Both are warnings rather than errors: there is no automatic repair, and they fire on data that predates the fixes. It also reports an **unreadable ID frontier store** (the next mint resets it and falls back to scanning, which can't see another worktree's uncommitted tasks) and a leftover `frame-ids.toml.bak`, which means the frontier *was* reset at some point and numbers minted in that window may have been reissued. Deleting the `.bak` clears that one.
 
-It flags **working-copy-local frame files leaking into git** — `frame/.state.json`, `frame/.lock`, `frame/.recovery.log`, `frame/.actor`, and (for projects outside git, where the frontier store is working-copy-local) `frame/.ids.toml` and `frame/.ids.lock`. `fr init` writes them all to `.gitignore`, but only at init, so a project created before an entry existed never gets it. Check reports a file that git already **tracks** (needs `git rm --cached <path>` as well as a `.gitignore` line — ignore rules don't apply to files already in the index) and one that exists but **isn't ignored** (the next `git add -A` commits it). Committing these leaks machine-local state into shared history; the append-only recovery log also conflicts on every merge that touches it. Projects outside git are skipped.
+It flags **working-copy-local frame files leaking into git** — `frame/.state.json`, `frame/.lock`, `frame/.recovery.log`, `frame/.actor`, `frame/.inflight`, and (for projects outside git, where the frontier store is working-copy-local) `frame/.ids.toml` and `frame/.ids.lock`. Committing these leaks machine-local state into shared history; the append-only recovery log also conflicts on every merge that touches it.
+
+`fr init` covers them with a single `.gitignore` pattern, `frame/.*`, rather than an entry each. Enumeration can't cover a file that doesn't exist yet — a project created before an entry was added never got that line, and had to be told about it after the fact — whereas the pattern covers the next one automatically. **This depends on a rule: nothing under `frame/` that needs to be committed may start with a dot.** That is already the convention (`actors.toml` is the one deliberately shared machine-relevant file, and is deliberately not a dotfile); if a committed dotfile ever becomes necessary, a `!frame/.foo` line after the pattern is the escape hatch. The pattern covers dotfiles directly inside `frame/`, not nested ones.
+
+Check reports a file that git already **tracks** (needs `git rm --cached <path>` as well as a `.gitignore` line — ignore rules don't apply to files already in the index) and one that exists but **isn't ignored** (the next `git add -A` commits it). Projects outside git are skipped.
 
 It reports an **interrupted operation**: a multi-file operation that started and did not finish, recorded in `frame/.inflight`. Normally the next write command completes it and clears the marker, so seeing this means either nothing has been written since, or recovery declined to act because a precondition no longer held. See [Multi-file writes](architecture.md) and `fr recovery` for the detail.
 
@@ -173,14 +177,14 @@ The plan is exactly what check reported: one warning in, at most one repair out.
 |---|---|---|
 | unclosed note fence | append a closing fence to the note | no |
 | unclosed inbox fence | append a closing fence to the body | no |
-| local file not ignored | add the entry to `.gitignore` | no |
+| local file not ignored | add `frame/.*` to `.gitignore` | no |
 | duplicate archived ID | drop the extra copies, keeping one | **yes** |
 | leftover `frame-ids.toml.bak` | delete the stale backup | **yes** |
 | interrupted operation recovery declined | clear the `.inflight` marker | **yes** |
 
 An **interrupted operation** (`frame/.inflight`) is normally not repaired here at all — the next write command completes it automatically and clears the marker. The repair above exists only for the case where recovery declined to act because a precondition no longer held, so the marker would otherwise stand forever with no way to acknowledge it.
 
-Everything else check reports is left alone, because it has no repair that is safe to apply without a decision — renumbering a reissued ID rewrites something other work may reference, a `ref:` can be legitimately absent on the current branch, `fr actor merge` renumbers a whole namespace, and a `#lost` tag exists precisely to be read by a human. A local file git already **tracks** is only half-repairable: the `.gitignore` line is added, but `git rm --cached` is yours to run.
+Everything else check reports is left alone, because it has no repair that is safe to apply without a decision — renumbering a reissued ID rewrites something other work may reference, a `ref:` can be legitimately absent on the current branch, `fr actor merge` renumbers a whole namespace, and a `#lost` tag exists precisely to be read by a human. A local file git already **tracks** is only half-repairable: the `.gitignore` pattern is added, but `git rm --cached` is yours to run. However many local files are reported, the repair is one line — the pattern covers all of them, so a project that predates it migrates in one step rather than acquiring entries one incident at a time.
 
 **Confirmation.** Repairs that delete prompt once before anything is written; `--yes` skips the prompt. Declining cancels the whole run, additive repairs included — a run applies its entire plan or none of it. With stdin closed (CI, an agent) the prompt reads nothing, which is not `y`, so the run cancels: pass `--yes` to mean it. Removed archive copies go to the [recovery log](#fr-recovery) before deletion, so a duplicate that was hand-edited after the first write is recoverable.
 

@@ -63,7 +63,7 @@ A frame project has a `frame/` directory containing:
 - `.inflight` — records a multi-file operation in progress; present only while one is running, or after one was interrupted. The next write command completes it (`ops::recover`) and removes it
 - `.ids.toml` / `.ids.lock` — ID frontier, **only for projects outside git**; inside git it lives at `<git-common-dir>/frame-ids.toml` so every worktree of the clone shares one
 
-Working-copy-local files (`.lock`, `.state.json`, `.actor`, `.inflight`, `.ids.*`) are listed in one constant, `io::project_io::LOCAL_ONLY_FRAME_FILES`, which drives both `fr init`'s `.gitignore` writing and `fr check`'s leak guard — add new ones there, not in either caller.
+Working-copy-local files (`.lock`, `.state.json`, `.actor`, `.inflight`, `.ids.*`) are listed in one constant, `io::project_io::LOCAL_ONLY_FRAME_FILES`, which drives `fr check`'s leak guard — add new ones there, not in the caller. `.gitignore` coverage is a single pattern (`frame/.*`, see `gitignore_pattern`), so a new local file needs no `.gitignore` change at all. **The rule that makes that safe: nothing under `frame/` that needs committing may start with a dot.**
 
 ## Documentation
 

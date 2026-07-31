@@ -1568,14 +1568,6 @@ fn test_init_force_reinitialize() {
 /// The `.gitignore` entries `fr init` is expected to add, in order, skipping any
 /// in `already_present`. Derived from the one list so adding an entry there
 /// updates these expectations instead of breaking them.
-fn expected_gitignore_entries(already_present: &[&str]) -> Vec<String> {
-    frame::io::project_io::LOCAL_ONLY_FRAME_FILES
-        .iter()
-        .filter(|name| !already_present.contains(*name))
-        .map(|name| format!("frame/{}", name))
-        .collect()
-}
-
 #[test]
 fn test_init_gitignore_added() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1584,14 +1576,18 @@ fn test_init_gitignore_added() {
     fs::create_dir(tmp.path().join(".git")).unwrap();
 
     let out = run_fr_ok(tmp.path(), &["init", "--name", "Git Project"]);
-    // The summary names exactly what was added — every local-only file.
-    let entries = expected_gitignore_entries(&[]);
-    assert!(out.contains(&format!("added {} to .gitignore", entries.join(", "))));
+    // One blanket pattern, not an entry per file.
+    assert!(
+        out.contains("added frame/.* to .gitignore"),
+        "summary should name the pattern: {out}"
+    );
 
     let gitignore = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
-    for entry in &entries {
-        assert!(gitignore.contains(entry), "missing {entry}");
-    }
+    assert!(gitignore.contains("frame/.*"), "{gitignore}");
+    assert!(
+        !gitignore.contains("frame/.state.json"),
+        "should not enumerate individual files: {gitignore}"
+    );
 }
 
 #[test]
@@ -1625,20 +1621,22 @@ fn test_init_gitignore_partial() {
     fs::write(tmp.path().join(".gitignore"), "frame/.lock\n").unwrap();
 
     let out = run_fr_ok(tmp.path(), &["init", "--name", "Partial"]);
-    // Should add exactly the missing entries, and say so — the pre-existing
-    // `frame/.lock` is not re-added and must not be named.
-    let entries = expected_gitignore_entries(&[".lock"]);
-    assert!(out.contains(&format!("added {} to .gitignore", entries.join(", "))));
+    // An enumerated entry does not cover future files, so the pattern is still
+    // added — and the old line is left alone rather than rewritten.
+    assert!(
+        out.contains("added frame/.* to .gitignore"),
+        "summary should name the pattern: {out}"
+    );
 
     let gitignore = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
-    assert!(gitignore.contains("frame/.state.json"));
-    // Original entry should still be there, exactly once.
+    assert!(gitignore.contains("frame/.*"));
     assert_eq!(
         gitignore
             .lines()
             .filter(|l| l.trim() == "frame/.lock")
             .count(),
-        1
+        1,
+        "pre-existing line preserved exactly once: {gitignore}"
     );
 }
 
@@ -3050,12 +3048,11 @@ fn test_check_fix_yes_dedupes_archive_and_logs_recovery() {
     );
 }
 
-/// The plan must correspond to what check reported. `.gitignore` is the case
-/// that made this concrete: check warns only about a local file that *exists*
-/// and is not ignored, so repairing must add that entry — not every entry frame
-/// would write at init.
+/// Repairing `.gitignore` adds the blanket pattern, once, however many local
+/// files were reported — it covers all of them and the next one added to
+/// `frame/` too, which enumerating never could.
 #[test]
-fn test_check_fix_adds_only_the_reported_gitignore_entry() {
+fn test_check_fix_adds_the_gitignore_pattern() {
     let tmp = tempfile::TempDir::new().unwrap();
     if !std::process::Command::new("git")
         .args(["init", "-q"])
@@ -3073,15 +3070,24 @@ fn test_check_fix_adds_only_the_reported_gitignore_entry() {
 
     let gitignore = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
     assert!(
-        gitignore.contains("frame/.actor"),
-        "the reported entry should be added: {gitignore}"
+        gitignore.contains("frame/.*"),
+        "the pattern should be added: {gitignore}"
     );
-    // `.state.json` does not exist in this project, so check never warned about
-    // it and the repair must not invent it.
-    assert!(
-        !gitignore.contains("frame/.state.json"),
-        "should not add entries check did not report: {gitignore}"
+    assert_eq!(
+        gitignore.lines().filter(|l| l.trim() == "frame/.*").count(),
+        1,
+        "exactly once, however many files were reported: {gitignore}"
     );
+    // And it really does cover them.
+    for name in frame::io::project_io::LOCAL_ONLY_FRAME_FILES {
+        let ok = std::process::Command::new("git")
+            .args(["check-ignore", "-q", &format!("frame/{name}")])
+            .current_dir(tmp.path())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(ok, "frame/{name} should be ignored by the pattern");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3552,8 +3558,8 @@ fn test_inflight_gitignore_entry_is_reported_even_when_absent() {
     run_fr_ok(tmp.path(), &["check", "--fix"]);
     let gitignore = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
     assert!(
-        gitignore.contains("frame/.inflight"),
-        "--fix should add it: {gitignore}"
+        gitignore.contains("frame/.*"),
+        "--fix should add the pattern, which covers it: {gitignore}"
     );
 
     // The persistent files keep the existence gate: `.ids.toml` never appears

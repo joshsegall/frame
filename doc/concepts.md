@@ -23,6 +23,13 @@ myproject/
     .inflight          # only present while a multi-file operation is running
 ```
 
+Everything in `frame/` is committed except the dotfiles, which belong to a single
+working copy — UI state, the lock, this clone's actor token, the recovery log.
+`fr init` covers them with one `.gitignore` line, `frame/.*`, so a local file
+added in a later version of frame needs no change to your `.gitignore`. The rule
+that keeps this working: **nothing under `frame/` that needs to be committed
+starts with a dot.**
+
 Project discovery walks up from the current directory until it finds a `frame/` folder.
 
 **If you find a `.inflight` file sitting there**, an operation that writes more
