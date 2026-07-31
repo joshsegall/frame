@@ -552,9 +552,20 @@ fn check_local_files_ignored(frame_dir: &Path, result: &mut CheckResult) {
                 path: rel.clone(),
                 tracked: true,
             });
-        } else if !ignored.iter().any(|i| i == rel) && frame_dir.join(name).exists() {
-            // Not ignored but not yet committed: only worth reporting for a file
-            // that actually exists, since an absent one can't be added.
+        } else if !ignored.iter().any(|i| i == rel)
+            && (frame_dir.join(name).exists() || is_transient(name))
+        {
+            // Not ignored but not yet committed: normally only worth reporting
+            // for a file that actually exists, since an absent one can't be
+            // added — `.ids.toml` never appears inside git at all, and warning
+            // about it here would be pure noise.
+            //
+            // A transient file is the exception. It exists only in a window
+            // nobody is watching, so an existence check almost never catches it,
+            // and `fr check --fix` never can: it recovers the interrupted
+            // operation first, which removes the marker before the repair plan
+            // is computed. Left as-is, a project created before the marker
+            // existed could never acquire its `.gitignore` line.
             result.warnings.push(CheckWarning::LocalFileCommitted {
                 path: rel.clone(),
                 tracked: false,
@@ -709,6 +720,18 @@ fn archived_task_lists(frame_dir: &Path) -> Vec<(String, Vec<Task>)> {
 /// Report a frontier store that can't be read, or one that was reset earlier.
 /// Read-only: unlike a mint, this leaves an unreadable store in place so the
 /// warning is actionable while the file is still there.
+/// Whether a working-copy-local file exists only briefly, rather than being
+/// created once and kept.
+///
+/// Only the in-flight marker qualifies: it is written at the start of a
+/// multi-file operation and removed at the end, so at any given moment it is
+/// almost certainly absent. Everything else in
+/// [`crate::io::project_io::LOCAL_ONLY_FRAME_FILES`] appears on first use and
+/// stays, which is what makes an existence check the right gate for them.
+fn is_transient(name: &str) -> bool {
+    name == crate::io::inflight::MARKER_FILE
+}
+
 /// Report an operation that started and did not finish.
 ///
 /// Read-only, like everything else here: the marker is left in place. Completing

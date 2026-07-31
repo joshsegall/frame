@@ -3509,3 +3509,59 @@ fn test_recovery_declines_when_a_precondition_fails() {
         "--fix --yes should clear a marker recovery declined to act on"
     );
 }
+
+/// The in-flight marker exists only between a crash and the next write command,
+/// so an existence check almost never catches it — and `fr check --fix` never
+/// can, because it recovers first, which removes the marker before the repair
+/// plan is computed. Without an exception a project created before the marker
+/// existed could never acquire its `.gitignore` line, and a `git add -A` in that
+/// window would commit it.
+#[test]
+fn test_inflight_gitignore_entry_is_reported_even_when_absent() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    if !std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(tmp.path())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        return; // no git available
+    }
+    create_test_project(tmp.path());
+
+    // A .gitignore as a project predating the marker would have it: everything
+    // else covered, `.inflight` missing.
+    fs::write(
+        tmp.path().join(".gitignore"),
+        "frame/.state.json\nframe/.lock\nframe/.recovery.log\nframe/.actor\n\
+         frame/.ids.toml\nframe/.ids.lock\n",
+    )
+    .unwrap();
+    assert!(
+        !tmp.path().join("frame/.inflight").exists(),
+        "no operation is in flight — that is the point"
+    );
+
+    let checked = run_fr_ok(tmp.path(), &["check"]);
+    assert!(
+        checked.contains("frame/.inflight"),
+        "should be reported even though the file is absent: {checked}"
+    );
+
+    run_fr_ok(tmp.path(), &["check", "--fix"]);
+    let gitignore = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+    assert!(
+        gitignore.contains("frame/.inflight"),
+        "--fix should add it: {gitignore}"
+    );
+
+    // The persistent files keep the existence gate: `.ids.toml` never appears
+    // inside a git repo, so warning about it would be noise.
+    fs::write(tmp.path().join(".gitignore"), "frame/.state.json\n").unwrap();
+    let checked = run_fr_ok(tmp.path(), &["check"]);
+    assert!(
+        !checked.contains("frame/.ids.toml"),
+        "an absent persistent file should stay unreported: {checked}"
+    );
+}
