@@ -762,3 +762,383 @@ fn json_projections_read_the_documented_shapes() {
     );
     assert_eq!(json_sequence(&v, Projection::ShowTaskOnly), vec!["M-003.1"]);
 }
+
+// ---------------------------------------------------------------------------
+// CLI vs TUI
+// ---------------------------------------------------------------------------
+//
+// The second pair. `e1a8dbe` fixed `ops::task_ops` so a Parked or Done task
+// could be moved across tracks; `83be43a` then had to fix the TUI separately,
+// because the defect was never in the shared op — it was the TUI's own guard,
+// upstream of it, refusing to call it.
+//
+// That is why these cases are driven by **keystrokes** rather than by calling
+// `App`'s action methods. Calling the methods would be easier and would skip
+// the guard, which is the thing that broke.
+//
+// What is *not* driven by keystrokes is getting to the task: the case declares
+// a starting view and cursor position, set directly. Positioning is not the
+// behavior under test, and the routes differ per view — a Done task is not
+// reachable in the track view at all ("Done tasks are NOT shown in track view"
+// in `build_flat_items`), so its cases start from the detail or recent view the
+// way a user would arrive there.
+//
+// Scope is deliberately narrow: cross-track move and state change, the two
+// operations with a documented drift history. The helpers below are most of the
+// work; the remaining shared operations grow onto them.
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use frame::tui::app::{App, View};
+use frame::tui::input::handle_key;
+
+/// A keystroke, spelled so the case table stays readable.
+#[derive(Clone, Copy, Debug)]
+enum Press {
+    Char(char),
+    Enter,
+    Space,
+}
+
+fn press(app: &mut App, stroke: Press) {
+    let event = match stroke {
+        Press::Char(c) if c.is_ascii_uppercase() => {
+            KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT)
+        }
+        Press::Char(c) => KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+        Press::Enter => KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        Press::Space => KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+    };
+    handle_key(app, event);
+}
+
+/// Where the TUI cursor sits before the keys are pressed.
+#[derive(Clone, Copy)]
+enum Start {
+    /// Track view, cursor on this task — what `J` (jump to task) does.
+    Track(&'static str),
+    /// Detail view for `(track_id, task_id)`. The route to a Done task, which
+    /// the track view does not list; a user arrives here from Recent or search.
+    Detail(&'static str, &'static str),
+    /// Recent view, cursor on the entry at this index.
+    Recent(usize),
+}
+
+struct SurfaceCase {
+    /// What the case does, for the failure message.
+    what: &'static str,
+    cli: &'static [&'static str],
+    start: Start,
+    keys: &'static [Press],
+    /// The CLI is expected to refuse. Both surfaces must then leave the project
+    /// alone — a refusal on one side and a completed write on the other is the
+    /// `7071675` shape.
+    cli_refuses: bool,
+    /// A divergence this suite found and that is not fixed yet.
+    ///
+    /// The case is inverted rather than skipped: it asserts the two surfaces
+    /// still *disagree*, so landing the fix fails the test until the note comes
+    /// off. A skipped case would go on passing forever after the fix, and a
+    /// stale note is exactly the drift this file exists to catch.
+    known_divergence: Option<&'static str>,
+}
+
+const fn case(
+    what: &'static str,
+    cli: &'static [&'static str],
+    start: Start,
+    keys: &'static [Press],
+) -> SurfaceCase {
+    SurfaceCase {
+        what,
+        cli,
+        start,
+        keys,
+        cli_refuses: false,
+        known_divergence: None,
+    }
+}
+
+const fn diverges(mut c: SurfaceCase, note: &'static str) -> SurfaceCase {
+    c.known_divergence = Some(note);
+    c
+}
+
+use Press::{Char, Enter, Space};
+
+const SURFACE_CASES: &[SurfaceCase] = &[
+    // -- state changes within the Backlog section ----------------------------
+    case(
+        "mark a Backlog task done",
+        &["state", "M-001", "done"],
+        Start::Track("M-001"),
+        &[Char('x')],
+    ),
+    case(
+        "park a Backlog task",
+        &["state", "M-001", "parked"],
+        Start::Track("M-001"),
+        &[Char('~')],
+    ),
+    case(
+        "block a Backlog task",
+        &["state", "M-001", "blocked"],
+        Start::Track("M-001"),
+        &[Char('b')],
+    ),
+    // A subtask never moves between sections, so the two surfaces have less to
+    // disagree about — included as the control for the cases that do move.
+    case(
+        "mark a subtask done",
+        &["state", "M-003.1", "done"],
+        Start::Track("M-003.1"),
+        &[Char('x')],
+    ),
+    // -- state changes that cross a section boundary -------------------------
+    diverges(
+        case(
+            "mark a top-level Parked task done",
+            &["state", "M-010", "done"],
+            Start::Track("M-010"),
+            &[Char('x')],
+        ),
+        "`fr state ID done` moves a top-level Parked task into the Done section \
+         (cmd_state handles Backlog *or* Parked as the source). The TUI schedules \
+         PendingMoveKind::ToDone only from Backlog; from Parked the FromParked \
+         move fires instead, landing a done task at the top of the *Backlog* — a \
+         state `fr check` reports as DoneInBacklog.",
+    ),
+    case(
+        "unpark a top-level Parked task",
+        &["state", "M-010", "todo"],
+        Start::Track("M-010"),
+        &[Char('o')],
+    ),
+    // Reopening is Space in the Recent view — the track view has no Done tasks
+    // to put a cursor on. Recent order is M-005, M-000, S-000.
+    case(
+        "reopen a top-level Done task",
+        &["state", "M-000", "todo"],
+        Start::Recent(1),
+        &[Space],
+    ),
+    // -- cross-track move ----------------------------------------------------
+    // `M`, type the target's prefix, Enter, `b` for bottom. The CLI's default
+    // position for `mv --track` is Bottom too.
+    case(
+        "move a Backlog task to another track",
+        &["mv", "M-001", "--track", "side"],
+        Start::Track("M-001"),
+        &[Char('M'), Char('S'), Enter, Char('b')],
+    ),
+    case(
+        "move a Parked task to another track",
+        &["mv", "M-010", "--track", "side"],
+        Start::Track("M-010"),
+        &[Char('M'), Char('S'), Enter, Char('b')],
+    ),
+    // The `83be43a` case itself.
+    case(
+        "move a Done task to another track",
+        &["mv", "M-000", "--track", "side"],
+        Start::Detail("main", "M-000"),
+        &[Char('M'), Char('S'), Enter, Char('b')],
+    ),
+    // -- refusal -------------------------------------------------------------
+    // `reject_add_to_shelved` makes the CLI refuse a move into a shelved track.
+    // The TUI must refuse too, or this is `7071675` again with the surfaces
+    // swapped.
+    SurfaceCase {
+        what: "move a task into a shelved track",
+        cli: &["mv", "M-001", "--track", "shelf"],
+        start: Start::Track("M-001"),
+        keys: &[Char('M'), Char('H'), Enter, Char('b')],
+        cli_refuses: true,
+        known_divergence: Some(
+            "`reject_add_to_shelved` makes the CLI refuse. begin_cross_track_move \
+             filters its candidate list on `state != \"archived\"` only, so the TUI \
+             offers the shelved track and completes the move — re-minting into the \
+             shelved track's namespace and rewriting dependents' `dep:` lines to \
+             point at it. `7071675` again with the surfaces swapped.",
+        ),
+    },
+];
+
+/// Run `fr`, returning whether it succeeded rather than asserting it did.
+fn try_fr(dir: &Path, args: &[&str]) -> bool {
+    Command::new(fr_bin())
+        .args(args)
+        .current_dir(dir)
+        .env("XDG_CONFIG_HOME", dir.join(".xdg-config"))
+        .output()
+        .expect("failed to run fr")
+        .status
+        .success()
+}
+
+/// Every file under `frame/` the two surfaces are expected to agree on, keyed
+/// by path relative to `frame/`.
+///
+/// Working-copy-local files are excluded via `LOCAL_ONLY_FRAME_FILES` — the
+/// lock, the UI state, the actor token, the id frontier and the in-flight
+/// marker are per-working-copy by definition, and these are two working copies.
+/// Third consumer of that constant, after `fr init` and `fr check`.
+fn frame_tree(root: &Path) -> Vec<(String, String)> {
+    let frame = root.join("frame");
+    let mut out = Vec::new();
+    let mut stack = vec![frame.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if frame::io::project_io::LOCAL_ONLY_FRAME_FILES.contains(&name.as_str()) {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(&frame)
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            out.push((rel, fs::read_to_string(&path).unwrap_or_default()));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Apply a case through the TUI the way the event loop does: position, press
+/// keys, then flush the grace-period section moves and save what they touched
+/// (`app.rs` does exactly this on view change and on quit).
+fn drive_tui(root: &Path, case: &SurfaceCase) {
+    let project = frame::io::project_io::load_project(root).expect("load project");
+    let mut app = App::new(project);
+
+    match case.start {
+        Start::Track(task_id) => assert!(
+            app.jump_to_task(task_id),
+            "{}: no cursor position for {task_id} in the track view",
+            case.what
+        ),
+        Start::Detail(track_id, task_id) => {
+            app.view = View::Detail {
+                track_id: track_id.to_string(),
+                task_id: task_id.to_string(),
+            };
+        }
+        Start::Recent(index) => {
+            app.view = View::Recent;
+            app.recent_cursor = index;
+        }
+    }
+
+    for stroke in case.keys {
+        press(&mut app, *stroke);
+    }
+
+    for track_id in app.flush_all_pending_moves() {
+        app.save_track_logged(&track_id);
+    }
+}
+
+#[test]
+fn cli_and_tui_leave_the_same_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut failures: Vec<String> = Vec::new();
+
+    for (i, case) in SURFACE_CASES.iter().enumerate() {
+        // A fresh pair of working copies per case: the surfaces must agree about
+        // one operation applied to the same starting state.
+        let via_cli = dir.path().join(format!("case{i}-cli"));
+        let via_tui = dir.path().join(format!("case{i}-tui"));
+        create_fixture(&via_cli);
+        create_fixture(&via_tui);
+
+        let ok = try_fr(&via_cli, case.cli);
+        if ok == case.cli_refuses {
+            failures.push(format!(
+                "{} — `fr {}` {} but the case says it should {}",
+                case.what,
+                case.cli.join(" "),
+                if ok { "succeeded" } else { "failed" },
+                if case.cli_refuses {
+                    "refuse"
+                } else {
+                    "succeed"
+                },
+            ));
+            continue;
+        }
+
+        drive_tui(&via_tui, case);
+
+        let cli_tree = frame_tree(&via_cli);
+        let tui_tree = frame_tree(&via_tui);
+        let agree = cli_tree == tui_tree;
+
+        match (agree, case.known_divergence) {
+            (true, None) => {}
+            (false, Some(_)) => {}
+            (true, Some(note)) => failures.push(format!(
+                "{} — the surfaces now agree, so the known-divergence note is stale \
+                 and should come off:\n  {note}",
+                case.what,
+            )),
+            (false, None) => {
+                let keys: Vec<String> = case.keys.iter().map(|k| format!("{k:?}")).collect();
+                failures.push(format!(
+                    "{} — `fr {}` vs [{}]\n{}",
+                    case.what,
+                    case.cli.join(" "),
+                    keys.join(", "),
+                    describe_tree_diff(&cli_tree, &tui_tree),
+                ));
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} of {} CLI/TUI cases disagreed:\n\n{}",
+        failures.len(),
+        SURFACE_CASES.len(),
+        failures.join("\n\n")
+    );
+}
+
+/// Render the first differing file as two labelled blocks. Whole files rather
+/// than a line diff: these are small, and section placement — the thing most of
+/// these cases turn on — is only legible with the sections around it.
+fn describe_tree_diff(cli: &[(String, String)], tui: &[(String, String)]) -> String {
+    for (path, cli_body) in cli {
+        match tui.iter().find(|(p, _)| p == path) {
+            Some((_, tui_body)) if tui_body == cli_body => continue,
+            Some((_, tui_body)) => {
+                return format!(
+                    "  {path} differs.\n  --- via CLI ---\n{}\n  --- via TUI ---\n{}",
+                    indent(cli_body),
+                    indent(tui_body)
+                );
+            }
+            None => return format!("  {path} exists only in the CLI copy"),
+        }
+    }
+    for (path, _) in tui {
+        if !cli.iter().any(|(p, _)| p == path) {
+            return format!("  {path} exists only in the TUI copy");
+        }
+    }
+    "  trees differ, but no single differing file was found".to_string()
+}
+
+fn indent(body: &str) -> String {
+    body.lines()
+        .map(|l| format!("  | {l}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
