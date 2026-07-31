@@ -75,6 +75,22 @@ pub fn new_track(
     Ok(crate::parse::parse_track(&content))
 }
 
+/// Whether a track accepts new tasks.
+///
+/// A shelved track is paused work and an archived one is closed; neither should
+/// receive a task by add, triage, import, or cross-track move. A stale target
+/// is the common cause, which is why this is an error rather than a silent
+/// write.
+///
+/// One predicate, three consumers: the CLI's `reject_add_to_shelved`, and both
+/// of the TUI's cross-track-move target lists. Those lists used to filter on
+/// `state != "archived"`, so the TUI offered shelved tracks and completed a move
+/// the CLI refuses — `tests/parity.rs` caught it, and `7071675` is the same
+/// disagreement with the surfaces the other way round.
+pub fn accepts_new_tasks(state: &str) -> bool {
+    state == "active"
+}
+
 /// Change a track's state to shelved.
 pub fn shelve_track(
     doc: &mut toml_edit::DocumentMut,

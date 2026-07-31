@@ -577,13 +577,15 @@ pub(super) fn begin_cross_track_move(app: &mut App) {
         _ => return,
     };
 
-    // Build candidate tracks: all non-archived tracks except current (show prefix)
+    // Build candidate tracks: every track that accepts new tasks except the
+    // current one (show prefix). Shelved tracks are excluded for the same reason
+    // `fr mv --track` refuses them.
     let candidates: Vec<String> = app
         .project
         .config
         .tracks
         .iter()
-        .filter(|t| t.state != "archived" && t.id != source_track_id)
+        .filter(|t| crate::ops::track_ops::accepts_new_tasks(&t.state) && t.id != source_track_id)
         .map(|t| {
             let prefix = app
                 .project

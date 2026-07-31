@@ -953,13 +953,7 @@ const SURFACE_CASES: &[SurfaceCase] = &[
         start: Start::Track("M-001"),
         keys: &[Char('M'), Char('H'), Enter, Char('b')],
         cli_refuses: true,
-        known_divergence: Some(
-            "`reject_add_to_shelved` makes the CLI refuse. begin_cross_track_move \
-             filters its candidate list on `state != \"archived\"` only, so the TUI \
-             offers the shelved track and completes the move — re-minting into the \
-             shelved track's namespace and rewriting dependents' `dep:` lines to \
-             point at it. `7071675` again with the surfaces swapped.",
-        ),
+        known_divergence: None,
     },
 ];
 

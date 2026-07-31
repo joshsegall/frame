@@ -168,14 +168,14 @@ fn reject_add_to_shelved(
     project: &Project,
     track_id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if track_state(project, track_id) == Some("shelved") {
-        return Err(format!(
-            "track '{track_id}' is shelved and does not accept new tasks; \
+    match track_state(project, track_id) {
+        Some(state) if !track_ops::accepts_new_tasks(state) => Err(format!(
+            "track '{track_id}' is {state} and does not accept new tasks; \
              activate it first with `fr track activate {track_id}`"
         )
-        .into());
+        .into()),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 /// Get the file path for a track from config.
