@@ -69,6 +69,26 @@ independent: `blocked` is set manually by the human, while `dep:` tracks
 explicit task-to-task dependencies. Either one prevents a task from
 being ready.
 
+### Working copies and actor tokens
+
+Each working copy mints IDs in its own **actor namespace**, so two clones that
+haven't synced never hand out the same number. The token is the letter before
+the number (`EFF-a14`) — see Metadata above.
+
+Git worktrees of one clone are **not** separate actors. A linked worktree
+inherits its clone's token: nothing is written, and no new actor appears in the
+registry. This is automatic and needs no setup.
+
+**Do not run `fr actor claim`.** A clone's main working tree claims a token
+automatically on its first mint; a linked worktree never claims at all, because
+it inherits. Claiming one by hand in a worktree splits a single clone into two
+actors — the exact failure the inheritance rule exists to prevent. If a mint
+fails and asks you to claim a token, report that to the human instead of
+resolving it yourself.
+
+`fr actor` with no subcommand shows the current token and which tier it came
+from. `fr info` shows it too, alongside the ID frontier.
+
 ### Tag conventions
 
 | Tag           | Meaning                                 |
@@ -141,6 +161,12 @@ fr sub EFF-014 "Test with nested closures"
 - **Task is blocked** → Check `fr deps <id>` to see what's blocking it.
   If the blocker is something you can do, pick that up first. If it needs
   human input, tag the blocker `#needs-input` and move on.
+- **A write is rejected because the track is shelved** → The track is paused
+  work, not a bad ID. Usually a stale `--track` argument: check `fr tracks` and
+  pick an active one. Don't run `fr track activate` to work around it — that's
+  a human decision about what work is in flight.
+- **A mint fails asking you to claim an actor token** → Report it to the human.
+  Do not run `fr actor claim`; see Working copies and actor tokens.
 - **Unsure which track** → Use `fr inbox` and let the human triage it.
 - **Task is too large** → Break it down with `fr sub` before starting.
 - **Conflicting or unclear spec** → Add a note with `fr note` explaining
@@ -149,6 +175,14 @@ fr sub EFF-014 "Test with nested closures"
 ---
 
 ## Command Reference
+
+### Global flags
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Machine-parseable output — see Conventions |
+| `-C <path>` | Run against a different project directory |
+| `--version` | Print version and the build's commit |
 
 ### Project init
 
@@ -182,8 +216,9 @@ fr sub EFF-014 "Test with nested closures"
 | `fr recent` | Recently completed tasks |
 | `fr recent --limit <n>` | Limit results (default: 20) |
 | `fr inbox` | List inbox items |
-| `fr check` | Validate project integrity (deps, refs, IDs) |
-| `fr info` | Project identity: version, name, frame dir, actor token, track count (report which clone you're on) |
+| `fr check` | Validate project integrity — read-only; see Maintenance for what it covers |
+| `fr info` | Project identity: version and build commit, name, frame dir, actor token, ID frontier, track count (report which clone you're on) |
+| `fr actor` | Show this working copy's actor token and which tier it resolved from |
 
 ### Creating tasks
 
@@ -198,11 +233,18 @@ fr sub EFF-014 "Test with nested closures"
 | `fr inbox "text" --tag bug` | Capture with tag |
 | `fr inbox "text" --note "details"` | Capture with body text |
 
+A **shelved** track does not accept new tasks. `add`, `push`, `sub`, `import`,
+`triage`, and `mv --track` all reject one, pointing at `fr track activate`. A
+stale `--track` argument is the usual cause — check `fr tracks` before assuming
+the track ID is wrong.
+
 ### Modifying tasks
 
 | Command | Description |
 |---------|-------------|
 | `fr state <id> <state>` | Change state. Setting a backlog task to `done` moves it to Done immediately |
+| `fr start <id>` | Shortcut for `state <id> active` (rejected if the track is shelved) |
+| `fr done <id>` | Shortcut for `state <id> done` |
 | `fr tag <id> add <tag>` | Add a tag |
 | `fr tag <id> rm <tag>` | Remove a tag |
 | `fr dep <id> add <dep-id>` | Add a dependency |
@@ -211,12 +253,17 @@ fr sub EFF-014 "Test with nested closures"
 | `fr ref <id> <filepath>` | Add a file reference |
 | `fr spec <id> <path>` | Set spec reference (e.g., `doc/spec.md#section`) |
 | `fr title <id> "new title"` | Change task title |
-| `fr mv <id> --top` | Move task to top of backlog |
+| `fr mv <id> --top` | Move task to top of its section |
 | `fr mv <id> --after <id>` | Move after another task |
 | `fr mv <id> <position>` | Move to numeric position (0-indexed) |
 | `fr mv <id> --track <track>` | Move to different track (rewrites ID prefix, updates deps) |
 | `fr mv <id> --promote` | Promote subtask to top-level (re-keys IDs) |
 | `fr mv <id> --parent <id>` | Reparent under another task (re-keys IDs) |
+
+`fr mv` operates on a top-level task in whichever section holds it — Backlog,
+Parked, or Done — not just the Backlog. A cross-track move lands the task in the
+*same* section on the target, so a done task stays done and keeps its
+`resolved:` date rather than being reopened into the backlog.
 
 ### Triage & import
 
@@ -257,16 +304,36 @@ fr sub EFF-014 "Test with nested closures"
 Projects auto-register on `fr init` or first use. Registry:
 `~/.config/frame/projects.toml`.
 
+### Actor tokens
+
+Only `fr actor` (no subcommand) is safe to run unprompted — it just reports.
+Everything below writes identity state shared across the clone, and is the
+**human's** call. See Working copies and actor tokens above.
+
+| Command | Description |
+|---------|-------------|
+| `fr actor` | Show the current token and which tier it resolved from |
+| `fr actor list` | All tokens with state and provenance |
+| `fr actor claim` | Auto-claim a token — **do not run**; working copies claim on first mint |
+| `fr actor set <token>` | Claim a specific token (`--local` for this worktree only) |
+| `fr actor retire <token>` | Tombstone a token (stays reclaimable) |
+| `fr actor merge <from>... --into <t>` | Human repair for accumulated tokens: renumbers IDs into one namespace and retires the sources. Preview with `--dry-run` |
+
 ### Maintenance
 
 | Command | Description |
 |---------|-------------|
 | `fr clean` | Assign IDs/dates, archive done tasks, validate |
 | `fr clean --dry-run` | Preview what clean would do |
-| `fr check` | Read-only validation (deps, refs, duplicates, `#lost` tasks, recovery log) |
+| `fr check` | Read-only validation: deps, refs, duplicate and reissued IDs, unclosed code fences, actor-registry drift, local files leaking into git, ID-frontier health, `#lost` tasks, recovery log |
+| `fr delete <ids>...` | **Permanently** delete tasks (`--yes` skips the prompt) |
 | `fr recovery` | View recovery log entries (most recent first) |
 | `fr recovery prune [--all]` | Remove old recovery log entries |
 | `fr recovery path` | Print path to recovery log file |
+
+`fr delete` is permanent and has no undo on the CLI. Prefer `fr state <id>
+parked` for work that is being set aside, or ask the human. Delete only when
+explicitly told to.
 
 ---
 
