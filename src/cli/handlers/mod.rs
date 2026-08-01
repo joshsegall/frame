@@ -556,8 +556,10 @@ fn cmd_search(args: SearchArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Search archives
-    {
+    // Search archives. Included by default -- finding a task you completed last
+    // month is the common reason to reach for search at all -- with --no-archive
+    // to opt out on a project whose archives have grown noisy.
+    if !args.no_archive {
         let archives = project_io::load_archives(&project.frame_dir)?;
         let archive_hits = search::search_archive_tasks(&archives, &re, args.track.as_deref());
         let mut seen_archive = HashSet::new();

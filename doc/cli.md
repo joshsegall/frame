@@ -89,14 +89,15 @@ fr blocked
 Search tasks and inbox by regex pattern.
 
 ```
-fr search PATTERN [--track TRACK]
+fr search PATTERN [--track TRACK] [--no-archive]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--track TRACK` | Limit to specific track |
+| `--no-archive` | Skip archived tasks |
 
-Searches across all fields: ID, title, tags, notes, deps, refs, spec. Includes inbox items (title, tags, body) when no track filter is set. Archived tasks (`frame/archive/*.md` files created by `fr clean`) are always included; archive results are prefixed with `[archive:track_id]`.
+Searches across all fields: ID, title, tags, notes, deps, refs, spec. Includes inbox items (title, tags, body) when no track filter is set. Archived tasks (`frame/archive/*.md` files created by `fr clean`) are included by default — finding something you finished last month is a common reason to search at all — and are prefixed with `[archive:track_id]`. `--no-archive` skips them, for a project whose archives have grown large enough to bury live results.
 
 ### `fr inbox`
 

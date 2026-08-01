@@ -729,6 +729,35 @@ fn deps_reports_a_dangling_dependency_as_not_found() {
     assert!(out.contains("M-999 (not found)"), "{out}");
 }
 
+/// Archives are searched by default; `--no-archive` is the opt-out. The old
+/// `--archive` flag was declared and never read, so it did nothing either way.
+#[test]
+fn search_archive_is_opt_out_not_opt_in() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    let archive = tmp.path().join("frame").join("archive");
+    fs::create_dir_all(&archive).unwrap();
+    fs::write(
+        archive.join("main.md"),
+        "# Main Track — Archive\n\n## Done\n\n- [x] `M-900` Archived widget\n  - resolved: 2024-01-02\n",
+    )
+    .unwrap();
+
+    let out = run_fr_ok(tmp.path(), &["search", "widget"]);
+    assert!(out.contains("[archive:main]"), "{out}");
+    assert!(out.contains("M-900"), "{out}");
+
+    let out = run_fr_ok(tmp.path(), &["search", "--no-archive", "widget"]);
+    assert!(
+        !out.contains("M-900"),
+        "--no-archive should skip it:\n{out}"
+    );
+
+    let (_, stderr, ok) = run_fr(tmp.path(), &["search", "-a", "widget"]);
+    assert!(!ok, "the removed -a flag should be an error, not a no-op");
+    assert!(stderr.contains("unexpected argument"), "{stderr}");
+}
+
 #[test]
 fn test_check() {
     let tmp = tempfile::TempDir::new().unwrap();

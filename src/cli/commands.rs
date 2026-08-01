@@ -154,9 +154,9 @@ pub struct SearchArgs {
     /// Limit search to specific track
     #[arg(long)]
     pub track: Option<String>,
-    /// Also search archived tasks
-    #[arg(short, long)]
-    pub archive: bool,
+    /// Skip archived tasks (searched by default)
+    #[arg(long)]
+    pub no_archive: bool,
 }
 
 #[derive(Args)]
