@@ -60,7 +60,7 @@ pub fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             Commands::Show(args) => cmd_show(args, json),
             Commands::Ready(args) => cmd_ready(args, json),
             Commands::Blocked => cmd_blocked(json),
-            Commands::Search(args) => cmd_search(args),
+            Commands::Search(args) => cmd_search(args, json),
             Commands::Inbox(args) => {
                 if args.text.is_some() {
                     cmd_inbox_add(args)
@@ -530,85 +530,180 @@ fn collect_blocked_tasks<'a>(task: &'a Task, track_id: &str, result: &mut Vec<(S
     }
 }
 
-fn cmd_search(args: SearchArgs) -> Result<(), Box<dyn std::error::Error>> {
+/// One task a search matched, with every field that matched it.
+///
+/// Collapsing per-field hits into one entry per task is what both surfaces
+/// want: the human output prints one line per task, and `--json` reports the
+/// full `matched_fields` list rather than whichever field the scan reached
+/// first.
+struct SearchTaskHit<'a> {
+    track_id: String,
+    task_id: String,
+    /// `None` when the hit does not resolve back to a task, which is reachable
+    /// for a task with no id — hits carry `""` for those.
+    task: Option<&'a Task>,
+    fields: Vec<&'static str>,
+}
+
+struct SearchInboxHit<'a> {
+    index: usize,
+    item: &'a crate::model::inbox::InboxItem,
+    fields: Vec<&'static str>,
+}
+
+/// Group hits by task, preserving first-seen order and accumulating fields.
+fn group_task_hits<'a>(
+    hits: &[search::SearchHit],
+    resolve: impl Fn(&str, &str) -> Option<&'a Task>,
+) -> Vec<SearchTaskHit<'a>> {
+    let mut out: Vec<SearchTaskHit<'a>> = Vec::new();
+    let mut seen: std::collections::HashMap<(String, String), usize> =
+        std::collections::HashMap::new();
+
+    for hit in hits {
+        let key = (hit.track_id.clone(), hit.task_id.clone());
+        let name = hit.field.name();
+        match seen.get(&key) {
+            Some(&i) => {
+                if !out[i].fields.contains(&name) {
+                    out[i].fields.push(name);
+                }
+            }
+            None => {
+                seen.insert(key, out.len());
+                out.push(SearchTaskHit {
+                    track_id: hit.track_id.clone(),
+                    task_id: hit.task_id.clone(),
+                    task: resolve(&hit.track_id, &hit.task_id),
+                    fields: vec![name],
+                });
+            }
+        }
+    }
+    out
+}
+
+fn hits_to_json(hits: &[SearchTaskHit]) -> Vec<SearchHitJson> {
+    hits.iter()
+        .map(|hit| SearchHitJson {
+            track: hit.track_id.clone(),
+            task: hit.task.map(task_to_json),
+            matched_fields: hit.fields.iter().map(|f| f.to_string()).collect(),
+        })
+        .collect()
+}
+
+/// `[track] [ ] ID Title` when the task resolves, and the field that matched
+/// when it does not — the only case where the human surface names a field.
+fn format_search_hits(hits: &[SearchTaskHit], prefix: &str) -> Vec<String> {
+    hits.iter()
+        .map(|hit| match hit.task {
+            Some(task) => format!("[{}{}] {}", prefix, hit.track_id, format_task_line(task)),
+            None => format!(
+                "[{}{}] {} (in {})",
+                prefix, hit.track_id, hit.task_id, hit.fields[0]
+            ),
+        })
+        .collect()
+}
+
+fn cmd_search(args: SearchArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let project = load_project_cwd()?;
     let re = Regex::new(&args.pattern)?;
-    let hits = search::search_tasks(&project, &re, args.track.as_deref());
 
-    // Deduplicate by task_id (multiple field matches for same task)
-    let mut seen = HashSet::new();
-    for hit in &hits {
-        if seen.insert((&hit.track_id, &hit.task_id)) {
-            // Find the task to get its title
-            if let Some(track) = find_track(&project, &hit.track_id) {
-                if let Some(task) = task_ops::find_task_in_track(track, &hit.task_id) {
-                    let line = format_task_line(task);
-                    println!("[{}] {}", hit.track_id, line);
-                } else {
-                    println!(
-                        "[{}] {} (in {})",
-                        hit.track_id,
-                        hit.task_id,
-                        hit.field_name()
-                    );
-                }
-            }
-        }
-    }
+    let live = group_task_hits(
+        &search::search_tasks(&project, &re, args.track.as_deref()),
+        |track_id, task_id| {
+            find_track(&project, track_id)
+                .and_then(|track| task_ops::find_task_in_track(track, task_id))
+        },
+    );
 
-    // Search archives. Included by default -- finding a task you completed last
-    // month is the common reason to reach for search at all -- with --no-archive
+    // Archives are searched by default -- finding a task you completed last
+    // month is a common reason to reach for search at all -- with --no-archive
     // to opt out on a project whose archives have grown noisy.
-    if !args.no_archive {
-        let archives = project_io::load_archives(&project.frame_dir)?;
-        let archive_hits = search::search_archive_tasks(&archives, &re, args.track.as_deref());
-        let mut seen_archive = HashSet::new();
-        for hit in &archive_hits {
-            if seen_archive.insert((&hit.track_id, &hit.task_id)) {
-                // Find the task in the archive data to get its title
-                let task = archives
-                    .iter()
-                    .find(|(tid, _)| tid == &hit.track_id)
-                    .and_then(|(_, tasks)| find_task_by_id(tasks, &hit.task_id));
-                if let Some(task) = task {
-                    let line = format_task_line(task);
-                    println!("[archive:{}] {}", hit.track_id, line);
-                } else {
-                    println!(
-                        "[archive:{}] {} (in {})",
-                        hit.track_id,
-                        hit.task_id,
-                        hit.field_name()
-                    );
-                }
-            }
-        }
-    }
+    let archives = if args.no_archive {
+        Vec::new()
+    } else {
+        project_io::load_archives(&project.frame_dir)?
+    };
+    let archived = group_task_hits(
+        &search::search_archive_tasks(&archives, &re, args.track.as_deref()),
+        |track_id, task_id| {
+            archives
+                .iter()
+                .find(|(tid, _)| tid == track_id)
+                .and_then(|(_, tasks)| find_task_by_id(tasks, task_id))
+        },
+    );
 
-    // Search inbox if no track filter
+    // The inbox belongs to no track, so a track filter excludes it entirely.
+    let mut inbox_hits: Vec<SearchInboxHit> = Vec::new();
     if args.track.is_none()
         && let Some(ref inbox) = project.inbox
     {
-        let inbox_hits = search::search_inbox(inbox, &re);
-        let mut seen_items = HashSet::new();
-        for hit in &inbox_hits {
-            if seen_items.insert(hit.item_index)
-                && let Some(item) = inbox.items.get(hit.item_index)
-            {
-                let tags = if item.tags.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        " {}",
-                        item.tags
-                            .iter()
-                            .map(|t| format!("#{}", t))
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    )
-                };
-                println!("[inbox:{}] {}{}", hit.item_index + 1, item.title, tags);
+        let mut seen: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+        for hit in &search::search_inbox(inbox, &re) {
+            let name = hit.field.name();
+            match seen.get(&hit.item_index) {
+                Some(&i) => {
+                    if !inbox_hits[i].fields.contains(&name) {
+                        inbox_hits[i].fields.push(name);
+                    }
+                }
+                None => {
+                    if let Some(item) = inbox.items.get(hit.item_index) {
+                        seen.insert(hit.item_index, inbox_hits.len());
+                        inbox_hits.push(SearchInboxHit {
+                            index: hit.item_index,
+                            item,
+                            fields: vec![name],
+                        });
+                    }
+                }
             }
+        }
+    }
+
+    if json {
+        let output = SearchJson {
+            pattern: args.pattern.clone(),
+            tasks: hits_to_json(&live),
+            archived: hits_to_json(&archived),
+            inbox: inbox_hits
+                .iter()
+                .map(|hit| InboxSearchHitJson {
+                    index: hit.index + 1,
+                    title: hit.item.title.clone(),
+                    tags: hit.item.tags.clone(),
+                    body: hit.item.body.clone(),
+                    matched_fields: hit.fields.iter().map(|f| f.to_string()).collect(),
+                })
+                .collect(),
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        for line in format_search_hits(&live, "") {
+            println!("{}", line);
+        }
+        for line in format_search_hits(&archived, "archive:") {
+            println!("{}", line);
+        }
+        for hit in &inbox_hits {
+            let tags = if hit.item.tags.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " {}",
+                    hit.item
+                        .tags
+                        .iter()
+                        .map(|t| format!("#{}", t))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+            };
+            println!("[inbox:{}] {}{}", hit.index + 1, hit.item.title, tags);
         }
     }
 
@@ -626,26 +721,6 @@ fn find_task_by_id<'a>(tasks: &'a [Task], id: &str) -> Option<&'a Task> {
         }
     }
     None
-}
-
-/// Extension trait to get field name for search hits
-trait FieldName {
-    fn field_name(&self) -> &'static str;
-}
-
-impl FieldName for search::SearchHit {
-    fn field_name(&self) -> &'static str {
-        match self.field {
-            search::MatchField::Id => "id",
-            search::MatchField::Title => "title",
-            search::MatchField::Tag => "tag",
-            search::MatchField::Note => "note",
-            search::MatchField::Dep => "dep",
-            search::MatchField::Ref => "ref",
-            search::MatchField::Spec => "spec",
-            search::MatchField::Body => "body",
-        }
-    }
 }
 
 fn cmd_inbox_list(json: bool) -> Result<(), Box<dyn std::error::Error>> {

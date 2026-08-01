@@ -123,12 +123,50 @@ pub struct DepNodeJson {
     pub deps: Vec<DepNodeJson>,
 }
 
+/// `fr search --json`.
+///
+/// Three named arrays rather than one flat array of tagged hits: each is
+/// homogeneous, so a consumer gets a stable schema per array instead of a union
+/// it has to discriminate. The grouping is not invented — it is the order the
+/// human surface already prints (live, then archive, then inbox), so
+/// concatenating the three reproduces the human sequence exactly.
+///
+/// `archived` is always present, empty under `--no-archive`, so the schema does
+/// not change shape with the flag.
+#[derive(Serialize)]
+pub struct SearchJson {
+    pub pattern: String,
+    pub tasks: Vec<SearchHitJson>,
+    pub archived: Vec<SearchHitJson>,
+    pub inbox: Vec<InboxSearchHitJson>,
+}
+
+/// One task the search matched, with every field that matched it.
+///
+/// `matched_fields` is the one thing the JSON carries that the human line
+/// cannot — the human surface names a field only when it *fails* to resolve the
+/// task. It lists all matching fields, not the first: `cmd_search` collapses
+/// per-field hits into one entry per task, and reporting only the first would
+/// mean reporting whichever field the scan happened to reach first.
 #[derive(Serialize)]
 pub struct SearchHitJson {
     pub track: String,
-    pub task_id: String,
+    /// Absent when the hit does not resolve to a task. Reachable for a task
+    /// with no id: hits carry `""` for those, and nothing can be looked up by
+    /// it. `matched_fields` still says what matched.
+    #[serde(flatten)]
+    pub task: Option<TaskJson>,
+    pub matched_fields: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct InboxSearchHitJson {
+    pub index: usize,
     pub title: String,
-    pub field: String,
+    pub tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    pub matched_fields: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------

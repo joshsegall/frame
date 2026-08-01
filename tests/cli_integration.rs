@@ -758,6 +758,34 @@ fn search_archive_is_opt_out_not_opt_in() {
     assert!(stderr.contains("unexpected argument"), "{stderr}");
 }
 
+/// `matched_fields` lists every field that matched, not whichever one the scan
+/// reached first. Searching for an id matches the task by `id` and its
+/// dependents by `dep`.
+#[test]
+fn search_json_reports_all_matched_fields() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    let out = run_fr_ok(tmp.path(), &["--json", "search", "M-001"]);
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(parsed["pattern"], "M-001");
+
+    let tasks = parsed["tasks"].as_array().unwrap();
+    let by_id = |id: &str| {
+        tasks
+            .iter()
+            .find(|t| t["id"] == id)
+            .unwrap_or_else(|| panic!("{id} missing from {out}"))
+    };
+    assert_eq!(by_id("M-001")["matched_fields"][0], "id");
+    assert_eq!(by_id("M-002")["matched_fields"][0], "dep");
+
+    // The three arrays are always present, so a consumer never has to test for
+    // a key's existence.
+    assert!(parsed["archived"].is_array());
+    assert!(parsed["inbox"].is_array());
+}
+
 #[test]
 fn test_check() {
     let tmp = tempfile::TempDir::new().unwrap();

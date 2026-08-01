@@ -8,7 +8,7 @@ use crate::model::task::{Metadata, Task};
 use crate::model::track::{Track, TrackNode};
 
 /// Which field of a task or inbox item matched
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatchField {
     Id,
     Title,
@@ -19,6 +19,23 @@ pub enum MatchField {
     Spec,
     /// Inbox body text
     Body,
+}
+
+impl MatchField {
+    /// The field's name as both surfaces report it: `(in note)` in the human
+    /// output, `matched_fields` in `--json`.
+    pub fn name(self) -> &'static str {
+        match self {
+            MatchField::Id => "id",
+            MatchField::Title => "title",
+            MatchField::Tag => "tag",
+            MatchField::Note => "note",
+            MatchField::Dep => "dep",
+            MatchField::Ref => "ref",
+            MatchField::Spec => "spec",
+            MatchField::Body => "body",
+        }
+    }
 }
 
 /// A search hit for a task field

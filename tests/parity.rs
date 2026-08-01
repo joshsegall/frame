@@ -49,6 +49,8 @@ use serde_json::Value;
 const TASK_IDS: &[&str] = &[
     "M-000", "M-001", "M-002", "M-003", "M-003.1", "M-003.2", "M-004", "M-005", "M-010", "S-000",
     "S-001", "S-002", "S-010", "H-001", "H-002", "H-003", "H-004", "H-005", "H-006", "H-007",
+    // Archived, so it appears only in `fr search`'s `[archive:…]` block.
+    "M-900",
     // Not a task. A dangling `dep:` target, which `fr deps` names in both
     // surfaces and the extractor therefore has to recognise.
     "H-999",
@@ -212,6 +214,24 @@ shelf = "H"
     )
     .unwrap();
 
+    // An archive, so `fr search`'s archived block is not permanently empty —
+    // without it the live/archive ordering would go untested and any row
+    // covering it would pass vacuously.
+    fs::create_dir_all(frame.join("archive")).unwrap();
+    fs::write(
+        frame.join("archive/main.md"),
+        "\
+# Main Track — Archive
+
+## Done
+
+- [x] `M-900` Archived First task
+  - added: 2024-01-01
+  - resolved: 2024-01-02
+",
+    )
+    .unwrap();
+
     fs::write(
         frame.join("inbox.md"),
         "\
@@ -339,6 +359,12 @@ enum Projection {
     /// command holds objects rather than the bare id strings `TaskJson.deps`
     /// carries.
     DepTree,
+    /// `fr search`: task ids from `tasks` then `archived`, which is the order
+    /// the human surface prints them. Not `inbox`, whose entries have no id.
+    SearchIds,
+    /// `fr search`: inbox titles. The inbox block is printed last, so a row
+    /// using this must not also expect task hits.
+    SearchTitles,
     /// `fr show ID --context`: ancestors outermost-first, then the task, then
     /// its subtasks — the order the human surface prints them. The JSON carries
     /// ancestors in a trailing `ancestors` field; that is a schema detail, not
@@ -431,6 +457,26 @@ fn json_sequence(v: &Value, projection: Projection) -> Vec<String> {
             collect_subtree(v, &mut out);
         }
         Projection::DepTree => collect_dep_tree(v, &mut out),
+        Projection::SearchIds => {
+            for key in ["tasks", "archived"] {
+                if let Some(Value::Array(items)) = v.get(key) {
+                    for item in items {
+                        if let Some(id) = item.get("id").and_then(Value::as_str) {
+                            out.push(id.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        Projection::SearchTitles => {
+            if let Some(Value::Array(items)) = v.get("inbox") {
+                for item in items {
+                    if let Some(title) = item.get("title").and_then(Value::as_str) {
+                        out.push(title.to_string());
+                    }
+                }
+            }
+        }
         Projection::ShowTaskOnly => collect_subtree(v, &mut out),
     }
     out
@@ -537,6 +583,45 @@ const ROWS: &[Row] = &[
     // `fr stats` prints track *names*, not ids — the JSON carries both.
     row(&["stats"], TRACK_NAMES, Projection::Field("name")),
     row(&["stats", "--all"], TRACK_NAMES, Projection::Field("name")),
+    // -- fr search -----------------------------------------------------------
+    // Matches a live task and an archived one, which is what pins the order the
+    // two blocks print in: live first, then archive.
+    row(&["search", "First task"], TASK_IDS, Projection::SearchIds),
+    // --no-archive drops the archived block and keeps the live one.
+    row(
+        &["search", "--no-archive", "First task"],
+        TASK_IDS,
+        Projection::SearchIds,
+    ),
+    // Matches by id, and by the `dep:` lines of the two tasks depending on it —
+    // three tasks, one of which the human line names in a different position.
+    row(&["search", "M-001"], TASK_IDS, Projection::SearchIds),
+    // A track filter also excludes the inbox, which belongs to no track.
+    row(
+        &["search", "--track", "side", "Side"],
+        TASK_IDS,
+        Projection::SearchIds,
+    ),
+    // Shelved tracks are not searched by default (`search_tasks` filters to
+    // active), so this finds nothing — declared, not accidental.
+    Row {
+        args: &["search", "Diamond"],
+        universe: TASK_IDS,
+        projection: Projection::SearchIds,
+        expect_empty: true,
+    },
+    // Inbox hits carry no task id, so this row compares titles.
+    row(
+        &["search", "design"],
+        INBOX_TITLES,
+        Projection::SearchTitles,
+    ),
+    Row {
+        args: &["search", "zzz-no-such-thing"],
+        universe: TASK_IDS,
+        projection: Projection::SearchIds,
+        expect_empty: true,
+    },
     // -- fr deps -------------------------------------------------------------
     // A diamond: H-001 → H-002, H-003 → both → H-004. The second path reports
     // `repeat`, not `cycle`.
@@ -611,10 +696,10 @@ enum Class {
     /// ignored: the command prints human text either way. A consumer gets a
     /// parse error with no indication the flag did nothing.
     ///
-    /// `SearchHitJson` exists in `cli/output.rs` and is constructed nowhere —
-    /// the JSON shape for `fr search` was designed and never wired up. Tracked
-    /// as its own item; when it lands, move it to `Covered` and add its rows.
-    /// (`fr deps` was the other one, and has since moved across.)
+    /// Empty today — `search` and `deps` were both here and both moved to
+    /// `Covered`. Kept because this is the class a newly added read command
+    /// most easily falls into, and naming it is what makes that visible.
+    #[allow(dead_code)]
     JsonIgnored,
     /// Read command whose output is a scalar summary, not a listing — no
     /// sequence for the two surfaces to disagree about.
@@ -635,7 +720,7 @@ const CLASSIFICATION: &[(&str, Class)] = &[
     ("stats", Class::Covered),
     ("recent", Class::Covered),
     ("inbox", Class::Covered),
-    ("search", Class::JsonIgnored),
+    ("search", Class::Covered),
     ("deps", Class::Covered),
     ("info", Class::NotAListing),
     (

@@ -344,7 +344,7 @@ fn execute_project_search(app: &mut App) {
                         };
                         if let Some(s) = snippet {
                             annotations.push(MatchAnnotation {
-                                field: ih.field.clone(),
+                                field: ih.field,
                                 snippet: s,
                             });
                         }
@@ -466,7 +466,7 @@ fn build_annotations(
         }
         if let Some(snippet) = build_snippet_for_field(&hit.field, task, re) {
             annotations.push(MatchAnnotation {
-                field: hit.field.clone(),
+                field: hit.field,
                 snippet,
             });
         }
