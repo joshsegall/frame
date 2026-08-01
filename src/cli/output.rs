@@ -96,6 +96,33 @@ pub struct TrackStatsEntryJson {
     pub stats: TrackStatsJson,
 }
 
+/// A node in a `fr deps --json` tree.
+///
+/// Nested rather than a flat `{root, nodes, edges}` graph: the nesting mirrors
+/// the human tree exactly, which is what lets `tests/parity.rs` compare the two
+/// surfaces directly. A consumer that wants edges can flatten this; a parity
+/// test cannot un-flatten a graph.
+///
+/// Everything but `id` and `status` is absent on a non-`resolved` node. A
+/// `cycle` or `repeat` node points at a record that appears elsewhere in the
+/// same document, and repeating the record would invite a consumer to count one
+/// task twice; a `missing` node has no record at all.
+#[derive(Serialize)]
+pub struct DepNodeJson {
+    pub id: String,
+    pub status: DepStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub track: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<TaskState>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub deps: Vec<DepNodeJson>,
+}
+
 #[derive(Serialize)]
 pub struct SearchHitJson {
     pub track: String,
@@ -140,6 +167,18 @@ pub fn task_to_json(task: &Task) -> TaskJson {
         resolved,
         subtasks: task.subtasks.iter().map(task_to_json).collect(),
         ancestors: Vec::new(),
+    }
+}
+
+pub fn dep_tree_to_json(node: &DepNode) -> DepNodeJson {
+    DepNodeJson {
+        id: node.id.clone(),
+        status: node.status,
+        track: node.track_id.clone(),
+        title: node.title.clone(),
+        state: node.state,
+        tags: node.tags.clone(),
+        deps: node.deps.iter().map(dep_tree_to_json).collect(),
     }
 }
 

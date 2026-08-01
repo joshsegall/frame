@@ -71,7 +71,7 @@ pub fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             Commands::Tracks => cmd_tracks(json),
             Commands::Stats(args) => cmd_stats(args, json),
             Commands::Recent(args) => cmd_recent(args, json),
-            Commands::Deps(args) => cmd_deps(args),
+            Commands::Deps(args) => cmd_deps(args, json),
             Commands::Check(args) => cmd_check(args, json),
             Commands::Info => cmd_info(json),
 
@@ -1129,7 +1129,7 @@ fn cmd_recent(args: RecentArgs, json: bool) -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
-fn cmd_deps(args: DepsArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_deps(args: DepsArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let project = load_project_cwd()?;
 
     let tree = deps::dep_tree(&project, &args.id);
@@ -1137,8 +1137,15 @@ fn cmd_deps(args: DepsArgs) -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("task not found: {}", args.id).into());
     }
 
-    for line in format_dep_tree(&tree) {
-        println!("{}", line);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&dep_tree_to_json(&tree))?
+        );
+    } else {
+        for line in format_dep_tree(&tree) {
+            println!("{}", line);
+        }
     }
     Ok(())
 }

@@ -136,11 +136,24 @@ fr recent [--limit N]
 
 ### `fr deps ID`
 
-Show the dependency tree for a task. Detects circular dependencies and missing references.
+Show the dependency tree for a task.
 
 ```
-fr deps EFF-014
+fr deps EFF-014 [--json]
 ```
+
+Each node in the tree is one of four kinds, and the distinction matters:
+
+| Marker | Meaning |
+|--------|---------|
+| *(none)* | resolved — the task was found and its own dependencies are expanded below |
+| `(circular)` | the id is its own ancestor on this branch: a genuine cycle |
+| `(already shown)` | the task was expanded elsewhere in the same tree — a shared dependency, not a problem |
+| `(not found)` | no task anywhere in the project holds this id |
+
+`(already shown)` is what a *diamond* looks like: two tasks depending on the same third. That is the ordinary shape of a real backlog, and it is not a cycle — each id is expanded once per tree, and the second reference points at the expansion rather than repeating it.
+
+With `--json`, the same tree is emitted nested, each node carrying `id` and `status` (`resolved` / `cycle` / `repeat` / `missing`). A `resolved` node also carries `track`, `title`, `state`, `tags` and its own `deps`; the other three carry `id` and `status` only, since their full record is either elsewhere in the same document or nonexistent.
 
 ### `fr check`
 

@@ -48,7 +48,10 @@ use serde_json::Value;
 /// error message can never be mistaken for a listed task.
 const TASK_IDS: &[&str] = &[
     "M-000", "M-001", "M-002", "M-003", "M-003.1", "M-003.2", "M-004", "M-005", "M-010", "S-000",
-    "S-001", "S-002", "S-010", "H-001",
+    "S-001", "S-002", "S-010", "H-001", "H-002", "H-003", "H-004", "H-005", "H-006", "H-007",
+    // Not a task. A dangling `dep:` target, which `fr deps` names in both
+    // surfaces and the extractor therefore has to recognise.
+    "H-999",
 ];
 
 const TRACK_IDS: &[&str] = &["main", "side", "shelf"];
@@ -58,10 +61,15 @@ const TRACK_NAMES: &[&str] = &["Main Track", "Side Track", "Shelf Track"];
 const INBOX_TITLES: &[&str] = &["Bug in parser", "Think about design", "Quick note"];
 
 /// A fixture built so that no row is vacuous: every filter in [`ROWS`] selects
-/// something. Deliberately awkward in two places — `S-002` is state Parked while
-/// sitting in the *Backlog* section, and `shelf` is a shelved track with live
-/// work in it — because both are states a real project reaches and both are
-/// where a human/JSON pair is most likely to disagree.
+/// something. Deliberately awkward in three places — `S-002` is state Parked
+/// while sitting in the *Backlog* section, `shelf` is a shelved track with live
+/// work in it, and the shelf track carries the whole dependency zoo (a diamond,
+/// a cycle, a dangling target) — because these are states a real project reaches
+/// and where a human/JSON pair is most likely to disagree.
+///
+/// The dependency structure lives in `shelf` on purpose: a shelved track is
+/// excluded from `ready`, `blocked` and the default `list`, so adding deps there
+/// gives `fr deps` something to traverse without perturbing every other row.
 fn create_fixture(root: &Path) {
     let frame = root.join("frame");
     fs::create_dir_all(frame.join("tracks")).unwrap();
@@ -180,6 +188,24 @@ shelf = "H"
 
 - [ ] `H-001` Shelved task #core
   - added: 2025-03-01
+  - dep: H-002, H-003
+- [ ] `H-002` Diamond left
+  - added: 2025-03-02
+  - dep: H-004
+- [ ] `H-003` Diamond right
+  - added: 2025-03-03
+  - dep: H-004
+- [ ] `H-004` Shared leaf
+  - added: 2025-03-04
+- [ ] `H-005` Cycle a
+  - added: 2025-03-05
+  - dep: H-006
+- [ ] `H-006` Cycle b
+  - added: 2025-03-06
+  - dep: H-005
+- [ ] `H-007` Dangling
+  - added: 2025-03-07
+  - dep: H-999
 
 ## Done
 ",
@@ -308,6 +334,11 @@ enum Projection {
     ListEntries,
     /// A named field of each object, recursing through container keys.
     Field(&'static str),
+    /// `fr deps`: the root id then its dependency tree, pre-order — the order
+    /// the human tree prints. Recurses only through `deps`, which on this
+    /// command holds objects rather than the bare id strings `TaskJson.deps`
+    /// carries.
+    DepTree,
     /// `fr show ID --context`: ancestors outermost-first, then the task, then
     /// its subtasks — the order the human surface prints them. The JSON carries
     /// ancestors in a trailing `ancestors` field; that is a schema detail, not
@@ -358,6 +389,18 @@ fn collect_subtree(v: &Value, out: &mut Vec<String>) {
     }
 }
 
+/// Collect ids from a dependency tree, parent before its dependencies.
+fn collect_dep_tree(v: &Value, out: &mut Vec<String>) {
+    if let Some(id) = v.get("id").and_then(Value::as_str) {
+        out.push(id.to_string());
+    }
+    if let Some(Value::Array(deps)) = v.get("deps") {
+        for dep in deps {
+            collect_dep_tree(dep, out);
+        }
+    }
+}
+
 fn json_sequence(v: &Value, projection: Projection) -> Vec<String> {
     let mut out = Vec::new();
     match projection {
@@ -387,6 +430,7 @@ fn json_sequence(v: &Value, projection: Projection) -> Vec<String> {
             }
             collect_subtree(v, &mut out);
         }
+        Projection::DepTree => collect_dep_tree(v, &mut out),
         Projection::ShowTaskOnly => collect_subtree(v, &mut out),
     }
     out
@@ -493,6 +537,17 @@ const ROWS: &[Row] = &[
     // `fr stats` prints track *names*, not ids — the JSON carries both.
     row(&["stats"], TRACK_NAMES, Projection::Field("name")),
     row(&["stats", "--all"], TRACK_NAMES, Projection::Field("name")),
+    // -- fr deps -------------------------------------------------------------
+    // A diamond: H-001 → H-002, H-003 → both → H-004. The second path reports
+    // `repeat`, not `cycle`.
+    row(&["deps", "H-001"], TASK_IDS, Projection::DepTree),
+    // A genuine cycle, which must stop at the root rather than run a lap past it.
+    row(&["deps", "H-005"], TASK_IDS, Projection::DepTree),
+    // A dangling `dep:` target: named by both surfaces, held by neither.
+    row(&["deps", "H-007"], TASK_IDS, Projection::DepTree),
+    // A leaf. The human surface prints `(no dependencies)`; both still name the
+    // root, so this is not an expect_empty row.
+    row(&["deps", "H-004"], TASK_IDS, Projection::DepTree),
     // -- fr inbox ------------------------------------------------------------
     row(&["inbox"], INBOX_TITLES, Projection::Field("title")),
 ];
@@ -557,9 +612,9 @@ enum Class {
     /// parse error with no indication the flag did nothing.
     ///
     /// `SearchHitJson` exists in `cli/output.rs` and is constructed nowhere —
-    /// the JSON shape for `fr search` was designed and never wired up. Both are
-    /// tracked as their own items; when either lands, move it to `Covered` and
-    /// add its rows.
+    /// the JSON shape for `fr search` was designed and never wired up. Tracked
+    /// as its own item; when it lands, move it to `Covered` and add its rows.
+    /// (`fr deps` was the other one, and has since moved across.)
     JsonIgnored,
     /// Read command whose output is a scalar summary, not a listing — no
     /// sequence for the two surfaces to disagree about.
@@ -581,7 +636,7 @@ const CLASSIFICATION: &[(&str, Class)] = &[
     ("recent", Class::Covered),
     ("inbox", Class::Covered),
     ("search", Class::JsonIgnored),
-    ("deps", Class::JsonIgnored),
+    ("deps", Class::Covered),
     ("info", Class::NotAListing),
     (
         "check",
