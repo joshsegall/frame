@@ -987,6 +987,31 @@ impl UnsavedFile {
     }
 }
 
+/// Whether `frame/` cannot be written to, and why.
+///
+/// Probing at startup turns a discovery made at quit — the worst possible moment,
+/// with a session's work behind it — into one made before the user types
+/// anything. It is a real write rather than a permissions inspection, because
+/// what matters is whether a write succeeds: a full disk, a read-only mount and a
+/// directory owned by someone else all fail here and not all of them show up in
+/// the mode bits.
+fn probe_unwritable(frame_dir: &Path) -> Option<String> {
+    let probe = frame_dir.join(".write-probe");
+    match std::fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            None
+        }
+        Err(e) => Some(e.to_string()),
+    }
+}
+
+/// Where work that never reached disk is copied at exit.
+///
+/// A dotfile directly inside `frame/`, so `gitignore_pattern`'s `frame/.*` covers
+/// it with no `.gitignore` change — nothing here is ever meant to be committed.
+pub const RESCUE_DIR: &str = ".rescue";
+
 /// The first retry delay. Doubles per failed attempt up to [`RETRY_BACKOFF_MAX`].
 pub const RETRY_BACKOFF_START: Duration = Duration::from_secs(1);
 /// The longest a retry will ever wait.
@@ -1152,6 +1177,10 @@ pub struct App {
     /// accumulated since. What this set exists for is the one path that *can*
     /// lose it: an external reload replacing a track that never got written.
     pub unsaved: BTreeMap<SaveTarget, UnsavedFile>,
+    /// `frame/` could not be written to at startup. Cleared by the first
+    /// successful save, so a project that becomes writable mid-session recovers
+    /// without a restart.
+    pub frame_unwritable: bool,
     /// The last content known to be on disk for each file: what we loaded, or
     /// what we last successfully wrote.
     ///
@@ -1365,6 +1394,7 @@ impl App {
             last_save_at: None,
             track_mtimes,
             unsaved: BTreeMap::new(),
+            frame_unwritable: false,
             baselines: HashMap::new(),
             detail_state: None,
             detail_stack: Vec::new(),
@@ -2682,6 +2712,8 @@ impl App {
     /// deliberate and equivalent: this runs immediately after that exact model
     /// was serialized and written, and serialization is deterministic.
     fn record_baseline(&mut self, target: SaveTarget) {
+        // A write just succeeded, so whatever the startup probe found is over.
+        self.frame_unwritable = false;
         let text = match &target {
             SaveTarget::Track(id) => {
                 Self::find_track_in_project(&self.project, id).map(crate::parse::serialize_track)
@@ -2748,6 +2780,53 @@ impl App {
         // moment it becomes true.
         self.status_message = Some(format!("Cannot save {}: {error}", target.label()));
         self.status_is_error = true;
+    }
+
+    /// Write every file that never reached disk into `frame/.rescue/`.
+    ///
+    /// Returns the paths written. Called at exit, when the in-memory copy is
+    /// about to stop existing and is the only one there is.
+    ///
+    /// **Best-effort by design.** The save failed because something was wrong
+    /// with writing to this project, so the dump may well fail for the same
+    /// reason; when it does the file is skipped and the exit report says so.
+    /// There is no fallback location — a rescue copy somewhere the user will
+    /// never look is not a rescue, and a temp directory that the OS may clear is
+    /// worse than an honest report of what was lost.
+    pub fn dump_unsaved(&self) -> Vec<PathBuf> {
+        if self.unsaved.is_empty() {
+            return Vec::new();
+        }
+        let dir = self.project.frame_dir.join(RESCUE_DIR);
+        if std::fs::create_dir_all(&dir).is_err() {
+            return Vec::new();
+        }
+
+        let mut written = Vec::new();
+        for target in self.unsaved.keys() {
+            let (name, text) = match target {
+                SaveTarget::Track(id) => {
+                    let Some(track) = Self::find_track_in_project(&self.project, id) else {
+                        continue;
+                    };
+                    (
+                        self.display_name(target),
+                        crate::parse::serialize_track(track),
+                    )
+                }
+                SaveTarget::Inbox => {
+                    let Some(inbox) = self.project.inbox.as_ref() else {
+                        continue;
+                    };
+                    ("inbox.md".to_string(), crate::parse::serialize_inbox(inbox))
+                }
+            };
+            let path = dir.join(name);
+            if std::fs::write(&path, text).is_ok() {
+                written.push(path);
+            }
+        }
+        written
     }
 
     /// What the unsaved indicator should show, or `None` for nothing.
@@ -4020,6 +4099,18 @@ pub fn run(project_dir_override: Option<&str>) -> Result<(), Box<dyn std::error:
     // Record kitty protocol status on app for debug display
     app.kitty_enabled = kitty_enabled;
 
+    // Find out whether writes will work at all before the user types anything,
+    // rather than at the first save — or, as it used to be, at quit.
+    //
+    // Here rather than in `App::new` because a constructor that writes to disk
+    // is a surprise to every caller, and every test fixture builds an `App`
+    // against a directory that does not exist.
+    if let Some(reason) = probe_unwritable(&app.project.frame_dir) {
+        app.status_message = Some(format!("Cannot write to frame/: {reason}"));
+        app.status_is_error = true;
+        app.frame_unwritable = true;
+    }
+
     // Set terminal window title
     set_window_title(&app.project.config.project.name);
 
@@ -4029,6 +4120,12 @@ pub fn run(project_dir_override: Option<&str>) -> Result<(), Box<dyn std::error:
     // Save UI state before exit
     save_ui_state(&app);
 
+    // Copy anything that never reached disk while the in-memory copy still
+    // exists. Must happen before the terminal is restored so the report below
+    // can say where it went.
+    let rescued = app.dump_unsaved();
+    let unsaved_report = unsaved_exit_report(&app, &rescued);
+
     // Restore terminal
     clear_window_title();
     disable_raw_mode()?;
@@ -4037,7 +4134,61 @@ pub fn run(project_dir_override: Option<&str>) -> Result<(), Box<dyn std::error:
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
-    result
+    result?;
+
+    // Only now, with the alternate screen gone, is there anywhere for this to be
+    // read. Exiting silently is the failure item 9 was written about: the user
+    // quits, sees a clean exit, and the work is gone.
+    if let Some(report) = unsaved_report {
+        eprint!("{report}");
+        return Err(format!(
+            "quit with {} unsaved file{}",
+            app.unsaved.len(),
+            if app.unsaved.len() == 1 { "" } else { "s" }
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
+/// The exit report for work that never reached disk, or `None` when all is well.
+///
+/// Names each file and why it failed, then where the rescue copy went — or says
+/// plainly that there is none, which is the case worth being loudest about.
+fn unsaved_exit_report(app: &App, rescued: &[PathBuf]) -> Option<String> {
+    if app.unsaved.is_empty() {
+        return None;
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "\n{} file{} could not be saved:\n",
+        app.unsaved.len(),
+        if app.unsaved.len() == 1 { "" } else { "s" }
+    ));
+    for (target, f) in &app.unsaved {
+        out.push_str(&format!("  {} — {}\n", app.display_name(target), f.error));
+    }
+
+    if rescued.is_empty() {
+        out.push_str(
+            "\nNo rescue copy could be written either — the same problem that \
+             stopped the save.\nThe contents are gone; nothing further can be \
+             recovered from this session.\n",
+        );
+    } else {
+        out.push_str(&format!(
+            "\nCopies of the unsaved work were written to:\n  {}\n",
+            app.project.frame_dir.join(RESCUE_DIR).display()
+        ));
+        out.push_str("Move them into place once the cause is fixed.\n");
+    }
+    out.push_str(&format!(
+        "Details: {}\n",
+        crate::io::recovery::recovery_log_path(&app.project.frame_dir).display()
+    ));
+    Some(out)
 }
 
 /// Launch the TUI in project-picker-only mode (when no project is found).
@@ -5189,6 +5340,145 @@ mod tests {
             app.unsaved.keys().collect::<Vec<_>>(),
             vec![&SaveTarget::Track("nonexistent".into())],
             "only the write that failed is outstanding"
+        );
+    }
+
+    // ---- Exit ------------------------------------------------------------
+
+    /// At exit the in-memory copy stops existing. If it never reached disk and
+    /// nothing is written down, the work is simply gone — which is the failure
+    /// this whole item is about.
+    #[test]
+    fn unsaved_work_is_dumped_at_exit() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+
+        let tasks = app
+            .find_track_mut("a")
+            .unwrap()
+            .section_tasks_mut(SectionKind::Backlog)
+            .unwrap();
+        tasks[0].title = "Never reached disk".into();
+        tasks[0].dirty = true;
+        app.record_save_failure(
+            SaveTarget::Track("a".into()),
+            &"Read-only file system".to_string(),
+        );
+
+        let written = app.dump_unsaved();
+        assert_eq!(written.len(), 1, "the unsaved track should be dumped");
+        let text = std::fs::read_to_string(&written[0]).unwrap();
+        assert!(
+            text.contains("Never reached disk"),
+            "the dump must hold the in-memory content: {text}"
+        );
+        assert!(
+            written[0].starts_with(app.project.frame_dir.join(RESCUE_DIR)),
+            "dumped to {:?}",
+            written[0]
+        );
+    }
+
+    #[test]
+    fn nothing_outstanding_dumps_nothing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let app = app_on_disk(tmp.path());
+        assert!(app.dump_unsaved().is_empty());
+        assert!(
+            !app.project.frame_dir.join(RESCUE_DIR).exists(),
+            "a clean exit should not leave a rescue directory behind"
+        );
+    }
+
+    #[test]
+    fn the_exit_report_names_each_file_and_where_the_copy_went() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        app.record_save_failure(
+            SaveTarget::Track("a".into()),
+            &"Read-only file system".to_string(),
+        );
+
+        let rescued = app.dump_unsaved();
+        let report = unsaved_exit_report(&app, &rescued).expect("there is something to report");
+        assert!(report.contains("a.md"), "{report}");
+        assert!(report.contains("Read-only file system"), "{report}");
+        assert!(report.contains(RESCUE_DIR), "{report}");
+        assert!(report.contains(".recovery.log"), "{report}");
+    }
+
+    /// The loudest case: the dump failed too, so there is nothing anywhere. Say
+    /// so plainly rather than pointing at a directory that does not exist.
+    #[test]
+    fn the_exit_report_admits_when_there_is_no_rescue_copy() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        app.record_save_failure(
+            SaveTarget::Track("a".into()),
+            &"Read-only file system".to_string(),
+        );
+
+        let report = unsaved_exit_report(&app, &[]).unwrap();
+        assert!(report.contains("No rescue copy"), "{report}");
+        assert!(
+            !report.contains("Move them into place"),
+            "must not point at copies that do not exist: {report}"
+        );
+    }
+
+    #[test]
+    fn a_clean_exit_reports_nothing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let app = app_on_disk(tmp.path());
+        assert!(unsaved_exit_report(&app, &[]).is_none());
+    }
+
+    /// The rescue directory is working-copy-local, so `fr check`'s leak guard
+    /// has to know about it — and the `frame/.*` gitignore pattern has to cover
+    /// it, which it does only because the name starts with a dot.
+    #[test]
+    fn the_rescue_directory_is_treated_as_working_copy_local() {
+        assert!(
+            crate::io::project_io::LOCAL_ONLY_FRAME_FILES.contains(&RESCUE_DIR),
+            "the leak guard must cover the rescue directory"
+        );
+        assert!(
+            RESCUE_DIR.starts_with('.'),
+            "`frame/.*` only covers it if it is a dotfile"
+        );
+    }
+
+    // ---- Startup probe ---------------------------------------------------
+
+    #[test]
+    fn a_writable_project_probes_clean() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let app = app_on_disk(tmp.path());
+        assert!(!app.frame_unwritable);
+        assert!(probe_unwritable(&app.project.frame_dir).is_none());
+        assert!(
+            !app.project.frame_dir.join(".write-probe").exists(),
+            "the probe must clean up after itself"
+        );
+    }
+
+    #[test]
+    fn an_unwritable_project_is_detected_before_any_edit() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let app = app_on_disk(tmp.path());
+        let frame_dir = app.project.frame_dir.clone();
+
+        let mut perms = std::fs::metadata(&frame_dir).unwrap().permissions();
+        let original = perms.clone();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&frame_dir, perms).unwrap();
+
+        let probed = probe_unwritable(&frame_dir);
+
+        std::fs::set_permissions(&frame_dir, original).unwrap();
+        assert!(
+            probed.is_some(),
+            "a read-only frame/ should be caught at startup"
         );
     }
 

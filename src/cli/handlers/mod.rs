@@ -1338,9 +1338,20 @@ fn cmd_check(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
                     }
                     check::CheckWarning::LocalFileCommitted { path, tracked } => {
                         if *tracked {
+                            // `git rm --cached` refuses a directory without
+                            // `-r`, and some local-only entries are directories.
+                            let flags = if project
+                                .frame_dir
+                                .join(std::path::Path::new(path).file_name().unwrap_or_default())
+                                .is_dir()
+                            {
+                                "-r --cached"
+                            } else {
+                                "--cached"
+                            };
                             println!(
-                                "  {} is tracked by git, but it is local to this working copy — untrack it with `git rm --cached {}` and add `{}` to .gitignore",
-                                path, path, path
+                                "  {} is tracked by git, but it is local to this working copy — untrack it with `git rm {} {}` and add `{}` to .gitignore",
+                                path, flags, path, path
                             );
                         } else {
                             println!(

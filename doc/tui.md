@@ -106,6 +106,14 @@ While a file is outstanding, an external change to it is **merged** rather than
 allowed to overwrite the unsaved version — see
 [architecture.md](architecture.md#file-watching--conflict-resolution).
 
+If `frame/` is not writable when the TUI starts, the rule says `frame/ not
+writable` straight away rather than letting you find out at the first save.
+
+Quitting with anything still unsaved copies it into `frame/.rescue/`, prints what
+could not be saved and where the copies went, and exits non-zero. The copy is
+best-effort — the cause of the failed save may stop it too, and the report says so
+when it does.
+
 ### Track View — Navigate Mode
 
 **Cursor movement:**

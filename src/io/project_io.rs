@@ -18,7 +18,7 @@ use crate::parse::{parse_inbox, parse_track};
 /// `fr check` verifies these against git from this one list. `.gitignore`
 /// coverage is a single pattern rather than an entry each — see
 /// [`gitignore_pattern_for`].
-pub const LOCAL_ONLY_FRAME_FILES: [&str; 7] = [
+pub const LOCAL_ONLY_FRAME_FILES: [&str; 8] = [
     ".state.json",
     ".lock",
     ".recovery.log",
@@ -26,6 +26,7 @@ pub const LOCAL_ONLY_FRAME_FILES: [&str; 7] = [
     crate::io::inflight::MARKER_FILE,
     crate::io::ids::LOCAL_STORE,
     crate::io::ids::LOCAL_LOCK,
+    crate::tui::app::RESCUE_DIR,
 ];
 
 /// The `.gitignore` pattern covering every working-copy-local file, for a frame

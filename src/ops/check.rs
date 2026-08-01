@@ -625,7 +625,15 @@ fn check_local_files_ignored(frame_dir: &Path, result: &mut CheckResult) {
         .iter()
         .zip(crate::io::project_io::LOCAL_ONLY_FRAME_FILES)
     {
-        if tracked.iter().any(|t| t == rel) {
+        // A directory entry is tracked when anything *under* it is: git
+        // ls-files reports `frame/.rescue/main.md`, never `frame/.rescue`, so an
+        // equality test would call a committed rescue directory untracked and
+        // hand out the wrong remedy.
+        let dir_prefix = format!("{rel}/");
+        if tracked
+            .iter()
+            .any(|t| t == rel || t.starts_with(&dir_prefix))
+        {
             result.warnings.push(CheckWarning::LocalFileCommitted {
                 path: rel.clone(),
                 tracked: true,

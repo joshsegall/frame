@@ -707,6 +707,15 @@ pub(crate) fn separator_badges(app: &App) -> Vec<SeparatorBadge> {
             spans: vec![Span::styled(ind.full(), style)],
             short: vec![Span::styled(ind.short(), style)],
         });
+    } else if app.frame_unwritable {
+        // Nothing has failed *yet* — the project was unwritable before the user
+        // typed anything. Saying so now beats letting them find out by losing a
+        // session's work.
+        let style = Style::default().fg(app.theme.red).bg(bg);
+        badges.push(SeparatorBadge {
+            spans: vec![Span::styled("frame/ not writable".to_string(), style)],
+            short: vec![Span::styled("read-only".to_string(), style)],
+        });
     }
 
     // Active filter — track and board views only, where it means something.

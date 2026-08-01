@@ -691,6 +691,39 @@ const CASES: &[Case] = &[
         repair: Repair::Clears,
     },
     Case {
+        name: "local-directory-committed",
+        provenance: "a rescue dump from an interrupted session, force-added to git",
+        covers: &["local_file_committed"],
+        build: |root| {
+            if !git(root, &["init", "-q"]) {
+                return Built::Skipped("git unavailable");
+            }
+            // The pattern is in place, so nothing else is reported and this case
+            // is attributable to the one thing it breaks.
+            std::fs::write(root.join(".gitignore"), "frame/.*\n").unwrap();
+            let rescue = root.join("frame/.rescue");
+            std::fs::create_dir_all(&rescue).unwrap();
+            std::fs::write(rescue.join("main.md"), "- [ ] `M-001` rescued\n").unwrap();
+            if !git(root, &["add", "-f", "frame/.rescue/main.md"]) {
+                return Built::Skipped("git add failed");
+            }
+            Built::Ok
+        },
+        // The reason this case exists: `git ls-files` reports the *file* under a
+        // committed directory, never the directory, so an equality test called
+        // this untracked and offered the wrong remedy — add a `.gitignore` line
+        // that was already there, rather than untrack it.
+        expect: &[warning(
+            "local_file_committed",
+            &[
+                ("path", Match::Eq("frame/.rescue")),
+                ("tracked", Match::Eq("true")),
+            ],
+        )],
+        // Untracking is `git rm --cached`, deliberately left to a human.
+        repair: Repair::None,
+    },
+    Case {
         name: "id-frontier-unreadable",
         provenance: "a half-written or hand-edited frontier store",
         covers: &["id_frontier_unreadable"],
