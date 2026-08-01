@@ -40,7 +40,9 @@ pub fn serialize_inbox(inbox: &Inbox) -> String {
         }
     }
 
-    lines.join("\n")
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
 }
 
 #[cfg(test)]
@@ -60,7 +62,8 @@ mod tests {
 - Think about whether `perform` should be an expression or statement
   #design
 
-- Read the Koka paper on named handlers #research";
+- Read the Koka paper on named handlers #research
+";
 
         let (inbox, _) = parse_inbox(source);
         let output = serialize_inbox(&inbox);
@@ -80,7 +83,8 @@ mod tests {
   ```
   But it makes the effect type more complex.
 
-- Simple item #bug";
+- Simple item #bug
+";
 
         let (inbox, _) = parse_inbox(source);
         let output = serialize_inbox(&inbox);
@@ -89,7 +93,7 @@ mod tests {
 
     #[test]
     fn test_round_trip_inbox_empty() {
-        let source = "# Inbox";
+        let source = "# Inbox\n";
         let (inbox, _) = parse_inbox(source);
         let output = serialize_inbox(&inbox);
         assert_eq!(output, source);
@@ -105,7 +109,8 @@ mod tests {
 
   Second paragraph.
 
-- Simple item #bug";
+- Simple item #bug
+";
 
         let (inbox, _) = parse_inbox(source);
         let output = serialize_inbox(&inbox);

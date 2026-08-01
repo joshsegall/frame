@@ -65,7 +65,8 @@ fn round_trip_padded_and_raw_ids() {
 ## Done
 
 - [x] `ST-001` Padded done task
-  - resolved: 2025-05-01";
+  - resolved: 2025-05-01
+";
     let track = parse_track(source);
     let output = serialize_track(&track);
     assert_eq!(output, source, "padded/raw IDs must round-trip verbatim");
@@ -256,7 +257,8 @@ fn selective_rewrite_only_dirty_subtask_changes() {
 - [ ] `T-002` Unrelated task
   - added: 2025-05-11
 
-## Done";
+## Done
+";
 
     let mut track = parse_track(source);
 

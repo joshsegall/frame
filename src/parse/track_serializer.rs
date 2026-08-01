@@ -26,7 +26,9 @@ pub fn serialize_track(track: &Track) -> String {
         }
     }
 
-    lines.join("\n")
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
 }
 
 #[cfg(test)]
@@ -56,7 +58,8 @@ mod tests {
 ## Done
 
 - [x] `EFF-003` Implement effect handler desugaring #core
-  - resolved: 2025-05-14";
+  - resolved: 2025-05-14
+";
 
         let track = parse_track(source);
         let output = serialize_track(&track);
@@ -72,7 +75,8 @@ mod tests {
 
 ## Parked
 
-## Done";
+## Done
+";
 
         let track = parse_track(source);
         let output = serialize_track(&track);
@@ -94,7 +98,8 @@ mod tests {
     - [ ] `T-001.2.2` Another deep subtask
   - [ ] `T-001.3` Third subtask
 
-## Done";
+## Done
+";
 
         let track = parse_track(source);
         let output = serialize_track(&track);

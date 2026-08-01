@@ -257,22 +257,6 @@ fn canon_inbox(source: &str) -> String {
     serialize_inbox(&inbox)
 }
 
-/// Trailing newlines are excluded from the P4 fixpoint comparison because the
-/// round trip is **known to be unstable** in exactly that byte, and the churn
-/// would mask every structural instability the property is here to find.
-///
-/// The cause: `serialize_track` ends with `lines.join("\n")` while `parse_track`
-/// reads with `str::lines()`, and `"a\n".lines()` is `["a"]` — a terminal newline
-/// has no representation in the model. Each round trip therefore drops one, so a
-/// file ending in N blank lines needs N-1 writes to settle, emitting a one-line
-/// git diff each time. No data is lost and every checked-in track and fixture
-/// already ends without a trailing newline, so this is cosmetic churn rather
-/// than corruption — but it is a real instability, found by this property before
-/// it was scoped out.
-fn trim_trailing_newlines(s: &str) -> &str {
-    s.trim_end_matches('\n')
-}
-
 /// How many rewrites P4 allows before the text must stop changing.
 ///
 /// One is not enough, and the reason is structural rather than a defect. A
@@ -293,7 +277,7 @@ fn settle(source: &str, rewrite: fn(&str) -> String) -> Result<(String, usize), 
     let mut current = rewrite(source);
     for pass in 1..=MAX_REWRITES_TO_SETTLE {
         let next = rewrite(&current);
-        if trim_trailing_newlines(&next) == trim_trailing_newlines(&current) {
+        if next == current {
             return Ok((current, pass));
         }
         current = next;
@@ -875,8 +859,9 @@ proptest! {
     /// file. A parser that reads its own output differently shows up here even
     /// when nothing else can judge the result.
     ///
-    /// Bounded rather than one-step — see `MAX_REWRITES_TO_SETTLE`. Trailing
-    /// newlines are excluded — see `trim_trailing_newlines`.
+    /// Bounded rather than one-step — see `MAX_REWRITES_TO_SETTLE`. Compared
+    /// byte for byte, trailing newlines included: they used to be excluded
+    /// because the round trip ate one per write, which is now fixed.
     #[test]
     fn p4_track_rewrites_converge(source in arb_soup()) {
         if let Err((last, next)) = settle(&source, canon_track) {
@@ -1172,7 +1157,8 @@ fn multibyte_at_the_indent_boundary_does_not_panic() {
   - note:
     §ünïcode at the slice boundary
  §§ dedented mid-character
-- [ ] `T-002` Sibling";
+- [ ] `T-002` Sibling
+";
 
     let track = parse_track(source);
     let _ = serialize_track(&track);
@@ -1208,7 +1194,8 @@ fn a_stray_line_between_two_done_tasks_survives_a_write() {
   - resolved: 2026-07-20
     **Shape.** A sharded `||> Vec.map` whose callback produces a per-row output.
 - [x] `MAI-013` Unrelated finished work
-  - resolved: 2026-07-21";
+  - resolved: 2026-07-21
+";
 
     let plain = serialize_track(&parse_track(source));
     assert_eq!(plain, source, "a plain write changed the file at all");
@@ -1239,10 +1226,67 @@ fn a_stray_line_under_a_subtask_survives_a_write() {
 - [ ] `T-001` Parent
   - [ ] `T-001.1` Subtask
       stranded under the subtask
-- [ ] `T-002` Sibling";
+- [ ] `T-002` Sibling
+";
 
     assert_eq!(serialize_track(&parse_track(source)), source);
     assert!(canon_track(source).contains("stranded under the subtask"));
+}
+
+/// A write ends the file with exactly one newline, and a second write does not
+/// change it.
+///
+/// Frame used to end files with no terminal newline at all: `serialize_track`
+/// finishes with `lines.join("\n")` while `parse_track` reads with
+/// `str::lines()`, and `"a\n".lines()` is `["a"]`, so the byte had nowhere to
+/// live in the model. Every write dropped one. A file ending in N blank lines
+/// took N-1 writes to settle, and — the part that actually bit — an editor save
+/// adding the customary final newline was undone by the next frame write, so the
+/// two churned against each other indefinitely. This is the `1df7a69` shape:
+/// frame and another writer disagreeing about a file forever.
+#[test]
+fn a_write_leaves_exactly_one_terminal_newline() {
+    for source in [
+        "# T\n\n## Backlog\n\n- [ ] `T-001` One",
+        "# T\n\n## Backlog\n\n- [ ] `T-001` One\n",
+        "# T\n\n## Backlog\n\n- [ ] `T-001` One\n\n\n",
+    ] {
+        let once = canon_track(source);
+        let twice = canon_track(&once);
+        assert_eq!(
+            once, twice,
+            "a second write must change nothing: {source:?}"
+        );
+        assert!(once.ends_with('\n'), "{once:?}");
+    }
+
+    // Erosion, specifically: trailing blank lines the user wrote are kept, not
+    // shaved off one per write. Preserving them is correct — they are the user's
+    // formatting — and it is the *losing* of them that was the defect.
+    let padded = "# T\n\n## Backlog\n\n- [ ] `T-001` One\n\n\n";
+    assert_eq!(
+        canon_track(padded).matches('\n').count(),
+        padded.matches('\n').count(),
+        "trailing blank lines must survive a write intact"
+    );
+}
+
+/// The same for the inbox, which has its own serializer and could drift.
+#[test]
+fn an_inbox_write_leaves_exactly_one_terminal_newline() {
+    for source in [
+        "# Inbox\n\n- one",
+        "# Inbox\n\n- one\n",
+        "# Inbox\n\n- one\n\n",
+    ] {
+        let once = canon_inbox(source);
+        let twice = canon_inbox(&once);
+        assert_eq!(
+            once, twice,
+            "a second write must change nothing: {source:?}"
+        );
+        assert!(once.ends_with('\n'), "{once:?}");
+    }
 }
 
 /// The same drop with nothing before it: a stranded line at the top of a
@@ -1255,7 +1299,8 @@ fn a_stray_line_above_the_first_task_survives_a_write() {
     let source = "\
 ## Backlog
   - added: 2025-05-14
-- [ ] plain task";
+- [ ] plain task
+";
 
     assert_eq!(serialize_track(&parse_track(source)), source);
     assert!(canon_track(source).contains("- added: 2025-05-14"));
