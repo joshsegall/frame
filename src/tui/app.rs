@@ -954,6 +954,39 @@ pub struct UnsavedFile {
     pub error: String,
     /// Save attempts so far, including the first. Retry backoff reads this.
     pub attempts: usize,
+    /// When the next retry is due.
+    pub next_retry_at: Instant,
+    /// A failure no retry can clear — see [`is_permanent`].
+    pub permanent: bool,
+}
+
+/// The first retry delay. Doubles per failed attempt up to [`RETRY_BACKOFF_MAX`].
+pub const RETRY_BACKOFF_START: Duration = Duration::from_secs(1);
+/// The longest a retry will ever wait.
+///
+/// Contention clears in seconds; an unwritable volume does not clear until
+/// someone acts on it. A minute keeps the second case from being probed
+/// pointlessly without making the first slow.
+pub const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(60);
+
+/// How long to wait before the `n`th attempt: 1s, 2s, 4s, … capped at a minute.
+fn retry_delay(attempts: usize) -> Duration {
+    let shift = attempts.saturating_sub(1).min(6) as u32;
+    (RETRY_BACKOFF_START * 2u32.saturating_pow(shift)).min(RETRY_BACKOFF_MAX)
+}
+
+/// Whether an error will still be there on the next attempt.
+///
+/// A lock timeout is the transient case and the common one — another `fr` is
+/// mid-write, and it will be finished shortly. The rest are conditions only a
+/// person can clear, so retrying them on a timer accomplishes nothing; they wait
+/// for an explicit retry instead.
+fn is_permanent(error: &str) -> bool {
+    let e = error.to_ascii_lowercase();
+    e.contains("permission denied")
+        || e.contains("read-only")
+        || e.contains("no space")
+        || e.contains("not found")
 }
 
 /// Main application state
@@ -2605,9 +2638,13 @@ impl App {
             .or_insert_with(|| UnsavedFile {
                 error: error.clone(),
                 attempts: 0,
+                next_retry_at: Instant::now(),
+                permanent: false,
             });
         entry.error = error.clone();
         entry.attempts += 1;
+        entry.permanent = is_permanent(&error);
+        entry.next_retry_at = Instant::now() + retry_delay(entry.attempts);
 
         crate::io::recovery::log_recovery(
             &self.project.frame_dir,
@@ -2624,6 +2661,103 @@ impl App {
     /// Note that a file reached disk, so it is no longer outstanding.
     fn clear_save_failure(&mut self, target: &SaveTarget) {
         self.unsaved.remove(target);
+    }
+
+    /// Re-attempt every outstanding save whose backoff has elapsed.
+    ///
+    /// Retrying costs nothing to prepare: a save serializes the whole file from
+    /// current in-memory state, so there is no queue to replay and no ordering
+    /// to reconstruct. One success writes the failed edit along with everything
+    /// that accumulated after it.
+    ///
+    /// **The lock timeout here is zero, deliberately.** `acquire_default` blocks
+    /// for five seconds, and a retry on the 250ms event tick using that would
+    /// freeze the TUI for five seconds at a time during exactly the contention
+    /// it is recovering from. `lock_file` makes one attempt before testing the
+    /// elapsed time, so a zero timeout is a clean try-lock. The original saves
+    /// keep the patient timeout; only this is impatient.
+    ///
+    /// One acquisition covers every outstanding file, so a retry cannot be
+    /// interleaved by another writer partway through.
+    pub fn retry_unsaved_saves(&mut self, force: bool) {
+        if self.unsaved.is_empty() {
+            return;
+        }
+
+        let now = Instant::now();
+        let due: Vec<SaveTarget> = self
+            .unsaved
+            .iter()
+            .filter(|(_, f)| force || (!f.permanent && f.next_retry_at <= now))
+            .map(|(t, _)| t.clone())
+            .collect();
+        if due.is_empty() {
+            return;
+        }
+
+        let Ok(lock) = FileLock::acquire(&self.project.frame_dir, Duration::from_millis(0)) else {
+            // Still contended. Push each due file out by its own backoff rather
+            // than hammering the lock every tick.
+            for target in &due {
+                if let Some(f) = self.unsaved.get_mut(target) {
+                    f.attempts += 1;
+                    f.next_retry_at = now + retry_delay(f.attempts);
+                }
+            }
+            return;
+        };
+
+        for target in due {
+            let result = match &target {
+                SaveTarget::Track(id) => {
+                    let id = id.clone();
+                    self.save_track_locked(&id)
+                }
+                SaveTarget::Inbox => self.save_inbox_locked(),
+            };
+            match result {
+                Ok(()) => self.clear_save_failure(&target),
+                Err(e) => self.record_save_failure(target, &e),
+            }
+        }
+
+        drop(lock);
+    }
+
+    /// Retry now, resetting every backoff — the `R` key and the palette action.
+    ///
+    /// Also covers the permanent failures the timer skips: the user is the one
+    /// who clears those conditions, so their asking is the signal that it is
+    /// worth trying again.
+    pub fn force_retry_unsaved(&mut self) {
+        let outstanding = self.unsaved.len();
+        if outstanding == 0 {
+            self.status_message = Some("Nothing waiting to be saved".into());
+            self.status_is_error = false;
+            return;
+        }
+        for f in self.unsaved.values_mut() {
+            f.attempts = 0;
+            f.next_retry_at = Instant::now();
+        }
+        self.retry_unsaved_saves(true);
+
+        if self.unsaved.is_empty() {
+            self.status_message = Some(format!(
+                "Saved {outstanding} outstanding file{}",
+                if outstanding == 1 { "" } else { "s" }
+            ));
+            self.status_is_error = false;
+        } else {
+            let first = self
+                .unsaved
+                .values()
+                .next()
+                .map(|f| f.error.clone())
+                .unwrap_or_default();
+            self.status_message = Some(format!("Still cannot save: {first}"));
+            self.status_is_error = true;
+        }
     }
 
     /// Save one track, recording any failure.
@@ -3905,6 +4039,11 @@ fn run_event_loop(
             app.flush_expired_subtask_hides();
         }
 
+        // Re-attempt anything that did not reach disk. Cheap and usually
+        // successful: the common failure is another `fr` holding the lock, which
+        // it releases as soon as its own write is done.
+        app.retry_unsaved_saves(false);
+
         terminal.draw(|frame| render::render(frame, app))?;
 
         // Poll for file watcher events
@@ -4898,6 +5037,156 @@ mod tests {
             vec![&SaveTarget::Track("nonexistent".into())],
             "only the write that failed is outstanding"
         );
+    }
+
+    // ---- Retry -----------------------------------------------------------
+
+    #[test]
+    fn retry_backoff_doubles_and_stops_at_a_minute() {
+        assert_eq!(retry_delay(1), Duration::from_secs(1));
+        assert_eq!(retry_delay(2), Duration::from_secs(2));
+        assert_eq!(retry_delay(3), Duration::from_secs(4));
+        assert_eq!(retry_delay(7), RETRY_BACKOFF_MAX);
+        assert_eq!(
+            retry_delay(1000),
+            RETRY_BACKOFF_MAX,
+            "backoff must not run away"
+        );
+    }
+
+    #[test]
+    fn a_lock_timeout_is_transient_but_a_permission_error_is_not() {
+        assert!(!is_permanent("lock timeout after 5s"));
+        assert!(!is_permanent("Resource temporarily unavailable"));
+        assert!(is_permanent("Permission denied (os error 13)"));
+        assert!(is_permanent("Read-only file system"));
+        assert!(is_permanent("No space left on device"));
+    }
+
+    /// The whole point of retrying: a save that failed on contention lands as
+    /// soon as the lock frees, with no user action and nothing to replay.
+    #[test]
+    fn a_retry_lands_the_edit_once_the_lock_frees() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        let path = app.project.frame_dir.join("tracks/a.md");
+
+        // Another writer holds the lock; our save fails.
+        let held = FileLock::acquire_default(&app.project.frame_dir).unwrap();
+        let tasks = app
+            .find_track_mut("a")
+            .unwrap()
+            .section_tasks_mut(SectionKind::Backlog)
+            .unwrap();
+        tasks[0].title = "Edited while contended".into();
+        tasks[0].dirty = true;
+        app.record_save_failure(SaveTarget::Track("a".into()), &"lock timeout".to_string());
+
+        app.retry_unsaved_saves(true);
+        assert!(
+            !app.unsaved.is_empty(),
+            "the lock is still held, so the retry must not have succeeded"
+        );
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("Edited while contended"),
+            "nothing should have been written while contended"
+        );
+
+        drop(held);
+
+        app.retry_unsaved_saves(true);
+        assert!(app.unsaved.is_empty(), "the retry should have landed it");
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("Edited while contended"),
+            "the edit reaches disk without the user doing anything"
+        );
+    }
+
+    /// A retry must never block the event loop. `acquire_default` waits five
+    /// seconds; using it here would freeze the TUI for five seconds a tick
+    /// during exactly the contention being recovered from.
+    #[test]
+    fn a_retry_does_not_wait_on_a_held_lock() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        let _held = FileLock::acquire_default(&app.project.frame_dir).unwrap();
+        app.record_save_failure(SaveTarget::Track("a".into()), &"lock timeout".to_string());
+
+        let started = Instant::now();
+        app.retry_unsaved_saves(true);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "retry blocked for {:?}; it must use a try-lock",
+            started.elapsed()
+        );
+    }
+
+    /// Backoff has to grow even when the lock itself is what we cannot get,
+    /// otherwise a contended project is probed on every 250ms tick.
+    #[test]
+    fn a_failed_retry_pushes_the_next_one_further_out() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        let _held = FileLock::acquire_default(&app.project.frame_dir).unwrap();
+        app.record_save_failure(SaveTarget::Track("a".into()), &"lock timeout".to_string());
+
+        let first = app.unsaved.values().next().unwrap().attempts;
+        app.retry_unsaved_saves(true);
+        let second = app.unsaved.values().next().unwrap().attempts;
+        assert!(second > first, "a failed retry counts as an attempt");
+    }
+
+    /// A permanent error is not retried on the timer — nothing about waiting
+    /// clears a read-only filesystem — but asking explicitly still tries.
+    #[test]
+    fn a_permanent_failure_waits_for_an_explicit_retry() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+
+        app.record_save_failure(
+            SaveTarget::Track("a".into()),
+            &"Read-only file system".to_string(),
+        );
+        let before = app.unsaved.values().next().unwrap().attempts;
+
+        app.retry_unsaved_saves(false);
+        assert_eq!(
+            app.unsaved.values().next().map(|f| f.attempts),
+            Some(before),
+            "the timer must skip a failure retrying cannot clear"
+        );
+
+        // The file is actually writable here, so an explicit retry succeeds.
+        app.force_retry_unsaved();
+        assert!(
+            app.unsaved.is_empty(),
+            "an explicit retry still attempts it"
+        );
+    }
+
+    /// The timer must respect the backoff, or the cadence is meaningless.
+    #[test]
+    fn the_timer_skips_a_file_whose_backoff_has_not_elapsed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+
+        app.record_save_failure(SaveTarget::Track("a".into()), &"lock timeout".to_string());
+        // The entry is due one second out, so an immediate tick does nothing.
+        app.retry_unsaved_saves(false);
+        assert!(
+            !app.unsaved.is_empty(),
+            "a retry fired before its backoff elapsed"
+        );
+
+        app.unsaved
+            .values_mut()
+            .for_each(|f| f.next_retry_at = Instant::now());
+        app.retry_unsaved_saves(false);
+        assert!(app.unsaved.is_empty(), "the retry should fire once due");
     }
 
     #[test]

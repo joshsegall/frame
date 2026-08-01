@@ -202,6 +202,24 @@ pub fn available_actions(app: &App) -> Vec<PaletteAction> {
         }
     }
 
+    // Dynamic: retrying a save is only meaningful while a save is outstanding,
+    // and offering it otherwise would suggest saving is something you have to
+    // ask for.
+    if !app.unsaved.is_empty() {
+        let n = app.unsaved.len();
+        actions.push(PaletteAction {
+            id: "retry_save",
+            label: if n == 1 {
+                "Retry saving 1 file".into()
+            } else {
+                format!("Retry saving {n} files")
+            },
+            shortcut: Some("R"),
+            contexts: &[ViewContext::Global],
+            category: ActionCategory::System,
+        });
+    }
+
     // Dynamic: "Unarchive track" only when cursor is on an archived track in TracksView
     if ctx == ViewContext::TracksView {
         // Build ordered list same as tracks_view render order

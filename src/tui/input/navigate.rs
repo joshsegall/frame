@@ -348,6 +348,13 @@ pub(super) fn handle_navigate(app: &mut App, key: KeyEvent) {
             app.view = View::Board;
         }
 
+        // Retry outstanding saves now, rather than waiting out the backoff.
+        // Only bound when something is actually waiting, so `R` stays free for
+        // a future binding in the ordinary case.
+        (KeyModifiers::SHIFT, KeyCode::Char('R')) if !app.unsaved.is_empty() => {
+            app.force_retry_unsaved();
+        }
+
         // Project-wide search
         (KeyModifiers::SHIFT, KeyCode::Char('S')) => {
             app.project_search_active = true;

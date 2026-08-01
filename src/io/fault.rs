@@ -20,7 +20,12 @@
 //!
 //! `FRAME_FAIL_WRITE=<substring>` fails the first guarded write whose path
 //! contains `<substring>`. `FRAME_FAIL_WRITE=<substring>:N` fails the Nth such
-//! write instead.
+//! write instead, and `FRAME_FAIL_WRITE=<substring>:*` fails **every** one.
+//!
+//! `:*` is for a *sustained* failure — an unwritable `frame/` rather than a
+//! one-off. A retry loop that gives up after one injected failure proves only
+//! that the first attempt was made; the interesting behaviour (backoff, an
+//! indicator that stays up, work dumped at exit) needs the failure to persist.
 //!
 //! ```text
 //! FRAME_FAIL_WRITE=tracks/other.md fr mv SEC-3 --track other
@@ -54,6 +59,33 @@
 
 /// Fail this write when the environment selects its path.
 ///
+/// Which matching writes to fail: one particular occurrence, or all of them.
+#[cfg(debug_assertions)]
+#[derive(Debug, PartialEq, Eq)]
+enum Which {
+    Nth(usize),
+    Every,
+}
+
+/// Parse the `FRAME_FAIL_WRITE` value. `None` disables injection.
+///
+/// Separate from [`maybe_fail`] so it can be tested: the live parse happens once
+/// per process behind a `OnceLock`, which a test cannot re-run.
+#[cfg(debug_assertions)]
+fn parse_target(raw: &str) -> Option<(String, Which)> {
+    let (substring, which) = match raw.rsplit_once(':') {
+        Some((s, "*")) => (s.to_string(), Which::Every),
+        Some((s, n)) if n.parse::<usize>().is_ok() => {
+            (s.to_string(), Which::Nth(n.parse().unwrap()))
+        }
+        _ => (raw.to_string(), Which::Nth(1)),
+    };
+    if substring.is_empty() || which == Which::Nth(0) {
+        return None;
+    }
+    Some((substring, which))
+}
+
 /// Call at the top of a write entry point, before anything is modified.
 #[cfg(debug_assertions)]
 pub fn maybe_fail(path: &std::path::Path) -> std::io::Result<()> {
@@ -63,19 +95,9 @@ pub fn maybe_fail(path: &std::path::Path) -> std::io::Result<()> {
 
     // Parsed once per process. Absent or empty disables injection, which is
     // every normal run and every test that does not opt in.
-    static TARGET: std::sync::OnceLock<Option<(String, usize)>> = std::sync::OnceLock::new();
-    let target = TARGET.get_or_init(|| {
-        let raw = std::env::var("FRAME_FAIL_WRITE").ok()?;
-        let (substring, nth) = match raw.rsplit_once(':') {
-            Some((s, n)) if n.parse::<usize>().is_ok() => (s.to_string(), n.parse().unwrap()),
-            _ => (raw, 1),
-        };
-        if substring.is_empty() || nth == 0 {
-            return None;
-        }
-        Some((substring, nth))
-    });
-    let Some((substring, nth)) = target else {
+    static TARGET: std::sync::OnceLock<Option<(String, Which)>> = std::sync::OnceLock::new();
+    let target = TARGET.get_or_init(|| parse_target(&std::env::var("FRAME_FAIL_WRITE").ok()?));
+    let Some((substring, which)) = target else {
         return Ok(());
     };
 
@@ -84,13 +106,65 @@ pub fn maybe_fail(path: &std::path::Path) -> std::io::Result<()> {
     }
 
     let n = MATCHES.fetch_add(1, Ordering::SeqCst) + 1;
-    if n == *nth {
+    let fail = match which {
+        Which::Nth(nth) => n == *nth,
+        Which::Every => true,
+    };
+    if fail {
         return Err(std::io::Error::other(format!(
             "injected write failure: {} (match #{n} for {substring:?})",
             path.display()
         )));
     }
     Ok(())
+}
+
+#[cfg(all(test, debug_assertions))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_bare_path_fails_the_first_match() {
+        assert_eq!(
+            parse_target("tracks/a.md"),
+            Some(("tracks/a.md".to_string(), Which::Nth(1)))
+        );
+    }
+
+    #[test]
+    fn a_trailing_number_selects_that_match() {
+        assert_eq!(
+            parse_target("tracks/a.md:3"),
+            Some(("tracks/a.md".to_string(), Which::Nth(3)))
+        );
+    }
+
+    /// The sustained form: every matching write fails, so a retry loop keeps
+    /// failing rather than succeeding on its second go.
+    #[test]
+    fn a_trailing_star_fails_every_match() {
+        assert_eq!(
+            parse_target("tracks/a.md:*"),
+            Some(("tracks/a.md".to_string(), Which::Every))
+        );
+    }
+
+    /// A Windows-style path or any other stray colon must not be read as a
+    /// count and silently truncate the path being targeted.
+    #[test]
+    fn a_colon_that_is_not_a_count_stays_part_of_the_path() {
+        assert_eq!(
+            parse_target("weird:name.md"),
+            Some(("weird:name.md".to_string(), Which::Nth(1)))
+        );
+    }
+
+    #[test]
+    fn an_empty_or_zeroth_target_disables_injection() {
+        assert_eq!(parse_target(""), None);
+        assert_eq!(parse_target("tracks/a.md:0"), None);
+        assert_eq!(parse_target(":*"), None);
+    }
 }
 
 #[cfg(not(debug_assertions))]

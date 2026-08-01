@@ -469,6 +469,9 @@ pub(super) fn dispatch_palette_action(app: &mut App, action_id: &str, track_inde
         "preview_clean" => {
             palette_preview_clean(app);
         }
+        "retry_save" => {
+            app.force_retry_unsaved();
+        }
 
         _ => {}
     }

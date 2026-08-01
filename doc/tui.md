@@ -82,6 +82,23 @@ Full view of a single task showing all fields as navigable regions: Title, Tags,
 | `S` | Project-wide search (across all tracks, inbox, and archives) |
 | `z`, `u`, `Ctrl+Z`, `Super+Z` | Undo |
 | `Z`, `Ctrl+Y`, `Ctrl+Shift+Z`, `Super+Shift+Z` | Redo |
+| `R` | Retry outstanding saves now (bound only while a save is outstanding) |
+
+### Saving
+
+Saves happen automatically as you work. A save can fail — most often because
+another `fr` process is holding the project lock — and when it does, the edit
+stays in memory and frame keeps re-attempting it in the background. Backoff
+doubles from one second up to a minute per file, and one success writes
+everything that accumulated in the meantime.
+
+An error retrying cannot clear (a read-only filesystem, permission denied, no
+space) is not retried on the timer; `R`, or the palette's "Retry saving N files",
+tries it anyway and resets the backoff.
+
+While a file is outstanding, an external change to it is **merged** rather than
+allowed to overwrite the unsaved version — see
+[architecture.md](architecture.md#file-watching--conflict-resolution).
 
 ### Track View — Navigate Mode
 
