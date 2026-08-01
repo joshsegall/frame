@@ -135,6 +135,8 @@ Such a reload runs a three-way merge (`ops::reconcile`) against `App::baselines`
 
 Not attempted: task ordering (a task follows the side it came from) and subtask reparenting (a subtask's ID extends its parent's, so a move renumbers it and reads as an addition plus a deletion). Without a baseline the merge cannot run, and the fallback is to keep the in-memory version whole and log the incoming one.
 
+**The inbox merges by content, not identity.** Inbox items have no IDs, so there is nothing stable to match on. `reconcile_inbox` treats the two sides as multisets and takes the standard three-way count (`ours + theirs - base`, floored at zero), which expresses exactly what the inbox is used for — captures and removals. An edit then reads as a removal plus a capture, which is correct in both directions, and a *double* edit keeps both versions rather than choosing: a duplicate in a capture list costs one triage keystroke, while a dropped capture is unrecoverable. Because nothing is ever set aside, the inbox merge reports no conflicts and writes nothing to the recovery log. Tracks cannot work this way — duplicating a task duplicates an ID, which `fr check` reports as an error.
+
 The mtime is deliberately not refreshed on this path: `track_changed_on_disk` reads it to decide whether memory and disk have diverged, and after a merge they have.
 
 **Code**: `src/io/watcher.rs` (FrameWatcher), `src/tui/render/conflict_popup.rs`, `src/ops/reconcile.rs`

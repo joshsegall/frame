@@ -3084,10 +3084,10 @@ impl App {
     ///
     /// Neither side is a safe default. With several sessions on one project, an
     /// agent's write is as real as a human's and the agent cannot tell it was
-    /// dropped. So the two are merged on task identity
-    /// ([`crate::ops::reconcile`]); only a task both sides changed differently
-    /// falls back to keeping ours, and that task's other version goes to the
-    /// recovery log.
+    /// dropped. So the two are merged ([`crate::ops::reconcile`]) — a track on
+    /// task identity, where only a task both sides changed differently falls
+    /// back to keeping ours and its other version goes to the recovery log; the
+    /// inbox by content, where nothing is ever set aside.
     ///
     /// Without a baseline there is no ancestor to merge against, so the fallback
     /// covers the whole file — the same floor as before the merge existed.
@@ -3128,12 +3128,24 @@ impl App {
             let deleted = result.deleted;
             self.replace_track(track_id, result.track);
             if took > 0 || deleted > 0 {
-                self.status_message = Some(format!(
-                    "Merged {} external change{} into unsaved {}",
-                    took + deleted,
-                    if took + deleted == 1 { "" } else { "s" },
-                    target.label()
-                ));
+                self.announce_merge(target, took + deleted);
+            }
+            return;
+        }
+
+        if matches!(target, SaveTarget::Inbox)
+            && let Some(base_text) = self.baselines.get(target).cloned()
+            && let Some(ours) = self.project.inbox.as_ref()
+        {
+            let (base, _) = parse_inbox(&base_text);
+            let (theirs, _) = parse_inbox(&text);
+            let result = crate::ops::reconcile::reconcile_inbox(&base, ours, &theirs);
+
+            // Nothing to log: the inbox merge never sets a side's content aside.
+            let changed = result.took_theirs + result.deleted;
+            self.project.inbox = Some(result.inbox);
+            if changed > 0 {
+                self.announce_merge(target, changed);
             }
             return;
         }
@@ -3152,6 +3164,16 @@ impl App {
                 body: text,
             },
         );
+    }
+
+    /// Tell the user their unsaved file absorbed someone else's changes.
+    fn announce_merge(&mut self, target: &SaveTarget, changed: usize) {
+        self.status_message = Some(format!(
+            "Merged {} external change{} into unsaved {}",
+            changed,
+            if changed == 1 { "" } else { "s" },
+            target.label()
+        ));
     }
 
     /// Reload changed files from disk. Returns the edit target's task_id if it was externally modified.
@@ -5283,6 +5305,47 @@ mod tests {
         assert!(
             !text.contains("concurrent edit"),
             "a clean merge should record no conflict: {text}"
+        );
+    }
+
+    /// The inbox has no IDs, so it merges by content rather than by identity —
+    /// but through the same reload path, and with the same guarantee: a capture
+    /// on either side survives.
+    #[test]
+    fn an_external_capture_merges_into_an_unsaved_inbox() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        let path = app.project.frame_dir.join("inbox.md");
+
+        // Ours: a capture that never reached disk.
+        let inbox = app.project.inbox.as_mut().unwrap();
+        inbox.items.push(crate::model::inbox::InboxItem::new(
+            "captured here".to_string(),
+        ));
+        app.record_save_failure(SaveTarget::Inbox, &"lock timeout".to_string());
+
+        // Theirs: a different capture, written by another process.
+        std::fs::write(&path, "# Inbox\n\n- captured elsewhere\n").unwrap();
+        app.reload_changed_files(std::slice::from_ref(&path));
+
+        let titles: Vec<&str> = app
+            .project
+            .inbox
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .map(|i| i.title.as_str())
+            .collect();
+        assert!(titles.contains(&"captured here"), "{titles:?}");
+        assert!(titles.contains(&"captured elsewhere"), "{titles:?}");
+
+        // The inbox merge never sets a side aside, so it logs nothing.
+        let log = crate::io::recovery::recovery_log_path(&app.project.frame_dir);
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            !text.contains("kept the in-memory version"),
+            "the inbox should merge rather than pick a winner: {text}"
         );
     }
 

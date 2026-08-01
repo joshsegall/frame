@@ -1,4 +1,4 @@
-//! Three-way merge of a track against a concurrent write.
+//! Three-way merge of a track or the inbox against a concurrent write.
 //!
 //! # Why this exists
 //!
@@ -46,9 +46,18 @@
 //! Ours is kept and theirs is returned in [`Reconciled::conflicts`] for the
 //! caller to write to the recovery log. Nothing is dropped on either side; the
 //! merge only ever narrows how often that fallback is needed.
+//!
+//! # The inbox works differently, deliberately
+//!
+//! Inbox items have no IDs, so identity-matching has nothing to stand on.
+//! [`reconcile_inbox`] merges by content as a multiset instead, which fits what
+//! the inbox is for — captures and removals — and which resolves a double edit
+//! by keeping both versions rather than setting one aside. See its own docs for
+//! why that is the right answer there and the wrong one for tracks.
 
 use std::collections::HashMap;
 
+use crate::model::inbox::{Inbox, InboxItem};
 use crate::model::task::Task;
 use crate::model::track::{SectionKind, Track, TrackNode};
 
@@ -218,6 +227,143 @@ pub fn reconcile_track(base: &Track, ours: &Track, theirs: &Track) -> Reconciled
         took_theirs,
         deleted,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Inbox
+// ---------------------------------------------------------------------------
+
+/// The result of merging the inbox.
+#[derive(Debug)]
+pub struct ReconciledInbox {
+    pub inbox: Inbox,
+    /// Items that came from the other writer.
+    pub took_theirs: usize,
+    /// Items removed because both sides agree they are gone.
+    pub deleted: usize,
+}
+
+impl ReconciledInbox {
+    pub fn changed_anything(&self) -> bool {
+        self.took_theirs > 0 || self.deleted > 0
+    }
+}
+
+/// Merge the inbox by content, as a multiset.
+///
+/// # Why this is not the track algorithm
+///
+/// Inbox items have **no IDs**. There is nothing stable to match on, so the
+/// track merge's central move — pair the two sides up by identity, then ask who
+/// changed what — has no foundation here.
+///
+/// What the inbox actually gets is captures and removals: `fr capture` appends,
+/// triage takes an item away. Both are exactly expressible as multiset
+/// arithmetic on content, and the standard three-way count
+/// (`ours + theirs - base`, floored at zero) handles them without needing
+/// identity at all.
+///
+/// An *edit* then reads as a removal plus a capture, and that turns out to be
+/// the right reading rather than a compromise. If we edited an item and they did
+/// not, the old text is gone from our side and the new text is new: the old
+/// falls out, the new stays. Same in reverse. And if **both** sides edited the
+/// same item differently, both versions survive as two items — which for a
+/// quick-capture list is the better answer. A duplicate here costs one triage
+/// keystroke; a dropped capture is a thought the user cannot get back.
+///
+/// That is why this reports no conflicts and writes nothing to the recovery log:
+/// there is no case where it sets a side's content aside. Tracks cannot work
+/// this way — duplicating a task means duplicating an ID, which is damage
+/// `fr check` reports as an error.
+pub fn reconcile_inbox(base: &Inbox, ours: &Inbox, theirs: &Inbox) -> ReconciledInbox {
+    let base_counts = counts(&base.items);
+    let our_counts = counts(&ours.items);
+    let their_counts = counts(&theirs.items);
+
+    // How many of each item the merged inbox should hold.
+    let mut wanted: HashMap<String, usize> = HashMap::new();
+    for key in our_counts
+        .keys()
+        .chain(their_counts.keys())
+        .chain(base_counts.keys())
+    {
+        if wanted.contains_key(key) {
+            continue;
+        }
+        let b = *base_counts.get(key).unwrap_or(&0) as isize;
+        let o = *our_counts.get(key).unwrap_or(&0) as isize;
+        let t = *their_counts.get(key).unwrap_or(&0) as isize;
+        wanted.insert(key.clone(), (o + t - b).max(0) as usize);
+    }
+
+    // Ours first, in our order, so what the user is looking at does not jump
+    // around; then whatever they added that we have not accounted for.
+    let mut remaining = wanted.clone();
+    let mut items: Vec<InboxItem> = Vec::new();
+    let mut deleted = 0usize;
+
+    for item in &ours.items {
+        let key = item_key(item);
+        match remaining.get_mut(&key) {
+            Some(n) if *n > 0 => {
+                *n -= 1;
+                items.push(item.clone());
+            }
+            _ => deleted += 1,
+        }
+    }
+
+    let mut took_theirs = 0usize;
+    for item in &theirs.items {
+        let key = item_key(item);
+        if let Some(n) = remaining.get_mut(&key)
+            && *n > 0
+        {
+            *n -= 1;
+            items.push(item.clone());
+            took_theirs += 1;
+        }
+    }
+
+    // Header follows the same rule as a track's literal content: take theirs
+    // only when we did not touch it ourselves.
+    let header_lines = if ours.header_lines == base.header_lines {
+        theirs.header_lines.clone()
+    } else {
+        ours.header_lines.clone()
+    };
+
+    ReconciledInbox {
+        inbox: Inbox {
+            header_lines,
+            items,
+            source_lines: ours.source_lines.clone(),
+        },
+        took_theirs,
+        deleted,
+    }
+}
+
+fn counts(items: &[InboxItem]) -> HashMap<String, usize> {
+    let mut out: HashMap<String, usize> = HashMap::new();
+    for item in items {
+        *out.entry(item_key(item)).or_default() += 1;
+    }
+    out
+}
+
+/// An inbox item's content, as its identity.
+///
+/// Built by hand rather than using the derived `PartialEq`, which also compares
+/// `source_text` and `dirty` — two items with identical content would otherwise
+/// compare unequal purely because one had been through an edit.
+fn item_key(item: &InboxItem) -> String {
+    format!(
+        "{}\u{1}{}\u{1}{}",
+        item.title,
+        item.tags.join(","),
+        item.body.as_deref().unwrap_or("")
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -770,6 +916,135 @@ mod tests {
         // Ours is kept intact rather than half-merged into an unrecognisable
         // shape.
         assert!(serialize_track(&r.track).contains("Same"));
+    }
+
+    // ---- Inbox -----------------------------------------------------------
+
+    fn ib(text: &str) -> Inbox {
+        crate::parse::parse_inbox(text).0
+    }
+
+    fn titles(inbox: &Inbox) -> Vec<&str> {
+        inbox.items.iter().map(|i| i.title.as_str()).collect()
+    }
+
+    const INBOX_BASE: &str = "# Inbox\n\n- one\n- two\n";
+
+    /// The common case by far: two writers capturing into the inbox at once.
+    #[test]
+    fn captures_on_both_sides_survive() {
+        let base = ib(INBOX_BASE);
+        let ours = ib("# Inbox\n\n- one\n- two\n- ours\n");
+        let theirs = ib("# Inbox\n\n- one\n- two\n- theirs\n");
+
+        let r = reconcile_inbox(&base, &ours, &theirs);
+        assert_eq!(titles(&r.inbox), vec!["one", "two", "ours", "theirs"]);
+        assert_eq!(r.took_theirs, 1);
+    }
+
+    /// Triage on the other side removes an item; we should not resurrect it.
+    #[test]
+    fn their_removal_is_applied() {
+        let base = ib(INBOX_BASE);
+        let ours = ib(INBOX_BASE);
+        let theirs = ib("# Inbox\n\n- one\n");
+
+        let r = reconcile_inbox(&base, &ours, &theirs);
+        assert_eq!(titles(&r.inbox), vec!["one"]);
+        assert_eq!(r.deleted, 1);
+    }
+
+    #[test]
+    fn our_removal_is_kept_when_they_did_not_touch_it() {
+        let base = ib(INBOX_BASE);
+        let ours = ib("# Inbox\n\n- one\n");
+        let theirs = ib(INBOX_BASE);
+
+        let r = reconcile_inbox(&base, &ours, &theirs);
+        assert_eq!(titles(&r.inbox), vec!["one"]);
+    }
+
+    /// An edit is a removal plus a capture, and reads correctly as one: the old
+    /// text falls out on our side, the new text is new, and their untouched copy
+    /// does not drag the original back.
+    #[test]
+    fn our_edit_does_not_resurrect_the_original() {
+        let base = ib(INBOX_BASE);
+        let ours = ib("# Inbox\n\n- one, edited\n- two\n");
+        let theirs = ib(INBOX_BASE);
+
+        let r = reconcile_inbox(&base, &ours, &theirs);
+        assert_eq!(titles(&r.inbox), vec!["one, edited", "two"]);
+    }
+
+    #[test]
+    fn their_edit_is_taken() {
+        let base = ib(INBOX_BASE);
+        let ours = ib(INBOX_BASE);
+        let theirs = ib("# Inbox\n\n- one, theirs\n- two\n");
+
+        let r = reconcile_inbox(&base, &ours, &theirs);
+        assert_eq!(titles(&r.inbox), vec!["two", "one, theirs"]);
+    }
+
+    /// Both edited the same item. Keeping both is the deliberate answer: a
+    /// duplicate in a capture list costs one triage keystroke, a dropped capture
+    /// is a thought the user cannot get back.
+    #[test]
+    fn a_double_edit_keeps_both_rather_than_choosing() {
+        let base = ib(INBOX_BASE);
+        let ours = ib("# Inbox\n\n- one, ours\n- two\n");
+        let theirs = ib("# Inbox\n\n- one, theirs\n- two\n");
+
+        let r = reconcile_inbox(&base, &ours, &theirs);
+        let t = titles(&r.inbox);
+        assert!(t.contains(&"one, ours"), "{t:?}");
+        assert!(t.contains(&"one, theirs"), "{t:?}");
+    }
+
+    /// Genuinely duplicated captures are counted, not collapsed — otherwise
+    /// merging would silently delete one of two identical notes.
+    #[test]
+    fn identical_items_are_counted_not_deduplicated() {
+        let base = ib("# Inbox\n\n- same\n");
+        let ours = ib("# Inbox\n\n- same\n");
+        let theirs = ib("# Inbox\n\n- same\n- same\n");
+
+        let r = reconcile_inbox(&base, &ours, &theirs);
+        assert_eq!(
+            titles(&r.inbox),
+            vec!["same", "same"],
+            "their capture lands"
+        );
+    }
+
+    /// Tags and body are part of an item's identity, so changing either is an
+    /// edit rather than a coincidental match.
+    #[test]
+    fn tags_distinguish_two_items_with_the_same_title() {
+        let base = ib("# Inbox\n\n- note #a\n");
+        let ours = ib("# Inbox\n\n- note #a\n");
+        let theirs = ib("# Inbox\n\n- note #b\n");
+
+        let r = reconcile_inbox(&base, &ours, &theirs);
+        assert_eq!(r.inbox.items.len(), 1);
+        assert_eq!(r.inbox.items[0].tags, vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn merging_identical_inboxes_changes_nothing() {
+        let base = ib(INBOX_BASE);
+        let r = reconcile_inbox(&base, &base.clone(), &base.clone());
+        assert_eq!(titles(&r.inbox), vec!["one", "two"]);
+        assert!(!r.changed_anything());
+    }
+
+    #[test]
+    fn an_inbox_we_did_not_touch_takes_their_side_wholesale() {
+        let base = ib(INBOX_BASE);
+        let theirs = ib("# Inbox\n\n- one\n- two\n- three\n");
+        let r = reconcile_inbox(&base, &base.clone(), &theirs);
+        assert_eq!(titles(&r.inbox), vec!["one", "two", "three"]);
     }
 
     #[test]
