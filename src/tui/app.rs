@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
@@ -924,6 +924,38 @@ pub enum FlatItem {
     },
 }
 
+/// Which file a save was for.
+///
+/// `Ord` so [`App::unsaved`] iterates in a stable order: the indicator and the
+/// exit report must not reshuffle their file list between frames or runs.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SaveTarget {
+    Track(String),
+    Inbox,
+}
+
+impl SaveTarget {
+    /// How this file is named to the user, in messages and the recovery log.
+    pub fn label(&self) -> String {
+        match self {
+            SaveTarget::Track(id) => format!("track {id}"),
+            SaveTarget::Inbox => "inbox".to_string(),
+        }
+    }
+}
+
+/// A file whose in-memory content did not reach disk.
+///
+/// Its presence in [`App::unsaved`] is what stops an external reload from
+/// overwriting the only copy that exists — see [`App::reload_changed_files`].
+#[derive(Debug, Clone)]
+pub struct UnsavedFile {
+    /// The most recent error, for the recovery log and the exit report.
+    pub error: String,
+    /// Save attempts so far, including the first. Retry backoff reads this.
+    pub attempts: usize,
+}
+
 /// Main application state
 pub struct App {
     pub project: Project,
@@ -1007,6 +1039,13 @@ pub struct App {
     pub last_save_at: Option<Instant>,
     /// Last-known mtime for each track file (keyed by track_id)
     pub track_mtimes: HashMap<String, SystemTime>,
+    /// Files whose in-memory content did not reach disk. Empty is the normal state.
+    ///
+    /// Every save serializes the whole file from current in-memory state, so a
+    /// failure loses nothing by itself and any later success writes everything
+    /// accumulated since. What this set exists for is the one path that *can*
+    /// lose it: an external reload replacing a track that never got written.
+    pub unsaved: BTreeMap<SaveTarget, UnsavedFile>,
     /// Detail view state
     pub detail_state: Option<DetailState>,
     /// Stack of (track_id, task_id) for parent breadcrumbs when drilling into subtasks
@@ -1212,6 +1251,7 @@ impl App {
             conflict_text: None,
             last_save_at: None,
             track_mtimes,
+            unsaved: BTreeMap::new(),
             detail_state: None,
             detail_stack: Vec::new(),
             autocomplete: None,
@@ -2505,41 +2545,61 @@ impl App {
         Ok(())
     }
 
-    /// Record a failed save. Never surfaces to the UI — see the note above.
-    fn log_save_failure(&self, what: &str, e: &dyn std::fmt::Display) {
+    /// Record a failed save: remember the file as unsaved, and log it.
+    ///
+    /// The set is what protects the content — an entry here stops
+    /// [`Self::reload_changed_files`] from overwriting a file whose only copy is
+    /// in memory. The recovery entry is the durable trace for `fr recovery` and
+    /// `fr check` afterwards.
+    fn record_save_failure(&mut self, target: SaveTarget, e: &dyn std::fmt::Display) {
+        let error = e.to_string();
+        let entry = self
+            .unsaved
+            .entry(target.clone())
+            .or_insert_with(|| UnsavedFile {
+                error: error.clone(),
+                attempts: 0,
+            });
+        entry.error = error.clone();
+        entry.attempts += 1;
+
         crate::io::recovery::log_recovery(
             &self.project.frame_dir,
             crate::io::recovery::RecoveryEntry {
                 timestamp: chrono::Utc::now(),
                 category: crate::io::recovery::RecoveryCategory::Write,
-                description: format!("{what} save failed"),
-                fields: vec![("Error".to_string(), e.to_string())],
+                description: format!("{} save failed", target.label()),
+                fields: vec![("Error".to_string(), error)],
                 body: String::new(),
             },
         );
     }
 
+    /// Note that a file reached disk, so it is no longer outstanding.
+    fn clear_save_failure(&mut self, target: &SaveTarget) {
+        self.unsaved.remove(target);
+    }
+
     /// Save one track, recording any failure.
     pub fn save_track_logged(&mut self, track_id: &str) {
+        let target = SaveTarget::Track(track_id.to_string());
         match FileLock::acquire_default(&self.project.frame_dir) {
-            Ok(_lock) => {
-                if let Err(e) = self.save_track_locked(track_id) {
-                    self.log_save_failure(&format!("track {track_id}"), &e);
-                }
-            }
-            Err(e) => self.log_save_failure(&format!("track {track_id}"), &e),
+            Ok(_lock) => match self.save_track_locked(track_id) {
+                Ok(()) => self.clear_save_failure(&target),
+                Err(e) => self.record_save_failure(target, &e),
+            },
+            Err(e) => self.record_save_failure(target, &e),
         }
     }
 
     /// Save the inbox, recording any failure.
     pub fn save_inbox_logged(&mut self) {
         match FileLock::acquire_default(&self.project.frame_dir) {
-            Ok(_lock) => {
-                if let Err(e) = self.save_inbox_locked() {
-                    self.log_save_failure("inbox", &e);
-                }
-            }
-            Err(e) => self.log_save_failure("inbox", &e),
+            Ok(_lock) => match self.save_inbox_locked() {
+                Ok(()) => self.clear_save_failure(&SaveTarget::Inbox),
+                Err(e) => self.record_save_failure(SaveTarget::Inbox, &e),
+            },
+            Err(e) => self.record_save_failure(SaveTarget::Inbox, &e),
         }
     }
 
@@ -2557,22 +2617,27 @@ impl App {
             Ok(lock) => lock,
             Err(e) => {
                 for id in track_ids {
-                    self.log_save_failure(&format!("track {id}"), &e);
+                    self.record_save_failure(SaveTarget::Track(id.to_string()), &e);
                 }
                 if inbox {
-                    self.log_save_failure("inbox", &e);
+                    self.record_save_failure(SaveTarget::Inbox, &e);
                 }
                 return;
             }
         };
 
         for id in track_ids {
-            if let Err(e) = self.save_track_locked(id) {
-                self.log_save_failure(&format!("track {id}"), &e);
+            let target = SaveTarget::Track(id.to_string());
+            match self.save_track_locked(id) {
+                Ok(()) => self.clear_save_failure(&target),
+                Err(e) => self.record_save_failure(target, &e),
             }
         }
-        if inbox && let Err(e) = self.save_inbox_locked() {
-            self.log_save_failure("inbox", &e);
+        if inbox {
+            match self.save_inbox_locked() {
+                Ok(()) => self.clear_save_failure(&SaveTarget::Inbox),
+                Err(e) => self.record_save_failure(SaveTarget::Inbox, &e),
+            }
         }
 
         drop(lock);
@@ -2594,6 +2659,40 @@ impl App {
         } else {
             None
         }
+    }
+
+    /// Keep the in-memory copy of an unsaved file, preserving the disk version.
+    ///
+    /// Reached when a file changed externally while our copy had not reached
+    /// disk. Both sides then hold content that exists nowhere else, so replacing
+    /// ours — which is what this method exists to prevent — silently destroys
+    /// work the user can see on screen. The lock timeout makes the collision
+    /// likely rather than exotic: a save that failed because another `fr` held
+    /// the lock is followed by exactly that process writing the file.
+    ///
+    /// Ours wins because it is the copy nobody else has; theirs goes to the
+    /// recovery log in full, so neither side is dropped. A structural merge
+    /// would be better than a winner, and replaces this — see `ops::reconcile`.
+    ///
+    /// The mtime is deliberately *not* updated. `track_changed_on_disk` reads it
+    /// to decide whether memory and disk have diverged, and after this they have.
+    fn preserve_unreplaced(&mut self, target: &SaveTarget, path: &std::path::Path) {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return;
+        };
+        crate::io::recovery::log_recovery(
+            &self.project.frame_dir,
+            crate::io::recovery::RecoveryEntry {
+                timestamp: chrono::Utc::now(),
+                category: crate::io::recovery::RecoveryCategory::Write,
+                description: format!(
+                    "external change to unsaved {} — kept the in-memory version",
+                    target.label()
+                ),
+                fields: vec![("Path".to_string(), path.display().to_string())],
+                body: text,
+            },
+        );
     }
 
     /// Reload changed files from disk. Returns the edit target's task_id if it was externally modified.
@@ -2629,6 +2728,10 @@ impl App {
                 .map(|s| s.to_string());
 
             if is_inbox_path(&file_name, rel_path.as_deref()) {
+                if self.unsaved.contains_key(&SaveTarget::Inbox) {
+                    self.preserve_unreplaced(&SaveTarget::Inbox, path);
+                    continue;
+                }
                 if let Ok(text) = std::fs::read_to_string(path) {
                     let (inbox, dropped) = parse_inbox(&text);
                     if !dropped.is_empty() {
@@ -2656,6 +2759,12 @@ impl App {
                 resolve_track_for_path(&self.project.config.tracks, &file_name, rel_path.as_deref())
                 && let Ok(text) = std::fs::read_to_string(path)
             {
+                let target = SaveTarget::Track(track_id.clone());
+                if self.unsaved.contains_key(&target) {
+                    self.preserve_unreplaced(&target, path);
+                    continue;
+                }
+
                 let new_track = parse_track(&text);
 
                 // Check if the edited task was modified externally
@@ -4550,6 +4659,105 @@ mod tests {
         let text = std::fs::read_to_string(&log).expect("a failure should be logged");
         assert!(text.contains("nonexistent"), "{text}");
         assert!(text.contains("save failed"), "{text}");
+    }
+
+    /// The bug this set exists for. A save fails, so the only copy of the edit
+    /// is in memory; the file then changes externally — which is *likely*, not
+    /// exotic, because the usual reason a save fails is another `fr` holding the
+    /// lock, and that process goes on to write the file. The reload used to
+    /// replace the track unconditionally, destroying the edit with nothing but
+    /// an error string in the recovery log to show for it.
+    #[test]
+    fn external_change_does_not_overwrite_an_unsaved_track() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        let path = app.project.frame_dir.join("tracks/a.md");
+
+        // An edit that lives only in memory, and a save that did not land.
+        let track = app.find_track_mut("a").unwrap();
+        let tasks = track.section_tasks_mut(SectionKind::Backlog).unwrap();
+        tasks[0].title = "One, edited in the TUI".into();
+        tasks[0].source_text = Some(vec!["- [ ] `A-001` One, edited in the TUI".to_string()]);
+        app.record_save_failure(SaveTarget::Track("a".into()), &"lock timeout".to_string());
+
+        // Another writer lands a different version of the same file.
+        std::fs::write(
+            &path,
+            "# A\n\n## Backlog\n\n- [ ] `A-001` One, edited elsewhere\n\n## Done\n",
+        )
+        .unwrap();
+        app.reload_changed_files(std::slice::from_ref(&path));
+
+        let title = &app.find_track_mut("a").unwrap().backlog()[0].title;
+        assert_eq!(
+            title, "One, edited in the TUI",
+            "the unsaved in-memory edit must survive an external write"
+        );
+
+        // Theirs is not dropped either — it goes to the recovery log in full.
+        let log = crate::io::recovery::recovery_log_path(&app.project.frame_dir);
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            text.contains("One, edited elsewhere"),
+            "the external version must be preserved, not discarded: {text}"
+        );
+    }
+
+    /// The guard is keyed on the file, not on "something is unsaved somewhere":
+    /// an unrelated track still reloads normally.
+    #[test]
+    fn external_change_still_reloads_a_saved_track() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        let path = app.project.frame_dir.join("tracks/a.md");
+
+        app.record_save_failure(SaveTarget::Inbox, &"lock timeout".to_string());
+
+        std::fs::write(
+            &path,
+            "# A\n\n## Backlog\n\n- [ ] `A-001` One, edited elsewhere\n\n## Done\n",
+        )
+        .unwrap();
+        app.reload_changed_files(std::slice::from_ref(&path));
+
+        assert_eq!(
+            app.find_track_mut("a").unwrap().backlog()[0].title,
+            "One, edited elsewhere",
+            "a track with no outstanding save must still pick up external changes"
+        );
+    }
+
+    /// A successful save retires the entry, so the guard stops firing and normal
+    /// reload behaviour resumes.
+    #[test]
+    fn a_successful_save_clears_the_unsaved_entry() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+
+        app.record_save_failure(SaveTarget::Track("a".into()), &"lock timeout".to_string());
+        assert!(!app.unsaved.is_empty());
+
+        app.save_track_logged("a");
+        assert!(
+            app.unsaved.is_empty(),
+            "the file reached disk; it is no longer outstanding"
+        );
+    }
+
+    /// One file failing in a batch must not mark the others unsaved — the badge
+    /// and the exit report both read this set as "what is actually at risk".
+    #[test]
+    fn a_partial_batch_leaves_only_the_failed_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+
+        app.save_batch_logged(&["a", "nonexistent"], true);
+
+        assert_eq!(
+            app.unsaved.keys().collect::<Vec<_>>(),
+            vec![&SaveTarget::Track("nonexistent".into())],
+            "only the write that failed is outstanding"
+        );
     }
 
     #[test]
