@@ -928,7 +928,7 @@ pub enum FlatItem {
 ///
 /// `Ord` so [`App::unsaved`] iterates in a stable order: the indicator and the
 /// exit report must not reshuffle their file list between frames or runs.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SaveTarget {
     Track(String),
     Inbox,
@@ -1046,6 +1046,13 @@ pub struct App {
     /// accumulated since. What this set exists for is the one path that *can*
     /// lose it: an external reload replacing a track that never got written.
     pub unsaved: BTreeMap<SaveTarget, UnsavedFile>,
+    /// The last content known to be on disk for each file: what we loaded, or
+    /// what we last successfully wrote.
+    ///
+    /// This is the common ancestor a three-way merge needs. Kept as text and
+    /// parsed only when a merge actually runs, so the ordinary case costs one
+    /// `String` per track and no parse.
+    pub baselines: HashMap<SaveTarget, String>,
     /// Detail view state
     pub detail_state: Option<DetailState>,
     /// Stack of (track_id, task_id) for parent breadcrumbs when drilling into subtasks
@@ -1208,7 +1215,7 @@ impl App {
             track_states.insert(track_id.clone(), state);
         }
 
-        App {
+        let mut app = App {
             project,
             view: initial_view,
             mode: Mode::Navigate,
@@ -1252,6 +1259,7 @@ impl App {
             last_save_at: None,
             track_mtimes,
             unsaved: BTreeMap::new(),
+            baselines: HashMap::new(),
             detail_state: None,
             detail_stack: Vec::new(),
             autocomplete: None,
@@ -1312,7 +1320,22 @@ impl App {
                 visible_columns: 3,
                 column_pins: Vec::new(),
             },
+        };
+
+        // What was just loaded is, by definition, what is on disk — the common
+        // ancestor for any merge that becomes necessary later in the session.
+        for (id, track) in &app.project.tracks {
+            app.baselines.insert(
+                SaveTarget::Track(id.clone()),
+                crate::parse::serialize_track(track),
+            );
         }
+        if let Some(inbox) = app.project.inbox.as_ref() {
+            app.baselines
+                .insert(SaveTarget::Inbox, crate::parse::serialize_inbox(inbox));
+        }
+
+        app
     }
 
     pub fn find_track_in_project<'a>(project: &'a Project, track_id: &str) -> Option<&'a Track> {
@@ -2524,6 +2547,7 @@ impl App {
         let inbox = self.project.inbox.as_ref().ok_or("no inbox loaded")?;
         project_io::save_inbox(&self.project.frame_dir, inbox)?;
         self.last_save_at = Some(Instant::now());
+        self.record_baseline(SaveTarget::Inbox);
         Ok(())
     }
 
@@ -2542,7 +2566,29 @@ impl App {
         if let Ok(mtime) = std::fs::metadata(&path).and_then(|m| m.modified()) {
             self.track_mtimes.insert(track_id.to_string(), mtime);
         }
+        self.record_baseline(SaveTarget::Track(track_id.to_string()));
         Ok(())
+    }
+
+    /// Note what a file's content is now that memory and disk agree.
+    ///
+    /// Serializing the in-memory model rather than re-reading the file is
+    /// deliberate and equivalent: this runs immediately after that exact model
+    /// was serialized and written, and serialization is deterministic.
+    fn record_baseline(&mut self, target: SaveTarget) {
+        let text = match &target {
+            SaveTarget::Track(id) => {
+                Self::find_track_in_project(&self.project, id).map(crate::parse::serialize_track)
+            }
+            SaveTarget::Inbox => self
+                .project
+                .inbox
+                .as_ref()
+                .map(crate::parse::serialize_inbox),
+        };
+        if let Some(text) = text {
+            self.baselines.insert(target, text);
+        }
     }
 
     /// Record a failed save: remember the file as unsaved, and log it.
@@ -2661,18 +2707,24 @@ impl App {
         }
     }
 
-    /// Keep the in-memory copy of an unsaved file, preserving the disk version.
+    /// Merge an external change into an unsaved file instead of replacing it.
     ///
     /// Reached when a file changed externally while our copy had not reached
-    /// disk. Both sides then hold content that exists nowhere else, so replacing
-    /// ours — which is what this method exists to prevent — silently destroys
-    /// work the user can see on screen. The lock timeout makes the collision
+    /// disk. Both sides then hold content that exists nowhere else, so the
+    /// unconditional replace this method exists to prevent silently destroyed
+    /// work the user could see on screen. The lock timeout makes the collision
     /// likely rather than exotic: a save that failed because another `fr` held
     /// the lock is followed by exactly that process writing the file.
     ///
-    /// Ours wins because it is the copy nobody else has; theirs goes to the
-    /// recovery log in full, so neither side is dropped. A structural merge
-    /// would be better than a winner, and replaces this — see `ops::reconcile`.
+    /// Neither side is a safe default. With several sessions on one project, an
+    /// agent's write is as real as a human's and the agent cannot tell it was
+    /// dropped. So the two are merged on task identity
+    /// ([`crate::ops::reconcile`]); only a task both sides changed differently
+    /// falls back to keeping ours, and that task's other version goes to the
+    /// recovery log.
+    ///
+    /// Without a baseline there is no ancestor to merge against, so the fallback
+    /// covers the whole file — the same floor as before the merge existed.
     ///
     /// The mtime is deliberately *not* updated. `track_changed_on_disk` reads it
     /// to decide whether memory and disk have diverged, and after this they have.
@@ -2680,6 +2732,47 @@ impl App {
         let Ok(text) = std::fs::read_to_string(path) else {
             return;
         };
+
+        if let SaveTarget::Track(track_id) = target
+            && let Some(base_text) = self.baselines.get(target).cloned()
+            && let Some(ours) = Self::find_track_in_project(&self.project, track_id)
+        {
+            let base = parse_track(&base_text);
+            let theirs = parse_track(&text);
+            let result = crate::ops::reconcile::reconcile_track(&base, ours, &theirs);
+
+            for conflict in &result.conflicts {
+                crate::io::recovery::log_recovery(
+                    &self.project.frame_dir,
+                    crate::io::recovery::RecoveryEntry {
+                        timestamp: chrono::Utc::now(),
+                        category: crate::io::recovery::RecoveryCategory::Write,
+                        description: format!(
+                            "concurrent edit to {} in {} — kept the in-memory version",
+                            conflict.key,
+                            target.label()
+                        ),
+                        fields: vec![("Reason".to_string(), format!("{:?}", conflict.reason))],
+                        body: conflict.theirs.join("\n"),
+                    },
+                );
+            }
+
+            let took = result.took_theirs;
+            let deleted = result.deleted;
+            self.replace_track(track_id, result.track);
+            if took > 0 || deleted > 0 {
+                self.status_message = Some(format!(
+                    "Merged {} external change{} into unsaved {}",
+                    took + deleted,
+                    if took + deleted == 1 { "" } else { "s" },
+                    target.label()
+                ));
+            }
+            return;
+        }
+
+        // No ancestor to merge against: keep ours whole and preserve theirs.
         crate::io::recovery::log_recovery(
             &self.project.frame_dir,
             crate::io::recovery::RecoveryEntry {
@@ -4700,6 +4793,53 @@ mod tests {
         assert!(
             text.contains("One, edited elsewhere"),
             "the external version must be preserved, not discarded: {text}"
+        );
+    }
+
+    /// The case the merge exists for, end to end through the reload path: we
+    /// edited one task, another writer added a different one. Keeping ours
+    /// wholesale would drop their task — which, with several agent sessions on
+    /// one project, is a write nobody would ever notice going missing.
+    #[test]
+    fn an_external_addition_merges_into_an_unsaved_track() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        let path = app.project.frame_dir.join("tracks/a.md");
+
+        let tasks = app
+            .find_track_mut("a")
+            .unwrap()
+            .section_tasks_mut(SectionKind::Backlog)
+            .unwrap();
+        tasks[0].title = "One, edited in the TUI".into();
+        tasks[0].source_text = Some(vec!["- [ ] `A-001` One, edited in the TUI".to_string()]);
+        app.record_save_failure(SaveTarget::Track("a".into()), &"lock timeout".to_string());
+
+        // They add a task without touching ours.
+        std::fs::write(
+            &path,
+            "# A\n\n## Backlog\n\n- [ ] `A-001` One\n- [ ] `A-002` Theirs\n\n## Done\n",
+        )
+        .unwrap();
+        app.reload_changed_files(std::slice::from_ref(&path));
+
+        let backlog = app.find_track_mut("a").unwrap().backlog().to_vec();
+        let titles: Vec<&str> = backlog.iter().map(|t| t.title.as_str()).collect();
+        assert!(
+            titles.contains(&"One, edited in the TUI"),
+            "our edit must survive: {titles:?}"
+        );
+        assert!(
+            titles.contains(&"Theirs"),
+            "their addition must survive too: {titles:?}"
+        );
+
+        // Nothing was in dispute, so nothing needed preserving out-of-band.
+        let log = crate::io::recovery::recovery_log_path(&app.project.frame_dir);
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            !text.contains("concurrent edit"),
+            "a clean merge should record no conflict: {text}"
         );
     }
 

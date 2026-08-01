@@ -123,7 +123,21 @@ Every mutating TUI action pushes an `Operation` onto the undo stack. Each operat
 
 **Conflict popup**: If a deferred reload discovers that the task being edited was deleted or moved externally, a conflict popup displays the orphaned edit text so the user can copy it. The edit is discarded (there's no merge).
 
-**Code**: `src/io/watcher.rs` (FrameWatcher), `src/tui/render/conflict_popup.rs`
+**Unsaved files are merged, not replaced**: `App::unsaved` records files whose in-memory content did not reach disk. A reload of a file in that set does *not* overwrite it — both sides then hold content that exists nowhere else, and the usual reason a save failed is another `fr` holding the lock, which is the same process that goes on to write the file. So the collision is likely, not exotic.
+
+Such a reload runs a three-way merge (`ops::reconcile`) against `App::baselines` — the last content known to be on disk for that file, recorded at load and after each successful save, kept as text and parsed only when a merge actually runs. Tasks are matched by ID, so:
+
+- an addition on either side survives;
+- a change to a task the other side did not touch is taken;
+- subtasks merge independently of their parent;
+- an edit beats a delete, in both directions (a delete is trivially repeatable, an edit is not);
+- a task both sides changed differently keeps the in-memory version, with the other written to the recovery log.
+
+Not attempted: task ordering (a task follows the side it came from) and subtask reparenting (a subtask's ID extends its parent's, so a move renumbers it and reads as an addition plus a deletion). Without a baseline the merge cannot run, and the fallback is to keep the in-memory version whole and log the incoming one.
+
+The mtime is deliberately not refreshed on this path: `track_changed_on_disk` reads it to decide whether memory and disk have diverged, and after a merge they have.
+
+**Code**: `src/io/watcher.rs` (FrameWatcher), `src/tui/render/conflict_popup.rs`, `src/ops/reconcile.rs`
 
 ## Done Task Lifecycle
 
