@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{
@@ -3869,7 +3869,7 @@ fn handle_external_reload(app: &mut App, paths: &[std::path::PathBuf]) {
         app.edit_cursor = 0;
     }
     // Auto-clean after external reload
-    run_auto_clean(app);
+    run_auto_clean(app, paths);
 }
 
 /// Handle a pending reload using the stored changed paths
@@ -3884,13 +3884,54 @@ fn handle_pending_reload(app: &mut App, paths: &[PathBuf]) {
     // This is after EDIT/MOVE completed, so no conflict possible — just reload
     app.reload_changed_files(&deduped);
     // Auto-clean after reload
-    run_auto_clean(app);
+    run_auto_clean(app, &deduped);
+}
+
+/// Why auto-clean must not run for this external change, if it must not.
+///
+/// Auto-clean exists to normalise *human* edits — ticking a checkbox in an
+/// editor should get a `resolved:` date filled in silently. But the watcher
+/// reports only "this file changed", and git rewriting a track file looks
+/// identical to a hand edit. Cleaning then fights the git operation: every done
+/// task the checkout restored without a `resolved:` gets stamped with *today*,
+/// the next `git restore` removes it, the watcher fires again, and the loop
+/// repeats until one side gives up.
+///
+/// Two signals say git did this, not a person:
+///
+/// - a multi-step operation is unfinished (rebase, merge, cherry-pick, …), so
+///   more rewrites are still coming; and
+/// - a changed file is byte-identical to the index, which is what `git restore`,
+///   `git checkout` and `git stash` leave behind but an editor save does not.
+///
+/// The second is what catches a bare `git restore`, which sets no marker file.
+fn git_write_back_block(frame_dir: &Path, changed: &[PathBuf]) -> Option<&'static str> {
+    use crate::io::git;
+    if git::operation_in_progress(frame_dir) {
+        return Some("git operation in progress");
+    }
+    if !git::index_clean_paths(frame_dir, changed).is_empty() {
+        return Some("files restored by git");
+    }
+    None
 }
 
 /// Run auto-clean on the project after external changes are detected.
 /// Assigns missing IDs/dates and saves affected tracks. Shows status message if anything changed.
-fn run_auto_clean(app: &mut App) {
+///
+/// Skipped entirely — rather than cleaned in memory and left unsaved — when
+/// [`git_write_back_block`] fires, so that what the TUI displays keeps matching
+/// what is on disk.
+fn run_auto_clean(app: &mut App, changed: &[PathBuf]) {
     use crate::ops::clean::clean_project;
+
+    if !app.project.config.clean.auto_clean {
+        return;
+    }
+    if let Some(reason) = git_write_back_block(&app.project.frame_dir, changed) {
+        app.status_message = Some(format!("Auto-clean skipped: {reason}"));
+        return;
+    }
 
     // Passive auto-clean after external changes — no auto-claim, and an
     // unclaimed clone mints nothing (strict null policy).
@@ -4409,6 +4450,89 @@ mod tests {
             inbox: Some(crate::parse::parse_inbox("# Inbox\n").0),
         };
         App::new(project)
+    }
+
+    // ---- Auto-clean write-back -----------------------------------------
+
+    /// Point `app` at a track holding one done task with no `resolved:` — the
+    /// shape auto-clean backfills, and the shape a git checkout keeps restoring.
+    fn with_dateless_done_task(app: &mut App) -> std::path::PathBuf {
+        const TRACK: &str = "# A\n\n## Backlog\n\n## Done\n\n- [x] `A-001` Finished long ago\n  - added: 2026-01-06\n";
+        let path = app.project.frame_dir.join("tracks").join("a.md");
+        std::fs::write(&path, TRACK).unwrap();
+        app.project.tracks = vec![("a".into(), crate::parse::parse_track(TRACK))];
+        path
+    }
+
+    #[test]
+    fn auto_clean_backfills_a_resolved_date_by_default() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        let path = with_dateless_done_task(&mut app);
+
+        run_auto_clean(&mut app, &[]);
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("resolved:"), "auto-clean still runs:\n{text}");
+    }
+
+    /// `clean.auto_clean` shipped in the config template documented as "run clean
+    /// after file reload in TUI" but was never read, so turning it off did
+    /// nothing.
+    #[test]
+    fn auto_clean_disabled_writes_nothing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        let path = with_dateless_done_task(&mut app);
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        app.project.config.clean.auto_clean = false;
+        run_auto_clean(&mut app, &[]);
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "auto_clean = false must leave the file alone"
+        );
+    }
+
+    /// The reported bug: the TUI re-added `resolved:` backfills after every
+    /// `git restore`, fighting a rebase. A file git just put back must not be
+    /// cleaned — and must not be cleaned *in memory* either, or the TUI would
+    /// display invented dates that are not on disk.
+    #[test]
+    fn auto_clean_skips_files_git_restored() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let Some(frame_dir) = crate::io::git::testutil::repo_with_committed_track(tmp.path())
+        else {
+            return; // git unavailable
+        };
+        let root = frame_dir.parent().unwrap().to_path_buf();
+        let mut app = app_on_disk(&root);
+        let path = with_dateless_done_task(&mut app);
+
+        // Commit the dateless done task, so restoring returns to exactly this.
+        assert!(crate::io::git::testutil::commit_all(&root));
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        run_auto_clean(&mut app, std::slice::from_ref(&path));
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "a git-restored file must not be rewritten"
+        );
+        assert!(
+            !crate::parse::serialize_track(&app.project.tracks[0].1).contains("resolved:"),
+            "in-memory state must match disk, not carry an unsaved backfill"
+        );
+        assert!(
+            app.status_message
+                .as_deref()
+                .is_some_and(|m| m.contains("Auto-clean skipped")),
+            "the skip should be visible: {:?}",
+            app.status_message
+        );
     }
 
     /// The point of item 5: a failed save is recorded, not discarded. 61 sites

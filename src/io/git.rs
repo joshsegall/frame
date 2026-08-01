@@ -167,6 +167,83 @@ pub fn ignored_paths(toplevel: &Path, rel_paths: &[String]) -> Option<Vec<String
     git_paths(toplevel, &["check-ignore"], rel_paths)
 }
 
+/// Which of `rel_paths` (repo-relative) have unstaged modifications — the working
+/// tree copy differs from what is staged in the index.
+fn modified_paths(toplevel: &Path, rel_paths: &[String]) -> Option<Vec<String>> {
+    git_paths(toplevel, &["diff", "--name-only"], rel_paths)
+}
+
+/// Files and directories git leaves in a working tree's git dir while a
+/// multi-step operation is unfinished. Each is removed when the operation
+/// finishes or is aborted, so their presence means "git is mid-surgery".
+const OPERATION_MARKERS: [&str; 6] = [
+    "rebase-merge",     // rebase -i, rebase --merge (directory)
+    "rebase-apply",     // rebase --apply, am (directory)
+    "MERGE_HEAD",       // merge
+    "CHERRY_PICK_HEAD", // cherry-pick
+    "REVERT_HEAD",      // revert
+    "BISECT_LOG",       // bisect
+];
+
+/// Whether git is part-way through a multi-step operation (rebase, merge,
+/// cherry-pick, revert, bisect, am) on the working tree containing `frame_dir`.
+///
+/// The markers live in this worktree's own git dir, not the common dir, so a
+/// rebase in one worktree does not report as in progress from another.
+/// `false` when `frame_dir` is not in a repo, or git is unavailable.
+pub fn operation_in_progress(frame_dir: &Path) -> bool {
+    let Some(paths) = repo_paths(frame_dir) else {
+        return false;
+    };
+    OPERATION_MARKERS
+        .iter()
+        .any(|marker| paths.git_dir.join(marker).exists())
+}
+
+/// Of `abs_paths`, those whose current contents **git itself wrote**: the path is
+/// tracked and byte-identical to the index.
+///
+/// This is the discriminator between "a human edited this file" and "git put this
+/// file here". `git restore`, `git checkout`, `git stash`, and the checkouts a
+/// rebase performs all leave a file exactly matching the index; saving from an
+/// editor leaves it differing from the index. Untracked files are never
+/// reported — `git diff` ignores them, so "no diff" would otherwise be read as
+/// "unmodified".
+///
+/// Empty when `frame_dir` is not in a repo or git is unavailable, which callers
+/// should read as "no evidence git did this" rather than as an error.
+pub fn index_clean_paths(frame_dir: &Path, abs_paths: &[PathBuf]) -> Vec<PathBuf> {
+    let Some(paths) = repo_paths(frame_dir) else {
+        return Vec::new();
+    };
+    // Canonicalize before relativizing: `toplevel` is canonical, and watcher
+    // paths need not be (`/tmp` vs `/private/tmp` on macOS). A path that cannot
+    // be canonicalized no longer exists, so it is not an index-clean file.
+    let relativized: Vec<(String, PathBuf)> = abs_paths
+        .iter()
+        .filter_map(|p| {
+            let canon = p.canonicalize().ok()?;
+            let rel = canon.strip_prefix(&paths.toplevel).ok()?.to_str()?;
+            Some((rel.to_string(), p.clone()))
+        })
+        .collect();
+    if relativized.is_empty() {
+        return Vec::new();
+    }
+    let rels: Vec<String> = relativized.iter().map(|(rel, _)| rel.clone()).collect();
+    let (Some(tracked), Some(modified)) = (
+        tracked_paths(&paths.toplevel, &rels),
+        modified_paths(&paths.toplevel, &rels),
+    ) else {
+        return Vec::new();
+    };
+    relativized
+        .into_iter()
+        .filter(|(rel, _)| tracked.contains(rel) && !modified.contains(rel))
+        .map(|(_, abs)| abs)
+        .collect()
+}
+
 #[cfg(test)]
 pub(crate) mod testutil {
     use std::path::{Path, PathBuf};
@@ -221,6 +298,59 @@ pub(crate) mod testutil {
         std::fs::create_dir_all(&wt_frame).ok()?;
         Some((main_frame, wt_frame))
     }
+
+    /// Build `<tmp>/repo` as a git repo whose `frame/tracks/main.md` is committed
+    /// at HEAD with no working-tree changes. Returns the frame dir, or `None`
+    /// when git is unavailable.
+    pub(crate) fn repo_with_committed_track(tmp: &Path) -> Option<PathBuf> {
+        let root = tmp.join("repo");
+        let tracks = root.join("frame").join("tracks");
+        std::fs::create_dir_all(&tracks).ok()?;
+        if !git(&root, &["init", "-q"]) {
+            return None;
+        }
+        std::fs::write(tracks.join("main.md"), "# Main\n\n## Done\n").ok()?;
+        if !git(&root, &["add", "."]) {
+            return None;
+        }
+        let committed = git(
+            &root,
+            &[
+                "-c",
+                "user.name=frame-test",
+                "-c",
+                "user.email=frame@test.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "init",
+            ],
+        );
+        committed.then(|| root.join("frame"))
+    }
+
+    /// Run `git restore` over a path, as a user would to undo an edit.
+    pub(crate) fn restore(root: &Path, rel: &str) -> bool {
+        git(root, &["restore", "--", rel])
+    }
+
+    /// Stage and commit everything in `root`, so the working tree is settled.
+    pub(crate) fn commit_all(root: &Path) -> bool {
+        git(root, &["add", "-A"])
+            && git(
+                root,
+                &[
+                    "-c",
+                    "user.name=frame-test",
+                    "-c",
+                    "user.email=frame@test.invalid",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "wip",
+                ],
+            )
+    }
 }
 
 #[cfg(test)]
@@ -270,6 +400,74 @@ mod tests {
             assert_eq!(worktree_kind(&frame_dir), WorktreeKind::NotGit);
             assert_eq!(git_common_dir(&frame_dir), None);
             assert_eq!(main_worktree_frame_dir(&frame_dir), None);
+            // Outside a repo there is no evidence git did anything, so auto-clean
+            // keeps its pre-existing behaviour rather than being suppressed.
+            assert!(!operation_in_progress(&frame_dir));
+            assert!(index_clean_paths(&frame_dir, &[frame_dir.join("tracks/main.md")]).is_empty());
         }
+    }
+
+    #[test]
+    fn operation_in_progress_detects_file_and_directory_markers() {
+        let tmp = TempDir::new().unwrap();
+        let Some(frame_dir) = testutil::repo_with_committed_track(tmp.path()) else {
+            return; // git unavailable
+        };
+        assert!(!operation_in_progress(&frame_dir), "settled repo");
+
+        let git_dir = repo_paths(&frame_dir).unwrap().git_dir;
+
+        // A merge leaves a marker *file*.
+        std::fs::write(git_dir.join("MERGE_HEAD"), "").unwrap();
+        assert!(operation_in_progress(&frame_dir), "merge in progress");
+        std::fs::remove_file(git_dir.join("MERGE_HEAD")).unwrap();
+        assert!(!operation_in_progress(&frame_dir), "merge finished");
+
+        // A rebase leaves a marker *directory* — `.exists()` covers both.
+        std::fs::create_dir(git_dir.join("rebase-merge")).unwrap();
+        assert!(operation_in_progress(&frame_dir), "rebase in progress");
+    }
+
+    /// The discriminator behind auto-clean suppression: an editor save must look
+    /// different from git putting a file back.
+    #[test]
+    fn index_clean_paths_separates_git_writes_from_editor_writes() {
+        let tmp = TempDir::new().unwrap();
+        let Some(frame_dir) = testutil::repo_with_committed_track(tmp.path()) else {
+            return; // git unavailable
+        };
+        let root = frame_dir.parent().unwrap().to_path_buf();
+        let track = frame_dir.join("tracks").join("main.md");
+
+        // Committed and untouched: git owns this content.
+        assert_eq!(
+            index_clean_paths(&frame_dir, std::slice::from_ref(&track)),
+            vec![track.clone()],
+            "unmodified tracked file"
+        );
+
+        // Hand-edited: a person owns this content, so auto-clean should run.
+        std::fs::write(&track, "# Main\n\n## Done\n\n- [x] `M-1` Ticked\n").unwrap();
+        assert!(
+            index_clean_paths(&frame_dir, std::slice::from_ref(&track)).is_empty(),
+            "edited file must not read as a git write"
+        );
+
+        // `git restore` — the exact command that fought the TUI — puts it back.
+        assert!(testutil::restore(&root, "frame/tracks/main.md"));
+        assert_eq!(
+            index_clean_paths(&frame_dir, std::slice::from_ref(&track)),
+            vec![track],
+            "restored file reads as a git write"
+        );
+
+        // Untracked files are never reported: `git diff` shows them no diff, and
+        // reading that as "unmodified" would suppress cleaning brand-new tracks.
+        let untracked = frame_dir.join("tracks").join("new.md");
+        std::fs::write(&untracked, "# New\n").unwrap();
+        assert!(
+            index_clean_paths(&frame_dir, &[untracked]).is_empty(),
+            "untracked file"
+        );
     }
 }

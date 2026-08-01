@@ -256,7 +256,8 @@ Auto-clean and archival settings:
 
 ```toml
 [clean]
-auto_clean = true          # run clean after file reload in TUI (default: true)
+auto_clean = true          # run clean after file reload in TUI (default: true;
+                           # always stands down while git is rewriting files)
 done_threshold = 100       # max done tasks per track before archiving (default: 100)
 done_retain = 10           # number of recent done tasks to keep in track after archiving (default: 10)
 archive_per_track = true   # separate archive file per track (default: true)

@@ -568,6 +568,13 @@ The TUI watches `frame/` for `.md` and `.toml` changes. Self-writes are detected
 
 Reload is deferred during both Edit and Move modes, applied when the mode exits. After reload, if `auto_clean` is enabled (default: true), frame automatically assigns missing IDs/dates and archives excess done tasks. This can cause visible changes to the file that weren't made by the user. Each reload inserts an undo sync marker, which clears the redo stack.
 
+**Auto-clean stands down for git.** Cleaning after a reload exists to normalise *human* edits — ticking a checkbox in an editor gets its `resolved:` date filled in silently. But the watcher only reports that a file changed, and git rewriting a track file looks exactly like a hand edit. Cleaning then fights the git operation: every done task a checkout restores without a `resolved:` is stamped with today, the next `git restore` removes it, and the watcher fires again. So the reload still happens — the TUI shows what is on disk — but the clean is skipped, and the status bar says why, when either:
+
+- a multi-step git operation is unfinished (rebase, merge, cherry-pick, revert, bisect, am), so more rewrites are still coming; or
+- a changed file is byte-identical to the git index, which is what `git restore`, `git checkout` and `git stash` leave behind and an editor save does not. This is what catches a bare `git restore`, which sets no marker file of its own.
+
+The clean is skipped outright rather than computed and left unsaved, so what the TUI displays keeps matching what is on disk. Untracked files are never treated as git-written, and outside a git repository neither rule applies. Run `fr clean` when the git work is done to pick up whatever was deferred.
+
 ### Filtering
 
 Track view filtering via the `f` prefix key:
