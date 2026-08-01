@@ -147,6 +147,8 @@ Two consequences worth knowing:
 - A fenced block inside a note cannot contain flush-left lines — the note ends at the first one. Indent the whole block with the rest of the note.
 - An unclosed fence is preserved verbatim and parses fine, but breaks downstream markdown rendering. [`fr check`](cli.md#fr-check) warns about it.
 
+**Content frame cannot place is kept, not read.** An indented line that is neither metadata, nor a task, nor inside a `- note:` block — most often prose that lost its indentation, or a metadata key that lost its colon — is preserved byte for byte and written back where it was found. Frame does not interpret it: a `dep:` stranded this way creates no dependency, and stranded subtask text is not a task. [`fr check`](cli.md#fr-check) reports it as a stranded line so the indentation can be fixed.
+
 ## Nesting
 
 Tasks nest up to 3 levels deep. Each level adds 2 spaces of indentation:

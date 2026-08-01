@@ -1354,6 +1354,21 @@ fn cmd_check(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
                             track_id, who, fence
                         );
                     }
+                    check::CheckWarning::StrandedLine {
+                        track_id,
+                        before_task_id,
+                        before_title,
+                        line,
+                    } => {
+                        let who = match before_task_id {
+                            Some(id) => id.clone(),
+                            None => format!("\"{}\"", before_title),
+                        };
+                        println!(
+                            "  [{}] a line above {} belongs to no task: \"{}\" — kept as-is on every write; re-indent it under a task to make frame read it",
+                            track_id, who, line
+                        );
+                    }
                     check::CheckWarning::UnclosedInboxFence {
                         index,
                         title,

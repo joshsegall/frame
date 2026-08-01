@@ -17,6 +17,12 @@ pub fn serialize_tasks(tasks: &[Task], indent: usize) -> Vec<String> {
 /// independently — this enables selective rewrite where editing a subtask
 /// doesn't reformat the parent or siblings.
 fn serialize_task(task: &Task, indent: usize, lines: &mut Vec<String>) {
+    // Lines the parser could not attribute to any task, held ahead of this one.
+    // Emitted verbatim on both paths — canonicalizing them is not possible
+    // (frame does not know what they mean) and dropping them is the bug they
+    // exist to prevent.
+    lines.extend(task.leading_lines.iter().cloned());
+
     if !task.dirty
         && let Some(ref source) = task.source_text
     {

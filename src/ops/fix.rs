@@ -703,6 +703,14 @@ mod tests {
                 track_id: "t".into(),
                 task_id: "T-5".into(),
             },
+            // Where a stranded line was meant to go is a guess. Frame keeps it
+            // where it found it and says so; re-indenting it is the user's call.
+            CheckWarning::StrandedLine {
+                track_id: "t".into(),
+                before_task_id: Some("T-6".into()),
+                before_title: "task".into(),
+                line: "**Shape.** prose that lost its indent".into(),
+            },
         ]));
         assert!(
             plan.is_empty(),

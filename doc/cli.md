@@ -179,6 +179,8 @@ Check reports a file that git already **tracks** (needs `git rm --cached <path>`
 
 It reports an **interrupted operation**: a multi-file operation that started and did not finish, recorded in `frame/.inflight`. Normally the next write command completes it and clears the marker, so seeing this means either nothing has been written since, or recovery declined to act because a precondition no longer held. See [Multi-file writes](architecture.md) and `fr recovery` for the detail.
 
+It reports a **stranded line**: content frame could not attribute to any task — a line indented deeper than the level it sits at that is neither metadata, nor a task, nor part of a `- note:` block. The warning names the line, the track, and the task it sits above. Frame keeps such a line exactly where it found it on every write (see [the conservation rule](architecture.md#selective-rewrite-parser-design)) but does not read it as anything, so `dep:`, `note:` or subtask content stranded this way is inert until the indentation is fixed. There is no automatic repair: where the line was meant to go is a guess.
+
 Finally, it warns about **task notes and inbox item bodies that leave a code fence open**. Frame itself parses these correctly — a note's extent is set by [indentation, not fence state](format.md#metadata) — but an unclosed fence makes every markdown renderer downstream (GitHub, editor previews) swallow the rest of the file into a code block. The warning names the offending opener, e.g. ` ```rust `. Fence balance follows CommonMark, so a fence carrying an info string cannot close a block: ` ```lace ` / ` ```rust ` / ` ``` ` is balanced and does *not* warn.
 
 #### `fr check --fix`

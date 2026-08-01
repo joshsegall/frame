@@ -2815,4 +2815,102 @@ mod tests {
         assert!(result.ids_assigned.is_empty());
         assert!(project.tracks[0].1.backlog()[1].id.is_none());
     }
+
+    /// The `fr clean` incident, at the level it was reported: a track the user
+    /// never touched, one task missing a `resolved:` date, and a mis-indented
+    /// prose line on a *different*, already-done task.
+    ///
+    /// Filling the date makes that one task dirty, which rewrites the file —
+    /// and the rewrite used to drop the prose line, because the parser had
+    /// consumed it without recording it. The damage arrived inside a large,
+    /// boring clean diff, on a task and a track unrelated to the work in hand.
+    #[test]
+    fn test_clean_keeps_a_stray_line_on_an_untouched_task() {
+        let source = "\
+# Main
+
+## Done
+
+- [x] `M-001` Sharded map lowering
+  - added: 2026-07-01
+  - resolved: 2026-07-20
+    **Shape.** A sharded map whose callback produces a per-row output.
+- [x] `M-002` Needs a resolved date
+  - added: 2026-07-02
+";
+        let mut project = make_project(source, vec![("main", "M")]);
+        let result = clean_project(&mut project, IdScope::Mint(None));
+
+        // The date fill is what triggered the rewrite.
+        assert!(
+            result
+                .dates_assigned
+                .iter()
+                .any(|d| d.task_id == "M-002" && d.kind == DateKind::Resolved),
+            "expected clean to fill M-002's resolved date: {:?}",
+            result.dates_assigned
+        );
+
+        let written = crate::parse::serialize_track(&project.tracks[0].1);
+        assert!(
+            written.contains("**Shape.** A sharded map whose callback produces a per-row output."),
+            "clean deleted a line from an untouched task: {written}"
+        );
+    }
+
+    /// Archiving must carry a stranded line with it rather than leave it behind
+    /// — the incident report checked the archive too, and the line was in
+    /// neither place. It travels with the task that holds it, which is the task
+    /// *below* it; when a whole Done section is archived together, as here, that
+    /// keeps its position exactly.
+    #[test]
+    fn test_archive_carries_a_stranded_line() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("frame/tracks")).unwrap();
+
+        let src = "\
+# Main
+
+## Backlog
+
+- [ ] `M-200` Active task
+
+## Done
+
+- [x] `M-001` Sharded map lowering
+  - added: 2026-07-01
+  - resolved: 2026-07-20
+    **Shape.** A sharded map whose callback produces a per-row output.
+- [x] `M-002` Unrelated finished work
+  - added: 2026-07-02
+  - resolved: 2026-07-21
+";
+
+        let mut config = make_config(vec![("main", "M")]);
+        config.clean.done_threshold = 1;
+        config.clean.done_retain = 0;
+
+        let mut project = Project {
+            root: root.to_path_buf(),
+            frame_dir: root.join("frame"),
+            config,
+            tracks: vec![("main".to_string(), parse_track(src))],
+            inbox: None,
+        };
+
+        let result = clean_project(&mut project, IdScope::Mint(None));
+        assert_eq!(result.tasks_archived.len(), 2);
+
+        let archive = std::fs::read_to_string(root.join("frame/archive/main.md")).unwrap();
+        assert!(
+            archive.contains("**Shape.** A sharded map whose callback produces a per-row output."),
+            "archiving dropped the stranded line: {archive}"
+        );
+        let track = crate::parse::serialize_track(&project.tracks[0].1);
+        assert!(
+            !track.contains("**Shape."),
+            "the line was left behind in the track as well: {track}"
+        );
+    }
 }

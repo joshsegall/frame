@@ -47,6 +47,13 @@
 //!   normalizes it and normalization can take a second pass to settle — see
 //!   `MAX_REWRITES_TO_SETTLE`.
 //!
+//! - **P5 — a plain write accounts for every line.** Parse, write back
+//!   untouched, and require every non-blank line to return byte for byte. The
+//!   other four compare *readings* of a file, so none of them can see a line the
+//!   parser consumed and recorded nowhere — the reading that lost it is the only
+//!   reading either side has. That blind spot is where the `fr clean` deletion
+//!   lived; this property is the one that would have caught it, and does.
+//!
 //! ## Generator constraints
 //!
 //! P3's generators emit a deliberately well-behaved subset. Each exclusion below
@@ -152,6 +159,29 @@ fn metadata_entries(track: &Track) -> Vec<Metadata> {
     fn walk(tasks: &[Task], out: &mut Vec<Metadata>) {
         for task in tasks {
             out.extend(task.metadata.iter().cloned());
+            walk(&task.subtasks, out);
+        }
+    }
+    let mut out = Vec::new();
+    for node in &track.nodes {
+        if let TrackNode::Section { tasks, .. } = node {
+            walk(tasks, &mut out);
+        }
+    }
+    out
+}
+
+/// Every stranded line the parser attached to a task, flattened. Compared as a
+/// set for the same reason as `task_identities`.
+///
+/// Where the line ends up attached is not fixed: a rewrite that normalizes an
+/// orphaned task's indent can hand its stranded neighbour to a different task,
+/// and one that recovers a metadata key can stop the line being stranded at all.
+/// Either is fine. Vanishing is not.
+fn stranded_lines(track: &Track) -> Vec<String> {
+    fn walk(tasks: &[Task], out: &mut Vec<String>) {
+        for task in tasks {
+            out.extend(task.leading_lines.iter().cloned());
             walk(&task.subtasks, out);
         }
     }
@@ -747,6 +777,20 @@ proptest! {
                 after_meta
             );
         }
+
+        // Lines frame could not attribute to any task. Checked against the
+        // rewritten *text* rather than against `stranded_lines(&after)`,
+        // because a rewrite may legitimately stop a line being stranded — the
+        // normalized indent can make it readable as metadata. Being understood
+        // is not the same as being lost.
+        for stranded in stranded_lines(&before) {
+            prop_assert!(
+                rewritten.lines().any(|l| l.trim() == stranded.trim()),
+                "stranded line lost by the rewrite: {:?}\nrewritten: {:?}",
+                stranded,
+                rewritten
+            );
+        }
     }
 
     #[test]
@@ -866,6 +910,61 @@ proptest! {
                 "never settled in {MAX_REWRITES_TO_SETTLE} rewrites\nlast: {last:?}\nnext: {next:?}"
             )));
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P5 — a plain write accounts for every line
+// ---------------------------------------------------------------------------
+
+/// The non-blank lines of a file, in order. Blank lines are excluded because the
+/// parser genuinely normalizes them: a blank between two tasks is formatting, it
+/// belongs to no node, and losing one is cosmetic. A non-blank line is content.
+fn nonblank_lines(source: &str) -> Vec<&str> {
+    source.lines().filter(|l| !l.trim().is_empty()).collect()
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(512))]
+
+    /// Parse and write back without touching anything: every non-blank line must
+    /// come back, byte for byte, in the same order.
+    ///
+    /// P1–P4 all compare *readings* of a file against each other, or against a
+    /// well-formed model. None of them can see a line the parser consumed and
+    /// recorded nowhere: both sides of P2 agree it does not exist, P3's
+    /// generators never produce one, and P4 converges happily because the line
+    /// is gone after the first write and stays gone. That is the blind spot
+    /// `parse_tasks` sat in — it advanced past unrecognized indented content
+    /// with `idx += 1`, so the line was absent from the model, invisible to
+    /// `fr check`, and deleted by the next write of the file.
+    ///
+    /// This property closes it from the other side: not "did the model survive
+    /// the write" but "did the file". It needs no ground truth and no
+    /// interpretation, which is why it can catch content frame does not
+    /// understand — the only content at risk of being dropped for not being
+    /// understood.
+    #[test]
+    fn p5_a_plain_write_keeps_every_line(source in arb_soup()) {
+        let written = serialize_track(&parse_track(&source));
+        prop_assert_eq!(nonblank_lines(&source), nonblank_lines(&written));
+    }
+
+    /// Same property against damaged real fixtures, which is where the shapes
+    /// that trip it actually come from: a half-finished hand edit, a merge that
+    /// left a line at the wrong indent, a metadata key that lost its colon.
+    #[test]
+    fn p5_a_plain_write_keeps_every_line_in_a_damaged_fixture(
+        which in 0usize..64,
+        idx in 0usize..512,
+        mutation in arb_mutation(),
+    ) {
+        let corpus = fixture_sources();
+        let source = &corpus[which % corpus.len()];
+        let damaged = mutate(source, idx, &mutation);
+
+        let written = serialize_track(&parse_track(&damaged));
+        prop_assert_eq!(nonblank_lines(&damaged), nonblank_lines(&written));
     }
 }
 
@@ -1078,4 +1177,86 @@ fn multibyte_at_the_indent_boundary_does_not_panic() {
     let track = parse_track(source);
     let _ = serialize_track(&track);
     assert_eq!(track.backlog().len(), 2);
+}
+
+/// Regression: the `fr clean` incident. A mis-indented prose line below a
+/// `resolved:` key, in a done task nobody was working on, deleted by a write of
+/// the track — no diff to read it in, because the same run was filling in
+/// `resolved:` dates on other tasks and the file was already churning.
+///
+/// The line satisfied every condition of the drop at once: deeper than the
+/// metadata indent (so `parse_single_task` stopped before it), not a task line
+/// (so `parse_tasks` would not adopt it), and followed by another task at the
+/// same level (so `parse_tasks` consumed it rather than leaving it to the track
+/// parser as literal text). `parse_tasks` advanced past it with `idx += 1` and
+/// recorded it nowhere, which is why nothing warned: the line was not in the
+/// model for `fr check` to inspect, and the next write simply did not emit it.
+///
+/// Asserted on the plain write as well as the canonical one. The plain path is
+/// the one that actually ran — `fr clean` rewrites a whole track file to fill in
+/// one task's date, and every clean task on it goes out verbatim — and it was
+/// losing the line too.
+#[test]
+fn a_stray_line_between_two_done_tasks_survives_a_write() {
+    let source = "\
+# Main
+
+## Done
+
+- [x] `MAI-012` Sharded map lowering
+  - added: 2026-07-01
+  - resolved: 2026-07-20
+    **Shape.** A sharded `||> Vec.map` whose callback produces a per-row output.
+- [x] `MAI-013` Unrelated finished work
+  - resolved: 2026-07-21";
+
+    let plain = serialize_track(&parse_track(source));
+    assert_eq!(plain, source, "a plain write changed the file at all");
+
+    let rewritten = canon_track(source);
+    assert!(
+        rewritten.contains("**Shape.**"),
+        "stray line deleted by a canonical rewrite: {rewritten:?}"
+    );
+    assert_eq!(
+        rewritten,
+        canon_track(&rewritten),
+        "the recovered line did not settle"
+    );
+}
+
+/// The same drop one level down, and with no `- note:` key anywhere near it:
+/// content stranded under a subtask, with a top-level task following. It was
+/// consumed by the outer `parse_tasks`, not the inner one, so a fix that only
+/// looked at the metadata loop would have left it.
+#[test]
+fn a_stray_line_under_a_subtask_survives_a_write() {
+    let source = "\
+# Track
+
+## Backlog
+
+- [ ] `T-001` Parent
+  - [ ] `T-001.1` Subtask
+      stranded under the subtask
+- [ ] `T-002` Sibling";
+
+    assert_eq!(serialize_track(&parse_track(source)), source);
+    assert!(canon_track(source).contains("stranded under the subtask"));
+}
+
+/// The same drop with nothing before it: a stranded line at the top of a
+/// section, above the first task. Shrunk out of P5 by proptest, and the case
+/// that decided where stranded lines get attached — there is no preceding task
+/// to hang this one on, but there is always a following one, which is why
+/// `leading_lines` sits on the successor.
+#[test]
+fn a_stray_line_above_the_first_task_survives_a_write() {
+    let source = "\
+## Backlog
+  - added: 2025-05-14
+- [ ] plain task";
+
+    assert_eq!(serialize_track(&parse_track(source)), source);
+    assert!(canon_track(source).contains("- added: 2025-05-14"));
 }

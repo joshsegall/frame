@@ -100,6 +100,30 @@ pub enum CheckWarning {
         /// The unclosed opening fence, trimmed (e.g. ```` ```rust ````).
         fence: String,
     },
+    /// A line frame could not attribute to any task: mis-indented prose, a
+    /// metadata key that lost its colon, a subtask fragment left by a bad merge.
+    /// It is preserved verbatim on every write and carried with the task it
+    /// precedes, but frame does not understand it — it is not a note, and
+    /// nothing but this warning will ever mention it.
+    ///
+    /// Worth reporting because the alternative was silence. These lines used to
+    /// be dropped at parse time and deleted by the next write, which is how a
+    /// `fr clean` run destroyed a note line in a track the user had not touched.
+    /// Preserving them fixed the deletion; reporting them is what lets someone
+    /// fix the indentation instead of carrying the line forever.
+    ///
+    /// Not repairable automatically: where the line was meant to go is a guess,
+    /// and guessing wrong rewrites prose.
+    #[serde(rename = "stranded_line")]
+    StrandedLine {
+        track_id: String,
+        /// The task the line sits above — `None` if that task has no ID yet.
+        before_task_id: Option<String>,
+        /// The title of that task, which identifies it when the ID is absent.
+        before_title: String,
+        /// The line itself, trimmed.
+        line: String,
+    },
     /// A **live** task holding an ID an **archived** task already has: the number
     /// was reissued after the original left the live track.
     ///
@@ -322,6 +346,18 @@ fn check_task(
         result.warnings.push(CheckWarning::DoneInBacklog {
             track_id: track_id.to_string(),
             task_id: task_id.to_string(),
+        });
+    }
+
+    // Warning: lines frame could not attribute to any task, held ahead of this
+    // one. Blanks inside such a run are carried too — they are formatting, so
+    // only the content lines are reported.
+    for line in task.leading_lines.iter().filter(|l| !l.trim().is_empty()) {
+        result.warnings.push(CheckWarning::StrandedLine {
+            track_id: track_id.to_string(),
+            before_task_id: task.id.as_ref().map(|id| id.to_string()),
+            before_title: task.title.clone(),
+            line: line.trim().to_string(),
         });
     }
 
@@ -1737,6 +1773,88 @@ mod tests {
                 .warnings
                 .iter()
                 .any(|w| matches!(w, CheckWarning::UnclosedNoteFence { .. }))
+        );
+    }
+
+    /// A line the parser could not attribute to any task is now carried instead
+    /// of deleted — which means someone has to be told it is there, or it stays
+    /// misfiled forever and frame keeps not reading it.
+    #[test]
+    fn test_warn_stranded_line() {
+        let tmp = TempDir::new().unwrap();
+        let project = make_project_at(
+            tmp.path(),
+            "\
+# Main
+
+## Done
+
+- [x] `M-001` Sharded map lowering
+  - resolved: 2026-07-20
+    **Shape.** A line that lost its indent.
+- [x] `M-002` Next task
+  - resolved: 2026-07-21
+",
+        );
+
+        let result = check_project(&project);
+        let stranded: Vec<_> = result
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                CheckWarning::StrandedLine {
+                    before_task_id,
+                    line,
+                    ..
+                } => Some((before_task_id.clone(), line.clone())),
+                _ => None,
+            })
+            .collect();
+
+        // Reported against the task it sits above — M-002, not the M-001 block
+        // it visually hangs off. Where it *belongs* is exactly what frame does
+        // not know; where it *is* is what the user needs to find it.
+        assert_eq!(
+            stranded,
+            vec![(
+                Some("M-002".to_string()),
+                "**Shape.** A line that lost its indent.".to_string()
+            )]
+        );
+        // Nothing structural is broken — the file still parses and still writes
+        // back unchanged.
+        assert!(result.valid);
+    }
+
+    /// The ordinary case must stay quiet: every line here is attributable, so a
+    /// well-formed track must produce no stranded-line warning at all.
+    #[test]
+    fn test_no_stranded_warning_for_a_clean_track() {
+        let tmp = TempDir::new().unwrap();
+        let project = make_project_at(
+            tmp.path(),
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Task
+  - added: 2025-05-01
+  - note:
+    A note with
+    two lines.
+  - [ ] `M-001.1` Subtask
+
+## Done
+",
+        );
+
+        let result = check_project(&project);
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| matches!(w, CheckWarning::StrandedLine { .. }))
         );
     }
 

@@ -88,6 +88,25 @@ pub struct Task {
     pub subtasks: Vec<Task>,
     /// Nesting depth (0 = top-level)
     pub depth: usize,
+    /// Lines that sit immediately *before* this task's line and belong to no
+    /// task — mis-indented prose, metadata stranded after stray content, the
+    /// residue of a bad hand edit or merge. They are carried verbatim and
+    /// re-emitted ahead of the task line so a rewrite puts them back where they
+    /// were.
+    ///
+    /// The parser used to drop them: any non-blank line more indented than the
+    /// current level, with another task still to come at that level, was
+    /// consumed by `parse_tasks` and recorded nowhere. Nothing surfaced it —
+    /// the line was absent from the model, so `fr check` could not see it, and
+    /// the next write of that file deleted it. `fr clean` made that routine,
+    /// because filling one task's `resolved:` date rewrites the whole track.
+    ///
+    /// Attaching to the *following* task rather than the preceding one is what
+    /// lets a single field cover every case: a line is only ever droppable when
+    /// a task follows it at the same level, so there is always a successor to
+    /// hang it on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub leading_lines: Vec<String>,
 
     // --- Source tracking ---
     /// Line range in the original source file (0-indexed)
@@ -112,6 +131,7 @@ impl Task {
             metadata: Vec::new(),
             subtasks: Vec::new(),
             depth: 0,
+            leading_lines: Vec::new(),
             source_lines: None,
             source_text: None,
             dirty: true,
@@ -124,6 +144,11 @@ impl Task {
     }
 }
 
+/// Compares the *semantic* fields only. `source_text`, `source_lines`, `dirty`
+/// and `leading_lines` are carried source, not task identity: two tasks that say
+/// the same thing are equal even if one of them is dragging a stranded line
+/// behind it. Conservation of `leading_lines` is checked at the text level by
+/// the parse properties, not here.
 impl PartialEq for Task {
     fn eq(&self, other: &Self) -> bool {
         self.state == other.state

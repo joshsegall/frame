@@ -16,13 +16,19 @@ pub fn parse_tasks(
     let mut tasks = Vec::new();
     let mut idx = start_idx;
 
+    // Lines seen at this level that belong to no task yet. They are handed to
+    // the next task as its `leading_lines`; see the loop's `else` arm.
+    let mut pending: Vec<String> = Vec::new();
+    let mut pending_start = start_idx;
+
     while idx < lines.len() {
         let line = &lines[idx];
 
         // Check if this line is a task at the expected indent level
         if let Some(task_indent) = task_indent(line) {
             if task_indent == indent {
-                let (task, next_idx) = parse_single_task(lines, idx, indent, depth);
+                let (mut task, next_idx) = parse_single_task(lines, idx, indent, depth);
+                task.leading_lines = std::mem::take(&mut pending);
                 tasks.push(task);
                 idx = next_idx;
             } else if task_indent < indent {
@@ -42,7 +48,8 @@ pub fn parse_tasks(
                 // are read at their real indent, but it is recorded at our depth,
                 // so a rewrite re-emits it somewhere that parses back the same
                 // way. Over-deep nesting is flattened rather than dropped.
-                let (task, next_idx) = parse_single_task(lines, idx, task_indent, depth);
+                let (mut task, next_idx) = parse_single_task(lines, idx, task_indent, depth);
+                task.leading_lines = std::mem::take(&mut pending);
                 tasks.push(task);
                 idx = next_idx;
             }
@@ -50,15 +57,47 @@ pub fn parse_tasks(
             // Not a task line. Blank lines and orphaned deeper-indent content
             // can appear between tasks (e.g., after multi-line notes with
             // trailing blank lines, or orphaned subtasks from previous parse
-            // errors). Skip past them if more tasks at our indent follow.
+            // errors).
+            //
+            // This used to `idx += 1` past all of it. Blank lines are formatting
+            // and losing them is cosmetic, but a *non-blank* line consumed here
+            // was recorded nowhere: absent from the model, invisible to
+            // `fr check`, and deleted by the next write of the file. `fr clean`
+            // turned that into routine damage — one task's missing `resolved:`
+            // date rewrites the whole track, so the deletion landed in a track
+            // the user never touched.
+            //
+            // Hold non-blank lines instead and hand them to the next task at
+            // this level as `leading_lines`, which re-emits them verbatim in
+            // place. There is always such a task: `has_more_tasks_at_indent` is
+            // the condition for consuming the line at all.
             if (line.trim().is_empty() || count_indent(line) > indent)
                 && has_more_tasks_at_indent(lines, idx + 1, indent)
             {
+                if !line.trim().is_empty() {
+                    if pending.is_empty() {
+                        pending_start = idx;
+                    }
+                    pending.push(line.clone());
+                } else if !pending.is_empty() {
+                    // A blank inside a stranded run: keep it, so two stranded
+                    // paragraphs don't get glued together.
+                    pending.push(String::new());
+                }
                 idx += 1;
                 continue;
             }
             break;
         }
+    }
+
+    if !pending.is_empty() {
+        // Unreachable while the consume condition above requires a following
+        // task, but the invariant this function owes its caller is that it
+        // never consumes a line without recording it. Rewinding to the first
+        // held line keeps that true unconditionally: the caller re-reads them
+        // and the track parser keeps them as literal text.
+        return (tasks, pending_start);
     }
 
     (tasks, idx)
@@ -83,6 +122,7 @@ fn parse_single_task(
         metadata: Vec::new(),
         subtasks: Vec::new(),
         depth,
+        leading_lines: Vec::new(),
         source_lines: None,
         source_text: None,
         dirty: false,

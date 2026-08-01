@@ -29,6 +29,10 @@ On serialization: clean tasks (`dirty == false`) emit `source_text` verbatim. Di
 
 **Why**: Editing subtask B never reformats parent A or sibling C. Users' hand-written formatting (extra spaces, custom line breaks in notes) is preserved exactly. Without this, every save would reformat the entire file.
 
+**Conservation rule**: parsing may not consume a non-blank line without recording it somewhere in the model. A line the parser cannot attribute to any task — mis-indented prose, a metadata key without its colon, a fragment left by a merge — is held on the *next* task at that level as `leading_lines` and re-emitted verbatim ahead of it, on both the verbatim and the canonical path. Attaching to the following task rather than the preceding one is deliberate: a line is only droppable when another task follows it at the same level, so a successor always exists, and one field covers every position. `fr check` reports these as `stranded_line`.
+
+**Why**: a consumed-but-unrecorded line is invisible in a way nothing else can catch. It is absent from the model, so no view shows it and `fr check` cannot see it, and the next write of the file deletes it — and because filling in one task's date rewrites a whole track, the deletion surfaces in a file the user never edited. Parse property P5 (`tests/parse_properties.rs`) states the rule directly: parse, write back untouched, and every non-blank line must return byte for byte.
+
 **Boundary rule**: The task parser stops at blank lines. The track parser handles inter-section blank lines as trailing content on the preceding section or leading content on the next header. Getting this boundary wrong causes blank lines to accumulate or disappear on repeated save cycles.
 
 **Code**: `src/parse/task_parser.rs`, `src/parse/task_serializer.rs`, `src/parse/track_parser.rs`, `src/parse/track_serializer.rs`
