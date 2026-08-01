@@ -92,6 +92,12 @@ stays in memory and frame keeps re-attempting it in the background. Backoff
 doubles from one second up to a minute per file, and one success writes
 everything that accumulated in the meantime.
 
+If a failure persists past the first retry, the rule under the tab bar shows
+`unsaved: main.md - retry in 4s` — the file name when there is one, a count when
+there are more, and the countdown to the next attempt. It is visible in every
+view and every mode, and stays up until every outstanding file has saved. A
+failure that the next retry clears is never shown at all.
+
 An error retrying cannot clear (a read-only filesystem, permission denied, no
 space) is not retried on the timer; `R`, or the palette's "Retry saving N files",
 tries it anyway and resets the backoff.

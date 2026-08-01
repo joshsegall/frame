@@ -669,23 +669,55 @@ fn render_track_tab(
     spans.push(sep.clone());
 }
 
-fn render_separator(frame: &mut Frame, app: &App, area: Rect, sep_cols: &[usize]) {
-    let width = area.width as usize;
-    let bg = app.theme.background;
-    let dim = app.theme.dim;
+/// A right-aligned annotation drawn over the rule under the tab bar.
+///
+/// This row is the only always-rendered chrome with room to spare — the tab row
+/// has none, and the status row is a `match` on the mode that shows
+/// `status_message` in Navigate and Select only. A save failing while the user is
+/// in Edit or Search has to be visible *there*, which rules the status row out.
+pub(crate) struct SeparatorBadge {
+    spans: Vec<Span<'static>>,
+    /// Used when the full form does not fit.
+    short: Vec<Span<'static>>,
+}
 
-    // Build filter indicator text if filter is active and in track/board view
+impl SeparatorBadge {
+    fn width(spans: &[Span<'static>]) -> usize {
+        spans
+            .iter()
+            .map(|s| unicode::display_width(&s.content))
+            .sum()
+    }
+}
+
+/// The badges to draw, highest priority first.
+///
+/// Priority decides what survives a narrow terminal: the lowest-priority badge
+/// degrades to its short form, then drops, before anything above it is touched.
+/// Unsaved work outranks a filter because the filter is a thing the user just
+/// chose and can see the effects of, while an unsaved file is neither.
+pub(crate) fn separator_badges(app: &App) -> Vec<SeparatorBadge> {
+    let bg = app.theme.background;
+    let mut badges = Vec::new();
+
+    // Unsaved work — every view, every mode.
+    if let Some(ind) = app.unsaved_indicator() {
+        let style = Style::default().fg(app.theme.red).bg(bg);
+        badges.push(SeparatorBadge {
+            spans: vec![Span::styled(ind.full(), style)],
+            short: vec![Span::styled(ind.short(), style)],
+        });
+    }
+
+    // Active filter — track and board views only, where it means something.
     let is_track_view = matches!(app.view, View::Track(_));
     let is_board_view = app.view == View::Board;
     let filter = &app.filter_state;
-
     if (is_track_view || is_board_view) && filter.is_active() {
-        // Build indicator spans: "filter: " + state + " " + #tag
-        let mut indicator_spans: Vec<Span> = Vec::new();
-        indicator_spans.push(Span::styled(
-            "filter: ",
+        let mut spans: Vec<Span<'static>> = vec![Span::styled(
+            "filter: ".to_string(),
             Style::default().fg(app.theme.purple).bg(bg),
-        ));
+        )];
 
         if let Some(sf) = &filter.state_filter {
             let state_color = match sf {
@@ -695,72 +727,110 @@ fn render_separator(frame: &mut Frame, app: &App, area: Rect, sep_cols: &[usize]
                 StateFilter::Parked => app.theme.state_color(crate::model::TaskState::Parked),
                 StateFilter::Ready => app.theme.state_color(crate::model::TaskState::Active),
             };
-            indicator_spans.push(Span::styled(
-                sf.label(),
+            spans.push(Span::styled(
+                sf.label().to_string(),
                 Style::default().fg(state_color).bg(bg),
             ));
         }
 
         if let Some(ref tag) = filter.tag_filter {
             if filter.state_filter.is_some() {
-                indicator_spans.push(Span::styled(" ", Style::default().bg(bg)));
+                spans.push(Span::styled(" ".to_string(), Style::default().bg(bg)));
             }
             let tag_color = app.theme.tag_color(tag);
-            indicator_spans.push(Span::styled(
+            spans.push(Span::styled(
                 format!("#{}", tag),
                 Style::default().fg(tag_color).bg(bg),
             ));
         }
 
-        // Calculate indicator width
-        let indicator_width: usize = indicator_spans
-            .iter()
-            .map(|s| unicode::display_width(&s.content))
-            .sum();
-        // +2: one space before indicator, one space after (right edge buffer)
-        let separator_end = width.saturating_sub(indicator_width + 2);
-
-        let mut spans: Vec<Span> = Vec::new();
-        // Build separator chars up to where indicator starts
-        let mut sep_text = String::with_capacity(separator_end * 3);
-        for col in 0..separator_end {
-            if sep_cols.contains(&col) {
-                sep_text.push('\u{2534}');
-            } else {
-                sep_text.push('\u{2500}');
-            }
-        }
-        spans.push(Span::styled(sep_text, Style::default().fg(dim).bg(bg)));
-        spans.push(Span::styled(" ", Style::default().bg(bg)));
-        spans.extend(indicator_spans);
-        // Trailing space
-        let current_width: usize = spans
-            .iter()
-            .map(|s| unicode::display_width(&s.content))
-            .sum();
-        if current_width < width {
-            spans.push(Span::styled(
-                " ".repeat(width - current_width),
-                Style::default().bg(bg),
-            ));
-        }
-
-        let line = Line::from(spans);
-        let sep_widget = Paragraph::new(line).style(Style::default().bg(bg));
-        frame.render_widget(sep_widget, area);
-    } else {
-        // No filter — plain separator
-        let mut line: String = String::with_capacity(width * 3);
-        for col in 0..width {
-            if sep_cols.contains(&col) {
-                line.push('\u{2534}');
-            } else {
-                line.push('\u{2500}');
-            }
-        }
-        let sep_widget = Paragraph::new(line).style(Style::default().fg(dim).bg(bg));
-        frame.render_widget(sep_widget, area);
+        badges.push(SeparatorBadge {
+            short: spans.clone(),
+            spans,
+        });
     }
+
+    badges
+}
+
+/// Choose which badges fit, in priority order, degrading and then dropping from
+/// the back.
+///
+/// Returns the spans to draw, right-aligned, and the column the rule must stop
+/// at. Nothing is ever truncated mid-badge — a half-written "unsav" would read
+/// as corruption rather than as a message.
+fn fit_badges(badges: &[SeparatorBadge], width: usize) -> (Vec<Span<'static>>, usize) {
+    // One space before the first badge, one after the last.
+    const GAP: usize = 2;
+    // At least this much rule has to survive for the row to still read as one.
+    const MIN_RULE: usize = 8;
+
+    // Degrade strictly from the back: a badge only loses detail once everything
+    // below it has already been dropped. Otherwise a low-priority badge could
+    // cost the highest-priority one its detail, which inverts the priority.
+    // For two badges the sequence is [full, full], [full, short], [full],
+    // [short], [].
+    for keep in (0..=badges.len()).rev() {
+        for last_short in [false, true] {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            for (i, badge) in badges[..keep].iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::raw("  "));
+                }
+                if last_short && i + 1 == keep {
+                    spans.extend(badge.short.iter().cloned());
+                } else {
+                    spans.extend(badge.spans.iter().cloned());
+                }
+            }
+            let used = SeparatorBadge::width(&spans);
+            if used == 0 {
+                return (spans, width);
+            }
+            if width >= used + GAP + MIN_RULE {
+                return (spans, width - used - GAP);
+            }
+        }
+    }
+    (Vec::new(), width)
+}
+
+fn render_separator(frame: &mut Frame, app: &App, area: Rect, sep_cols: &[usize]) {
+    let width = area.width as usize;
+    let bg = app.theme.background;
+    let dim = app.theme.dim;
+
+    let badges = separator_badges(app);
+    let (badge_spans, rule_end) = fit_badges(&badges, width);
+
+    let mut rule = String::with_capacity(rule_end * 3);
+    for col in 0..rule_end {
+        if sep_cols.contains(&col) {
+            rule.push('\u{2534}');
+        } else {
+            rule.push('\u{2500}');
+        }
+    }
+
+    let mut spans: Vec<Span> = vec![Span::styled(rule, Style::default().fg(dim).bg(bg))];
+    if !badge_spans.is_empty() {
+        spans.push(Span::styled(" ", Style::default().bg(bg)));
+        spans.extend(badge_spans);
+    }
+
+    let used: usize = spans
+        .iter()
+        .map(|s| unicode::display_width(&s.content))
+        .sum();
+    if used < width {
+        spans.push(Span::styled(
+            " ".repeat(width - used),
+            Style::default().bg(bg),
+        ));
+    }
+
+    let sep_widget = Paragraph::new(Line::from(spans)).style(Style::default().bg(bg));
+    frame.render_widget(sep_widget, area);
 }
 
 /// Style for a tab: highlighted if current, normal otherwise
@@ -778,6 +848,83 @@ fn tab_style(app: &App, is_current: bool) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Separator badges ------------------------------------------------
+
+    fn badge(full: &str, short: &str) -> SeparatorBadge {
+        SeparatorBadge {
+            spans: vec![Span::raw(full.to_string())],
+            short: vec![Span::raw(short.to_string())],
+        }
+    }
+
+    fn rendered(spans: &[Span<'static>]) -> String {
+        spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn no_badges_leaves_the_rule_full_width() {
+        let (spans, rule_end) = fit_badges(&[], 80);
+        assert!(spans.is_empty());
+        assert_eq!(rule_end, 80, "the rule should span the row");
+    }
+
+    #[test]
+    fn badges_are_laid_out_in_priority_order() {
+        let badges = vec![
+            badge("unsaved: a.md", "unsaved"),
+            badge("filter: todo", "f"),
+        ];
+        let (spans, rule_end) = fit_badges(&badges, 80);
+        assert_eq!(rendered(&spans), "unsaved: a.md  filter: todo");
+        assert!(rule_end < 80, "the rule must stop short of the badges");
+    }
+
+    /// Under width pressure the *last* badge degrades first, so the most
+    /// important annotation is the last thing to lose detail.
+    #[test]
+    fn the_lowest_priority_badge_shortens_first() {
+        let badges = vec![
+            badge("unsaved: a.md", "unsaved"),
+            badge("filter: todo", "f"),
+        ];
+        let (spans, _) = fit_badges(&badges, 30);
+        assert_eq!(rendered(&spans), "unsaved: a.md  f");
+    }
+
+    /// And when shortening is not enough it is dropped entirely, rather than
+    /// truncating a badge into something that reads as corruption.
+    #[test]
+    fn the_lowest_priority_badge_drops_before_the_highest() {
+        let badges = vec![
+            badge("unsaved: a.md", "unsaved"),
+            badge("filter: todo", "f"),
+        ];
+        let (spans, _) = fit_badges(&badges, 24);
+        assert_eq!(rendered(&spans), "unsaved: a.md");
+    }
+
+    #[test]
+    fn a_row_too_narrow_for_anything_keeps_the_rule_whole() {
+        let badges = vec![badge("unsaved: a.md", "unsaved")];
+        let (spans, rule_end) = fit_badges(&badges, 10);
+        assert!(spans.is_empty(), "nothing fits, so nothing is drawn");
+        assert_eq!(rule_end, 10);
+    }
+
+    #[test]
+    fn a_badge_is_never_cut_in_half() {
+        let badges = vec![badge("unsaved: a.md", "unsaved")];
+        for width in 0..60usize {
+            let (spans, rule_end) = fit_badges(&badges, width);
+            let text = rendered(&spans);
+            assert!(
+                text.is_empty() || text == "unsaved: a.md" || text == "unsaved",
+                "width {width} produced a partial badge: {text:?}"
+            );
+            assert!(rule_end <= width, "the rule overflowed at width {width}");
+        }
+    }
 
     #[test]
     fn test_all_fit_with_project_name() {

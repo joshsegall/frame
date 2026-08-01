@@ -958,6 +958,33 @@ pub struct UnsavedFile {
     pub next_retry_at: Instant,
     /// A failure no retry can clear — see [`is_permanent`].
     pub permanent: bool,
+    /// Whether this has been announced: shown in the indicator and written to
+    /// the recovery log.
+    ///
+    /// One-shot. Once set, no further recovery entry is written for this file
+    /// however many retries fail after it — a file retrying against an
+    /// unwritable volume for an hour is one incident, not sixty. It resets only
+    /// by the file leaving [`App::unsaved`], so a genuinely new incident later
+    /// is recorded again.
+    pub surfaced: bool,
+}
+
+impl UnsavedFile {
+    /// Whether this failure is worth telling the user about yet.
+    ///
+    /// A save failure is never a *short* wait — `acquire_default` already blocked
+    /// five seconds before giving up, so brief contention produces a slow save
+    /// and never reaches this set at all. What is worth suppressing is narrower:
+    /// a failure at the five-second mark that the retry a second later clears.
+    /// Announcing that would be a flash of alarm and a junk recovery entry for a
+    /// problem that fixed itself.
+    ///
+    /// So a transient failure gets one retry to prove itself, and an error no
+    /// retry can clear is announced immediately — waiting on a second attempt
+    /// that cannot succeed would only delay the news.
+    pub fn worth_announcing(&self) -> bool {
+        self.permanent || self.attempts >= 2
+    }
 }
 
 /// The first retry delay. Doubles per failed attempt up to [`RETRY_BACKOFF_MAX`].
@@ -968,6 +995,52 @@ pub const RETRY_BACKOFF_START: Duration = Duration::from_secs(1);
 /// someone acts on it. A minute keeps the second case from being probed
 /// pointlessly without making the first slow.
 pub const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(60);
+
+/// What the unsaved indicator should say, or `None` when there is nothing to say.
+///
+/// Computed from [`App::unsaved`] rather than stored, so it cannot drift from the
+/// set that actually decides what is at risk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsavedIndicator {
+    /// Files announced so far. Always at least 1 when this exists.
+    pub count: usize,
+    /// The single file's name, when there is exactly one.
+    pub only: Option<String>,
+    /// Seconds until the next retry, if one is scheduled and pending.
+    pub retry_in: Option<u64>,
+    /// True when nothing further will be attempted without being asked.
+    pub waiting_for_user: bool,
+    /// The error, when a single permanent failure makes it worth naming.
+    pub reason: Option<String>,
+}
+
+impl UnsavedIndicator {
+    /// The full text, for a row with room for it.
+    pub fn full(&self) -> String {
+        let what = match (&self.only, self.count) {
+            (Some(name), _) => format!("unsaved: {name}"),
+            (None, n) => format!("unsaved: {n} files"),
+        };
+        if self.waiting_for_user {
+            if let Some(reason) = &self.reason {
+                return format!("{what} - {reason}");
+            }
+            return format!("{what} - R to retry");
+        }
+        match self.retry_in {
+            Some(0) | None => format!("{what} - retrying"),
+            Some(s) => format!("{what} - retry in {s}s"),
+        }
+    }
+
+    /// The fallback for a row too narrow for [`Self::full`].
+    pub fn short(&self) -> String {
+        match (&self.only, self.count) {
+            (Some(name), _) => format!("unsaved: {name}"),
+            (None, n) => format!("unsaved: {n} files"),
+        }
+    }
+}
 
 /// How long to wait before the `n`th attempt: 1s, 2s, 4s, … capped at a minute.
 fn retry_delay(attempts: usize) -> Duration {
@@ -2624,12 +2697,19 @@ impl App {
         }
     }
 
-    /// Record a failed save: remember the file as unsaved, and log it.
+    /// Record a failed save: remember the file as unsaved, and announce it once
+    /// it has proved it is not going to fix itself.
     ///
     /// The set is what protects the content — an entry here stops
     /// [`Self::reload_changed_files`] from overwriting a file whose only copy is
-    /// in memory. The recovery entry is the durable trace for `fr recovery` and
-    /// `fr check` afterwards.
+    /// in memory — and it is maintained on the *first* failure, because
+    /// correctness cannot wait on a threshold.
+    ///
+    /// Announcing is gated separately ([`UnsavedFile::worth_announcing`]), and
+    /// happens exactly once per incident: one recovery entry when it starts, one
+    /// when it clears. A blip that the next retry resolves writes nothing at
+    /// all, and a file failing for an hour is still one entry rather than a
+    /// hundred crowding out everything else in the log.
     fn record_save_failure(&mut self, target: SaveTarget, e: &dyn std::fmt::Display) {
         let error = e.to_string();
         let entry = self
@@ -2640,11 +2720,18 @@ impl App {
                 attempts: 0,
                 next_retry_at: Instant::now(),
                 permanent: false,
+                surfaced: false,
             });
         entry.error = error.clone();
         entry.attempts += 1;
         entry.permanent = is_permanent(&error);
         entry.next_retry_at = Instant::now() + retry_delay(entry.attempts);
+
+        let announce = entry.worth_announcing() && !entry.surfaced;
+        if !announce {
+            return;
+        }
+        entry.surfaced = true;
 
         crate::io::recovery::log_recovery(
             &self.project.frame_dir,
@@ -2652,15 +2739,81 @@ impl App {
                 timestamp: chrono::Utc::now(),
                 category: crate::io::recovery::RecoveryCategory::Write,
                 description: format!("{} save failed", target.label()),
-                fields: vec![("Error".to_string(), error)],
+                fields: vec![("Error".to_string(), error.clone())],
                 body: String::new(),
             },
         );
+
+        // The indicator carries the fact; this carries the reason, once, at the
+        // moment it becomes true.
+        self.status_message = Some(format!("Cannot save {}: {error}", target.label()));
+        self.status_is_error = true;
+    }
+
+    /// What the unsaved indicator should show, or `None` for nothing.
+    ///
+    /// Reads only *announced* failures, so a transient one that the next retry
+    /// clears never reaches the screen — see [`UnsavedFile::worth_announcing`].
+    pub fn unsaved_indicator(&self) -> Option<UnsavedIndicator> {
+        let announced: Vec<(&SaveTarget, &UnsavedFile)> =
+            self.unsaved.iter().filter(|(_, f)| f.surfaced).collect();
+        if announced.is_empty() {
+            return None;
+        }
+
+        let count = announced.len();
+        let only = (count == 1).then(|| self.display_name(announced[0].0));
+
+        // Nothing is scheduled when every announced failure is one only the user
+        // can clear.
+        let waiting_for_user = announced.iter().all(|(_, f)| f.permanent);
+        let now = Instant::now();
+        let retry_in = announced
+            .iter()
+            .filter(|(_, f)| !f.permanent)
+            .map(|(_, f)| f.next_retry_at.saturating_duration_since(now).as_secs())
+            .min();
+        let reason = (count == 1 && waiting_for_user).then(|| announced[0].1.error.clone());
+
+        Some(UnsavedIndicator {
+            count,
+            only,
+            retry_in,
+            waiting_for_user,
+            reason,
+        })
+    }
+
+    /// The file name to show for a save target — `main.md`, not `track main`.
+    fn display_name(&self, target: &SaveTarget) -> String {
+        match target {
+            SaveTarget::Inbox => "inbox.md".to_string(),
+            SaveTarget::Track(id) => self
+                .track_file(id)
+                .and_then(|f| f.rsplit('/').next().map(str::to_string))
+                .unwrap_or_else(|| id.clone()),
+        }
     }
 
     /// Note that a file reached disk, so it is no longer outstanding.
     fn clear_save_failure(&mut self, target: &SaveTarget) {
-        self.unsaved.remove(target);
+        // Only an announced failure gets a resolution entry, so the log reads as
+        // matched pairs rather than orphan "recovered" lines for blips nobody
+        // was ever told about.
+        if let Some(f) = self.unsaved.remove(target)
+            && f.surfaced
+        {
+            crate::io::recovery::log_recovery(
+                &self.project.frame_dir,
+                crate::io::recovery::RecoveryEntry {
+                    timestamp: chrono::Utc::now(),
+                    category: crate::io::recovery::RecoveryCategory::Write,
+                    description: format!("{} saved after {} attempts", target.label(), f.attempts),
+                    fields: vec![("Last error".to_string(), f.error)],
+                    body: String::new(),
+                },
+            );
+        }
     }
 
     /// Re-attempt every outstanding save whose backoff has elapsed.
@@ -5037,6 +5190,150 @@ mod tests {
             vec![&SaveTarget::Track("nonexistent".into())],
             "only the write that failed is outstanding"
         );
+    }
+
+    // ---- Surfacing -------------------------------------------------------
+
+    /// The narrow case worth suppressing: a failure the very next retry clears.
+    /// It should reach neither the screen nor the log — a flash of alarm and a
+    /// junk entry for a problem that fixed itself.
+    #[test]
+    fn a_failure_the_retry_clears_is_never_announced() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+
+        {
+            let _held = FileLock::acquire_default(&app.project.frame_dir).unwrap();
+            app.save_track_logged("a");
+        }
+        assert!(!app.unsaved.is_empty(), "the save should have failed");
+        assert!(
+            app.unsaved_indicator().is_none(),
+            "one failure is not yet worth announcing"
+        );
+
+        app.retry_unsaved_saves(true);
+        assert!(app.unsaved.is_empty());
+
+        let log = crate::io::recovery::recovery_log_path(&app.project.frame_dir);
+        assert!(
+            !log.exists(),
+            "a blip resolved by the next retry should leave nothing behind"
+        );
+    }
+
+    /// A second failure means it is not fixing itself, so it is announced —
+    /// once, however many further attempts fail.
+    #[test]
+    fn a_sustained_failure_is_announced_exactly_once() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        let target = SaveTarget::Track("a".into());
+
+        app.record_save_failure(target.clone(), &"lock timeout".to_string());
+        assert!(app.unsaved_indicator().is_none());
+
+        app.record_save_failure(target.clone(), &"lock timeout".to_string());
+        assert!(
+            app.unsaved_indicator().is_some(),
+            "a failure that survives a retry should be announced"
+        );
+
+        for _ in 0..20 {
+            app.record_save_failure(target.clone(), &"lock timeout".to_string());
+        }
+
+        let log = crate::io::recovery::recovery_log_path(&app.project.frame_dir);
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(
+            text.matches("save failed").count(),
+            1,
+            "22 failures are one incident, not 22 log entries:\n{text}"
+        );
+    }
+
+    /// Nothing about waiting clears a read-only filesystem, so there is no point
+    /// holding the news back for a retry that cannot succeed.
+    #[test]
+    fn a_permanent_failure_is_announced_immediately() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+
+        app.record_save_failure(
+            SaveTarget::Track("a".into()),
+            &"Permission denied (os error 13)".to_string(),
+        );
+
+        let ind = app
+            .unsaved_indicator()
+            .expect("should be announced at once");
+        assert!(ind.waiting_for_user, "no timer will clear this");
+        assert!(ind.full().contains("Permission denied"), "{}", ind.full());
+    }
+
+    #[test]
+    fn the_indicator_names_one_file_and_counts_several() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+
+        for _ in 0..2 {
+            app.record_save_failure(SaveTarget::Track("a".into()), &"lock timeout".to_string());
+        }
+        let ind = app.unsaved_indicator().unwrap();
+        assert_eq!(ind.only.as_deref(), Some("a.md"));
+        assert!(ind.short().contains("a.md"), "{}", ind.short());
+
+        for _ in 0..2 {
+            app.record_save_failure(SaveTarget::Inbox, &"lock timeout".to_string());
+        }
+        let ind = app.unsaved_indicator().unwrap();
+        assert_eq!(ind.count, 2);
+        assert!(ind.short().contains("2 files"), "{}", ind.short());
+    }
+
+    /// The indicator clears only when *every* outstanding file has saved, not
+    /// when any one does.
+    #[test]
+    fn the_indicator_stays_up_while_anything_is_outstanding() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+
+        for _ in 0..2 {
+            app.record_save_failure(SaveTarget::Track("a".into()), &"lock timeout".to_string());
+            app.record_save_failure(SaveTarget::Inbox, &"lock timeout".to_string());
+        }
+        assert_eq!(app.unsaved_indicator().unwrap().count, 2);
+
+        app.save_inbox_logged();
+        assert_eq!(
+            app.unsaved_indicator().map(|i| i.count),
+            Some(1),
+            "one file saving does not clear the warning"
+        );
+
+        app.save_track_logged("a");
+        assert!(
+            app.unsaved_indicator().is_none(),
+            "with nothing outstanding the indicator goes away"
+        );
+    }
+
+    /// An announced incident gets a closing entry, so the log reads as pairs
+    /// rather than an unexplained failure that never resolves.
+    #[test]
+    fn a_resolved_incident_is_recorded() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+
+        for _ in 0..2 {
+            app.record_save_failure(SaveTarget::Track("a".into()), &"lock timeout".to_string());
+        }
+        app.save_track_logged("a");
+
+        let log = crate::io::recovery::recovery_log_path(&app.project.frame_dir);
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(text.contains("save failed"), "{text}");
+        assert!(text.contains("saved after"), "the resolution too: {text}");
     }
 
     // ---- Retry -----------------------------------------------------------
