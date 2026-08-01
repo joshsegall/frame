@@ -1547,7 +1547,7 @@ fn cmd_check_fix(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::
         return Ok(());
     }
 
-    let deleting = fix::deleting_count(&plan);
+    let deleting = fix::destructive_count(&plan);
     if deleting > 0 && !args.yes {
         eprint!("{deleting} of these delete data. Proceed? [y/n] ");
         let mut input = String::new();

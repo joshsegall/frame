@@ -101,7 +101,7 @@ pub enum Repair {
         pattern: String,
     },
     /// Drop the extra copies of a task duplicated inside the archives, keeping
-    /// the first. **Deletes.**
+    /// the first. **Destructive.**
     #[serde(rename = "dedupe_archived_task")]
     DedupeArchivedTask {
         task_id: String,
@@ -110,12 +110,12 @@ pub enum Repair {
         /// Archive paths holding it, as check reports them.
         archives: Vec<String>,
     },
-    /// Remove the leftover frontier-store backup. **Deletes.**
+    /// Remove the leftover frontier-store backup. **Destructive.**
     #[serde(rename = "remove_frontier_backup")]
     RemoveFrontierBackup { path: String },
     /// Give a subtask whose ID does not extend its parent's the next free child
     /// number under that parent, rekeying its own descendants and rewriting every
-    /// `dep:` that pointed at the old ID. **Deletes** — the old ID stops existing
+    /// `dep:` that pointed at the old ID. **Destructive** — the old ID stops existing
     /// anywhere in the project, and frame cannot rewrite a reference held outside
     /// it (a commit message, a PR, a note someone made).
     ///
@@ -128,7 +128,7 @@ pub enum Repair {
         task_id: String,
         parent_id: String,
     },
-    /// Clear an in-flight marker that recovery declined to act on. **Deletes.**
+    /// Clear an in-flight marker that recovery declined to act on. **Destructive.**
     ///
     /// Only reachable when automatic recovery found a precondition it could not
     /// verify, so the operation was left alone and the marker kept. Clearing it
@@ -139,10 +139,16 @@ pub enum Repair {
 }
 
 impl Repair {
-    /// Whether applying this removes bytes that cannot be reconstructed from
-    /// what remains. Repairs that only add are applied without confirmation;
-    /// these require `--yes` or an interactive `y`.
-    pub fn deletes(&self) -> bool {
+    /// Whether applying this destroys something that cannot be reconstructed
+    /// from what remains. Repairs that only add are applied without
+    /// confirmation; these require `--yes` or an interactive `y`.
+    ///
+    /// Named for the consequence rather than the mechanism, because the two have
+    /// already diverged: `RenumberSubtask` removes no bytes at all — it rewrites
+    /// an ID — but the old ID stops existing anywhere in the project and frame
+    /// cannot rewrite a reference held outside it. That is the same
+    /// irreversibility a deletion has, and the gate is about irreversibility.
+    pub fn destructive(&self) -> bool {
         match self {
             Repair::CloseNoteFence { .. }
             | Repair::CloseInboxFence { .. }
@@ -757,10 +763,10 @@ pub fn inbox_touched(result: &FixResult) -> bool {
         .any(|r| matches!(r, Repair::CloseInboxFence { .. }))
 }
 
-/// How many repairs in `plan` remove bytes. This is the confirmation gate — a
-/// caller should not have to know which variants are the deleting ones.
-pub fn deleting_count(plan: &[Repair]) -> usize {
-    plan.iter().filter(|r| r.deletes()).count()
+/// How many repairs in `plan` cannot be undone. This is the confirmation gate —
+/// a caller should not have to know which variants those are.
+pub fn destructive_count(plan: &[Repair]) -> usize {
+    plan.iter().filter(|r| r.destructive()).count()
 }
 
 #[cfg(test)]
@@ -903,7 +909,7 @@ mod tests {
                 pattern: "frame/.*".into(),
             },
         ];
-        assert_eq!(deleting_count(&additive), 0);
+        assert_eq!(destructive_count(&additive), 0);
 
         let mut mixed = additive;
         mixed.push(Repair::RemoveFrontierBackup { path: "/x".into() });
@@ -912,7 +918,7 @@ mod tests {
             total: 3,
             archives: vec!["archive/t.md".into()],
         });
-        assert_eq!(deleting_count(&mixed), 2);
+        assert_eq!(destructive_count(&mixed), 2);
     }
 
     #[test]
@@ -1036,7 +1042,7 @@ mod tests {
         assert_eq!(plan.len(), 1);
         assert!(matches!(plan[0], Repair::RenumberSubtask { .. }));
         // It rewrites an id out of existence, so it needs consent.
-        assert_eq!(deleting_count(&plan), 1);
+        assert_eq!(destructive_count(&plan), 1);
     }
 
     #[test]

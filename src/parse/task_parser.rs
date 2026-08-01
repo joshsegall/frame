@@ -210,6 +210,17 @@ fn parse_single_task(
 }
 
 /// Parse the task line itself: `- [x] \`ID\` Title text #tag1 #tag2`
+///
+/// **Callers must have accepted `line` via [`task_indent`] first.** That is what
+/// makes the byte slice below safe: `task_indent` requires `content` to start
+/// with `- [` and to have `]` at byte 4, which forces the state character to be
+/// a single byte, so byte 5 is a character boundary. Nothing in the type system
+/// says so, and every caller today reaches here through `task_indent`.
+///
+/// The coupling is called out because the same shape was a real abort: `eff5ec0`
+/// fixed `strip_block_indent` slicing `line[4..]` into the middle of a `§`,
+/// which panicked `fr list` outright on a file containing one. That one had no
+/// guard at all; this one has a guard nothing points at.
 fn parse_task_line(line: &str, indent: usize) -> (TaskState, Option<TaskId>, String, Vec<String>) {
     let content = &line[indent..];
 
@@ -221,6 +232,11 @@ fn parse_task_line(line: &str, indent: usize) -> (TaskState, Option<TaskId>, Str
     let state = TaskState::from_checkbox_char(state_char).unwrap_or(TaskState::Todo);
 
     // Skip past `- [X] `
+    debug_assert!(
+        content.is_char_boundary(5),
+        "parse_task_line requires a line task_indent accepted; \
+         byte 5 is not a boundary in {content:?}"
+    );
     let after_checkbox = &content[5..]; // "- [X] " is 5 chars: "- [" + char + "]"
     let after_checkbox = after_checkbox.strip_prefix(' ').unwrap_or(after_checkbox);
 
