@@ -3181,6 +3181,27 @@ fn test_check_fix_closes_note_and_inbox_fences() {
     );
 }
 
+/// An archive holding one task twice, in the shape **`fr clean` actually
+/// writes**: a `# Archive — <track>` title and then bare task lines, with no
+/// `## Section` header.
+///
+/// The shape is the point. Both `--fix` tests below used to invent a `## Done`
+/// section, which exercised a path no real archive takes and let the dedupe
+/// repair ship not working at all — it walked `TrackNode::Section`, found
+/// nothing, and reported the task "no longer appears in the archives".
+/// `tests/damaged_corpus.rs` caught it by building the archive the way clean
+/// does.
+const DUPLICATED_ARCHIVE: &str = "\
+# Archive — main
+
+- [x] `M-900` Archived twice
+  - resolved: 2026-01-01
+- [x] `M-900` Archived twice
+  - resolved: 2026-01-01
+- [x] `M-901` Archived once
+  - resolved: 2026-01-02
+";
+
 /// A repair that deletes must not run without consent. With stdin closed the
 /// prompt reads nothing, which is not `y`, so the run cancels — the behaviour a
 /// non-interactive caller (CI, an agent) gets by default.
@@ -3189,16 +3210,7 @@ fn test_check_fix_cancels_deleting_repair_without_yes() {
     let tmp = tempfile::TempDir::new().unwrap();
     create_test_project(tmp.path());
     fs::create_dir_all(tmp.path().join("frame/archive")).unwrap();
-    let archive = "\
-# Main Archive
-
-## Done
-
-- [x] `M-900` Archived twice
-  - resolved: 2026-01-01
-- [x] `M-900` Archived twice
-  - resolved: 2026-01-01
-";
+    let archive = DUPLICATED_ARCHIVE;
     fs::write(tmp.path().join("frame/archive/main.md"), archive).unwrap();
 
     let (stdout, stderr, ok) = run_fr(tmp.path(), &["check", "--fix"]);
@@ -3218,22 +3230,7 @@ fn test_check_fix_yes_dedupes_archive_and_logs_recovery() {
     let tmp = tempfile::TempDir::new().unwrap();
     create_test_project(tmp.path());
     fs::create_dir_all(tmp.path().join("frame/archive")).unwrap();
-    fs::write(
-        tmp.path().join("frame/archive/main.md"),
-        "\
-# Main Archive
-
-## Done
-
-- [x] `M-900` Archived twice
-  - resolved: 2026-01-01
-- [x] `M-900` Archived twice
-  - resolved: 2026-01-01
-- [x] `M-901` Archived once
-  - resolved: 2026-01-02
-",
-    )
-    .unwrap();
+    fs::write(tmp.path().join("frame/archive/main.md"), DUPLICATED_ARCHIVE).unwrap();
 
     run_fr_ok(tmp.path(), &["check", "--fix", "--yes"]);
 
@@ -3244,6 +3241,10 @@ fn test_check_fix_yes_dedupes_archive_and_logs_recovery() {
         "one copy should remain: {after}"
     );
     assert!(after.contains("`M-901`"), "other tasks untouched: {after}");
+    assert!(
+        after.starts_with("# Archive — main"),
+        "the archive header is carried verbatim: {after}"
+    );
 
     // What was removed is recoverable, not gone.
     let log = run_fr_ok(tmp.path(), &["recovery"]);

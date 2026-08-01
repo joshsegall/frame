@@ -477,6 +477,16 @@ pub fn apply(project: &mut Project, plan: &[Repair]) -> FixResult {
 /// The surviving copy is the first encountered, in the order check reports the
 /// archives. Remaining tasks are untouched and still clean, so they serialize
 /// verbatim: the file is byte-identical apart from the removed blocks.
+///
+/// **An archive is not a track.** `fr clean` writes `# Archive — <track>` and
+/// then bare task lines, with no `## Section` header
+/// (`clean.rs`'s archive append), and both other readers —
+/// [`crate::io::project_io::load_archives`] and the mint scan in
+/// [`crate::ops::ids`] — skip to the first task line and parse from there. This
+/// reads them the same way. Walking `TrackNode::Section` instead, as this did
+/// until `tests/damaged_corpus.rs` ran it against an archive `fr clean` had
+/// actually produced, finds nothing in a real archive: the repair reported
+/// "no longer appears in the archives" and silently changed nothing.
 fn dedupe_archived(frame_dir: &Path, task_id: &str, archives: &[String]) -> Result<(), String> {
     let mut seen = false;
 
@@ -484,24 +494,29 @@ fn dedupe_archived(frame_dir: &Path, task_id: &str, archives: &[String]) -> Resu
         let path = frame_dir.join(rel);
         let content = std::fs::read_to_string(&path)
             .map_err(|e| format!("could not read {}: {e}", path.display()))?;
-        let mut track = crate::parse::parse_track(&content);
+
+        let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+        let start = lines
+            .iter()
+            .position(|l| l.starts_with("- ["))
+            .unwrap_or(lines.len());
+        let (tasks, _) = crate::parse::parse_tasks(&lines, start, 0, 0);
 
         let mut removed = Vec::new();
-        for node in &mut track.nodes {
-            if let TrackNode::Section { tasks, .. } = node {
-                tasks.retain(|task| {
-                    if task.id.as_deref() != Some(task_id) {
-                        return true;
-                    }
-                    if !seen {
-                        seen = true;
-                        return true;
-                    }
-                    removed.push(task.clone());
-                    false
-                });
-            }
-        }
+        let kept: Vec<Task> = tasks
+            .into_iter()
+            .filter(|task| {
+                if task.id.as_deref() != Some(task_id) {
+                    return true;
+                }
+                if !seen {
+                    seen = true;
+                    return true;
+                }
+                removed.push(task.clone());
+                false
+            })
+            .collect();
 
         if removed.is_empty() {
             continue;
@@ -523,7 +538,14 @@ fn dedupe_archived(frame_dir: &Path, task_id: &str, archives: &[String]) -> Resu
             );
         }
 
-        let out = crate::parse::serialize_track(&track);
+        // Everything above the first task line is header — the `# Archive` title
+        // and any blank line under it — and is carried verbatim.
+        let mut out = lines[..start].join("\n");
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&crate::parse::serialize_tasks(&kept, 0).join("\n"));
+        out.push('\n');
         crate::io::recovery::atomic_write(&path, out.as_bytes())
             .map_err(|e| format!("could not write {}: {e}", path.display()))?;
     }
@@ -918,6 +940,46 @@ mod tests {
 
         // Idempotent: a balanced note is left alone.
         assert!(!close_open_fence(&mut task, "```"));
+    }
+
+    /// An archive has no `## Section` header — `fr clean` writes a title and
+    /// then bare task lines. Reading one as a track finds no tasks at all, which
+    /// is how this repair shipped doing nothing on every archive frame produces.
+    #[test]
+    fn dedupe_reads_the_archive_shape_clean_actually_writes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(frame_dir.join("archive")).unwrap();
+        let path = frame_dir.join("archive").join("main.md");
+        std::fs::write(
+            &path,
+            "# Archive — main\n\n\
+             - [x] `M-900` Twice\n  - resolved: 2026-01-01\n\
+             - [x] `M-900` Twice\n  - resolved: 2026-01-01\n\
+             - [x] `M-901` Once\n  - resolved: 2026-01-02\n",
+        )
+        .unwrap();
+
+        dedupe_archived(&frame_dir, "M-900", &["archive/main.md".to_string()]).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after.matches("`M-900`").count(), 1, "{after}");
+        assert!(
+            after.contains("`M-901`"),
+            "untouched task survives: {after}"
+        );
+        assert!(
+            after.starts_with("# Archive — main\n\n"),
+            "header carried verbatim: {after}"
+        );
+
+        // Idempotent: the one remaining copy is not the duplicate.
+        dedupe_archived(&frame_dir, "M-900", &["archive/main.md".to_string()]).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            after,
+            "a second run must change nothing"
+        );
     }
 
     // --- Renumbering a subtask whose id escaped its parent ---
