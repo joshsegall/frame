@@ -2887,6 +2887,73 @@ fn test_worktrees_of_one_clone_do_not_mint_the_same_id() {
     assert!(ok, "check should pass: {status}");
 }
 
+/// The collision the clone-shared frontier deliberately does **not** cover.
+///
+/// Subtask numbers are allocated per parent by scanning that parent's children,
+/// not from the frontier, so two worktrees of one clone adding a subtask to the
+/// same parent both mint the same child id. Prevention was weighed and declined
+/// (see `src/ops/ids.rs`): a child number means nothing outside its parent, so
+/// renumbering one is mechanical — unlike a top-level id, whose reissue `fr
+/// check` reports as unrepairable. What has to hold instead is that the
+/// collision is detected and repaired.
+///
+/// This pins the whole path: collide, merge, detect, repair, converge.
+#[test]
+fn test_colliding_subtask_ids_are_detected_and_repaired() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let Some((main, worktree)) = clone_with_worktree(tmp.path()) else {
+        return; // git unavailable
+    };
+
+    // M-003 already has .1 and .2 in the fixture. Each tree scans only its own
+    // copy, sees the same two children, and hands out the same next number.
+    let mine = run_fr_ok(&main, &["sub", "M-003", "from main"]);
+    let theirs = run_fr_ok(&worktree, &["sub", "M-003", "from worktree"]);
+    assert_eq!(
+        mine.trim(),
+        theirs.trim(),
+        "the known open collision; if this ever stops holding, \
+         subtask minting grew a frontier and this test is the wrong shape"
+    );
+    assert_eq!(mine.trim(), "M-003.3");
+
+    // Merge the two working copies: both subtasks survive, carrying one id.
+    let merged = fs::read_to_string(main.join("frame/tracks/main.md"))
+        .unwrap()
+        .replace(
+            "  - [ ] `M-003.3` from main\n",
+            "  - [ ] `M-003.3` from main\n  - [ ] `M-003.3` from worktree\n",
+        );
+    fs::write(main.join("frame/tracks/main.md"), &merged).unwrap();
+    assert_eq!(merged.matches("`M-003.3`").count(), 2, "merge staged");
+
+    // Detected — the generic duplicate-id error covers subtasks.
+    let (out, _, _) = run_fr(&main, &["check"]);
+    assert!(
+        out.contains("M-003.3 is duplicated"),
+        "should report the collision: {out}"
+    );
+
+    // Repaired, under the parent — not promoted to a top-level number.
+    run_fr_ok(&main, &["clean"]);
+    let after = fs::read_to_string(main.join("frame/tracks/main.md")).unwrap();
+    assert!(
+        after.contains("`M-003.3` from main") && after.contains("`M-003.4` from worktree"),
+        "the second copy should take the next child number: {after}"
+    );
+
+    // Converged: no duplicate left, and nothing escaped its parent.
+    let (recheck, _, _) = run_fr(&main, &["check"]);
+    assert!(
+        !recheck.contains("duplicated"),
+        "duplicate survived: {recheck}"
+    );
+    assert!(
+        !recheck.contains("doesn't extend"),
+        "the repair must not misparent anything: {recheck}"
+    );
+}
+
 /// Archived tasks keep their numbers: `fr clean` moving a done task out of the
 /// live track must not free its number for reuse.
 #[test]
@@ -3183,6 +3250,79 @@ fn test_check_fix_yes_dedupes_archive_and_logs_recovery() {
     assert!(
         log.contains("M-900"),
         "removed copy should be in the recovery log: {log}"
+    );
+}
+
+/// The damage `fr clean` used to leave behind: a duplicated *subtask* id
+/// resolved with a top-level number, so the task ends up as `M-020` nested under
+/// `M-003`. Projects cleaned before that was fixed still hold it on disk, which
+/// is what this repair is for.
+#[test]
+fn test_check_fix_renumbers_a_subtask_that_escaped_its_parent() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    fs::write(
+        tmp.path().join("frame/tracks/main.md"),
+        "\
+# Main Track
+
+## Backlog
+
+- [ ] `M-003` Parent
+  - added: 2025-05-03
+  - [ ] `M-003.1` Sub one
+    - added: 2025-05-03
+  - [ ] `M-020` Escaped, with a child of its own
+    - added: 2025-05-03
+    - [ ] `M-020.1` Deep
+      - added: 2025-05-03
+- [ ] `M-004` Waiting on the escapee
+  - added: 2025-05-03
+  - dep: M-020
+
+## Done
+",
+    )
+    .unwrap();
+
+    let reported = run_fr_ok(tmp.path(), &["check"]);
+    assert!(
+        reported.contains("M-020 is nested under M-003 but its id doesn't extend it"),
+        "should report it: {reported}"
+    );
+
+    // It rewrites an id out of existence, so it needs consent.
+    let planned = run_fr_ok(tmp.path(), &["check", "--fix", "--dry-run"]);
+    assert!(
+        planned.contains("renumber under its parent M-003"),
+        "should plan it: {planned}"
+    );
+
+    run_fr_ok(tmp.path(), &["check", "--fix", "--yes"]);
+
+    let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    assert!(
+        track.contains("`M-003.2` Escaped"),
+        "should take the next free child number: {track}"
+    );
+    assert!(
+        track.contains("`M-003.2.1` Deep"),
+        "descendants follow: {track}"
+    );
+    assert!(
+        track.contains("dep: M-003.2"),
+        "deps follow the rekey: {track}"
+    );
+
+    let recheck = run_fr_ok(tmp.path(), &["check"]);
+    assert!(
+        !recheck.contains("doesn't extend"),
+        "finding should be gone: {recheck}"
+    );
+    let again = run_fr_ok(tmp.path(), &["check", "--fix"]);
+    assert!(
+        again.contains("nothing to repair"),
+        "--fix must be idempotent: {again}"
     );
 }
 

@@ -28,7 +28,12 @@
 //! keeping next to the code that could otherwise be tempted to add them:
 //!
 //! - `IdReissuedAfterArchive` — renumbering a live task rewrites an ID that
-//!   other work may already reference.
+//!   other work may already reference. `ChildIdNotUnderParent` *is* repaired
+//!   here despite rewriting an ID too, and the difference is that it has one
+//!   correct answer: a subtask's ID must extend its parent's, so which task
+//!   changes and what it becomes are both determined. A reissued number instead
+//!   asks which of two legitimate holders should move — a judgment call, and one
+//!   where the archived holder cannot move at all.
 //! - `ActorNameCollision` — the repair is `fr actor merge`, which renumbers a
 //!   whole namespace. A human call, already documented as one.
 //! - `ActorTokenRetiredButHeld` — reactivate the token, or claim a fresh one?
@@ -108,6 +113,21 @@ pub enum Repair {
     /// Remove the leftover frontier-store backup. **Deletes.**
     #[serde(rename = "remove_frontier_backup")]
     RemoveFrontierBackup { path: String },
+    /// Give a subtask whose ID does not extend its parent's the next free child
+    /// number under that parent, rekeying its own descendants and rewriting every
+    /// `dep:` that pointed at the old ID. **Deletes** — the old ID stops existing
+    /// anywhere in the project, and frame cannot rewrite a reference held outside
+    /// it (a commit message, a PR, a note someone made).
+    ///
+    /// The new ID is not known until apply: [`plan`] reads the check result and
+    /// never the project, and the free number depends on the parent's other
+    /// children.
+    #[serde(rename = "renumber_subtask")]
+    RenumberSubtask {
+        track_id: String,
+        task_id: String,
+        parent_id: String,
+    },
     /// Clear an in-flight marker that recovery declined to act on. **Deletes.**
     ///
     /// Only reachable when automatic recovery found a precondition it could not
@@ -129,7 +149,8 @@ impl Repair {
             | Repair::AddGitignorePattern { .. } => false,
             Repair::DedupeArchivedTask { .. }
             | Repair::RemoveFrontierBackup { .. }
-            | Repair::ClearInflightMarker { .. } => true,
+            | Repair::ClearInflightMarker { .. }
+            | Repair::RenumberSubtask { .. } => true,
         }
     }
 
@@ -172,6 +193,16 @@ impl Repair {
             Repair::RemoveFrontierBackup { path } => {
                 format!("delete stale frontier backup {path}")
             }
+            Repair::RenumberSubtask {
+                track_id,
+                task_id,
+                parent_id,
+            } => {
+                format!(
+                    "[{track_id}] {task_id}: renumber under its parent {parent_id} \
+                     (its id does not extend the parent's); deps follow"
+                )
+            }
             Repair::ClearInflightMarker { command, .. } => {
                 format!(
                     "clear the in-flight marker for `{command}` (recovery could not complete it)"
@@ -188,6 +219,12 @@ pub struct FixResult {
     /// Repairs that could not be applied, with why. A task renamed or removed
     /// between the plan and the apply lands here rather than failing the run.
     pub skipped: Vec<SkippedRepair>,
+    /// Tracks changed as a side effect, beyond the one a repair names: renumbering
+    /// a subtask rewrites `dep:` lines wherever they point at the old ID, which
+    /// can be any track. Folded into [`tracks_touched`]; not part of the JSON
+    /// shape, which reports repairs rather than files.
+    #[serde(skip)]
+    pub also_touched: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -262,6 +299,15 @@ pub fn plan(check: &CheckResult) -> Vec<Repair> {
                 task_id: task_id.clone(),
                 total: *total,
                 archives: archives.clone(),
+            }),
+            CheckWarning::ChildIdNotUnderParent {
+                track_id,
+                task_id,
+                parent_id,
+            } => plan.push(Repair::RenumberSubtask {
+                track_id: track_id.clone(),
+                task_id: task_id.clone(),
+                parent_id: parent_id.clone(),
             }),
             CheckWarning::IdFrontierWasReset { path } => {
                 plan.push(Repair::RemoveFrontierBackup { path: path.clone() })
@@ -378,6 +424,20 @@ pub fn apply(project: &mut Project, plan: &[Repair]) -> FixResult {
                     reason,
                 }),
             },
+            Repair::RenumberSubtask {
+                track_id,
+                task_id,
+                parent_id,
+            } => match apply_renumber_subtask(project, track_id, task_id, parent_id) {
+                Ok(touched) => {
+                    result.also_touched.extend(touched);
+                    result.applied.push(repair.clone())
+                }
+                Err(reason) => result.skipped.push(SkippedRepair {
+                    repair: repair.clone(),
+                    reason,
+                }),
+            },
             Repair::ClearInflightMarker { .. } => {
                 match crate::io::inflight::clear(&project.frame_dir) {
                     Ok(()) => result.applied.push(repair.clone()),
@@ -473,6 +533,78 @@ fn dedupe_archived(frame_dir: &Path, task_id: &str, archives: &[String]) -> Resu
     } else {
         Err(format!("{task_id} no longer appears in the archives"))
     }
+}
+
+/// Give `task_id` the next free child number under `parent_id`.
+///
+/// The new number is minted in **the namespace the task's own ID already
+/// carries**, not this working copy's. The task is not being created here, only
+/// put back where its ID says it belongs; re-minting it into the repairing
+/// clone's namespace would quietly reattribute someone else's task.
+///
+/// Returns the tracks left dirty — the one holding the task, plus any whose
+/// `dep:` lines were rewritten.
+fn apply_renumber_subtask(
+    project: &mut Project,
+    track_id: &str,
+    task_id: &str,
+    parent_id: &str,
+) -> Result<Vec<String>, String> {
+    use crate::model::task_id::TaskId;
+    use crate::ops::task_ops;
+
+    let track = project
+        .tracks
+        .iter()
+        .find(|(id, _)| id == track_id)
+        .map(|(_, t)| t)
+        .ok_or_else(|| format!("track '{track_id}' not found"))?;
+
+    let parent = task_ops::find_task_in_track(track, parent_id)
+        .ok_or_else(|| format!("parent '{parent_id}' not found"))?;
+    let parent_task_id = parent
+        .id
+        .as_ref()
+        .filter(|id| id.is_structured())
+        .ok_or_else(|| format!("parent '{parent_id}' has no structured id"))?;
+
+    // Re-establish that the finding still holds. The plan was computed from a
+    // check result; anything else in the same run may have moved the task since.
+    let current = parent
+        .subtasks
+        .iter()
+        .find_map(|sub| sub.id.as_ref().filter(|id| id.as_str() == task_id))
+        .ok_or_else(|| format!("'{task_id}' is no longer a subtask of '{parent_id}'"))?;
+    if current.is_child_of(parent_task_id) {
+        return Err(format!("'{task_id}' already extends '{parent_id}'"));
+    }
+
+    let token = current.leaf_token().cloned();
+    let number = task_ops::next_child_number(parent, token.as_ref()) as u32;
+    let new_id = TaskId::child_of(parent_task_id, number, token.as_ref());
+
+    let track = project
+        .tracks
+        .iter_mut()
+        .find(|(id, _)| id == track_id)
+        .map(|(_, t)| t)
+        .expect("track was found immutably a moment ago");
+    let task = task_ops::find_task_mut_in_track(track, task_id)
+        .expect("task was found immutably a moment ago");
+    // Descendants have to follow: `BAC-207.1` under a renamed `BAC-207` would
+    // otherwise become the very defect being repaired.
+    let mappings = task_ops::rekey_subtree(task, new_id.as_str(), token.as_ref());
+
+    for (old, new) in &mappings {
+        task_ops::update_dep_references(&mut project.tracks, old, new);
+    }
+
+    Ok(project
+        .tracks
+        .iter()
+        .filter(|(_, t)| task_ops::track_has_dirty_task(t))
+        .map(|(id, _)| id.clone())
+        .collect())
 }
 
 fn apply_note_fence(
@@ -583,10 +715,13 @@ pub fn tracks_touched(result: &FixResult) -> Vec<String> {
         .applied
         .iter()
         .filter_map(|r| match r {
-            Repair::CloseNoteFence { track_id, .. } => Some(track_id.clone()),
+            Repair::CloseNoteFence { track_id, .. } | Repair::RenumberSubtask { track_id, .. } => {
+                Some(track_id.clone())
+            }
             _ => None,
         })
         .collect();
+    out.extend(result.also_touched.iter().cloned());
     out.sort();
     out.dedup();
     out
@@ -783,5 +918,210 @@ mod tests {
 
         // Idempotent: a balanced note is left alone.
         assert!(!close_open_fence(&mut task, "```"));
+    }
+
+    // --- Renumbering a subtask whose id escaped its parent ---
+
+    fn project_with(tracks: Vec<(&str, &str)>) -> Project {
+        use crate::model::config::{
+            AgentConfig, CleanConfig, IdConfig, ProjectConfig, ProjectInfo, TrackConfig, UiConfig,
+        };
+        Project {
+            root: std::path::PathBuf::from("/tmp/fix-test"),
+            frame_dir: std::path::PathBuf::from("/tmp/fix-test/frame"),
+            config: ProjectConfig {
+                project: ProjectInfo {
+                    name: "test".to_string(),
+                },
+                agent: AgentConfig::default(),
+                tracks: tracks
+                    .iter()
+                    .map(|(id, _)| TrackConfig {
+                        id: id.to_string(),
+                        name: id.to_string(),
+                        state: "active".to_string(),
+                        file: format!("tracks/{id}.md"),
+                    })
+                    .collect(),
+                clean: CleanConfig::default(),
+                ids: IdConfig {
+                    prefixes: indexmap::IndexMap::new(),
+                },
+                ui: UiConfig::default(),
+            },
+            tracks: tracks
+                .into_iter()
+                .map(|(id, src)| (id.to_string(), crate::parse::parse_track(src)))
+                .collect(),
+            inbox: None,
+        }
+    }
+
+    /// Plan and apply, driven by what check actually reported — the same path
+    /// the CLI takes.
+    fn fix_all(project: &mut Project) -> FixResult {
+        let plan = plan(&crate::ops::check::check_project(project));
+        apply(project, &plan)
+    }
+
+    #[test]
+    fn a_misparented_subtask_is_planned_for_renumbering() {
+        let plan = plan(&result_with(vec![CheckWarning::ChildIdNotUnderParent {
+            track_id: "main".into(),
+            task_id: "M-007".into(),
+            parent_id: "M-001".into(),
+        }]));
+        assert_eq!(plan.len(), 1);
+        assert!(matches!(plan[0], Repair::RenumberSubtask { .. }));
+        // It rewrites an id out of existence, so it needs consent.
+        assert_eq!(deleting_count(&plan), 1);
+    }
+
+    #[test]
+    fn renumbering_puts_the_subtask_under_its_parent() {
+        let mut project = project_with(vec![(
+            "main",
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Parent
+  - [ ] `M-001.1` Sibling
+  - [ ] `M-007` Escaped
+
+## Done
+",
+        )]);
+
+        let result = fix_all(&mut project);
+        assert_eq!(result.applied.len(), 1);
+        assert!(result.skipped.is_empty());
+
+        let subs = &project.tracks[0].1.backlog()[0].subtasks;
+        assert_eq!(subs[1].id.as_deref(), Some("M-001.2"));
+        assert!(subs[1].dirty);
+        assert_eq!(tracks_touched(&result), vec!["main".to_string()]);
+
+        // And the finding is gone.
+        assert!(fix_all(&mut project).applied.is_empty());
+    }
+
+    /// The escaped subtask's own children follow it, or they become the very
+    /// defect being repaired.
+    #[test]
+    fn renumbering_carries_descendants_and_their_deps() {
+        let mut project = project_with(vec![
+            (
+                "main",
+                "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Parent
+  - [ ] `M-007` Escaped
+    - [ ] `M-007.1` Child of the escapee
+
+## Done
+",
+            ),
+            (
+                "other",
+                "\
+# Other
+
+## Backlog
+
+- [ ] `O-001` Waiting
+  - dep: M-007.1
+
+## Done
+",
+            ),
+        ]);
+
+        let result = fix_all(&mut project);
+        assert_eq!(result.applied.len(), 1);
+
+        let escaped = &project.tracks[0].1.backlog()[0].subtasks[0];
+        assert_eq!(escaped.id.as_deref(), Some("M-001.1"));
+        assert_eq!(escaped.subtasks[0].id.as_deref(), Some("M-001.1.1"));
+
+        let waiting = &project.tracks[1].1.backlog()[0];
+        assert!(
+            waiting
+                .metadata
+                .iter()
+                .any(|m| matches!(m, Metadata::Dep(d) if d == &vec!["M-001.1.1".to_string()])),
+            "dep should follow the rekey: {:?}",
+            waiting.metadata
+        );
+
+        // Both files have to be saved, not just the one the repair names.
+        assert_eq!(
+            tracks_touched(&result),
+            vec!["main".to_string(), "other".to_string()]
+        );
+    }
+
+    /// The task is put back where its id says it belongs; it is not reassigned
+    /// to whoever happens to be running the repair. The namespace comes from the
+    /// id already on the task.
+    #[test]
+    fn renumbering_keeps_the_id_in_its_own_namespace() {
+        let mut project = project_with(vec![(
+            "main",
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Parent
+  - [ ] `M-001.1` Ours
+  - [ ] `M-b12` Theirs, escaped
+
+## Done
+",
+        )]);
+
+        fix_all(&mut project);
+
+        let subs = &project.tracks[0].1.backlog()[0].subtasks;
+        assert_eq!(subs[1].id.as_deref(), Some("M-001.b1"));
+    }
+
+    /// A plan is applied against a project that may have moved since check ran.
+    /// A repair whose finding no longer holds is skipped with a reason, not
+    /// forced through onto whatever task now answers to that id.
+    #[test]
+    fn a_repair_whose_finding_went_away_is_skipped() {
+        let mut project = project_with(vec![(
+            "main",
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Parent
+  - [ ] `M-001.1` Already fine
+
+## Done
+",
+        )]);
+
+        let stale = vec![Repair::RenumberSubtask {
+            track_id: "main".into(),
+            task_id: "M-001.1".into(),
+            parent_id: "M-001".into(),
+        }];
+        let result = apply(&mut project, &stale);
+        assert!(result.applied.is_empty());
+        assert_eq!(result.skipped.len(), 1);
+        assert!(
+            result.skipped[0].reason.contains("already extends"),
+            "reason: {}",
+            result.skipped[0].reason
+        );
     }
 }

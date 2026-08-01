@@ -191,7 +191,7 @@ fr check --fix [--dry-run] [--yes]
 
 Applies the repairs check would otherwise only describe. Bare `fr check` never writes — the repair path is only reached with `--fix`.
 
-The plan is exactly what check reported: one warning in, at most one repair out. Six findings are repairable:
+The plan is exactly what check reported: one warning in, at most one repair out. Seven findings are repairable:
 
 | Finding | Repair | Deletes? |
 |---|---|---|
@@ -201,6 +201,9 @@ The plan is exactly what check reported: one warning in, at most one repair out.
 | duplicate archived ID | drop the extra copies, keeping one | **yes** |
 | leftover `frame-ids.toml.bak` | delete the stale backup | **yes** |
 | interrupted operation recovery declined | clear the `.inflight` marker | **yes** |
+| subtask ID that doesn't extend its parent's | renumber it under that parent | **yes** |
+
+A **subtask whose ID escaped its parent** — `M-020` nested under `M-003` — gets the next free child number under the parent it actually sits below, in the namespace its own ID already carries rather than yours. Its descendants are rekeyed with it and every `dep:` pointing at the old IDs follows. It counts as deleting because the old ID stops existing anywhere in the project, and frame cannot rewrite a reference you kept somewhere else. Renumbering a reissued *top-level* ID is not repairable for a related but different reason: there, two legitimate holders exist and which one moves is your call.
 
 An **interrupted operation** (`frame/.inflight`) is normally not repaired here at all — the next write command completes it automatically and clears the marker. The repair above exists only for the case where recovery declined to act because a precondition no longer held, so the marker would otherwise stand forever with no way to acknowledge it.
 
@@ -487,7 +490,7 @@ Actions performed:
 - Assign missing task IDs
 - Add missing `added` dates
 - Add missing `resolved` dates to done tasks
-- Resolve duplicate IDs
+- Resolve duplicate IDs — the first occurrence in track order keeps the ID. A duplicated **subtask** is renumbered under its own parent (`M-003.3` → `M-003.4`), not given a top-level number, so its ID keeps saying where it lives. This is the resolution path for the one ID collision the frontier doesn't prevent: two worktrees of a clone adding a subtask to the same parent.
 - Archive done tasks exceeding the threshold
 - Move top-level tasks into the section matching their state
 - Report dangling dependencies and broken refs

@@ -240,11 +240,10 @@ impl TaskId {
         }
     }
 
-    /// If `self` is a direct child of `parent` (one extra segment whose preceding
-    /// segments match the parent exactly) and that last segment is in the `token`
-    /// namespace (`None` = null), return the child number. Used by the gap-safe,
-    /// per-namespace child-number scan.
-    pub fn child_number_of(&self, parent: &TaskId, token: Option<&Token>) -> Option<u32> {
+    /// The last segment of `self` when it is a direct child of `parent`: one
+    /// extra segment, with every preceding segment matching the parent exactly.
+    /// Namespace-blind — callers that care filter on the segment's own token.
+    fn child_segment_of(&self, parent: &TaskId) -> Option<&Segment> {
         match (&self.parsed, &parent.parsed) {
             (
                 ParsedId::Structured {
@@ -255,16 +254,39 @@ impl TaskId {
                     prefix: pp,
                     segments: ps,
                 },
-            ) if cp == pp && cs.len() == ps.len() + 1 && cs[..ps.len()] == ps[..] => {
-                let last = cs.last()?;
-                if last.token.as_ref() == token {
-                    Some(last.number)
-                } else {
-                    None
-                }
-            }
+            ) if cp == pp && cs.len() == ps.len() + 1 && cs[..ps.len()] == ps[..] => cs.last(),
             _ => None,
         }
+    }
+
+    /// If `self` is a direct child of `parent` (one extra segment whose preceding
+    /// segments match the parent exactly) and that last segment is in the `token`
+    /// namespace (`None` = null), return the child number. Used by the gap-safe,
+    /// per-namespace child-number scan.
+    pub fn child_number_of(&self, parent: &TaskId, token: Option<&Token>) -> Option<u32> {
+        let last = self.child_segment_of(parent)?;
+        (last.token.as_ref() == token).then_some(last.number)
+    }
+
+    /// Whether `self` is a direct child of `parent` in **any** namespace.
+    ///
+    /// This is the structural rule the grammar exists to express — a subtask's ID
+    /// extends its parent's — stated without reference to who minted it, which is
+    /// what a *validator* needs: a subtask minted by another clone still has to
+    /// sit under its parent. [`child_number_of`](Self::child_number_of) is the
+    /// namespace-scoped form, for minting.
+    ///
+    /// A `Raw` ID on either side is never a child, so a hand-written ID hierarchy
+    /// that does not match the grammar is left alone rather than reported.
+    pub fn is_child_of(&self, parent: &TaskId) -> bool {
+        self.child_segment_of(parent).is_some()
+    }
+
+    /// Whether this ID matches the grammar (as opposed to being preserved
+    /// verbatim as [`Raw`](ParsedId::Raw)). Only structured IDs carry the
+    /// parent/child relationship [`is_child_of`](Self::is_child_of) tests.
+    pub fn is_structured(&self) -> bool {
+        matches!(self.parsed, ParsedId::Structured { .. })
     }
 }
 
@@ -547,6 +569,50 @@ mod tests {
             TaskId::parse("EFF-a14.b2").child_number_of(&parent, Some(&tok("c"))),
             None
         );
+    }
+
+    /// The validator's question — *is this id under that one* — is namespace-blind
+    /// where the minter's is not. A subtask minted by another clone is still a
+    /// subtask.
+    #[test]
+    fn is_child_of_ignores_the_namespace() {
+        let parent = TaskId::parse("EFF-a14");
+        assert!(TaskId::parse("EFF-a14.1").is_child_of(&parent));
+        assert!(TaskId::parse("EFF-a14.b2").is_child_of(&parent));
+        // Same segments, but the scan that mints would skip the `b` one.
+        assert_eq!(
+            TaskId::parse("EFF-a14.b2").child_number_of(&parent, None),
+            None
+        );
+    }
+
+    #[test]
+    fn is_child_of_rejects_everything_that_is_not_one_level_down() {
+        let parent = TaskId::parse("M-001");
+        // A top-level id, which is what a duplicate resolution used to hand a
+        // subtask.
+        assert!(!TaskId::parse("M-007").is_child_of(&parent));
+        // Another parent's child.
+        assert!(!TaskId::parse("M-002.1").is_child_of(&parent));
+        // A grandchild — depth alone is not the rule.
+        assert!(!TaskId::parse("M-001.1.1").is_child_of(&parent));
+        // A different prefix.
+        assert!(!TaskId::parse("S-001.1").is_child_of(&parent));
+        // The parent itself.
+        assert!(!TaskId::parse("M-001").is_child_of(&parent));
+    }
+
+    /// Raw ids round-trip verbatim and carry no structure, so they are never
+    /// related — which is what keeps a hand-written id hierarchy from being
+    /// reported as damage.
+    #[test]
+    fn raw_ids_are_never_children() {
+        assert!(!TaskId::parse("M-001.1").is_child_of(&TaskId::parse("legacy/thing")));
+        assert!(!TaskId::parse("whatever").is_child_of(&TaskId::parse("M-001")));
+        assert!(!TaskId::parse("a/b").is_child_of(&TaskId::parse("a")));
+
+        assert!(TaskId::parse("M-001").is_structured());
+        assert!(!TaskId::parse("legacy/thing").is_structured());
     }
 
     #[test]

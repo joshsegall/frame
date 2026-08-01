@@ -525,12 +525,28 @@ fn assign_resolved_in_tasks(
 // 3. Duplicate ID resolution
 // ---------------------------------------------------------------------------
 
+/// A duplicate occurrence awaiting a fresh ID.
+struct Duplicate {
+    old_id: String,
+    track_id: String,
+    /// The ID of the task this one is nested under, or `None` at top level.
+    /// A subtask's replacement ID has to extend its parent's, so this decides
+    /// which allocator the replacement comes from.
+    parent_id: Option<String>,
+}
+
 /// Find and resolve duplicate IDs across the project.
 ///
 /// The first occurrence by track order (as listed in `project.toml`) then by
 /// position within the track keeps its ID. Subsequent duplicates are reassigned
 /// new IDs via the standard `max + 1` rule. Dependencies pointing to the
 /// reassigned ID are updated across all tracks.
+///
+/// A duplicate that is a **subtask** is renumbered under its own parent, not
+/// given a top-level number. Both allocators are `max + 1`, but they number
+/// different things: minting `BAC-207` for a task nested under `BAC-153` resolves
+/// the collision while breaking the rule that a subtask's ID extends its
+/// parent's, leaving damage `fr check` reports as `ChildIdNotUnderParent`.
 fn resolve_duplicate_ids(project: &mut Project, token: Option<&Token>, result: &mut CleanResult) {
     // Build ordered track list from config (defines precedence)
     let track_order: Vec<String> = project
@@ -543,8 +559,7 @@ fn resolve_duplicate_ids(project: &mut Project, token: Option<&Token>, result: &
     // Pass 1: Walk all tasks in track order, identify duplicate IDs.
     // First occurrence keeps the ID; subsequent occurrences are collected for reassignment.
     let mut seen_ids: HashSet<String> = HashSet::new();
-    // (old_id, track_id, title) for each duplicate that needs reassignment
-    let mut duplicates: Vec<(String, String, String)> = Vec::new();
+    let mut duplicates: Vec<Duplicate> = Vec::new();
 
     for config_track_id in &track_order {
         if let Some((_, track)) = project
@@ -557,6 +572,7 @@ fn resolve_duplicate_ids(project: &mut Project, token: Option<&Token>, result: &
                     find_duplicates_in_tasks(
                         tasks,
                         config_track_id,
+                        None,
                         &mut seen_ids,
                         &mut duplicates,
                     );
@@ -599,7 +615,17 @@ fn resolve_duplicate_ids(project: &mut Project, token: Option<&Token>, result: &
     // So dep rewriting is only needed if ALL instances of an ID were reassigned
     // (which never happens — the first keeps its ID). Therefore: no dep rewriting needed.
 
-    for (old_id, dup_track_id, _title) in &duplicates {
+    // Child numbers already handed out in this batch, keyed by parent ID. Like
+    // `staged` below, these aren't in the track yet, so two duplicates under one
+    // parent would otherwise both be offered the same number.
+    let mut staged_children: HashMap<String, u32> = HashMap::new();
+
+    for dup in &duplicates {
+        let Duplicate {
+            old_id,
+            track_id: dup_track_id,
+            parent_id,
+        } = dup;
         let prefix = project
             .config
             .ids
@@ -616,17 +642,28 @@ fn resolve_duplicate_ids(project: &mut Project, token: Option<&Token>, result: &
             .map(|(_, t)| t);
         let Some(track) = track else { continue };
 
-        // Reassignments already computed in this batch aren't in the track yet,
-        // so they have to be floored in explicitly.
-        let staged = reassignments
-            .values()
-            .flatten()
-            .filter_map(|new_id| TaskId::parse(new_id).top_level_number(&pfx, token))
-            .max()
-            .unwrap_or(0);
+        // A nested duplicate is renumbered under its own parent. Falls through to
+        // the top-level mint if the parent has gone missing or its ID doesn't
+        // match the grammar, where there is no child number to hand out.
+        let new_id = match parent_id
+            .as_deref()
+            .and_then(|pid| next_child_id_under(track, pid, token, &mut staged_children))
+        {
+            Some(child_id) => child_id,
+            None => {
+                // Reassignments already computed in this batch aren't in the
+                // track yet, so they have to be floored in explicitly.
+                let staged = reassignments
+                    .values()
+                    .flatten()
+                    .filter_map(|new_id| TaskId::parse(new_id).top_level_number(&pfx, token))
+                    .max()
+                    .unwrap_or(0);
 
-        let mint = Mint::new(&project.frame_dir, dup_track_id, &pfx, token);
-        let new_id = TaskId::with_number(&pfx, mint.next_above(track, staged), token).to_string();
+                let mint = Mint::new(&project.frame_dir, dup_track_id, &pfx, token);
+                TaskId::with_number(&pfx, mint.next_above(track, staged), token).to_string()
+            }
+        };
         reassignments
             .entry(old_id.clone())
             .or_default()
@@ -661,11 +698,36 @@ fn resolve_duplicate_ids(project: &mut Project, token: Option<&Token>, result: &
     }
 }
 
+/// The next free child number under `parent_id`, rendered as a full child ID.
+///
+/// `None` when the parent is gone or its own ID doesn't match the grammar —
+/// there is no child number to extend in either case, and the caller falls back
+/// to a top-level mint rather than inventing one.
+///
+/// `staged` carries the numbers already handed out under each parent in this
+/// batch, which the track does not show yet.
+fn next_child_id_under(
+    track: &Track,
+    parent_id: &str,
+    token: Option<&Token>,
+    staged: &mut HashMap<String, u32>,
+) -> Option<String> {
+    let parent = crate::ops::task_ops::find_task_in_track(track, parent_id)?;
+    let parent_task_id = parent.id.as_ref().filter(|id| id.is_structured())?;
+
+    let scanned = crate::ops::task_ops::next_child_number(parent, token) as u32;
+    let slot = staged.entry(parent_id.to_string()).or_insert(0);
+    let number = scanned.max(*slot + 1);
+    *slot = number;
+    Some(TaskId::child_of(parent_task_id, number, token).to_string())
+}
+
 fn find_duplicates_in_tasks(
     tasks: &[Task],
     track_id: &str,
+    parent_id: Option<&str>,
     seen: &mut HashSet<String>,
-    duplicates: &mut Vec<(String, String, String)>,
+    duplicates: &mut Vec<Duplicate>,
 ) {
     for task in tasks {
         if task
@@ -674,9 +736,19 @@ fn find_duplicates_in_tasks(
             .is_some_and(|id| !seen.insert(id.to_string()))
         {
             let id = task.id.as_ref().unwrap();
-            duplicates.push((id.to_string(), track_id.to_string(), task.title.clone()));
+            duplicates.push(Duplicate {
+                old_id: id.to_string(),
+                track_id: track_id.to_string(),
+                parent_id: parent_id.map(str::to_string),
+            });
         }
-        find_duplicates_in_tasks(&task.subtasks, track_id, seen, duplicates);
+        find_duplicates_in_tasks(
+            &task.subtasks,
+            track_id,
+            task.id.as_deref(),
+            seen,
+            duplicates,
+        );
     }
 }
 
@@ -2259,6 +2331,209 @@ mod tests {
         // Subtasks renumbered
         assert_eq!(backlog[1].subtasks[0].id.as_deref(), Some("M-002.1"));
         assert_eq!(backlog[1].subtasks[1].id.as_deref(), Some("M-002.2"));
+    }
+
+    /// The collision two worktrees of one clone can still produce: both add a
+    /// subtask to the same parent, both mint `.4`, the merge keeps both.
+    ///
+    /// Resolution has to come from the *parent's* child numbering. Minting a
+    /// top-level `M-002` here would make the ID unique while breaking the rule
+    /// that a subtask's ID extends its parent's.
+    #[test]
+    fn test_resolve_duplicate_subtask_renumbers_under_its_parent() {
+        let mut project = make_project(
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Parent
+  - added: 2025-05-01
+  - [ ] `M-001.4` Mine
+    - added: 2025-05-01
+  - [ ] `M-001.4` Theirs
+    - added: 2025-05-01
+
+## Done
+",
+            vec![("main", "M")],
+        );
+
+        let result = clean_project(&mut project, IdScope::Mint(None));
+
+        assert_eq!(result.duplicates_resolved.len(), 1);
+        assert_eq!(result.duplicates_resolved[0].original_id, "M-001.4");
+        assert_eq!(result.duplicates_resolved[0].new_id, "M-001.5");
+
+        let backlog = project.tracks[0].1.backlog();
+        assert_eq!(backlog.len(), 1, "no task was promoted to top level");
+        assert_eq!(backlog[0].subtasks[0].id.as_deref(), Some("M-001.4"));
+        assert_eq!(backlog[0].subtasks[1].id.as_deref(), Some("M-001.5"));
+    }
+
+    /// Two collisions under one parent in a single pass: the second cannot be
+    /// offered the number the first just took, which the track does not show yet.
+    #[test]
+    fn test_resolve_duplicate_subtasks_stage_within_one_parent() {
+        let mut project = make_project(
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Parent
+  - added: 2025-05-01
+  - [ ] `M-001.1` Original
+    - added: 2025-05-01
+  - [ ] `M-001.1` Copy one
+    - added: 2025-05-01
+  - [ ] `M-001.1` Copy two
+    - added: 2025-05-01
+
+## Done
+",
+            vec![("main", "M")],
+        );
+
+        clean_project(&mut project, IdScope::Mint(None));
+
+        let subs = &project.tracks[0].1.backlog()[0].subtasks;
+        let ids: Vec<_> = subs.iter().filter_map(|s| s.id.as_deref()).collect();
+        assert_eq!(ids, vec!["M-001.1", "M-001.2", "M-001.3"]);
+    }
+
+    /// A duplicate nested two deep is renumbered under *its* parent, not the
+    /// top-level task at the root of the branch.
+    #[test]
+    fn test_resolve_duplicate_grandchild_renumbers_under_its_own_parent() {
+        let mut project = make_project(
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Parent
+  - added: 2025-05-01
+  - [ ] `M-001.1` Child
+    - added: 2025-05-01
+    - [ ] `M-001.1.2` Grandchild
+      - added: 2025-05-01
+    - [ ] `M-001.1.2` Grandchild twin
+      - added: 2025-05-01
+
+## Done
+",
+            vec![("main", "M")],
+        );
+
+        clean_project(&mut project, IdScope::Mint(None));
+
+        let grandkids = &project.tracks[0].1.backlog()[0].subtasks[0].subtasks;
+        assert_eq!(grandkids[0].id.as_deref(), Some("M-001.1.2"));
+        assert_eq!(grandkids[1].id.as_deref(), Some("M-001.1.3"));
+    }
+
+    /// A renumbered subtask carries its own descendants with it.
+    #[test]
+    fn test_resolve_duplicate_subtask_rekeys_descendants() {
+        let mut project = make_project(
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Parent
+  - added: 2025-05-01
+  - [ ] `M-001.1` Original
+    - added: 2025-05-01
+  - [ ] `M-001.1` Twin
+    - added: 2025-05-01
+    - [ ] `M-001.1.1` Twin's child
+      - added: 2025-05-01
+
+## Done
+",
+            vec![("main", "M")],
+        );
+
+        clean_project(&mut project, IdScope::Mint(None));
+
+        let twin = &project.tracks[0].1.backlog()[0].subtasks[1];
+        assert_eq!(twin.id.as_deref(), Some("M-001.2"));
+        assert_eq!(twin.subtasks[0].id.as_deref(), Some("M-001.2.1"));
+    }
+
+    /// A duplicated subtask under a token-namespace clean is renumbered in that
+    /// namespace, still under its parent.
+    #[test]
+    fn test_resolve_duplicate_subtask_in_token_namespace() {
+        let mut project = make_project(
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Parent
+  - added: 2025-05-01
+  - [ ] `M-001.1` Original
+    - added: 2025-05-01
+  - [ ] `M-001.1` Twin
+    - added: 2025-05-01
+
+## Done
+",
+            vec![("main", "M")],
+        );
+
+        let token = Token::new("b").unwrap();
+        clean_project(&mut project, IdScope::Mint(Some(token)));
+
+        let subs = &project.tracks[0].1.backlog()[0].subtasks;
+        assert_eq!(subs[0].id.as_deref(), Some("M-001.1"));
+        assert_eq!(subs[1].id.as_deref(), Some("M-001.b1"));
+    }
+
+    /// The resolved project is clean by `fr check`'s reckoning — no leftover
+    /// duplicate, and no subtask whose id escaped its parent.
+    #[test]
+    fn test_resolve_duplicate_subtask_leaves_no_check_finding() {
+        let mut project = make_project(
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Parent
+  - added: 2025-05-01
+  - [ ] `M-001.4` Mine
+    - added: 2025-05-01
+  - [ ] `M-001.4` Theirs
+    - added: 2025-05-01
+
+## Done
+",
+            vec![("main", "M")],
+        );
+
+        clean_project(&mut project, IdScope::Mint(None));
+
+        let check = crate::ops::check::check_project(&project);
+        assert!(
+            !check
+                .errors
+                .iter()
+                .any(|e| matches!(e, crate::ops::check::CheckError::DuplicateId { .. })),
+            "duplicate survived: {:?}",
+            check.errors
+        );
+        assert!(
+            !check.warnings.iter().any(|w| matches!(
+                w,
+                crate::ops::check::CheckWarning::ChildIdNotUnderParent { .. }
+            )),
+            "resolution misparented a subtask: {:?}",
+            check.warnings
+        );
     }
 
     #[test]

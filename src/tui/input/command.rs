@@ -733,6 +733,16 @@ pub(super) fn palette_check_project(app: &mut App) {
                 check::CheckWarning::LostTask { track_id, task_id } => {
                     format!("  [{}] {} has #lost tag", track_id, task_id)
                 }
+                check::CheckWarning::ChildIdNotUnderParent {
+                    track_id,
+                    task_id,
+                    parent_id,
+                } => {
+                    format!(
+                        "  [{}] {} is nested under {} but its id doesn't extend it (`fr check --fix`)",
+                        track_id, task_id, parent_id
+                    )
+                }
                 check::CheckWarning::ActorTokenUnregistered { token } => {
                     format!(
                         "  actor token '{}' missing from actors.toml (next mint re-registers it)",

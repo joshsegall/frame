@@ -81,10 +81,18 @@ primary working copy mints tokenless (null-namespace) IDs like `EFF-014` and
 `EFF-014.2`, while a clone holding token `a` mints `EFF-a14`, and a subtask added
 there under someone else's task reads `EFF-014.a1`.
 
+**A subtask's ID extends its parent's**: every segment but the last matches the
+parent exactly, whatever namespace the last one carries. `EFF-014.2` and
+`EFF-014.a1` are both children of `EFF-014`; `EFF-020` nested under it is not, and
+neither is `EFF-014.2.1`. `fr check` reports a subtask that breaks the rule and
+`fr check --fix` renumbers it back under its parent.
+
 **Literal passthrough**: any backtick-wrapped ID that does not match this grammar
 (including legacy or hand-written IDs) is preserved verbatim on round-trip and is
 ignored when frame computes the next ID to mint, so it never perturbs numbering.
-Zero-padding in the number is preserved (`EFF-014` stays `EFF-014`).
+Zero-padding in the number is preserved (`EFF-014` stays `EFF-014`). Such an ID
+carries no parent/child relationship either, so a hand-written hierarchy is never
+reported as broken.
 
 **Tags** (optional): `#word` tokens at the end of the line. Parsed right-to-left from the end; only trailing `#word` sequences are recognized as tags.
 

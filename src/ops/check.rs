@@ -69,6 +69,22 @@ pub enum CheckWarning {
     /// Task has the #lost tag (created by recovery system)
     #[serde(rename = "lost_task")]
     LostTask { track_id: String, task_id: String },
+    /// A subtask's ID does not extend its parent's — e.g. `BAC-207` nested under
+    /// `BAC-153`. The ID no longer says where the task lives, and the parent's
+    /// child-number scan cannot see it, so a later subtask can be handed a number
+    /// this one already occupies in spirit.
+    ///
+    /// Reported only when both IDs match the grammar: a `Raw` ID is preserved
+    /// verbatim by design and carries no parent/child relationship to break.
+    ///
+    /// Historically produced by `fr clean` itself, which resolved a duplicated
+    /// *subtask* ID by minting a top-level number for it.
+    #[serde(rename = "child_id_not_under_parent")]
+    ChildIdNotUnderParent {
+        track_id: String,
+        task_id: String,
+        parent_id: String,
+    },
     /// This clone's `.actor` token has no row in `actors.toml` (registry drift —
     /// the committed registry lost our claim). The next mint re-registers it.
     #[serde(rename = "actor_token_unregistered")]
@@ -291,14 +307,18 @@ fn check_track(
     for node in &track.nodes {
         if let TrackNode::Section { kind, tasks, .. } = node {
             for task in tasks {
-                check_task(task, track_id, *kind, all_ids, project_root, result);
+                check_task(task, None, track_id, *kind, all_ids, project_root, result);
             }
         }
     }
 }
 
+/// `parent` is the task this one is nested under, or `None` at top level — the
+/// subtask-ID rule is the one check that a task cannot be judged against alone.
+#[allow(clippy::too_many_arguments)]
 fn check_task(
     task: &Task,
+    parent: Option<&Task>,
     track_id: &str,
     section: crate::model::track::SectionKind,
     all_ids: &HashSet<String>,
@@ -361,6 +381,20 @@ fn check_task(
         });
     }
 
+    // Warning: a subtask whose ID does not extend its parent's.
+    if let Some(id) = task.id.as_ref()
+        && let Some(parent_id) = parent.and_then(|p| p.id.as_ref())
+        && id.is_structured()
+        && parent_id.is_structured()
+        && !id.is_child_of(parent_id)
+    {
+        result.warnings.push(CheckWarning::ChildIdNotUnderParent {
+            track_id: track_id.to_string(),
+            task_id: id.to_string(),
+            parent_id: parent_id.to_string(),
+        });
+    }
+
     // Warning: lost task (from recovery system)
     if task.tags.iter().any(|t| t == "lost") && task.id.is_some() {
         result.warnings.push(CheckWarning::LostTask {
@@ -420,7 +454,15 @@ fn check_task(
 
     // Recurse into subtasks
     for sub in &task.subtasks {
-        check_task(sub, track_id, section, all_ids, project_root, result);
+        check_task(
+            sub,
+            Some(task),
+            track_id,
+            section,
+            all_ids,
+            project_root,
+            result,
+        );
     }
 }
 
@@ -1552,6 +1594,160 @@ mod tests {
                 |e| matches!(e, CheckError::DuplicateId { task_id, track_ids } if task_id == "M-001" && track_ids.len() == 2)
             )
         );
+    }
+
+    // --- Subtask IDs that escape their parent ---
+
+    /// (task_id, parent_id) for each misparented-subtask warning.
+    fn misparented(result: &CheckResult) -> Vec<(String, String)> {
+        result
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                CheckWarning::ChildIdNotUnderParent {
+                    task_id, parent_id, ..
+                } => Some((task_id.clone(), parent_id.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The shape `fr clean` used to produce when it resolved a duplicated
+    /// subtask ID by minting a top-level number for it.
+    #[test]
+    fn test_check_reports_a_subtask_holding_a_top_level_id() {
+        let tmp = TempDir::new().unwrap();
+        let project = make_project_at(
+            tmp.path(),
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Parent
+  - added: 2025-05-01
+  - [ ] `M-007` Escaped
+    - added: 2025-05-01
+
+## Done
+",
+        );
+
+        assert_eq!(
+            misparented(&check_project(&project)),
+            vec![("M-007".to_string(), "M-001".to_string())]
+        );
+    }
+
+    /// A subtask under the wrong parent entirely — one branch's ID nested in
+    /// another's, which a bad three-way merge can produce.
+    #[test]
+    fn test_check_reports_a_subtask_under_the_wrong_parent() {
+        let tmp = TempDir::new().unwrap();
+        let project = make_project_at(
+            tmp.path(),
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` One
+  - added: 2025-05-01
+- [ ] `M-002` Two
+  - added: 2025-05-01
+  - [ ] `M-001.3` Belongs to M-001
+    - added: 2025-05-01
+
+## Done
+",
+        );
+
+        assert_eq!(
+            misparented(&check_project(&project)),
+            vec![("M-001.3".to_string(), "M-002".to_string())]
+        );
+    }
+
+    /// Depth is not the rule — an ID two segments below its parent skips a level.
+    #[test]
+    fn test_check_reports_a_grandchild_id_on_a_child() {
+        let tmp = TempDir::new().unwrap();
+        let project = make_project_at(
+            tmp.path(),
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Parent
+  - added: 2025-05-01
+  - [ ] `M-001.1.1` Too deep
+    - added: 2025-05-01
+
+## Done
+",
+        );
+
+        assert_eq!(
+            misparented(&check_project(&project)),
+            vec![("M-001.1.1".to_string(), "M-001".to_string())]
+        );
+    }
+
+    /// A well-formed hierarchy, including a subtask minted by another clone —
+    /// a different namespace on the last segment is still a child.
+    #[test]
+    fn test_check_accepts_well_formed_subtask_ids() {
+        let tmp = TempDir::new().unwrap();
+        let project = make_project_at(
+            tmp.path(),
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Parent
+  - added: 2025-05-01
+  - [ ] `M-001.1` Ours
+    - added: 2025-05-01
+  - [ ] `M-001.b2` Theirs
+    - added: 2025-05-01
+    - [ ] `M-001.b2.1` Deep
+      - added: 2025-05-01
+
+## Done
+",
+        );
+
+        assert!(misparented(&check_project(&project)).is_empty());
+    }
+
+    /// IDs that don't match the grammar are preserved verbatim by design and
+    /// carry no parent/child relationship, so they are never reported.
+    #[test]
+    fn test_check_leaves_raw_ids_alone() {
+        let tmp = TempDir::new().unwrap();
+        let project = make_project_at(
+            tmp.path(),
+            "\
+# Main
+
+## Backlog
+
+- [ ] `legacy/thing` Parent
+  - added: 2025-05-01
+  - [ ] `M-001.1` Structured child of a raw parent
+    - added: 2025-05-01
+- [ ] `M-002` Structured parent
+  - added: 2025-05-01
+  - [ ] `whatever` Raw child
+    - added: 2025-05-01
+
+## Done
+",
+        );
+
+        assert!(misparented(&check_project(&project)).is_empty());
     }
 
     // --- Warnings ---

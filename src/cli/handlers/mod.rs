@@ -1304,6 +1304,16 @@ fn cmd_check(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
                             track_id, task_id
                         );
                     }
+                    check::CheckWarning::ChildIdNotUnderParent {
+                        track_id,
+                        task_id,
+                        parent_id,
+                    } => {
+                        println!(
+                            "  [{}] {} is nested under {} but its id doesn't extend it — the id no longer says where the task lives, and {}'s child numbering can't see it. Repair with `fr check --fix`",
+                            track_id, task_id, parent_id, parent_id
+                        );
+                    }
                     check::CheckWarning::ActorTokenUnregistered { token } => {
                         println!(
                             "  actor token '{}' (this clone's .actor) is missing from actors.toml — the next mint re-registers it, or run `fr actor set {}`",

@@ -16,11 +16,39 @@
 //!
 //! - **child IDs** (`BAC-153.2`), numbered per parent by
 //!   [`crate::ops::task_ops::next_child_number`] — two worktrees adding a subtask
-//!   to the *same* parent can still collide;
+//!   to the *same* parent still collide. Detected and repaired rather than
+//!   prevented; see below.
 //! - **`fr actor merge`** ([`crate::ops::actor_merge`]), which renumbers a whole
 //!   namespace in bulk from its own scan of every ID in the project. Its target
 //!   namespace belongs to a different clone, whose frontier is a different file,
 //!   so this clone's record has nothing useful to say about it.
+//!
+//! # Why child IDs are not covered
+//!
+//! A frontier for child numbers would have to be keyed *per parent*, so the
+//! store would grow with the number of tasks — against the bound stated in
+//! [`crate::io::ids`], and each entry is dead the moment the other worktree
+//! merges the task in. Numbering children from the top-level counter instead
+//! (`BAC-153.207`) keeps the store flat but gives up the `.1 .2 .3` reading of a
+//! file people hand-edit.
+//!
+//! Neither cost is worth paying, because the two collisions are not equally
+//! serious. A reissued *top-level* number cannot be repaired by machine —
+//! renumbering a live task is `IdReissuedAfterArchive`, which `fr check`
+//! deliberately reports without a fix, since which of two legitimate holders
+//! should move is a judgment call. A child number means nothing outside its
+//! parent: there is one right answer, `fr clean` applies it, and the deps follow.
+//!
+//! So the collision stays possible and is handled after the fact:
+//!
+//! - `fr check` reports it as a `DuplicateId` error (the duplicate scan has
+//!   always recursed into subtasks);
+//! - `fr clean` resolves it by renumbering the later copy **under its own
+//!   parent** — the allocator split in [`crate::ops::clean`];
+//! - `ChildIdNotUnderParent` catches the case where that went wrong anyway, with
+//!   a repair behind `fr check --fix`.
+//!
+//! Pinned end to end by `test_colliding_subtask_ids_are_detected_and_repaired`.
 
 use std::path::Path;
 
