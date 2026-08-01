@@ -2,6 +2,7 @@ use serde::Serialize;
 
 use crate::model::task::{Metadata, Task, TaskState};
 use crate::model::track::Track;
+use crate::ops::deps::{DepNode, DepStatus};
 use crate::ops::track_ops::TrackStats;
 
 // ---------------------------------------------------------------------------
@@ -443,6 +444,68 @@ pub fn format_track_listing(track_id: &str, track: &Track, tasks: &FilteredTasks
     }
 
     lines
+}
+
+/// Render a dependency tree.
+///
+/// The root line carries tags and the descendants do not; that asymmetry is
+/// how `fr deps` has always printed and is preserved deliberately.
+pub fn format_dep_tree(root: &DepNode) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    let state = root.state.unwrap_or(TaskState::Todo);
+    let tags = if root.tags.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " {}",
+            root.tags
+                .iter()
+                .map(|t| format!("#{}", t))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    };
+    lines.push(format!(
+        "[{}] {} {}{}",
+        state_char(state),
+        root.id,
+        root.title.clone().unwrap_or_default(),
+        tags
+    ));
+
+    if root.deps.is_empty() {
+        lines.push("  (no dependencies)".to_string());
+    } else {
+        for dep in &root.deps {
+            format_dep_node(dep, 1, &mut lines);
+        }
+    }
+    lines
+}
+
+fn format_dep_node(node: &DepNode, indent: usize, lines: &mut Vec<String>) {
+    let prefix = "  ".repeat(indent);
+    match node.status {
+        DepStatus::Resolved => {
+            lines.push(format!(
+                "{}└─ [{}] {} {}",
+                prefix,
+                state_char(node.state.unwrap_or(TaskState::Todo)),
+                node.id,
+                node.title.clone().unwrap_or_default()
+            ));
+            for child in &node.deps {
+                format_dep_node(child, indent + 1, lines);
+            }
+        }
+        // Three distinct conditions the output used to collapse into two: a
+        // task reached twice is not a cycle, and saying so was the whole point
+        // of splitting the status.
+        DepStatus::Cycle => lines.push(format!("{}└─ {} (circular)", prefix, node.id)),
+        DepStatus::Repeat => lines.push(format!("{}└─ {} (already shown)", prefix, node.id)),
+        DepStatus::Missing => lines.push(format!("{}└─ {} (not found)", prefix, node.id)),
+    }
 }
 
 /// Parse a state string into TaskState

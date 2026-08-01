@@ -22,7 +22,9 @@ use crate::model::project::Project;
 use crate::model::task::{Metadata, Task, TaskState};
 use crate::model::track::{Track, TrackNode};
 use crate::ops::ids::Mint;
-use crate::ops::{actor_merge, check, clean, fix, import, inbox_ops, search, task_ops, track_ops};
+use crate::ops::{
+    actor_merge, check, clean, deps, fix, import, inbox_ops, search, task_ops, track_ops,
+};
 
 // ---------------------------------------------------------------------------
 // Dispatch
@@ -508,7 +510,7 @@ fn cmd_blocked(json: bool) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         for (track_id, task) in &blocked_tasks {
             let line = format_task_line(task);
-            let deps = task_deps(task);
+            let deps = deps::task_deps(task);
             if deps.is_empty() {
                 println!("[{}] {}", track_id, line);
             } else {
@@ -526,16 +528,6 @@ fn collect_blocked_tasks<'a>(task: &'a Task, track_id: &str, result: &mut Vec<(S
     for sub in &task.subtasks {
         collect_blocked_tasks(sub, track_id, result);
     }
-}
-
-fn task_deps(task: &Task) -> Vec<String> {
-    let mut deps = Vec::new();
-    for m in &task.metadata {
-        if let Metadata::Dep(d) = m {
-            deps.extend(d.iter().cloned());
-        }
-    }
-    deps
 }
 
 fn cmd_search(args: SearchArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -1140,57 +1132,15 @@ fn cmd_recent(args: RecentArgs, json: bool) -> Result<(), Box<dyn std::error::Er
 fn cmd_deps(args: DepsArgs) -> Result<(), Box<dyn std::error::Error>> {
     let project = load_project_cwd()?;
 
-    // Find the task
-    let mut found_task = None;
-    for (_, track) in &project.tracks {
-        if let Some(task) = task_ops::find_task_in_track(track, &args.id) {
-            found_task = Some(task);
-            break;
-        }
+    let tree = deps::dep_tree(&project, &args.id);
+    if tree.status == deps::DepStatus::Missing {
+        return Err(format!("task not found: {}", args.id).into());
     }
 
-    let task = found_task.ok_or_else(|| format!("task not found: {}", args.id))?;
-    println!("{}", format_task_line(task));
-
-    // Print dependency tree
-    let deps = task_deps(task);
-    if deps.is_empty() {
-        println!("  (no dependencies)");
-    } else {
-        print_dep_tree(&project, &deps, 1, &mut HashSet::new());
+    for line in format_dep_tree(&tree) {
+        println!("{}", line);
     }
     Ok(())
-}
-
-fn print_dep_tree(
-    project: &Project,
-    dep_ids: &[String],
-    indent: usize,
-    visited: &mut HashSet<String>,
-) {
-    let prefix = "  ".repeat(indent);
-    for dep_id in dep_ids {
-        if !visited.insert(dep_id.clone()) {
-            println!("{}└─ {} (circular)", prefix, dep_id);
-            continue;
-        }
-        let mut found = false;
-        for (_, track) in &project.tracks {
-            if let Some(dep_task) = task_ops::find_task_in_track(track, dep_id) {
-                let sc = dep_task.state.checkbox_char();
-                println!("{}└─ [{}] {} {}", prefix, sc, dep_id, dep_task.title);
-                let sub_deps = task_deps(dep_task);
-                if !sub_deps.is_empty() {
-                    print_dep_tree(project, &sub_deps, indent + 1, visited);
-                }
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            println!("{}└─ {} (not found)", prefix, dep_id);
-        }
-    }
 }
 
 fn cmd_check(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {

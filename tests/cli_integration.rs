@@ -123,6 +123,18 @@ side = "S"
 }
 
 /// Run `fr` with the given args in the given directory, returning (stdout, stderr, success).
+/// Overwrite a track file wholesale, for tests that need a shape the shared
+/// fixture doesn't have.
+fn write_track(root: &Path, track_id: &str, body: &str) {
+    fs::write(
+        root.join("frame")
+            .join("tracks")
+            .join(format!("{track_id}.md")),
+        body,
+    )
+    .unwrap();
+}
+
 fn run_fr(dir: &Path, args: &[&str]) -> (String, String, bool) {
     let output = Command::new(fr_bin())
         .args(args)
@@ -646,6 +658,75 @@ fn test_deps() {
     let out = run_fr_ok(tmp.path(), &["deps", "M-002"]);
     assert!(out.contains("M-002"));
     assert!(out.contains("M-001"));
+}
+
+/// A diamond -- two tasks depending on the same third -- is the ordinary shape
+/// of a real backlog. `fr deps` used to report the second path as `(circular)`,
+/// because one `visited` set spanned the whole traversal and was never popped.
+#[test]
+fn deps_reports_a_shared_dependency_as_already_shown() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    write_track(
+        tmp.path(),
+        "main",
+        "# Main Track\n\n## Backlog\n\n\
+         - [ ] `M-001` Root\n  - dep: M-002, M-003\n\
+         - [ ] `M-002` Left\n  - dep: M-004\n\
+         - [ ] `M-003` Right\n  - dep: M-004\n\
+         - [ ] `M-004` Shared leaf\n\n## Done\n",
+    );
+
+    let out = run_fr_ok(tmp.path(), &["deps", "M-001"]);
+    assert!(
+        out.contains("M-004 (already shown)"),
+        "expected the second path to M-004 to be marked as a repeat:\n{out}"
+    );
+    assert!(
+        !out.contains("(circular)"),
+        "a diamond is not a cycle:\n{out}"
+    );
+    // The first path still expands it in full.
+    assert!(out.contains("[ ] M-004 Shared leaf"), "{out}");
+}
+
+/// A cycle through the root used to run one lap too far, because the root id
+/// was never seeded into the visited set.
+#[test]
+fn deps_stops_a_cycle_at_the_root() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    write_track(
+        tmp.path(),
+        "main",
+        "# Main Track\n\n## Backlog\n\n\
+         - [ ] `M-005` Cycle a\n  - dep: M-006\n\
+         - [ ] `M-006` Cycle b\n  - dep: M-005\n\n## Done\n",
+    );
+
+    let out = run_fr_ok(tmp.path(), &["deps", "M-005"]);
+    assert!(out.contains("M-005 (circular)"), "{out}");
+    // Three lines: the root, M-006, and the cycle marker. A fourth means the
+    // root was expanded a second time.
+    assert_eq!(
+        out.lines().filter(|l| !l.trim().is_empty()).count(),
+        3,
+        "{out}"
+    );
+}
+
+#[test]
+fn deps_reports_a_dangling_dependency_as_not_found() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    write_track(
+        tmp.path(),
+        "main",
+        "# Main Track\n\n## Backlog\n\n- [ ] `M-007` Dangling\n  - dep: M-999\n\n## Done\n",
+    );
+
+    let out = run_fr_ok(tmp.path(), &["deps", "M-007"]);
+    assert!(out.contains("M-999 (not found)"), "{out}");
 }
 
 #[test]
