@@ -897,6 +897,70 @@ fn test_state_done_adds_resolved() {
     assert!(track.contains("resolved:"));
 }
 
+/// Every section a state change can start from lands in the right place.
+///
+/// Written as a loop over the whole (state × starting section) space rather than
+/// one case per transition, because enumerating transitions is exactly how the
+/// hole below got in: `cmd_state` listed `from → to` pairs and nobody listed
+/// Done → Parked.
+///
+/// `tests/parity.rs` cannot cover this. It compares the CLI to the TUI, and both
+/// surfaces had the identical gap — they agreed with each other and disagreed
+/// only with `canonical_section`. Verified by reverting both fixes: the parity
+/// case for this cell still passed. Agreement is not correctness, so the
+/// behaviour needs asserting somewhere that knows the right answer.
+#[test]
+fn state_change_moves_a_task_to_the_section_its_state_calls_for() {
+    // (state to set, expected section header the task must end up under)
+    let expectations = [
+        ("done", "## Done"),
+        ("parked", "## Parked"),
+        ("todo", "## Backlog"),
+        ("active", "## Backlog"),
+        ("blocked", "## Backlog"),
+    ];
+    // Each starting section, as the track content that puts M-001 there.
+    let starts = [
+        (
+            "backlog",
+            "## Backlog\n\n- [ ] `M-001` Task\n\n## Parked\n\n## Done\n",
+        ),
+        (
+            "parked",
+            "## Backlog\n\n## Parked\n\n- [~] `M-001` Task\n\n## Done\n",
+        ),
+        (
+            "done",
+            "## Backlog\n\n## Parked\n\n## Done\n\n- [x] `M-001` Task\n  - resolved: 2026-01-01\n",
+        ),
+    ];
+
+    for (start_name, body) in starts {
+        for (state, want_section) in expectations {
+            let tmp = tempfile::TempDir::new().unwrap();
+            create_test_project(tmp.path());
+            let path = tmp.path().join("frame/tracks/main.md");
+            fs::write(&path, format!("# Main\n\n{body}")).unwrap();
+
+            run_fr_ok(tmp.path(), &["state", "M-001", state]);
+            let track = fs::read_to_string(&path).unwrap();
+
+            // The section the task actually landed in: the last header above it.
+            let idx = track.find("`M-001`").expect("task survived");
+            let landed = track[..idx]
+                .rmatch_indices("## ")
+                .next()
+                .map(|(i, _)| track[i..].lines().next().unwrap())
+                .expect("task sits under a section header");
+
+            assert_eq!(
+                landed, want_section,
+                "M-001 starting in {start_name}, set to {state}, landed under {landed:?}\n{track}"
+            );
+        }
+    }
+}
+
 #[test]
 fn test_tag_add_remove() {
     let tmp = tempfile::TempDir::new().unwrap();

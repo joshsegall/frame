@@ -1093,14 +1093,17 @@ pub(super) fn task_state_action(app: &mut App, action: StateAction) {
                 });
         }
 
-        // If task is now Parked and is a top-level Backlog task, schedule pending move
+        // If the task is now Parked, schedule its move into the Parked section —
+        // from wherever it currently sits, not the Backlog alone. A task parked
+        // out of `## Done` used to stay in Done wearing `[~]`, which is the
+        // `12c0b57` defect one section over.
         if new_state == crate::model::task::TaskState::Parked {
             let track_ref = App::find_track_in_project(&app.project, &track_id).unwrap();
-            let is_top_level_backlog =
-                task_ops::is_top_level_in_section(track_ref, &task_id, SectionKind::Backlog);
-            if is_top_level_backlog {
+            if let Some(from) = task_ops::top_level_section(track_ref, &task_id)
+                && from != SectionKind::Parked
+            {
                 app.pending_moves.push(PendingMove {
-                    kind: PendingMoveKind::ToParked,
+                    kind: PendingMoveKind::ToParked { from },
                     track_id: track_id.clone(),
                     task_id: task_id.clone(),
                     deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),

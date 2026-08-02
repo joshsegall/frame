@@ -400,6 +400,48 @@ pub fn top_level_section(track: &Track, task_id: &str) -> Option<SectionKind> {
         .find(|&s| is_top_level_in_section(track, task_id, s))
 }
 
+/// The section a top-level task in this state belongs in.
+///
+/// **This is the section policy**, and it is stated as a total function from
+/// state rather than as a list of transitions on purpose. Every caller that
+/// instead enumerated `from → to` pairs ended up missing one: `fr state ID
+/// parked` on a task in the Done section moved it nowhere, because the Parked
+/// arm had been written for tasks coming from the Backlog and Done → Parked was
+/// not a case anybody had listed. Both the CLI and the TUI had that same hole,
+/// which is also why `tests/parity.rs` could not see it — the two surfaces
+/// agreed with each other and disagreed with this.
+///
+/// Asking "where does this state belong" has no cases to forget. Pair it with
+/// [`top_level_section`] for the current section and move if they differ.
+///
+/// Subtasks have no section of their own — they live inside their parent — so
+/// this applies only to top-level tasks.
+pub fn canonical_section(state: TaskState) -> SectionKind {
+    match state {
+        TaskState::Parked => SectionKind::Parked,
+        TaskState::Done => SectionKind::Done,
+        _ => SectionKind::Backlog,
+    }
+}
+
+/// Move `task_id` into the section its state calls for, if it is not there.
+///
+/// Returns the move that happened, as `(from, to)`. `None` when the task is a
+/// subtask, is already in the right section, or is not in the track.
+pub fn reconcile_task_section(
+    track: &mut Track,
+    task_id: &str,
+    state: TaskState,
+) -> Option<(SectionKind, SectionKind)> {
+    let from = top_level_section(track, task_id)?;
+    let to = canonical_section(state);
+    if from == to {
+        return None;
+    }
+    move_task_between_sections(track, task_id, from, to);
+    Some((from, to))
+}
+
 /// Move a task to a different track. Reassigns the task ID using the target
 /// track's prefix. Updates dependency references across all provided tracks.
 ///
@@ -1409,6 +1451,73 @@ mod tests {
         move_task(&mut track, "T-001", InsertPosition::Bottom).unwrap();
         let backlog = track.backlog();
         assert_eq!(backlog.last().unwrap().id.as_deref(), Some("T-001"));
+    }
+
+    // --- The section policy ---
+
+    /// Total over every state, so a state added later cannot quietly have no
+    /// section — the failure mode the enumerated form had.
+    #[test]
+    fn every_state_has_a_canonical_section() {
+        assert_eq!(canonical_section(TaskState::Todo), SectionKind::Backlog);
+        assert_eq!(canonical_section(TaskState::Active), SectionKind::Backlog);
+        assert_eq!(canonical_section(TaskState::Blocked), SectionKind::Backlog);
+        assert_eq!(canonical_section(TaskState::Parked), SectionKind::Parked);
+        assert_eq!(canonical_section(TaskState::Done), SectionKind::Done);
+    }
+
+    /// The cell both the CLI and the TUI missed: a task parked out of Done.
+    #[test]
+    fn reconcile_moves_a_done_task_that_was_parked() {
+        let mut track = sample_track();
+        move_task_between_sections(&mut track, "T-001", SectionKind::Backlog, SectionKind::Done);
+
+        let moved = reconcile_task_section(&mut track, "T-001", TaskState::Parked);
+        assert_eq!(moved, Some((SectionKind::Done, SectionKind::Parked)));
+        assert_eq!(track.parked()[0].id.as_deref(), Some("T-001"));
+        assert!(
+            track
+                .done()
+                .iter()
+                .all(|t| t.id.as_deref() != Some("T-001"))
+        );
+    }
+
+    #[test]
+    fn reconcile_is_a_no_op_when_the_task_is_already_right() {
+        let mut track = sample_track();
+        assert_eq!(
+            reconcile_task_section(&mut track, "T-001", TaskState::Todo),
+            None,
+            "a Backlog task set to todo has nowhere to go"
+        );
+        assert_eq!(track.backlog()[0].id.as_deref(), Some("T-001"));
+    }
+
+    /// A subtask lives inside its parent and has no section of its own, so the
+    /// policy must not try to relocate one.
+    #[test]
+    fn reconcile_leaves_a_subtask_alone() {
+        let mut track = sample_track();
+        let sub_id = track.backlog()[2].subtasks[0]
+            .id
+            .as_deref()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            reconcile_task_section(&mut track, &sub_id, TaskState::Done),
+            None
+        );
+        assert_eq!(track.backlog()[2].subtasks.len(), 2, "subtask stayed put");
+    }
+
+    #[test]
+    fn reconcile_ignores_a_task_that_is_not_there() {
+        let mut track = sample_track();
+        assert_eq!(
+            reconcile_task_section(&mut track, "NOPE-999", TaskState::Done),
+            None
+        );
     }
 
     // --- Section moves ---

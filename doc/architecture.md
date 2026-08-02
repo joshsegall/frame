@@ -153,6 +153,16 @@ Done tasks have a grace period to prevent accidental section moves:
 
 **Subtree unity**: `move_task_between_sections()` moves the entire subtask tree together. Only top-level tasks in a section can be moved — subtasks don't move independently.
 
+### The section policy
+
+`task_ops::canonical_section(state) -> SectionKind` is the single statement of which section a top-level task belongs in: Parked → `## Parked`, Done → `## Done`, everything else → `## Backlog`. `reconcile_task_section` pairs it with `top_level_section` and moves the task if the two differ.
+
+**It is a total function from state, not a list of transitions, and that is the point.** Three places used to decide this independently, and the two written as `from → to` enumerations both missed the same cell: neither `cmd_state` nor the TUI listed Done → Parked, so parking a completed task left it in `## Done` wearing `[~]`. Asking "where does this state belong" has no cases to forget.
+
+Note what this means for testing: `tests/parity.rs` could not catch that, because it compares the CLI to the TUI and both were wrong *identically*. Agreement is not correctness. The behaviour is pinned instead by `state_change_moves_a_task_to_the_section_its_state_calls_for` in `tests/cli_integration.rs`, which sweeps every (state × starting section) pair against the known-right answer.
+
+The TUI applies the same policy but defers the move by 5 seconds (above), and adds undo entries and board column pins that the CLI has no need for. *What* section is shared; *when* to move and *what else* to do are the surface's own business.
+
 ### Multi-file writes: add before remove
 
 Single-file writes are atomic — `recovery::atomic_write` is temp-file + rename, so a crash leaves either the old file or the new one. The exposure is operations that are only complete after *two or more* files are written, where an interruption in between leaves the project half-updated.

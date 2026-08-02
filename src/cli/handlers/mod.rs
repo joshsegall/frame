@@ -1778,8 +1778,6 @@ fn cmd_done(args: DoneArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cmd_state(args: StateArgs) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::model::track::SectionKind;
-
     let mut project = load_project_cwd()?;
     let _lock = lock_and_recover(&mut project)?;
 
@@ -1807,59 +1805,14 @@ fn cmd_state(args: StateArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     task_ops::set_state(task, new_state);
 
-    // Move top-level tasks between sections based on state change
+    // Put the task in the section its new state calls for. Asking where the
+    // state belongs rather than listing `from → to` pairs is what makes this
+    // total: the enumerated form here had no case for Done → Parked, so a
+    // `[~]` task stayed sitting in `## Done`.
     {
         let track = find_track_mut(&mut project, &track_id)
             .ok_or_else(|| format!("track not found: {}", track_id))?;
-        match new_state {
-            TaskState::Done => {
-                if task_ops::is_top_level_in_section(track, &args.id, SectionKind::Backlog) {
-                    task_ops::move_task_between_sections(
-                        track,
-                        &args.id,
-                        SectionKind::Backlog,
-                        SectionKind::Done,
-                    );
-                } else if task_ops::is_top_level_in_section(track, &args.id, SectionKind::Parked) {
-                    task_ops::move_task_between_sections(
-                        track,
-                        &args.id,
-                        SectionKind::Parked,
-                        SectionKind::Done,
-                    );
-                }
-            }
-            TaskState::Parked => {
-                if task_ops::is_top_level_in_section(track, &args.id, SectionKind::Backlog) {
-                    task_ops::move_task_between_sections(
-                        track,
-                        &args.id,
-                        SectionKind::Backlog,
-                        SectionKind::Parked,
-                    );
-                }
-            }
-            _ => {
-                // Un-park: move from Parked back to Backlog
-                if task_ops::is_top_level_in_section(track, &args.id, SectionKind::Parked) {
-                    task_ops::move_task_between_sections(
-                        track,
-                        &args.id,
-                        SectionKind::Parked,
-                        SectionKind::Backlog,
-                    );
-                }
-                // Reopen: move from Done back to Backlog
-                if task_ops::is_top_level_in_section(track, &args.id, SectionKind::Done) {
-                    task_ops::move_task_between_sections(
-                        track,
-                        &args.id,
-                        SectionKind::Done,
-                        SectionKind::Backlog,
-                    );
-                }
-            }
-        }
+        task_ops::reconcile_task_section(track, &args.id, new_state);
     }
 
     save_track(&project, &track_id)?;

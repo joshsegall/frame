@@ -473,8 +473,11 @@ pub enum PendingMoveKind {
     ToDone { from: SectionKind },
     /// Task reopened from Done → will move to Backlog
     ToBacklog,
-    /// Task parked in Backlog → will move to Parked section
-    ToParked,
+    /// Task parked at top level → will move to the Parked section from `from`,
+    /// which is the Backlog or Done. Carries its source for the same reason
+    /// `ToDone` does: hardcoding the Backlog left a task parked out of `## Done`
+    /// sitting there with `[~]` on it.
+    ToParked { from: SectionKind },
     /// Task un-parked in Parked → will move to Backlog section
     FromParked,
 }
@@ -1568,7 +1571,8 @@ impl App {
                             Some(pm)
                                 if matches!(
                                     pm.kind,
-                                    PendingMoveKind::ToDone { .. } | PendingMoveKind::ToParked
+                                    PendingMoveKind::ToDone { .. }
+                                        | PendingMoveKind::ToParked { .. }
                                 ) =>
                             {
                                 pm.old_state.unwrap_or(task.state)
@@ -1916,17 +1920,13 @@ impl App {
                 task.mark_dirty();
                 Some(pm.track_id.clone())
             }
-            PendingMoveKind::ToParked => {
-                let source_index = move_task_between_sections(
-                    track,
-                    &pm.task_id,
-                    SectionKind::Backlog,
-                    SectionKind::Parked,
-                )?;
+            PendingMoveKind::ToParked { from } => {
+                let source_index =
+                    move_task_between_sections(track, &pm.task_id, from, SectionKind::Parked)?;
                 self.undo_stack.push(Operation::SectionMove {
                     track_id: pm.track_id.clone(),
                     task_id: pm.task_id.clone(),
-                    from_section: SectionKind::Backlog,
+                    from_section: from,
                     to_section: SectionKind::Parked,
                     from_index: source_index,
                 });

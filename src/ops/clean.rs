@@ -183,14 +183,7 @@ pub fn ensure_ids_and_dates(project: &mut Project, scope: IdScope) -> Vec<String
 // Section reconciliation — move misplaced top-level tasks to correct section
 // ---------------------------------------------------------------------------
 
-/// Returns the canonical section for a task state.
-fn canonical_section(state: TaskState) -> SectionKind {
-    match state {
-        TaskState::Parked => SectionKind::Parked,
-        TaskState::Done => SectionKind::Done,
-        _ => SectionKind::Backlog,
-    }
-}
+use crate::ops::task_ops::canonical_section;
 
 /// Move top-level tasks that are in the wrong section to the correct one.
 /// For example, a `[~]` parked task sitting in `## Backlog` gets moved to `## Parked`.

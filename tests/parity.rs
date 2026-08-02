@@ -1051,6 +1051,17 @@ const SURFACE_CASES: &[SurfaceCase] = &[
         Start::Recent(1),
         &[Space],
     ),
+    // The cell both surfaces used to miss. Each enumerated its section moves as
+    // `from → to` pairs and neither listed Done → Parked, so the task stayed in
+    // `## Done` wearing `[~]`. Parity could not see it: the two agreed with each
+    // other and disagreed with `canonical_section`, which is a third opinion this
+    // suite never compares against. Both now compute the target instead.
+    case(
+        "park a top-level Done task",
+        &["state", "M-000", "parked"],
+        Start::Detail("main", "M-000"),
+        &[Char('~')],
+    ),
     // -- cross-track move ----------------------------------------------------
     // `M`, type the target's prefix, Enter, `b` for bottom. The CLI's default
     // position for `mv --track` is Bottom too.
