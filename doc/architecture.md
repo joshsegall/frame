@@ -163,6 +163,8 @@ Done tasks have a grace period to prevent accidental section moves:
 
 **It is a total function from state, not a list of transitions, and that is the point.** Three places used to decide this independently, and the two written as `from → to` enumerations both missed the same cell: neither `cmd_state` nor the TUI listed Done → Parked, so parking a completed task left it in `## Done` wearing `[~]`. Asking "where does this state belong" has no cases to forget.
 
+`fr check` guards the invariant as `task_in_wrong_section`, and `--fix` repairs it with the same move. The warning is **top-level only**: a subtask has no section of its own, and reporting one is both a false positive and — if a repair acted on it — a way to tear a subtask out of its parent.
+
 Note what this means for testing: `tests/parity.rs` could not catch that, because it compares the CLI to the TUI and both were wrong *identically*. Agreement is not correctness. The behaviour is pinned instead by `state_change_moves_a_task_to_the_section_its_state_calls_for` in `tests/cli_integration.rs`, which sweeps every (state × starting section) pair against the known-right answer.
 
 The TUI applies the same policy but defers the move by 5 seconds (above), and adds undo entries and board column pins that the CLI has no need for. *What* section is shared; *when* to move and *what else* to do are the surface's own business.

@@ -29,7 +29,8 @@ pub enum TrackNode {
 }
 
 /// The kind of task section in a track file
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SectionKind {
     Backlog,
     Parked,

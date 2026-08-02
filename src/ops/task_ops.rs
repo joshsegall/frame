@@ -531,7 +531,39 @@ pub fn move_task_between_sections(
         dest.insert(0, task);
     }
 
+    separate_section(track, to);
+    separate_section(track, from);
+
     Some(source_index)
+}
+
+/// Keep one blank line after a section's tasks, so the next header does not end
+/// up welded to the last task line.
+///
+/// A section's trailing blank is part of its own node, so moving a task into a
+/// section that had none — an empty `## Done`, say — produced `- [x] task` with
+/// `## Parked` on the very next line. Cosmetic, but every section move made it,
+/// including the ones `fr clean` performs unasked, so files drifted into it
+/// without anyone editing them.
+///
+/// Only ever *adds* the separator, and only when the section has tasks: a
+/// section that already ends in blank lines keeps whatever spacing the author
+/// chose, and an empty one is left alone.
+fn separate_section(track: &mut Track, kind: SectionKind) {
+    for node in &mut track.nodes {
+        if let TrackNode::Section {
+            kind: k,
+            tasks,
+            trailing_lines,
+            ..
+        } = node
+            && *k == kind
+            && !tasks.is_empty()
+            && !trailing_lines.iter().any(|l| l.trim().is_empty())
+        {
+            trailing_lines.push(String::new());
+        }
+    }
 }
 
 /// Check if a task ID is a top-level task in the given section.
@@ -1509,6 +1541,58 @@ mod tests {
             None
         );
         assert_eq!(track.backlog()[2].subtasks.len(), 2, "subtask stayed put");
+    }
+
+    /// A section's trailing blank belongs to its own node, so moving a task into
+    /// one that had none welded the next header to the last task line.
+    #[test]
+    fn a_section_move_keeps_the_next_header_separated() {
+        let mut track =
+            parse_track("# T\n\n## Backlog\n\n- [ ] `T-001` One\n\n## Parked\n\n## Done\n");
+        move_task_between_sections(
+            &mut track,
+            "T-001",
+            SectionKind::Backlog,
+            SectionKind::Parked,
+        );
+
+        let out = crate::parse::serialize_track(&track);
+        assert!(
+            out.contains("- [ ] `T-001` One\n\n## Done"),
+            "the Done header must not sit against the task line:\n{out}"
+        );
+    }
+
+    /// Only ever adds a separator, so an author's own spacing survives and
+    /// repeated moves do not accumulate blank lines.
+    #[test]
+    fn section_separation_does_not_accumulate() {
+        let mut track =
+            parse_track("# T\n\n## Backlog\n\n- [ ] `T-001` One\n\n## Parked\n\n## Done\n");
+        move_task_between_sections(
+            &mut track,
+            "T-001",
+            SectionKind::Backlog,
+            SectionKind::Parked,
+        );
+        let once = crate::parse::serialize_track(&track);
+        move_task_between_sections(
+            &mut track,
+            "T-001",
+            SectionKind::Parked,
+            SectionKind::Backlog,
+        );
+        move_task_between_sections(
+            &mut track,
+            "T-001",
+            SectionKind::Backlog,
+            SectionKind::Parked,
+        );
+        assert_eq!(
+            crate::parse::serialize_track(&track),
+            once,
+            "moving a task back and forth must not grow the file"
+        );
     }
 
     #[test]

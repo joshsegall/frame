@@ -63,9 +63,30 @@ pub enum CheckWarning {
     /// Done task has no `resolved:` date
     #[serde(rename = "missing_resolved_date")]
     MissingResolvedDate { track_id: String, task_id: String },
-    /// Done task is in the backlog section (should probably be in Done)
-    #[serde(rename = "done_in_backlog")]
-    DoneInBacklog { track_id: String, task_id: String },
+    /// A **top-level** task is not in the section its state calls for — a done
+    /// task in `## Backlog`, a parked one in `## Done`, and so on.
+    ///
+    /// Generalised from a done-in-Backlog-only check, which covered one of the
+    /// six possible misplacements. The other five were reachable: three separate
+    /// defects in frame's own transition tables produced them (`12c0b57`,
+    /// `5eb069f`, `62e253c`), and none of them was reported. Every misplacement
+    /// found so far was made by frame rather than by hand, which is what this is
+    /// really guarding.
+    ///
+    /// **Top-level only.** A subtask lives inside its parent and has no section
+    /// of its own; a finished subtask under an unfinished parent in `## Backlog`
+    /// is the normal shape. The old check inherited its parent's section and
+    /// reported exactly that, a warning nothing could act on — `fr clean`
+    /// reconciles top-level tasks only, so it never went away.
+    #[serde(rename = "task_in_wrong_section")]
+    TaskInWrongSection {
+        track_id: String,
+        task_id: String,
+        /// Where the task's state says it belongs.
+        expected: crate::model::track::SectionKind,
+        /// Where it actually is.
+        actual: crate::model::track::SectionKind,
+    },
     /// Task has the #lost tag (created by recovery system)
     #[serde(rename = "lost_task")]
     LostTask { track_id: String, task_id: String },
@@ -361,12 +382,19 @@ fn check_task(
         }
     }
 
-    // Warning: done task sitting in backlog
-    if task.state == TaskState::Done && section == crate::model::track::SectionKind::Backlog {
-        result.warnings.push(CheckWarning::DoneInBacklog {
-            track_id: track_id.to_string(),
-            task_id: task_id.to_string(),
-        });
+    // Warning: a top-level task in a section its state does not call for.
+    // `parent.is_none()` is the top-level test — a subtask has no section of its
+    // own and simply inherits the one passed down this recursion.
+    if parent.is_none() && task.id.is_some() {
+        let expected = crate::ops::task_ops::canonical_section(task.state);
+        if expected != section {
+            result.warnings.push(CheckWarning::TaskInWrongSection {
+                track_id: track_id.to_string(),
+                task_id: task_id.to_string(),
+                expected,
+                actual: section,
+            });
+        }
     }
 
     // Warning: lines frame could not attribute to any task, held ahead of this
@@ -1851,7 +1879,10 @@ mod tests {
         let result = check_project(&project);
         assert!(result.warnings.iter().any(|w| matches!(
             w,
-            CheckWarning::DoneInBacklog { task_id, .. } if task_id == "M-001"
+            CheckWarning::TaskInWrongSection { task_id, expected, actual, .. }
+                if task_id == "M-001"
+                    && *expected == crate::model::track::SectionKind::Done
+                    && *actual == crate::model::track::SectionKind::Backlog
         )));
     }
 

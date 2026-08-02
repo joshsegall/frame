@@ -1292,10 +1292,18 @@ fn cmd_check(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
                     check::CheckWarning::MissingResolvedDate { track_id, task_id } => {
                         println!("  [{}] {} (done) missing resolved date", track_id, task_id);
                     }
-                    check::CheckWarning::DoneInBacklog { track_id, task_id } => {
+                    check::CheckWarning::TaskInWrongSection {
+                        track_id,
+                        task_id,
+                        expected,
+                        actual,
+                    } => {
                         println!(
-                            "  [{}] {} is done but in backlog section",
-                            track_id, task_id
+                            "  [{}] {} is in {} but its state belongs in {}",
+                            track_id,
+                            task_id,
+                            fix::section_name(*actual),
+                            fix::section_name(*expected)
                         );
                     }
                     check::CheckWarning::LostTask { track_id, task_id } => {

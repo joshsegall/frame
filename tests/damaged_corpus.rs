@@ -447,7 +447,7 @@ const CASES: &[Case] = &[
     Case {
         name: "done-in-backlog",
         provenance: "same — a checkbox ticked in place, leaving the task where it sat",
-        covers: &["done_in_backlog"],
+        covers: &["task_in_wrong_section"],
         build: |root| {
             append_backlog(
                 root,
@@ -456,9 +456,59 @@ const CASES: &[Case] = &[
             Built::Ok
         },
         expect: &[warning(
-            "done_in_backlog",
-            &[("task_id", Match::Eq("M-004"))],
+            "task_in_wrong_section",
+            &[
+                ("task_id", Match::Eq("M-004")),
+                ("expected", Match::Eq("done")),
+                ("actual", Match::Eq("backlog")),
+            ],
         )],
+        // Purely positional, so `--fix` moves it. This was `Repair::None` when
+        // the finding covered only done-in-Backlog and shipped without one.
+        repair: Repair::Clears,
+    },
+    Case {
+        name: "parked-in-done",
+        provenance: "a task parked out of `## Done` before the section policy was total",
+        covers: &["task_in_wrong_section"],
+        build: |root| {
+            append_done(
+                root,
+                "- [~] `M-004` Parked, left in Done\n  - added: 2026-01-01\n",
+            );
+            Built::Ok
+        },
+        // The five misplacements the done-in-Backlog check could not see. This
+        // one was produced by frame itself — see `5eb069f`.
+        expect: &[warning(
+            "task_in_wrong_section",
+            &[
+                ("task_id", Match::Eq("M-004")),
+                ("expected", Match::Eq("parked")),
+                ("actual", Match::Eq("done")),
+            ],
+        )],
+        repair: Repair::Clears,
+    },
+    Case {
+        name: "done-subtask-under-a-backlog-parent",
+        provenance: "an ordinary project: one subtask finished, its parent not",
+        // Covers nothing by design — this case exists to assert *silence*. The
+        // two cases above carry the tag.
+        covers: &[],
+        build: |root| {
+            append_backlog(
+                root,
+                "- [ ] `M-004` Parent\n  - added: 2026-01-01\n  - [x] `M-004.1` Finished sub\n    - added: 2026-01-01\n    - resolved: 2026-01-02\n",
+            );
+            Built::Ok
+        },
+        // **Nothing.** A subtask has no section of its own, so a finished one
+        // under an unfinished parent is the normal shape — but the old check
+        // inherited the parent's section and reported it as done-in-Backlog.
+        // Unactionable, too: `fr clean` reconciles top-level tasks only, so the
+        // warning never went away. This case exists to keep it gone.
+        expect: &[],
         repair: Repair::None,
     },
     Case {

@@ -128,6 +128,20 @@ pub enum Repair {
         task_id: String,
         parent_id: String,
     },
+    /// Move a top-level task into the section its state calls for.
+    ///
+    /// Purely positional — the task, its state and its subtasks are untouched —
+    /// so nothing here is irreversible and it needs no confirmation. This is the
+    /// same operation `fr clean` performs unasked; having it here is what lets
+    /// someone read the diagnosis first, and what makes the finding actionable
+    /// for a project that never runs clean.
+    #[serde(rename = "move_task_to_section")]
+    MoveTaskToSection {
+        track_id: String,
+        task_id: String,
+        from: crate::model::track::SectionKind,
+        to: crate::model::track::SectionKind,
+    },
     /// Clear an in-flight marker that recovery declined to act on. **Destructive.**
     ///
     /// Only reachable when automatic recovery found a precondition it could not
@@ -136,6 +150,16 @@ pub enum Repair {
     /// forever with no way to acknowledge it.
     #[serde(rename = "clear_inflight_marker")]
     ClearInflightMarker { operation: String, command: String },
+}
+
+/// A section's name as it appears in the file, for messages.
+pub fn section_name(kind: crate::model::track::SectionKind) -> &'static str {
+    use crate::model::track::SectionKind;
+    match kind {
+        SectionKind::Backlog => "## Backlog",
+        SectionKind::Parked => "## Parked",
+        SectionKind::Done => "## Done",
+    }
 }
 
 impl Repair {
@@ -152,6 +176,7 @@ impl Repair {
         match self {
             Repair::CloseNoteFence { .. }
             | Repair::CloseInboxFence { .. }
+            | Repair::MoveTaskToSection { .. }
             | Repair::AddGitignorePattern { .. } => false,
             Repair::DedupeArchivedTask { .. }
             | Repair::RemoveFrontierBackup { .. }
@@ -207,6 +232,18 @@ impl Repair {
                 format!(
                     "[{track_id}] {task_id}: renumber under its parent {parent_id} \
                      (its id does not extend the parent's); deps follow"
+                )
+            }
+            Repair::MoveTaskToSection {
+                track_id,
+                task_id,
+                from,
+                to,
+            } => {
+                format!(
+                    "[{track_id}] {task_id}: move from {} to {} (its state belongs there)",
+                    section_name(*from),
+                    section_name(*to)
                 )
             }
             Repair::ClearInflightMarker { command, .. } => {
@@ -315,6 +352,17 @@ pub fn plan(check: &CheckResult) -> Vec<Repair> {
                 task_id: task_id.clone(),
                 parent_id: parent_id.clone(),
             }),
+            CheckWarning::TaskInWrongSection {
+                track_id,
+                task_id,
+                expected,
+                actual,
+            } => plan.push(Repair::MoveTaskToSection {
+                track_id: track_id.clone(),
+                task_id: task_id.clone(),
+                from: *actual,
+                to: *expected,
+            }),
             CheckWarning::IdFrontierWasReset { path } => {
                 plan.push(Repair::RemoveFrontierBackup { path: path.clone() })
             }
@@ -397,6 +445,45 @@ pub fn apply(project: &mut Project, plan: &[Repair]) -> FixResult {
                     reason,
                 }),
             },
+            Repair::MoveTaskToSection {
+                track_id,
+                task_id,
+                from,
+                to,
+            } => {
+                // Re-check the current section rather than trusting the plan:
+                // `fr clean` may have reconciled it between the diagnosis and
+                // the repair, which is not a failure — it is the same move
+                // arriving from the other direction.
+                let moved = project
+                    .tracks
+                    .iter_mut()
+                    .find(|(id, _)| id == track_id)
+                    .map(|(_, track)| (track,))
+                    .and_then(|(track,)| {
+                        let now = crate::ops::task_ops::top_level_section(track, task_id)?;
+                        // `now == *to` means clean already reconciled it between
+                        // the diagnosis and the repair — the same move arriving
+                        // from the other direction, not a failure.
+                        Some(
+                            now == *to
+                                || crate::ops::task_ops::move_task_between_sections(
+                                    track, task_id, now, *to,
+                                )
+                                .is_some(),
+                        )
+                    });
+                match moved {
+                    Some(true) => result.applied.push(repair.clone()),
+                    _ => result.skipped.push(SkippedRepair {
+                        repair: repair.clone(),
+                        reason: format!(
+                            "{task_id} is no longer a top-level task in {}",
+                            section_name(*from)
+                        ),
+                    }),
+                }
+            }
             Repair::AddGitignorePattern { pattern } => {
                 // The pattern is repo-relative, as check reports the paths it
                 // was derived from, so the `.gitignore` it belongs in is the
@@ -743,9 +830,9 @@ pub fn tracks_touched(result: &FixResult) -> Vec<String> {
         .applied
         .iter()
         .filter_map(|r| match r {
-            Repair::CloseNoteFence { track_id, .. } | Repair::RenumberSubtask { track_id, .. } => {
-                Some(track_id.clone())
-            }
+            Repair::CloseNoteFence { track_id, .. }
+            | Repair::RenumberSubtask { track_id, .. }
+            | Repair::MoveTaskToSection { track_id, .. } => Some(track_id.clone()),
             _ => None,
         })
         .collect();
@@ -861,10 +948,6 @@ mod tests {
             CheckWarning::MissingResolvedDate {
                 track_id: "t".into(),
                 task_id: "T-4".into(),
-            },
-            CheckWarning::DoneInBacklog {
-                track_id: "t".into(),
-                task_id: "T-5".into(),
             },
             // Where a stranded line was meant to go is a guess. Frame keeps it
             // where it found it and says so; re-indenting it is the user's call.

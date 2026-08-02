@@ -728,8 +728,19 @@ pub(super) fn palette_check_project(app: &mut App) {
                 check::CheckWarning::MissingResolvedDate { track_id, task_id } => {
                     format!("  [{}] {} (done) missing resolved date", track_id, task_id)
                 }
-                check::CheckWarning::DoneInBacklog { track_id, task_id } => {
-                    format!("  [{}] {} done but in backlog section", track_id, task_id)
+                check::CheckWarning::TaskInWrongSection {
+                    track_id,
+                    task_id,
+                    expected,
+                    actual,
+                } => {
+                    format!(
+                        "  [{}] {} is in {} but belongs in {}",
+                        track_id,
+                        task_id,
+                        crate::ops::fix::section_name(*actual),
+                        crate::ops::fix::section_name(*expected)
+                    )
                 }
                 check::CheckWarning::LostTask { track_id, task_id } => {
                     format!("  [{}] {} has #lost tag", track_id, task_id)
