@@ -463,34 +463,58 @@ pub enum ConfirmAction {
     ImportTasks { track_id: String, file_path: String },
 }
 
-/// The kind of pending section move (grace period)
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PendingMoveKind {
-    /// Task marked done at top level → will move to the Done section from
-    /// `from`, which is the Backlog or Parked. `fr state ID done` has moved a
-    /// parked task to Done since e1a8dbe; hardcoding Backlog here is what kept
-    /// the TUI from doing the same.
-    ToDone { from: SectionKind },
-    /// Task reopened from Done → will move to Backlog
-    ToBacklog,
-    /// Task parked at top level → will move to the Parked section from `from`,
-    /// which is the Backlog or Done. Carries its source for the same reason
-    /// `ToDone` does: hardcoding the Backlog left a task parked out of `## Done`
-    /// sitting there with `[~]` on it.
-    ToParked { from: SectionKind },
-    /// Task un-parked in Parked → will move to Backlog section
-    FromParked,
-}
-
-/// A pending section move with a grace period
+/// A section move waiting out its grace period.
+///
+/// **One shape for every direction, deliberately.** This was four variants named
+/// for their destinations — `ToDone`, `ToBacklog`, `ToParked`, `FromParked` —
+/// which made coverage a matter of whoever remembered to list a case. Three
+/// separate defects came out of that: a Parked task marked done went to the
+/// Backlog (`12c0b57`), a Done task parked stayed in Done (`5eb069f`), and a Done
+/// task reopened anywhere but the Board or Recent views stayed in Done. Each was
+/// fixed by widening one variant, and the next gap simply moved elsewhere.
+///
+/// Carrying `from` and `to` instead means the destination is *computed* — by
+/// `task_ops::canonical_section` — rather than selected from a list, so there is
+/// no case left to forget.
 #[derive(Debug, Clone)]
 pub struct PendingMove {
-    pub kind: PendingMoveKind,
+    /// Where the task sits now.
+    pub from: SectionKind,
+    /// Where it goes when the grace period expires.
+    pub to: SectionKind,
+    /// Whether flushing pushes its own [`Operation::SectionMove`] undo entry.
+    ///
+    /// Not derivable from `from`/`to`: it depends on what the *scheduler* already
+    /// recorded. `Operation::Reopen` puts the task back in the Done section
+    /// itself, at its original index, so the recent-view reopen needs nothing
+    /// more. `Operation::StateChange` restores state and the resolved date and
+    /// leaves the task where it is — so every move scheduled alongside one needs
+    /// this, or undo lands the task in the right state in the wrong section.
+    pub push_undo: bool,
     pub track_id: String,
     pub task_id: String,
     pub deadline: Instant,
     /// The task state before this pending move was created (for board view grace period)
     pub old_state: Option<TaskState>,
+}
+
+impl PendingMove {
+    /// Whether the task is on its way out of the Done section.
+    ///
+    /// It is still physically in Done until the grace period expires, so the
+    /// Done column and the Recent view keep showing it — otherwise the row
+    /// vanishes the instant you reopen it and reappears elsewhere, which is the
+    /// jump the grace period exists to prevent.
+    pub fn leaves_done(&self) -> bool {
+        self.from == SectionKind::Done
+    }
+
+    /// Whether the task is heading somewhere it will be displayed by its old
+    /// state — Done or Parked — so the grace period should keep showing it that
+    /// way rather than flipping the moment the key is pressed.
+    pub fn settles_out_of_backlog(&self) -> bool {
+        self.to != SectionKind::Backlog
+    }
 }
 
 /// A pending subtask hide with a grace period (subtask stays visible briefly after being marked done)
@@ -1568,13 +1592,7 @@ impl App {
                         p.pinned_state
                     } else {
                         match pending_move {
-                            Some(pm)
-                                if matches!(
-                                    pm.kind,
-                                    PendingMoveKind::ToDone { .. }
-                                        | PendingMoveKind::ToParked { .. }
-                                ) =>
-                            {
+                            Some(pm) if pm.settles_out_of_backlog() => {
                                 pm.old_state.unwrap_or(task.state)
                             }
                             _ => task.state,
@@ -1645,9 +1663,7 @@ impl App {
                         // Check for a pending reopen (PendingMove::ToBacklog) — task was
                         // reopened but the section move hasn't fired yet (grace period).
                         let pending_reopen = self.pending_moves.iter().any(|pm| {
-                            pm.kind == PendingMoveKind::ToBacklog
-                                && pm.track_id == *track_id
-                                && pm.task_id == task_id
+                            pm.leaves_done() && pm.track_id == *track_id && pm.task_id == task_id
                         });
 
                         if task.state != TaskState::Done && !pending_reopen {
@@ -1890,60 +1906,29 @@ impl App {
     fn execute_pending_move(&mut self, pm: &PendingMove) -> Option<String> {
         use crate::ops::task_ops::move_task_between_sections;
         let track = self.find_track_mut(&pm.track_id)?;
-        match pm.kind {
-            PendingMoveKind::ToDone { from } => {
-                let source_index =
-                    move_task_between_sections(track, &pm.task_id, from, SectionKind::Done)?;
-                // Push SectionMove undo entry
-                self.undo_stack.push(Operation::SectionMove {
-                    track_id: pm.track_id.clone(),
-                    task_id: pm.task_id.clone(),
-                    from_section: from,
-                    to_section: SectionKind::Done,
-                    from_index: source_index,
-                });
-                Some(pm.track_id.clone())
-            }
-            PendingMoveKind::ToBacklog => {
-                // For reopen flush: move from Done to Backlog top
-                // No extra undo entry — the existing Reopen operation handles full reversal
-                move_task_between_sections(
-                    track,
-                    &pm.task_id,
-                    SectionKind::Done,
-                    SectionKind::Backlog,
-                )?;
-                // Now remove the resolved date (kept during grace period for sort stability)
-                let track = self.find_track_mut(&pm.track_id)?;
-                let task = crate::ops::task_ops::find_task_mut_in_track(track, &pm.task_id)?;
-                task.metadata.retain(|m| m.key() != "resolved");
-                task.mark_dirty();
-                Some(pm.track_id.clone())
-            }
-            PendingMoveKind::ToParked { from } => {
-                let source_index =
-                    move_task_between_sections(track, &pm.task_id, from, SectionKind::Parked)?;
-                self.undo_stack.push(Operation::SectionMove {
-                    track_id: pm.track_id.clone(),
-                    task_id: pm.task_id.clone(),
-                    from_section: from,
-                    to_section: SectionKind::Parked,
-                    from_index: source_index,
-                });
-                Some(pm.track_id.clone())
-            }
-            PendingMoveKind::FromParked => {
-                // Un-park flush: move from Parked to Backlog top
-                // No extra undo entry — the StateChange undo handles reversal
-                move_task_between_sections(
-                    track,
-                    &pm.task_id,
-                    SectionKind::Parked,
-                    SectionKind::Backlog,
-                )?;
-                Some(pm.track_id.clone())
-            }
+        let source_index = move_task_between_sections(track, &pm.task_id, pm.from, pm.to)?;
+
+        if pm.push_undo {
+            self.undo_stack.push(Operation::SectionMove {
+                track_id: pm.track_id.clone(),
+                task_id: pm.task_id.clone(),
+                from_section: pm.from,
+                to_section: pm.to,
+                from_index: source_index,
+            });
         }
+
+        // A task leaving Done is no longer resolved. The date is kept through the
+        // grace period so the row holds its place in the Done column and the
+        // Recent view while it is still visible there; this is where it goes.
+        if pm.leaves_done() {
+            let track = self.find_track_mut(&pm.track_id)?;
+            let task = crate::ops::task_ops::find_task_mut_in_track(track, &pm.task_id)?;
+            task.metadata.retain(|m| m.key() != "resolved");
+            task.mark_dirty();
+        }
+
+        Some(pm.track_id.clone())
     }
 
     /// Cancel a pending subtask hide for a specific task.
@@ -2002,7 +1987,7 @@ impl App {
         // Flash tasks that are about to move columns via pending moves
         let moving_task_ids: std::collections::HashSet<String> = expired
             .iter()
-            .filter(|pm| matches!(pm.kind, PendingMoveKind::ToBacklog))
+            .filter(|pm| pm.leaves_done())
             .map(|pm| pm.task_id.clone())
             .collect();
 
@@ -5837,6 +5822,146 @@ mod tests {
             .for_each(|f| f.next_retry_at = Instant::now());
         app.retry_unsaved_saves(false);
         assert!(app.unsaved.is_empty(), "the retry should fire once due");
+    }
+
+    // ---- Section moves and undo ------------------------------------------
+
+    /// Drive a key through the real input layer, the way a user would.
+    fn press(app: &mut App, c: char) {
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+        crate::tui::input::handle_key(
+            app,
+            KeyEvent {
+                code: KeyCode::Char(c),
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            },
+        );
+    }
+
+    fn with_parked_task(app: &mut App) {
+        let track = app.find_track_mut("a").unwrap();
+        track.ensure_section(SectionKind::Parked);
+        let t = crate::model::task::Task::new(
+            crate::model::task::TaskState::Parked,
+            Some("A-009".parse().unwrap()),
+            "Parked one".to_string(),
+        );
+        track
+            .section_tasks_mut(SectionKind::Parked)
+            .unwrap()
+            .push(t);
+    }
+
+    fn section_of(app: &mut App, task_id: &str) -> Option<SectionKind> {
+        let track = App::find_track_in_project(&app.project, "a")?;
+        crate::ops::task_ops::top_level_section(track, task_id)
+    }
+
+    /// Undo has to put the task back in the section it came from, not just
+    /// restore its state.
+    ///
+    /// `Operation::StateChange` restores state and the resolved date and leaves
+    /// the task where it sits — so a section move scheduled alongside one needs
+    /// an undo entry of its own. The un-park move used to skip it, on a comment
+    /// claiming StateChange covered the reversal, and undoing an un-park left a
+    /// `[~]` task sitting in the Backlog.
+    #[test]
+    fn undo_after_unparking_puts_the_task_back_in_parked() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        with_parked_task(&mut app);
+
+        app.view = View::Detail {
+            track_id: "a".into(),
+            task_id: "A-009".into(),
+        };
+        press(&mut app, 'o'); // un-park
+        app.flush_all_pending_moves();
+        assert_eq!(
+            section_of(&mut app, "A-009"),
+            Some(SectionKind::Backlog),
+            "un-parking moves it to the Backlog"
+        );
+
+        app.undo_stack.undo(&mut app.project.tracks, None);
+        assert_eq!(
+            section_of(&mut app, "A-009"),
+            Some(SectionKind::Parked),
+            "undo must restore the section, not just the state"
+        );
+    }
+
+    /// The view-dependent hole: reopening outside the Board and Recent views had
+    /// no section move at all, so the task stayed in `## Done` as `[ ]`.
+    #[test]
+    fn reopening_from_the_detail_view_moves_the_task_out_of_done() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        {
+            let track = app.find_track_mut("a").unwrap();
+            track.ensure_section(SectionKind::Done);
+            let t = crate::model::task::Task::new(
+                crate::model::task::TaskState::Done,
+                Some("A-008".parse().unwrap()),
+                "Finished".to_string(),
+            );
+            track.section_tasks_mut(SectionKind::Done).unwrap().push(t);
+        }
+
+        app.view = View::Detail {
+            track_id: "a".into(),
+            task_id: "A-008".into(),
+        };
+        press(&mut app, 'o');
+        app.flush_all_pending_moves();
+
+        assert_eq!(
+            section_of(&mut app, "A-008"),
+            Some(SectionKind::Backlog),
+            "a reopened task must leave the Done section from any view"
+        );
+    }
+
+    /// A task on its way out of Done keeps its resolved date for the grace
+    /// period — the Done column and Recent both sort on it — and loses it when
+    /// the move fires.
+    #[test]
+    fn the_resolved_date_survives_the_grace_period_and_not_the_move() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        {
+            let track = app.find_track_mut("a").unwrap();
+            track.ensure_section(SectionKind::Done);
+            let mut t = crate::model::task::Task::new(
+                crate::model::task::TaskState::Done,
+                Some("A-008".parse().unwrap()),
+                "Finished".to_string(),
+            );
+            t.metadata
+                .push(crate::model::task::Metadata::Resolved("2026-01-01".into()));
+            track.section_tasks_mut(SectionKind::Done).unwrap().push(t);
+        }
+
+        app.view = View::Detail {
+            track_id: "a".into(),
+            task_id: "A-008".into(),
+        };
+        press(&mut app, 'o');
+
+        let has_resolved = |app: &mut App| {
+            let track = app.find_track_mut("a").unwrap();
+            crate::ops::task_ops::find_task_mut_in_track(track, "A-008")
+                .unwrap()
+                .metadata
+                .iter()
+                .any(|m| m.key() == "resolved")
+        };
+        assert!(has_resolved(&mut app), "kept during the grace period");
+
+        app.flush_all_pending_moves();
+        assert!(!has_resolved(&mut app), "stripped when the move fires");
     }
 
     #[test]

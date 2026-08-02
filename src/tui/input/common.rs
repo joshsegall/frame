@@ -8,8 +8,8 @@ use crate::ops::task_ops::{self};
 use crate::util::unicode;
 
 use crate::tui::app::{
-    App, DetailRegion, DetailState, FlatItem, Mode, PendingMove, PendingMoveKind, RepeatableAction,
-    View, resolve_task_from_flat,
+    App, DetailRegion, DetailState, FlatItem, Mode, PendingMove, RepeatableAction, View,
+    resolve_task_from_flat,
 };
 use crate::tui::undo::{Operation, UndoNavTarget};
 use std::io::Write;
@@ -897,37 +897,44 @@ pub(super) enum StateAction {
     ToggleParked,
 }
 
-/// Schedule the section move that follows marking a task done, and report the
-/// section the task sits in at top level (`None` for a subtask, which stays put).
+/// Schedule the section move a state change calls for, and report the section
+/// the task sits in at top level (`None` for a subtask, which has no section of
+/// its own and stays put).
 ///
-/// A top-level task moves into the Done section after the grace period — from
-/// the Backlog **or from Parked**. `fr state ID done` has done both since
-/// `e1a8dbe`; the TUI's four "mark done" paths each gated on the Backlog alone,
-/// so a parked task fell through to the un-park move instead and landed at the
-/// top of the Backlog carrying `[x]` and a resolved date — the state `fr check`
-/// reports as `DoneInBacklog`.
+/// The destination is **computed** — `task_ops::canonical_section` — rather than
+/// chosen from a list of transitions. Every version of this that enumerated
+/// `from → to` pairs was missing one: a Parked task marked done went to the
+/// Backlog (`12c0b57`), a Done task parked stayed in Done (`5eb069f`), and a Done
+/// task reopened outside the Board and Recent views stayed in Done. Asking where
+/// the new state belongs has no cases to leave out.
 ///
-/// One helper, four callers, so the next path to mark a task done cannot pick a
-/// fifth rule.
-pub(super) fn schedule_move_to_done(
+/// `push_undo` is the caller's to decide, because it depends on what that caller
+/// has already recorded — see [`PendingMove::push_undo`]. Every path through
+/// [`task_state_action`] pushes an `Operation::StateChange`, which restores state
+/// but *not* section, so those all need one.
+pub(super) fn schedule_section_move(
     app: &mut App,
     track_id: &str,
     task_id: &str,
+    new_state: crate::model::task::TaskState,
     old_state: crate::model::task::TaskState,
+    push_undo: bool,
 ) -> Option<SectionKind> {
     let track = App::find_track_in_project(&app.project, track_id)?;
-    let section = task_ops::top_level_section(track, task_id)?;
-    // Already in Done (a hand-edited checkbox, say): nothing to move.
-    if section != SectionKind::Done {
+    let from = task_ops::top_level_section(track, task_id)?;
+    let to = task_ops::canonical_section(new_state);
+    if from != to {
         app.pending_moves.push(PendingMove {
-            kind: PendingMoveKind::ToDone { from: section },
+            from,
+            to,
+            push_undo,
             track_id: track_id.to_string(),
             task_id: task_id.to_string(),
             deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
             old_state: Some(old_state),
         });
     }
-    Some(section)
+    Some(from)
 }
 
 /// Apply a state change to the task under the cursor.
@@ -997,65 +1004,50 @@ pub(super) fn task_state_action(app: &mut App, action: StateAction) {
         app.flash_state = Some(new_state);
         app.flash_task(&task_id);
 
-        // Board-specific grace period handling
-        if matches!(app.view, View::Board) {
-            if old_state == crate::model::task::TaskState::Done
-                && new_state != crate::model::task::TaskState::Done
-            {
-                // Done→non-Done on board: mirror the reopen flow from confirm.rs.
-                // set_state() already stripped the resolved date, but we need it
-                // during the grace period so the task stays visible in Done column.
-                if let Some(ref resolved) = old_resolved {
-                    let track = app.find_track_mut(&track_id).expect("track exists");
-                    let task =
-                        task_ops::find_task_mut_in_track(track, &task_id).expect("task exists");
-                    task.metadata.push(Metadata::Resolved(resolved.clone()));
-                    task.mark_dirty();
-                }
-                // Schedule section move Done→Backlog after grace period.
-                // execute_pending_move(ToBacklog) will move the task and strip resolved.
-                app.pending_moves.push(PendingMove {
-                    kind: PendingMoveKind::ToBacklog,
-                    track_id: track_id.clone(),
-                    task_id: task_id.clone(),
-                    deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
-                    old_state: Some(old_state),
-                });
-                // No column pin — PendingMove::ToBacklog keeps the task in Done section
-            } else {
-                // For non-Done→Done: cancel any stale ToBacklog move from a prior reopen
-                if new_state == crate::model::task::TaskState::Done {
-                    app.cancel_pending_move(&track_id, &task_id);
-                }
-                // Pin task to its current board column during grace period so it
-                // doesn't immediately jump columns (e.g. Ready → In Progress).
-                app.board_state
-                    .column_pins
-                    .retain(|p| !(p.track_id == track_id && p.task_id == task_id));
-                app.board_state
-                    .column_pins
-                    .push(crate::tui::app::BoardColumnPin {
-                        track_id: track_id.clone(),
-                        task_id: task_id.clone(),
-                        pinned_state: old_state,
-                        deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
-                    });
-            }
-        }
-
-        // If transitioning away from Done or Parked, cancel any pending move and subtask hide
-        // (For board Done→non-Done this is a no-op since we just created a ToBacklog above,
-        //  but cancel_pending_move only cancels moves matching the task, not by kind.)
+        // Any move scheduled by an earlier state change on this task is stale.
+        // Cancelling here, before the new one is scheduled below, is what lets
+        // this be unconditional — the old code had to carve out the move it had
+        // just created two branches earlier.
+        app.cancel_pending_move(&track_id, &task_id);
         if old_state == crate::model::task::TaskState::Done
             || old_state == crate::model::task::TaskState::Parked
         {
-            // Don't cancel the ToBacklog we just created for board Done→non-Done
-            if !(matches!(app.view, View::Board)
-                && old_state == crate::model::task::TaskState::Done)
-            {
-                app.cancel_pending_move(&track_id, &task_id);
-            }
             app.cancel_pending_subtask_hide(&track_id, &task_id);
+        }
+
+        // Leaving Done: `set_state` has already stripped the resolved date, but
+        // the task stays in the Done section until the move fires, so the Done
+        // column and the Recent view still show it — and both sort on that date.
+        // It is put back for the grace period and stripped again on flush.
+        if old_state == crate::model::task::TaskState::Done
+            && new_state != crate::model::task::TaskState::Done
+            && let Some(ref resolved) = old_resolved
+        {
+            let track = app.find_track_mut(&track_id).expect("track exists");
+            let task = task_ops::find_task_mut_in_track(track, &task_id).expect("task exists");
+            task.metadata.push(Metadata::Resolved(resolved.clone()));
+            task.mark_dirty();
+        }
+
+        // Board: pin the task to its current column for the grace period so it
+        // does not jump the instant the key is pressed. A task on its way out of
+        // Done needs no pin — it is still in the Done section, and so still in
+        // the Done column, until the move fires.
+        if matches!(app.view, View::Board)
+            && !(old_state == crate::model::task::TaskState::Done
+                && new_state != crate::model::task::TaskState::Done)
+        {
+            app.board_state
+                .column_pins
+                .retain(|p| !(p.track_id == track_id && p.task_id == task_id));
+            app.board_state
+                .column_pins
+                .push(crate::tui::app::BoardColumnPin {
+                    track_id: track_id.clone(),
+                    task_id: task_id.clone(),
+                    pinned_state: old_state,
+                    deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+                });
         }
 
         app.undo_stack.push(Operation::StateChange {
@@ -1080,10 +1072,15 @@ pub(super) fn task_state_action(app: &mut App, action: StateAction) {
             }
         });
 
-        // If the task is now Done, schedule its section move; a subtask has none
-        // and instead gets a grace period before it is hidden.
-        if new_state == crate::model::task::TaskState::Done
-            && schedule_move_to_done(app, &track_id, &task_id, old_state).is_none()
+        // The section move — one call, every direction. `push_undo` is true
+        // because the `StateChange` pushed above restores state and the resolved
+        // date but leaves the task where it sits; without an entry of its own,
+        // undoing an unpark left a `[~]` task in the Backlog.
+        //
+        // A subtask has no section of its own, so it gets a grace period before
+        // being hidden instead.
+        if schedule_section_move(app, &track_id, &task_id, new_state, old_state, true).is_none()
+            && new_state == crate::model::task::TaskState::Done
         {
             app.pending_subtask_hides
                 .push(crate::tui::app::PendingSubtaskHide {
@@ -1091,48 +1088,6 @@ pub(super) fn task_state_action(app: &mut App, action: StateAction) {
                     task_id: task_id.clone(),
                     deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
                 });
-        }
-
-        // If the task is now Parked, schedule its move into the Parked section —
-        // from wherever it currently sits, not the Backlog alone. A task parked
-        // out of `## Done` used to stay in Done wearing `[~]`, which is the
-        // `12c0b57` defect one section over.
-        if new_state == crate::model::task::TaskState::Parked {
-            let track_ref = App::find_track_in_project(&app.project, &track_id).unwrap();
-            if let Some(from) = task_ops::top_level_section(track_ref, &task_id)
-                && from != SectionKind::Parked
-            {
-                app.pending_moves.push(PendingMove {
-                    kind: PendingMoveKind::ToParked { from },
-                    track_id: track_id.clone(),
-                    task_id: task_id.clone(),
-                    deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
-                    old_state: Some(old_state),
-                });
-            }
-        }
-
-        // If the task was Parked and is now something else, and is top-level in
-        // the Parked section, schedule a move back to the Backlog. Done is the
-        // exception: it goes to the Done section, scheduled above.
-        if old_state == crate::model::task::TaskState::Parked
-            && !matches!(
-                new_state,
-                crate::model::task::TaskState::Parked | crate::model::task::TaskState::Done
-            )
-        {
-            let track_ref = App::find_track_in_project(&app.project, &track_id).unwrap();
-            let is_top_level_parked =
-                task_ops::is_top_level_in_section(track_ref, &task_id, SectionKind::Parked);
-            if is_top_level_parked {
-                app.pending_moves.push(PendingMove {
-                    kind: PendingMoveKind::FromParked,
-                    track_id: track_id.clone(),
-                    task_id: task_id.clone(),
-                    deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
-                    old_state: Some(old_state),
-                });
-            }
         }
     }
 

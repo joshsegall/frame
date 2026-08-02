@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::model::task::{Task, TaskState};
-use crate::tui::app::{App, PendingMoveKind};
+use crate::tui::app::App;
 use crate::tui::input::build_recent_entries;
 use crate::util::unicode;
 
@@ -60,11 +60,10 @@ pub fn render_recent_view(frame: &mut Frame, app: &mut App, area: Rect) {
         };
 
         // Check if this task has a pending ToBacklog move (show as reopened)
-        let has_pending_reopen = app.pending_moves.iter().any(|pm| {
-            pm.kind == PendingMoveKind::ToBacklog
-                && pm.track_id == entry.track_id
-                && pm.task_id == entry.id
-        });
+        let has_pending_reopen = app
+            .pending_moves
+            .iter()
+            .any(|pm| pm.leaves_done() && pm.track_id == entry.track_id && pm.task_id == entry.id);
 
         let has_subtasks = !entry.task.subtasks.is_empty();
         let is_expanded = has_subtasks && app.recent_expanded.contains(&entry.id);

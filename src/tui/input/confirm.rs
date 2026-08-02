@@ -3,7 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::model::SectionKind;
 use crate::ops::task_ops::{self};
 
-use crate::tui::app::{App, Mode, PendingMove, PendingMoveKind};
+use crate::tui::app::{App, Mode, PendingMove};
 use crate::tui::undo::Operation;
 
 use super::*;
@@ -255,7 +255,11 @@ pub(super) fn reopen_recent_task(app: &mut App) {
 
     // Schedule pending move to Backlog (grace period)
     app.pending_moves.push(PendingMove {
-        kind: PendingMoveKind::ToBacklog,
+        from: SectionKind::Done,
+        to: SectionKind::Backlog,
+        // `Operation::Reopen` above puts the task back in Done at its original
+        // index itself, so a `SectionMove` entry here would undo it twice.
+        push_undo: false,
         track_id: track_id.clone(),
         task_id: task_id.clone(),
         deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),

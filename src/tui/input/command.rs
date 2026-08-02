@@ -555,10 +555,8 @@ pub(super) fn compound_done_with_tag(app: &mut App, tag: &str) {
             new_resolved,
         });
 
-        // Schedule pending move to Done section if appropriate
-        if new_state == crate::model::TaskState::Done {
-            schedule_move_to_done(app, &track_id, &task_id, old_state);
-        }
+        // Whatever the new state is, put the task in the section it calls for.
+        schedule_section_move(app, &track_id, &task_id, new_state, old_state, true);
     }
 
     app.save_track_logged(&track_id);

@@ -571,10 +571,7 @@ pub(super) fn bulk_state_change(app: &mut App, target_state: crate::model::TaskS
                 new_resolved,
             });
 
-            // Schedule pending move if transitioning to Done
-            if new_state == crate::model::TaskState::Done {
-                schedule_move_to_done(app, &track_id, task_id, old_state);
-            }
+            schedule_section_move(app, &track_id, task_id, new_state, old_state, true);
 
             any_changed = true;
         }

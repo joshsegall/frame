@@ -145,11 +145,15 @@ The mtime is deliberately not refreshed on this path: `track_changed_on_disk` re
 
 Done tasks have a grace period to prevent accidental section moves:
 
-1. **TUI**: When a task is marked done (Space/x), it stays in the Backlog section with a `PendingMove::ToDone` created with a 5-second deadline. The event loop's 250ms poll calls `flush_expired_pending_moves()` to execute moves whose deadline has passed.
+1. **TUI**: When a task's state changes, it stays where it is and a `PendingMove { from, to }` is created with a 5-second deadline. `to` comes from `canonical_section` (below), so one shape covers every direction. The event loop's 250ms poll calls `flush_expired_pending_moves()` to execute moves whose deadline has passed.
 2. **Cancel**: Pressing undo during the grace period cancels the pending move and reverts the state change — the task never leaves Backlog.
 3. **Immediate flush**: View changes and quit flush all pending moves immediately (no dangling state).
 4. **CLI**: `fr state ID done` moves immediately with no grace period (non-interactive, no undo).
-5. **Reopen**: Space in Recent view creates a reverse `PendingMove::ToBacklog` with the same 5s grace, allowing cancel by pressing Space again.
+5. **Reopen**: Space in Recent view schedules a Done → Backlog move with the same 5s grace, allowing cancel by pressing Space again.
+
+**Undo entries**: `PendingMove::push_undo` says whether flushing records its own `Operation::SectionMove`. It is not derivable from `from`/`to` — it depends on what the scheduler already recorded. `Operation::Reopen` restores the task to the Done section at its original index itself, so the Recent-view reopen needs nothing more; `Operation::StateChange` restores state and the resolved date and leaves the task where it sits, so every move scheduled alongside one needs an entry. Getting this wrong is invisible until someone presses undo: un-parking used to skip the entry and undo left a `[~]` task in the Backlog.
+
+**Leaving Done**: the resolved date is put back for the grace period, because the task is still in the Done section and both the Done column and the Recent view sort on it. `execute_pending_move` strips it when the move fires.
 
 **Subtree unity**: `move_task_between_sections()` moves the entire subtask tree together. Only top-level tasks in a section can be moved — subtasks don't move independently.
 

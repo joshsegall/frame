@@ -1062,6 +1062,24 @@ const SURFACE_CASES: &[SurfaceCase] = &[
         Start::Detail("main", "M-000"),
         &[Char('~')],
     ),
+    // Reopening used to be *view*-dependent, which is worse than the
+    // state-dependent gaps above: the same key on the same task did different
+    // things depending on where you were looking at it from. The Board had a
+    // branch of its own and Recent had `reopen_recent_task`; the detail view had
+    // neither, so a reopened task stayed in `## Done` as `[ ]`. The Recent case
+    // above passed throughout, which is why nothing caught it.
+    case(
+        "reopen a top-level Done task from the detail view",
+        &["state", "M-000", "todo"],
+        Start::Detail("main", "M-000"),
+        &[Char('o')],
+    ),
+    case(
+        "block a top-level Done task from the detail view",
+        &["state", "M-000", "blocked"],
+        Start::Detail("main", "M-000"),
+        &[Char('b')],
+    ),
     // -- cross-track move ----------------------------------------------------
     // `M`, type the target's prefix, Enter, `b` for bottom. The CLI's default
     // position for `mv --track` is Bottom too.
