@@ -2,7 +2,7 @@
 
 All notable changes to frame will be documented in this file.
 
-## Unreleased
+## v0.1.7 - 2026-08-02
 
 ### Removed
 - **`fr search --archive` / `-a` is gone.** The flag was declared and never read: archives have always been searched unconditionally, so `-a` did nothing whether you passed it or not. Its help text ("Also search archived tasks") implied the opposite of what the command did. The default is unchanged — archives are still searched — and the new `--no-archive` is the opt-out. A script passing `-a` now gets an unknown-argument error rather than silently continuing to have no effect.
