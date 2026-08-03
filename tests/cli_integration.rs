@@ -3987,7 +3987,14 @@ fn merge_repo(root: &Path) -> bool {
     // sandbox registry would otherwise be committed and conflict on every merge.
     fs::write(root.join(".gitignore"), "frame/.*\n.xdg-config/\n").unwrap();
 
-    git_ok(root, &["add", "-A"]) && git_ok(root, &["commit", "-qm", "base"])
+    if !(git_ok(root, &["add", "-A"]) && git_ok(root, &["commit", "-qm", "base"])) {
+        return false;
+    }
+    // `init.defaultBranch` is not `main` everywhere — CI runs git's own default,
+    // which is `master`. Name the branch here so a later `checkout main` cannot
+    // fail silently and leave the test merging a branch into itself.
+    git_must(root, &["branch", "-M", "main"]);
+    true
 }
 
 fn git_ok(dir: &Path, args: &[&str]) -> bool {
@@ -3999,6 +4006,11 @@ fn git_ok(dir: &Path, args: &[&str]) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// A git step whose failure would make the test that follows meaningless.
+fn git_must(dir: &Path, args: &[&str]) {
+    assert!(git_ok(dir, args), "git {args:?} failed");
 }
 
 fn git_out(dir: &Path, args: &[&str]) -> String {
@@ -4027,15 +4039,15 @@ fn test_merge_driver_handles_a_relocation_and_an_append() {
     }
     let root = tmp.path();
 
-    git_ok(root, &["checkout", "-q", "-b", "theirs"]);
+    git_must(root, &["checkout", "-q", "-b", "theirs"]);
     run_fr_ok(root, &["add", "main", "Third thing"]);
-    git_ok(root, &["add", "-A"]);
-    git_ok(root, &["commit", "-qm", "append"]);
+    git_must(root, &["add", "-A"]);
+    git_must(root, &["commit", "-qm", "append"]);
 
-    git_ok(root, &["checkout", "-q", "main"]);
+    git_must(root, &["checkout", "-q", "main"]);
     run_fr_ok(root, &["state", "M-001", "done"]);
-    git_ok(root, &["add", "-A"]);
-    git_ok(root, &["commit", "-qm", "done"]);
+    git_must(root, &["add", "-A"]);
+    git_must(root, &["commit", "-qm", "done"]);
 
     let merged = Command::new("git")
         .current_dir(root)
@@ -4089,15 +4101,15 @@ fn test_merge_driver_conflict_leaves_a_valid_file_and_a_marker() {
     }
     let root = tmp.path();
 
-    git_ok(root, &["checkout", "-q", "-b", "theirs"]);
+    git_must(root, &["checkout", "-q", "-b", "theirs"]);
     run_fr_ok(root, &["note", "M-001", "note from them"]);
-    git_ok(root, &["add", "-A"]);
-    git_ok(root, &["commit", "-qm", "their note"]);
+    git_must(root, &["add", "-A"]);
+    git_must(root, &["commit", "-qm", "their note"]);
 
-    git_ok(root, &["checkout", "-q", "main"]);
+    git_must(root, &["checkout", "-q", "main"]);
     run_fr_ok(root, &["note", "M-001", "note from us"]);
-    git_ok(root, &["add", "-A"]);
-    git_ok(root, &["commit", "-qm", "our note"]);
+    git_must(root, &["add", "-A"]);
+    git_must(root, &["commit", "-qm", "our note"]);
 
     let merged = Command::new("git")
         .current_dir(root)
