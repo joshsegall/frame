@@ -125,7 +125,7 @@ Every mutating TUI action pushes an `Operation` onto the undo stack. Each operat
 
 **Unsaved files are merged, not replaced**: `App::unsaved` records files whose in-memory content did not reach disk. A reload of a file in that set does *not* overwrite it — both sides then hold content that exists nowhere else, and the usual reason a save failed is another `fr` holding the lock, which is the same process that goes on to write the file. So the collision is likely, not exotic.
 
-Such a reload runs a three-way merge (`ops::reconcile`) against `App::baselines` — the last content known to be on disk for that file, recorded at load and after each successful save, kept as text and parsed only when a merge actually runs. Tasks are matched by ID, so:
+Such a reload runs a three-way merge (`ops::reconcile`, shared with the merge driver — see below) against `App::baselines` — the last content known to be on disk for that file, recorded at load and after each successful save, kept as text and parsed only when a merge actually runs. Tasks are matched by ID, so:
 
 - an addition on either side survives;
 - a change to a task the other side did not touch is taken;
@@ -140,6 +140,22 @@ Not attempted: task ordering (a task follows the side it came from) and subtask 
 The mtime is deliberately not refreshed on this path: `track_changed_on_disk` reads it to decide whether memory and disk have diverged, and after a merge they have.
 
 **Code**: `src/io/watcher.rs` (FrameWatcher), `src/tui/render/conflict_popup.rs`, `src/ops/reconcile.rs`
+
+## Merging Under Version Control
+
+`ops::reconcile` has two callers, not one. The TUI reload above is the first; `fr merge` — registered as a git merge driver — is the second. Both hand it an ancestor and two sides and get back a merged track; only where the three versions come from differs.
+
+**Why a driver is necessary rather than nice.** `fr done` *relocates* a task from `## Backlog` to `## Done`. A line-based merge sees a deletion in one region and an insertion in another and cannot know they are the same task, so it conflicts — and any resolution that keeps both hunks produces two tasks with one ID, one `[ ]` and one `[x]`. The file still looks plausible and `fr show` disagrees with it. Worse, once git has written `<<<<<<<` into the file it is no longer valid frame markdown, so every tool that could diagnose the damage is broken too, and what follows is hand-editing line ranges in a file whose structure is already wrong. That is how a `## Parked` header gets deleted.
+
+**Why matching by ID is sound across branches.** Actor tokens namespace mints per working copy, and the durable frontier (`io::ids`) lives in the git common directory and is shared by every worktree of a clone. Two branches therefore cannot mint the same top-level number for different tasks, so a key present on both sides always denotes the same task. That is what lets the driver reuse `reconcile` unchanged, with no renumbering step. The one uncovered case is child numbers (`BAC-153.2`, see `ops::ids`), which `fr check` reports as a duplicate and `fr clean` renumbers under the parent.
+
+**No conflict markers, ever.** On conflict the driver writes a file that still parses, keeps our version, writes theirs to the recovery log, and exits non-zero so the VCS halts. Because the file carries no markers, staging the path would otherwise commit our side and silently discard theirs — so the conflicted task also gets a `conflict:` metadata line, which `fr check` reports as an error until `fr merge --resolve <ID>` clears it. That marker is the only durable record that a decision is outstanding.
+
+**Git readiness is one surface with one owner.** Three things must be true for a frame project in git: `.gitignore` covers working-copy-local files, `.gitattributes` routes frame markdown to the driver, and `.git/config` registers the driver. `fr git setup` does all three and is idempotent; `fr init` calls it. `fr check --fix` deliberately does none of it and points there instead — it used to add the `.gitignore` pattern and nothing else, which left nobody able to predict which part `--fix` would repair.
+
+The third piece is the awkward one: `.git/config` is per-clone and cannot be committed. A teammate who clones a correctly-configured project gets the attributes but not the driver, and silently falls back to text merges. That is why `fr check` warns about an unregistered driver — it is the only thing that tells a fresh clone to run setup. Both git checks are no-ops outside a repo, or when `git` cannot be run.
+
+**Code**: `src/ops/merge_files.rs`, `src/ops/git_setup.rs`, `src/cli/handlers/merge.rs`, `src/cli/handlers/git.rs`
 
 ## Done Task Lifecycle
 

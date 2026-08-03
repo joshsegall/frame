@@ -1,5 +1,9 @@
 mod init;
 pub use init::cmd_init;
+mod merge;
+pub use merge::{cmd_merge, cmd_merge_resolve};
+mod git;
+pub use git::cmd_git;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -48,6 +52,22 @@ pub fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Some(cmd) => match cmd {
             // Init is handled in main.rs before project discovery
             Commands::Init(args) => cmd_init(args),
+
+            // Merge is handled in main.rs too — it owns its exit status, which
+            // is how it reports a conflict to the version control system.
+            // `--resolve` writes to the project, so it takes the normal path;
+            // the driver form is handled in main.rs, which owns its exit status.
+            Commands::Merge(args) => {
+                if args.resolve.is_empty() {
+                    cmd_merge(args);
+                } else {
+                    cmd_merge_resolve(&args.resolve)?;
+                }
+                Ok(())
+            }
+
+            // Repo configuration, not project content
+            Commands::Git(args) => cmd_git(args, json),
 
             // Project registry (doesn't require a project context)
             Commands::Projects(args) => cmd_projects(args, json),
@@ -122,6 +142,19 @@ fn load_project_cwd() -> Result<Project, ProjectError> {
     registry::touch_cli(&project.root);
 
     Ok(project)
+}
+
+/// The project root, without loading or registering the project.
+///
+/// For commands that operate on a project's *surroundings* rather than its
+/// contents — `fr git setup` configures a repo, and has to keep working when a
+/// track file will not parse.
+fn discover_project_root() -> Result<PathBuf, ProjectError> {
+    let start = match PROJECT_DIR_OVERRIDE.lock().unwrap().as_ref() {
+        Some(dir) => dir.clone(),
+        None => std::env::current_dir().map_err(ProjectError::IoError)?,
+    };
+    project_io::discover_project(&start)
 }
 
 /// Find the track config and prefix for a given track ID.
@@ -1259,6 +1292,16 @@ fn cmd_check(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
                     } => {
                         println!("  [{}] {} has broken ref: {}", track_id, task_id, path);
                     }
+                    check::CheckError::UnresolvedMergeConflict {
+                        track_id,
+                        task_id,
+                        detail,
+                    } => {
+                        println!(
+                            "  [{}] {} has an unresolved merge conflict ({}) — their version is in the recovery log (`fr recovery`); apply what is missing, then clear it with `fr merge --resolve {}`",
+                            track_id, task_id, detail, task_id
+                        );
+                    }
                     check::CheckError::BrokenSpec {
                         track_id,
                         task_id,
@@ -1344,6 +1387,11 @@ fn cmd_check(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
                             tokens[0],
                         );
                     }
+                    check::CheckWarning::MergeDriverUnregistered => {
+                        println!(
+                            "  frame's merge driver is not registered in this clone, so git will merge track files line by line — run `fr git setup`"
+                        );
+                    }
                     check::CheckWarning::LocalFileCommitted { path, tracked } => {
                         if *tracked {
                             // `git rm --cached` refuses a directory without
@@ -1358,13 +1406,13 @@ fn cmd_check(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
                                 "--cached"
                             };
                             println!(
-                                "  {} is tracked by git, but it is local to this working copy — untrack it with `git rm {} {}` and add `{}` to .gitignore",
-                                path, flags, path, path
+                                "  {} is tracked by git, but it is local to this working copy — untrack it with `git rm {} {}`, then run `fr git setup`",
+                                path, flags, path
                             );
                         } else {
                             println!(
-                                "  {} is not covered by .gitignore, but it is local to this working copy — add `{}` to .gitignore before it gets committed",
-                                path, path
+                                "  {} is not covered by .gitignore, but it is local to this working copy — run `fr git setup` before it gets committed",
+                                path
                             );
                         }
                     }

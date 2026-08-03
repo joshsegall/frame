@@ -88,18 +88,6 @@ pub enum Repair {
         fence: String,
         closer: String,
     },
-    /// Add the blanket pattern covering working-copy-local frame files to
-    /// `.gitignore`.
-    ///
-    /// One repair however many files are reported: the pattern covers all of
-    /// them, and the next one added to `frame/` too. A project that predates the
-    /// pattern migrates to it on its first repair rather than acquiring entries
-    /// one incident at a time.
-    #[serde(rename = "add_gitignore_pattern")]
-    AddGitignorePattern {
-        /// e.g. `frame/.*`, or `sub/frame/.*` for a project in a subdirectory.
-        pattern: String,
-    },
     /// Drop the extra copies of a task duplicated inside the archives, keeping
     /// the first. **Destructive.**
     #[serde(rename = "dedupe_archived_task")]
@@ -176,8 +164,7 @@ impl Repair {
         match self {
             Repair::CloseNoteFence { .. }
             | Repair::CloseInboxFence { .. }
-            | Repair::MoveTaskToSection { .. }
-            | Repair::AddGitignorePattern { .. } => false,
+            | Repair::MoveTaskToSection { .. } => false,
             Repair::DedupeArchivedTask { .. }
             | Repair::RemoveFrontierBackup { .. }
             | Repair::ClearInflightMarker { .. }
@@ -205,9 +192,6 @@ impl Repair {
                 ..
             } => {
                 format!("inbox {index} \"{title}\": close body fence opened by `{fence}`")
-            }
-            Repair::AddGitignorePattern { pattern } => {
-                format!(".gitignore: add `{pattern}` (covers every working-copy-local frame file)")
             }
             Repair::DedupeArchivedTask {
                 task_id,
@@ -317,23 +301,6 @@ pub fn plan(check: &CheckResult) -> Vec<Repair> {
                 closer: closer_for(fence),
                 fence: fence.clone(),
             }),
-            // Only the not-yet-ignored half. A path git already tracks needs
-            // `git rm --cached` too, which this will not do.
-            //
-            // One repair however many files are reported — the pattern is
-            // derived from the frame directory they share, so several warnings
-            // collapse into the single line that covers all of them.
-            CheckWarning::LocalFileCommitted {
-                path,
-                tracked: false,
-            } => {
-                let pattern = gitignore_pattern_for_reported(path);
-                if !plan.iter().any(
-                    |r| matches!(r, Repair::AddGitignorePattern { pattern: p } if *p == pattern),
-                ) {
-                    plan.push(Repair::AddGitignorePattern { pattern });
-                }
-            }
             CheckWarning::DuplicateArchivedId {
                 task_id,
                 total,
@@ -376,19 +343,6 @@ pub fn plan(check: &CheckResult) -> Vec<Repair> {
         }
     }
     plan
-}
-
-/// The blanket pattern for the frame directory a reported path sits in.
-///
-/// Check reports repo-relative paths (`frame/.actor`, or `sub/frame/.actor` when
-/// the project is in a subdirectory), so the directory component is exactly what
-/// the pattern needs.
-fn gitignore_pattern_for_reported(reported_path: &str) -> String {
-    let dir = reported_path
-        .rsplit_once('/')
-        .map(|(dir, _)| dir)
-        .unwrap_or("frame");
-    crate::io::project_io::gitignore_pattern_for(dir)
 }
 
 /// The closing line for an opening fence.
@@ -481,30 +435,6 @@ pub fn apply(project: &mut Project, plan: &[Repair]) -> FixResult {
                             "{task_id} is no longer a top-level task in {}",
                             section_name(*from)
                         ),
-                    }),
-                }
-            }
-            Repair::AddGitignorePattern { pattern } => {
-                // The pattern is repo-relative, as check reports the paths it
-                // was derived from, so the `.gitignore` it belongs in is the
-                // repo's — not the project root, which differs when a frame
-                // project lives in a subdirectory of the repo.
-                match crate::io::git::repo_paths(&project.frame_dir) {
-                    Some(paths) => {
-                        match crate::io::project_io::append_gitignore_entry(
-                            &paths.toplevel,
-                            pattern,
-                        ) {
-                            Ok(()) => result.applied.push(repair.clone()),
-                            Err(e) => result.skipped.push(SkippedRepair {
-                                repair: repair.clone(),
-                                reason: e.to_string(),
-                            }),
-                        }
-                    }
-                    None => result.skipped.push(SkippedRepair {
-                        repair: repair.clone(),
-                        reason: "not a git repository".to_string(),
                     }),
                 }
             }
@@ -893,10 +823,6 @@ mod tests {
                 title: "item".into(),
                 fence: "```".into(),
             },
-            CheckWarning::LocalFileCommitted {
-                path: "frame/.actor".into(),
-                tracked: false,
-            },
             CheckWarning::DuplicateArchivedId {
                 task_id: "T-9".into(),
                 total: 2,
@@ -906,7 +832,7 @@ mod tests {
                 path: "/x/frame-ids.toml.bak".into(),
             },
         ]));
-        assert_eq!(plan.len(), 5);
+        assert_eq!(plan.len(), 4);
     }
 
     /// The findings with no safe automatic repair must produce nothing. If a new
@@ -915,11 +841,22 @@ mod tests {
     #[test]
     fn plan_ignores_warnings_with_no_safe_repair() {
         let plan = plan(&result_with(vec![
-            // A tracked file needs `git rm --cached` as well, so it is not ours.
+            // Git readiness belongs to `fr git setup`, whichever half is wrong:
+            // a tracked file needs `git rm --cached` too, and an unignored one
+            // needs a `.gitignore` line that `--fix` used to add on its own.
+            // Splitting the surface between two commands left nobody able to
+            // predict which half `--fix` would repair.
             CheckWarning::LocalFileCommitted {
                 path: "frame/.actor".into(),
                 tracked: true,
             },
+            CheckWarning::LocalFileCommitted {
+                path: "frame/.lock".into(),
+                tracked: false,
+            },
+            // The driver lives in `.git/config`, which is machine state rather
+            // than project content — further outside `--fix`'s remit still.
+            CheckWarning::MergeDriverUnregistered,
             CheckWarning::IdReissuedAfterArchive {
                 task_id: "T-1".into(),
                 tracks: vec!["t".into()],
@@ -988,8 +925,11 @@ mod tests {
                 fence: "```".into(),
                 closer: "```".into(),
             },
-            Repair::AddGitignorePattern {
-                pattern: "frame/.*".into(),
+            Repair::MoveTaskToSection {
+                track_id: "t".into(),
+                task_id: "T-1".into(),
+                from: crate::model::track::SectionKind::Backlog,
+                to: crate::model::track::SectionKind::Done,
             },
         ];
         assert_eq!(destructive_count(&additive), 0);

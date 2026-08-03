@@ -2,6 +2,25 @@
 
 All notable changes to frame will be documented in this file.
 
+## Unreleased
+
+### Added
+- **`fr merge` — a version control merge driver for frame files.** Track files are generated artifacts whose structure carries meaning, and a line-based merge gets one case badly wrong: `fr done` *relocates* a task from `## Backlog` to `## Done`, which git reads as a deletion in one region plus an unrelated insertion. It conflicts, and resolving that by keeping both sides — the obvious move, and the right one when both sides genuinely appended — leaves two tasks holding one ID, one `[ ]` and one `[x]`, in a file that still looks plausible and that `fr show` disagrees with.
+
+  Frame merges by **task identity** instead, reusing the same three-way merge the TUI already runs when a save collides with another process. The relocation stops being a conflict at all: it is one task whose section changed. Additions from both sides land, a change to a task the other side did not touch is taken, and subtasks merge independently of their parent. This is sound across branches because IDs cannot collide across them — actor tokens namespace mints per working copy, and the ID frontier is shared by every worktree of a clone.
+
+  Nothing in it is git-specific; git is one caller. The three file arguments and the result path are what every VCS with a custom-merge hook passes.
+
+  **On conflict, no conflict markers are written.** A file full of `<<<<<<<` is not valid frame markdown, so it disables the parser, `fr check` and `fr show` at the moment you need them — and hand-repairing line ranges in a file whose structure is already broken is how a `## Parked` header gets deleted. Instead your version stays in the file, theirs goes to the recovery log, the task gets a `conflict:` line that `fr check` reports as an error, and the merge exits non-zero so git stops with the path unmerged. `fr merge --resolve <ID>` clears the marker once you have applied what was missing. Which side should win has no automatic answer, so there is no `--fix` for it.
+- **`fr git setup` — make a clone frame-ready, idempotently.** Ensures the `.gitignore` pattern, writes the `.gitattributes` entries routing frame markdown to the merge driver, and registers the driver in `.git/config`. `fr init` runs it for you inside a repo.
+
+  It also **collapses legacy per-file `.gitignore` entries** into the blanket `frame/.*` pattern. Only lines it can name are removed — an exact match for a working-copy-local frame file, in any of its usual spellings, that the pattern genuinely covers. Unrecognised entries, nested ones like `frame/archive/.keep`, and negations are left alone. Outside a git repository it reports that there is nothing to configure and writes nothing.
+- **`fr check` warns when the merge driver is not registered in this clone.** `.gitattributes` is committed and arrives with a clone; the driver is in `.git/config`, which cannot be. So a teammate who clones a correctly-configured project silently falls back to line-based merges. This warning is the only thing that tells a fresh clone to run `fr git setup`. Like the existing local-file leak guard, it is a no-op outside git or when `git` cannot be run.
+- **`conflict:` task metadata**, written by `fr merge` and cleared by `fr merge --resolve`. Reported by `fr check` as an error and exposed as `conflict` in `--json` task output.
+
+### Removed
+- **`fr check --fix` no longer adds the `.gitignore` pattern.** It was the only part of git readiness `--fix` repaired, out of four, which left no way to predict what it would touch: the `.gitattributes` entries, the merge driver, and untracking an already-committed local file were all somebody else's job. `fr git setup` now owns that whole surface and `--fix` points at it. The check itself is unchanged — a leaking local-only file is still reported, with `fr git setup` as the remedy.
+
 ## v0.1.7 - 2026-08-02
 
 ### Removed

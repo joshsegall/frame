@@ -197,7 +197,6 @@ The plan is exactly what check reported: one warning in, at most one repair out.
 |---|---|---|
 | unclosed note fence | append a closing fence to the note | no |
 | unclosed inbox fence | append a closing fence to the body | no |
-| local file not ignored | add `frame/.*` to `.gitignore` | no |
 | duplicate archived ID | drop the extra copies, keeping one | **yes** |
 | leftover `frame-ids.toml.bak` | delete the stale backup | **yes** |
 | interrupted operation recovery declined | clear the `.inflight` marker | **yes** |
@@ -207,7 +206,11 @@ A **subtask whose ID escaped its parent** — `M-020` nested under `M-003` — g
 
 An **interrupted operation** (`frame/.inflight`) is normally not repaired here at all — the next write command completes it automatically and clears the marker. The repair above exists only for the case where recovery declined to act because a precondition no longer held, so the marker would otherwise stand forever with no way to acknowledge it.
 
-Everything else check reports is left alone, because it has no repair that is safe to apply without a decision — renumbering a reissued ID rewrites something other work may reference, a `ref:` can be legitimately absent on the current branch, `fr actor merge` renumbers a whole namespace, and a `#lost` tag exists precisely to be read by a human. A local file git already **tracks** is only half-repairable: the `.gitignore` pattern is added, but `git rm --cached` is yours to run. However many local files are reported, the repair is one line — the pattern covers all of them, so a project that predates it migrates in one step rather than acquiring entries one incident at a time.
+Everything else check reports is left alone, because it has no repair that is safe to apply without a decision — renumbering a reissued ID rewrites something other work may reference, a `ref:` can be legitimately absent on the current branch, `fr actor merge` renumbers a whole namespace, and a `#lost` tag exists precisely to be read by a human.
+
+**`--fix` does not touch git configuration.** Anything about `.gitignore`, `.gitattributes` or the merge driver is [`fr git setup`](#fr-git-setup)'s, whether it is a missing ignore pattern, an unregistered driver, or a local file git already tracks (which needs `git rm --cached` from you either way). `--fix` used to add the ignore pattern and nothing else, which left no way to predict which part of git readiness it would repair. One command owns that surface now, and `--fix` names it.
+
+An **unresolved merge conflict** — a task still carrying the `conflict:` line `fr merge` left on it — is reported as an *error* with no repair, for the same reason a reissued ID is: which side should win is the judgment the merge could not make. See [`fr merge`](#fr-merge).
 
 **Confirmation.** Repairs that delete prompt once before anything is written; `--yes` skips the prompt. Declining cancels the whole run, additive repairs included — a run applies its entire plan or none of it. With stdin closed (CI, an agent) the prompt reads nothing, which is not `y`, so the run cancels: pass `--yes` to mean it. Removed archive copies go to the [recovery log](#fr-recovery) before deletion, so a duplicate that was hand-edited after the first write is recoverable.
 
@@ -552,6 +555,72 @@ Print the absolute path to the recovery log file.
 ```
 fr recovery path
 ```
+
+## Version Control
+
+### `fr git setup`
+
+Configure this clone to work with frame. Idempotent — run it after every clone, and again whenever you want to check.
+
+```
+fr git setup [--dry-run] [--json]
+```
+
+Three things, reported individually:
+
+| Step | What it does |
+|------|--------------|
+| `.gitignore` | ensures the blanket `frame/.*` pattern, and collapses any per-file entries it covers into it |
+| `.gitattributes` | routes `frame/tracks/*.md`, `frame/archive/*.md` and `frame/inbox.md` to the merge driver |
+| `.git/config` | registers the driver: `merge.frame.driver` |
+
+`fr init` runs this for you inside a repo, so a new project needs nothing extra.
+
+**The first two are committed; the third cannot be.** `.git/config` is per-clone, so a teammate who clones a correctly-configured project gets the attributes but *not* the driver, and git silently goes back to merging track files line by line. `fr check` warns when the driver is missing for exactly this reason — it is what tells a fresh clone to run this. Every worktree of one clone shares the config, so once per clone is enough.
+
+The `.gitignore` migration only ever removes lines it can name: an exact match for a working-copy-local frame file (in any of its usual spellings, with or without leading or trailing slashes) that the blanket pattern genuinely covers. An entry frame does not recognise, a nested one like `frame/archive/.keep`, and a negation are all left alone.
+
+`--dry-run` reports what would change and writes nothing. Outside a git repository the command reports that there is nothing to configure and exits 0 — it will not create a `.gitignore` where there is no repo.
+
+### `fr merge`
+
+Three-way merge two versions of a track or the inbox. **Normally invoked by git, not by you** — `fr git setup` registers it as a merge driver and it runs during `git merge`, `git rebase`, `git cherry-pick` and `git stash pop`.
+
+```
+fr merge --base FILE --ours FILE --theirs FILE [--path PATH] [--kind track|inbox]
+fr merge --resolve ID...
+```
+
+Not to be confused with [`fr actor merge`](#fr-actor-merge), which collapses one actor's ID namespace into another.
+
+**Why this exists.** `fr done` moves a task from `## Backlog` to `## Done`. A line-based merge reads that as a deletion plus an unrelated insertion, conflicts, and — if the conflict is resolved by keeping both sides — leaves two copies of one task, one open and one done. Frame merges by task ID instead, so a relocation is just a task whose section changed, and that case stops being a conflict at all. Additions from both sides land; a change to a task the other side did not touch is taken; subtasks merge independently of their parent.
+
+**Exit status is the interface.**
+
+| Status | Meaning |
+|--------|---------|
+| `0` | merged cleanly |
+| `1` | merged, but something was left undecided — the VCS stops |
+| `2` | not a frame file, or the merge could not run — the VCS falls back to its own merge |
+
+Status `2` is why `project.toml` and `actors.toml` are not routed to the driver: they are TOML that merges fine line by line, and frame declines anything it does not recognise rather than guessing.
+
+**On conflict, no conflict markers are written.** A file full of `<<<<<<<` is not valid frame markdown, so it breaks the parser, `fr check` and `fr show` at exactly the moment you need them. Instead:
+
+- your version is kept in the file, which still parses;
+- their version goes to the [recovery log](#fr-recovery);
+- the task gets a `conflict:` line, which `fr check` reports as an error;
+- the merge exits 1, so git marks the path unmerged and stops.
+
+Git still shows the path as conflicted (`git status`, `git ls-files -u`) — there is simply nothing in the file to grep for. Apply whatever is missing with `fr note` / `fr state`, then:
+
+```
+fr merge --resolve BAC-179
+```
+
+which clears the marker and nothing else. Clearing it is you recording the judgment; frame cannot check that the right thing came out.
+
+**Running it by hand.** The three file arguments and `--path` mirror what a VCS passes (`%O %A %B %P` in git). The merged result is written over `--ours`. `--path` decides whether the file is a track or the inbox; `--kind` forces it when there is no meaningful path.
 
 ## Project Registry
 

@@ -743,6 +743,12 @@ const CLASSIFICATION: &[(&str, Class)] = &[
         Class::Deferred("reads the recovery log, which is empty on a healthy fixture"),
     ),
     ("init", Class::Write),
+    // Writes the merged file the VCS handed it. Its real interface is an exit
+    // status, not a listing, and `--json` has nothing to describe.
+    ("merge", Class::Write),
+    // Writes .gitignore/.gitattributes/.git/config. Its `--json` surface reports
+    // what it did, not a listing of project content.
+    ("git", Class::Write),
     ("add", Class::Write),
     ("push", Class::Write),
     ("sub", Class::Write),

@@ -55,6 +55,17 @@ pub enum Metadata {
     Added(String),
     /// `resolved: 2025-05-14`
     Resolved(String),
+    /// `conflict: both-edited 2026-08-03T04:08:38Z`
+    ///
+    /// Left by `fr merge` on a task it could not decide. Ours was kept and their
+    /// version went to the recovery log at that timestamp.
+    ///
+    /// It exists because the merge writes **no conflict markers** — the file
+    /// stays valid frame markdown, which is what keeps every other tool usable.
+    /// Without a mark in the file, staging the path would quietly commit our side
+    /// and drop theirs, with nothing but scrolled-away stderr to say so. `fr
+    /// check` reports it as an error; `fr merge --resolve <ID>` clears it.
+    Conflict(String),
 }
 
 impl Metadata {
@@ -67,6 +78,7 @@ impl Metadata {
             Metadata::Note(_) => "note",
             Metadata::Added(_) => "added",
             Metadata::Resolved(_) => "resolved",
+            Metadata::Conflict(_) => "conflict",
         }
     }
 }

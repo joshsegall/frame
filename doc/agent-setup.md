@@ -137,6 +137,30 @@ fr add api "Handle empty response body #cc-added" --found-from API-003
 
 **`--json`** — Agents should use `--json` on read commands when parsing output programmatically. Human-formatted output may change between versions.
 
+## Merging and Rebasing
+
+Run this once per clone, before any branch work:
+
+```bash
+fr git setup
+```
+
+It registers frame's merge driver, so git merges track files by task identity instead of line by line. `fr check` warns when a clone is missing it — the driver lives in `.git/config`, which cannot be committed, so it does *not* arrive with a clone even when everything else is configured.
+
+**Why it matters more for agents than for people.** An agent session tends to make many small, well-formed changes through `fr note` / `fr done` / `fr add`, then rebase onto a moved base. `fr done` relocates a task between sections, and a line-based merge reads that as a delete plus an add — so the conflict lands in a track file, and "keep both sides" produces a duplicated task with one ID. It reads plausibly enough to be committed.
+
+**If a merge does stop**, the file is still valid frame markdown and there are no `<<<<<<<` markers in it — that is deliberate, so `fr show` and `fr check` keep working. The conflicted task carries a `conflict:` line and the other side's version is in the recovery log:
+
+```bash
+fr check                       # names the task
+fr recovery                    # shows their version
+fr note EFF-014 "..."          # apply whatever is missing
+fr merge --resolve EFF-014     # clear the marker
+git add frame/tracks/main.md
+```
+
+**Never hand-splice a conflict region in a track file.** If markers ever do reach one — a clone without the driver, or a path `.gitattributes` doesn't cover — do not repair it by editing line ranges. Take one side whole (`git checkout --ours` / `--theirs`) and re-run the `fr` commands, then run `fr git setup` so it cannot happen again.
+
 ## Working Copies and Tokens
 
 Frame identifies work by *working copy* (git clone), via an [actor token](concepts.md#actors). This matters when running multiple agents:

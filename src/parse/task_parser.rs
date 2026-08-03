@@ -357,7 +357,7 @@ fn is_metadata_line(line: &str, indent: usize) -> bool {
 fn is_metadata_key(key: &str) -> bool {
     matches!(
         key.trim(),
-        "dep" | "ref" | "spec" | "note" | "added" | "resolved"
+        "dep" | "ref" | "spec" | "note" | "added" | "resolved" | "conflict"
     )
 }
 
@@ -391,6 +391,7 @@ fn parse_metadata(lines: &[String], idx: usize, indent: usize) -> (Metadata, usi
         "spec" => (Metadata::Spec(value.to_string()), idx + 1),
         "added" => (Metadata::Added(value.to_string()), idx + 1),
         "resolved" => (Metadata::Resolved(value.to_string()), idx + 1),
+        "conflict" => (Metadata::Conflict(value.to_string()), idx + 1),
         "note" => {
             if !value.is_empty() {
                 // Single-line note: `- note: some text`

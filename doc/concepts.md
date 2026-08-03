@@ -121,6 +121,17 @@ Tasks can have metadata lines indented below the task line:
 | `ref` | `ref: doc/design.md, src/lib.rs` | File references (comma-separated paths) |
 | `spec` | `spec: doc/spec.md#section` | Spec file with optional anchor |
 | `note` | `note: Free text` | Note (single-line or multi-line block) |
+| `conflict` | `conflict: both-edited 2026-08-03T04:08:38Z` | An unresolved merge conflict, written by `fr merge` and cleared by `fr merge --resolve` |
+
+## Track Files Are Generated, Not Hand-Merged
+
+The `.md` files are the source of truth, and they are meant to be read and hand-edited. But they are *written* by frame, and their structure carries meaning that plain text does not: a task's ID is its identity, and the section it sits in is derived from its state.
+
+That has one practical consequence, and it is the difference between a merge that works and a corrupted file. `fr done` does not edit a line in place — it **moves** the task from `## Backlog` to `## Done`. Merge two branches line by line and that reads as a deletion in one place plus an insertion in another, with nothing to say they are the same task. Resolve the resulting conflict by keeping both sides — the obvious move, and correct when both sides genuinely appended — and you get two tasks with one ID, one open and one done. The file still looks reasonable. `fr show` will disagree with it.
+
+So frame merges by **task identity** rather than by line, and [`fr git setup`](cli.md#fr-git-setup) registers that as a git merge driver. With it, the relocation is not a conflict at all: it is one task whose section changed. Without it, git merges frame files the wrong way and mostly gets away with it, which is the worst of the available failure modes.
+
+The rule generalises: **don't merge generated state, regenerate it — or merge it with the tool that generated it.** If you ever find yourself hand-splicing conflict regions in a track file, stop; the file has already stopped being valid frame markdown, and every tool that could diagnose it is broken too.
 
 ## Inbox
 

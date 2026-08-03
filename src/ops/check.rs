@@ -48,6 +48,28 @@ pub enum CheckError {
         task_id: String,
         track_ids: Vec<String>,
     },
+    /// A task still carries the `conflict:` marker `fr merge` left on it, so a
+    /// merge kept one side and set the other aside without anyone deciding that
+    /// was right.
+    ///
+    /// An **error**, not a warning, and the reason is what happens if it is
+    /// ignored: the merge writes no conflict markers — deliberately, so the file
+    /// stays valid frame markdown — which means staging the path commits our
+    /// version and discards theirs with nothing left to say so. This is the only
+    /// durable record that a decision is outstanding.
+    ///
+    /// **No `--fix`.** Which side should win is exactly the judgment a machine
+    /// cannot make; the same reasoning as `IdReissuedAfterArchive`. Their
+    /// version is in the recovery log — apply what is missing with `fr note` /
+    /// `fr state`, then clear the marker with `fr merge --resolve <ID>`.
+    #[serde(rename = "unresolved_merge_conflict")]
+    UnresolvedMergeConflict {
+        track_id: String,
+        task_id: String,
+        /// The marker's payload: a reason slug and the timestamp of the recovery
+        /// entry holding the other version.
+        detail: String,
+    },
 }
 
 /// A validation warning (non-critical issue).
@@ -125,6 +147,21 @@ pub enum CheckWarning {
     /// isn't covered by `.gitignore` and so will be. `path` is repo-relative.
     #[serde(rename = "local_file_committed")]
     LocalFileCommitted { path: String, tracked: bool },
+    /// This clone does not have frame's merge driver registered, so git will
+    /// merge track and inbox files line by line.
+    ///
+    /// Worth a warning because of *where* the registration lives. `.gitattributes`
+    /// is committed and arrives with a clone; the driver itself is in
+    /// `.git/config`, which is per-clone and cannot be committed. So a teammate
+    /// who clones a correctly-configured project silently gets text merges — and
+    /// a text merge duplicates any task a `fr done` relocated between sections,
+    /// which is not obvious until `fr show` disagrees with the file.
+    ///
+    /// Nothing in the project is wrong, which is why this is a warning and has no
+    /// `--fix`: the repair is `fr git setup`, and it writes machine state rather
+    /// than project content.
+    #[serde(rename = "merge_driver_unregistered")]
+    MergeDriverUnregistered,
     /// A task note leaves a code fence open. Frame parses the note correctly
     /// either way — note extent is bound by indentation, not fence state — but
     /// markdown renderers will swallow the rest of the file into a code block.
@@ -285,6 +322,9 @@ pub fn check_project(project: &Project) -> CheckResult {
     // Working-copy-local frame files leaking into git.
     check_local_files_ignored(&project.frame_dir, &mut result);
 
+    // The merge driver, which is per-clone and so cannot arrive with a clone.
+    check_merge_driver(&project.root, &mut result);
+
     // Numbers handed out twice, where one holder is archived (invisible to the
     // live-tracks-only duplicate check above).
     check_archived_id_collisions(project, &mut result);
@@ -353,6 +393,19 @@ fn check_task(
         result.warnings.push(CheckWarning::MissingId {
             track_id: track_id.to_string(),
             title: task.title.clone(),
+        });
+    }
+
+    // Error: a merge conflict nobody has resolved. Checked for every task,
+    // subtasks included — a merge marks whichever task it could not decide.
+    if let Some(detail) = task.metadata.iter().find_map(|m| match m {
+        Metadata::Conflict(d) => Some(d.clone()),
+        _ => None,
+    }) {
+        result.errors.push(CheckError::UnresolvedMergeConflict {
+            track_id: track_id.to_string(),
+            task_id: task_id.to_string(),
+            detail,
         });
     }
 
@@ -685,6 +738,18 @@ fn check_local_files_ignored(frame_dir: &Path, result: &mut CheckResult) {
                 tracked: false,
             });
         }
+    }
+}
+
+/// Flag a clone that has not registered frame's merge driver.
+///
+/// Silent outside git, and silent when `git` cannot be run — the same rule
+/// `check_local_files_ignored` follows, and for the same reason. A project that
+/// is not in a repo has no merge to get wrong, and nagging it about a driver
+/// would be noise about a problem it cannot have.
+fn check_merge_driver(root: &Path, result: &mut CheckResult) {
+    if crate::ops::git_setup::driver_registered(root) == Some(false) {
+        result.warnings.push(CheckWarning::MergeDriverUnregistered);
     }
 }
 

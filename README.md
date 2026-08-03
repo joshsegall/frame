@@ -124,6 +124,26 @@ fr clean             # Normalize, assign IDs, archive done tasks
 fr check             # Validate deps and file refs
 ```
 
+## Using frame with git
+
+Track files are generated artifacts whose structure carries meaning: a task's ID
+is its identity, and finishing a task *moves* it between sections. Merged line by
+line, that move reads as a delete plus an add — and resolving the resulting
+conflict by keeping both sides yields two copies of one task, one open and one
+done, in a file that still looks fine.
+
+So run this once per clone:
+
+```bash
+fr git setup
+```
+
+It adds the `.gitignore` pattern and the `.gitattributes` entries, and registers
+frame's merge driver so git merges track files by task identity instead. `fr
+init` does it for you in a new project. The first two are committed; the driver
+lives in `.git/config` and cannot be, so **each clone runs it once** — `fr check`
+warns when one hasn't.
+
 ## Key concepts
 
 **Tracks** are ordered work streams. Active tracks appear as tabs.

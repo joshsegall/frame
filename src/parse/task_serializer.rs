@@ -64,6 +64,9 @@ fn serialize_task(task: &Task, indent: usize, lines: &mut Vec<String>) {
             Metadata::Resolved(date) => {
                 lines.push(format!("{}- resolved: {}", meta_indent, date));
             }
+            Metadata::Conflict(detail) => {
+                lines.push(format!("{}- conflict: {}", meta_indent, detail));
+            }
             Metadata::Dep(deps) => {
                 lines.push(format!("{}- dep: {}", meta_indent, deps.join(", ")));
             }

@@ -85,6 +85,34 @@ pub enum ConflictReason {
     AmbiguousTitle,
 }
 
+impl ConflictReason {
+    /// A phrase for a human reading a conflict report, stating what happened and
+    /// which side the merge kept — the two things someone has to know before
+    /// they can resolve it.
+    /// A stable identifier for the reason, for the `conflict:` metadata a merge
+    /// leaves in the file. Kept separate from [`Self::describe`] so the wording
+    /// of a message can change without rewriting what is committed to files.
+    pub fn slug(self) -> &'static str {
+        match self {
+            ConflictReason::BothEdited => "both-edited",
+            ConflictReason::EditedAndDeleted => "edited-and-deleted",
+            ConflictReason::DeletedAndEdited => "deleted-and-edited",
+            ConflictReason::AmbiguousTitle => "ambiguous-title",
+        }
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            ConflictReason::BothEdited => "both sides edited it differently; kept ours",
+            ConflictReason::EditedAndDeleted => "we edited it, they removed it; kept ours",
+            ConflictReason::DeletedAndEdited => "we removed it, they edited it; took theirs",
+            ConflictReason::AmbiguousTitle => {
+                "two untitled-ID tasks share a title, so identity is ambiguous; kept ours"
+            }
+        }
+    }
+}
+
 /// The result of merging one track.
 #[derive(Debug)]
 pub struct Reconciled {
@@ -620,7 +648,7 @@ fn index_tasks(tasks: &[Task], section: SectionKind) -> Index {
 ///
 /// The `#` prefix keeps an untitled-but-IDed task from ever colliding with a
 /// title that happens to look like an ID.
-fn task_key(task: &Task) -> String {
+pub fn task_key(task: &Task) -> String {
     match &task.id {
         Some(id) => format!("#{id}"),
         None => format!("~{}", task.title),

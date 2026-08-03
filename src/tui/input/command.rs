@@ -706,6 +706,14 @@ pub(super) fn palette_check_project(app: &mut App) {
                 check::CheckError::DuplicateId { task_id, track_ids } => {
                     format!("  {} duplicated in: {}", task_id, track_ids.join(", "))
                 }
+                check::CheckError::UnresolvedMergeConflict {
+                    track_id,
+                    task_id,
+                    detail,
+                } => format!(
+                    "  [{}] {} has an unresolved merge conflict ({})",
+                    track_id, task_id, detail
+                ),
             };
             lines.push(Line::from(Span::styled(msg, red)));
         }
@@ -774,6 +782,9 @@ pub(super) fn palette_check_project(app: &mut App) {
                         name,
                         tokens.join(", ")
                     )
+                }
+                check::CheckWarning::MergeDriverUnregistered => {
+                    "  merge driver not registered in this clone — run `fr git setup`".to_string()
                 }
                 check::CheckWarning::LocalFileCommitted { path, tracked } => {
                     if *tracked {

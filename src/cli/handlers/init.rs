@@ -91,39 +91,24 @@ fn render_project_toml(
     output
 }
 
-/// Add Frame-specific entries to .gitignore if a git repo exists.
-/// Returns the entries actually added (empty when there was nothing to do).
-fn update_gitignore(cwd: &std::path::Path) -> Vec<String> {
-    // Only act if this is a git repo (has .git dir or file)
-    if !cwd.join(".git").exists() {
-        return Vec::new();
-    }
-
-    let gitignore_path = cwd.join(".gitignore");
-    let existing = fs::read_to_string(&gitignore_path).unwrap_or_default();
-
-    // One blanket pattern rather than an entry per file, so a file added to
-    // frame/ later is covered without every existing project needing an edit.
-    // `fr check` catches projects whose `.gitignore` predates this.
-    if crate::io::project_io::gitignore_pattern_present(cwd) {
-        return Vec::new();
-    }
-    let pattern = crate::io::project_io::gitignore_pattern();
-
-    let mut content = existing;
-    // Ensure we start on a fresh line
-    if !content.is_empty() && !content.ends_with('\n') {
-        content.push('\n');
-    }
-    content.push_str("\n# frame — working-copy-local files (never commit these)\n");
-    content.push_str(&pattern);
-    content.push('\n');
-
-    if fs::write(&gitignore_path, content).is_ok() {
-        vec![pattern]
-    } else {
-        Vec::new()
-    }
+/// Configure git for a project that was just created inside a repo.
+///
+/// Delegates to [`crate::ops::git_setup`] rather than writing `.gitignore`
+/// itself, so a new project gets everything a clone needs — the ignore pattern,
+/// the merge-driver attributes, and the driver in `.git/config` — from the same
+/// code `fr git setup` runs later. Two implementations of "make this repo
+/// frame-ready" would drift, and the one `fr init` used to hold covered only the
+/// first of the three.
+///
+/// Returns the names of the steps that changed something.
+fn update_git_config(cwd: &std::path::Path) -> Vec<String> {
+    let report = crate::ops::git_setup::run(cwd, "frame", false);
+    report
+        .steps
+        .iter()
+        .filter(|s| s.changed_anything())
+        .map(|s| s.name.to_string())
+        .collect()
 }
 
 pub fn cmd_init(args: InitArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -207,8 +192,8 @@ pub fn cmd_init(args: InitArgs) -> Result<(), Box<dyn std::error::Error>> {
     // Register in global project registry
     crate::io::registry::register_project(&name, &cwd);
 
-    // Update .gitignore
-    let gitignore_added = update_gitignore(&cwd);
+    // Configure git, if this is a repo.
+    let git_configured = update_git_config(&cwd);
 
     // Print summary
     println!("[>] frame initialized");
@@ -219,9 +204,9 @@ pub fn cmd_init(args: InitArgs) -> Result<(), Box<dyn std::error::Error>> {
         println!("  tracks/{}.md", id);
     }
 
-    if !gitignore_added.is_empty() {
+    if !git_configured.is_empty() {
         println!();
-        println!("  added {} to .gitignore", gitignore_added.join(", "));
+        println!("  configured git: {}", git_configured.join(", "));
     }
 
     Ok(())
@@ -348,77 +333,53 @@ mod tests {
         assert_eq!(parsed.ids.prefixes.get("ui").unwrap(), "UI");
     }
 
+    /// Outside a repo there is nothing to configure, and writing a `.gitignore`
+    /// where no repo exists would be surprising.
     #[test]
-    fn test_update_gitignore_no_git() {
+    fn test_update_git_config_no_git() {
         let tmp = tempfile::TempDir::new().unwrap();
-        // No .git dir — nothing to add
-        assert!(update_gitignore(tmp.path()).is_empty());
+        assert!(update_git_config(tmp.path()).is_empty());
         assert!(!tmp.path().join(".gitignore").exists());
+        assert!(!tmp.path().join(".gitattributes").exists());
     }
 
+    /// `fr init` inside a repo hands off to `fr git setup`, so a new project
+    /// gets all three pieces rather than only the ignore pattern. The pattern
+    /// logic itself is pinned in `ops::git_setup`; what matters here is that the
+    /// delegation happens at all.
     #[test]
-    fn test_update_gitignore_writes_the_blanket_pattern() {
+    fn test_update_git_config_configures_a_new_repo() {
         let tmp = tempfile::TempDir::new().unwrap();
-        fs::create_dir(tmp.path().join(".git")).unwrap();
+        if !std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(tmp.path())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            return; // git unavailable
+        }
 
-        let added = update_gitignore(tmp.path());
-        assert_eq!(added, vec![crate::io::project_io::gitignore_pattern()]);
+        let changed = update_git_config(tmp.path());
+        assert!(!changed.is_empty(), "a fresh repo needs configuring");
 
-        let content = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
-        assert!(content.contains("frame/.*"), "pattern missing: {content}");
-        assert!(content.contains("working-copy-local"));
-
+        let gitignore = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        assert!(
+            gitignore.contains("frame/.*"),
+            "pattern missing: {gitignore}"
+        );
         // One line, not an entry per file — that is the whole point.
         for name in crate::io::project_io::LOCAL_ONLY_FRAME_FILES {
             assert!(
-                !content.contains(&format!("frame/{name}")),
-                "should not enumerate {name}: {content}"
+                !gitignore.contains(&format!("frame/{name}")),
+                "should not enumerate {name}: {gitignore}"
             );
         }
-    }
 
-    #[test]
-    fn test_update_gitignore_skips_when_pattern_present() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        fs::create_dir(tmp.path().join(".git")).unwrap();
-        fs::write(tmp.path().join(".gitignore"), "frame/.*\n").unwrap();
+        let attrs = fs::read_to_string(tmp.path().join(".gitattributes")).unwrap();
+        assert!(attrs.contains("merge=frame"), "driver not routed: {attrs}");
 
-        assert!(update_gitignore(tmp.path()).is_empty());
-    }
-
-    /// A project whose `.gitignore` predates the pattern has the files
-    /// enumerated. It still gets the pattern, so the *next* local-only file is
-    /// covered without another round of edits — the failure mode that made this
-    /// change worth making.
-    #[test]
-    fn test_update_gitignore_migrates_an_enumerated_gitignore() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        fs::create_dir(tmp.path().join(".git")).unwrap();
-        let enumerated: String = crate::io::project_io::LOCAL_ONLY_FRAME_FILES
-            .iter()
-            .map(|n| format!("frame/{n}\n"))
-            .collect();
-        fs::write(tmp.path().join(".gitignore"), &enumerated).unwrap();
-
-        assert!(!update_gitignore(tmp.path()).is_empty());
-
-        let content = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
-        assert!(content.contains("frame/.*"));
-        // The old lines are left alone — redundant, but removing lines from
-        // someone's .gitignore is more invasive than adding one.
-        assert!(content.contains("frame/.state.json"));
-    }
-
-    #[test]
-    fn test_update_gitignore_appends_to_existing() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        fs::create_dir(tmp.path().join(".git")).unwrap();
-        fs::write(tmp.path().join(".gitignore"), "*.log\n").unwrap();
-
-        assert!(!update_gitignore(tmp.path()).is_empty());
-
-        let content = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
-        assert!(content.starts_with("*.log\n"));
-        assert!(content.contains("frame/.*"));
+        // Idempotent: initializing over an already-configured repo is silent.
+        assert!(update_git_config(tmp.path()).is_empty());
     }
 }

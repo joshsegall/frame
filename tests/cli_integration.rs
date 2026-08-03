@@ -1767,28 +1767,41 @@ fn test_init_force_reinitialize() {
     assert!(toml_content.contains("\"Second\""));
 }
 
-/// The `.gitignore` entries `fr init` is expected to add, in order, skipping any
-/// in `already_present`. Derived from the one list so adding an entry there
-/// updates these expectations instead of breaking them.
+/// `fr init` inside a repo configures git the same way `fr git setup` does: the
+/// blanket ignore pattern, the merge-driver attributes, and the driver itself.
+/// A new project should not need a second command to be mergeable.
 #[test]
-fn test_init_gitignore_added() {
+fn test_init_configures_git() {
     let tmp = tempfile::TempDir::new().unwrap();
-
-    // Create a git repo so .gitignore logic triggers
-    fs::create_dir(tmp.path().join(".git")).unwrap();
+    if !git_ok(tmp.path(), &["init", "-q"]) {
+        return; // git unavailable
+    }
 
     let out = run_fr_ok(tmp.path(), &["init", "--name", "Git Project"]);
-    // One blanket pattern, not an entry per file.
     assert!(
-        out.contains("added frame/.* to .gitignore"),
-        "summary should name the pattern: {out}"
+        out.contains("configured git"),
+        "summary should say so: {out}"
     );
 
     let gitignore = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+    // One blanket pattern, not an entry per file.
     assert!(gitignore.contains("frame/.*"), "{gitignore}");
     assert!(
         !gitignore.contains("frame/.state.json"),
         "should not enumerate individual files: {gitignore}"
+    );
+
+    let attrs = fs::read_to_string(tmp.path().join(".gitattributes")).unwrap();
+    assert!(
+        attrs.contains("frame/tracks/*.md merge=frame"),
+        "track files should route to the driver: {attrs}"
+    );
+
+    // And the project it just created is clean, driver warning included.
+    let checked = run_fr_ok(tmp.path(), &["check"]);
+    assert!(
+        !checked.contains("merge driver"),
+        "a project init just configured should not warn about the driver: {checked}"
     );
 }
 
@@ -1816,29 +1829,38 @@ fn test_init_gitignore_already_present() {
     assert!(!out.contains("added frame/.state.json"));
 }
 
+/// A `.gitignore` that enumerates local-only files predates the blanket pattern.
+/// The enumerated lines are *collapsed* into it rather than left beside it: they
+/// are exactly what the pattern covers, and leaving both means the next local
+/// file added to `frame/` looks covered when it is not.
 #[test]
-fn test_init_gitignore_partial() {
+fn test_init_collapses_an_enumerated_gitignore() {
     let tmp = tempfile::TempDir::new().unwrap();
-    fs::create_dir(tmp.path().join(".git")).unwrap();
-    fs::write(tmp.path().join(".gitignore"), "frame/.lock\n").unwrap();
+    if !git_ok(tmp.path(), &["init", "-q"]) {
+        return; // git unavailable
+    }
+    fs::write(
+        tmp.path().join(".gitignore"),
+        "*.log\nframe/.lock\nframe/.actor\n",
+    )
+    .unwrap();
 
-    let out = run_fr_ok(tmp.path(), &["init", "--name", "Partial"]);
-    // An enumerated entry does not cover future files, so the pattern is still
-    // added — and the old line is left alone rather than rewritten.
-    assert!(
-        out.contains("added frame/.* to .gitignore"),
-        "summary should name the pattern: {out}"
-    );
+    run_fr_ok(tmp.path(), &["init", "--name", "Partial"]);
 
     let gitignore = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
-    assert!(gitignore.contains("frame/.*"));
-    assert_eq!(
-        gitignore
-            .lines()
-            .filter(|l| l.trim() == "frame/.lock")
-            .count(),
-        1,
-        "pre-existing line preserved exactly once: {gitignore}"
+    assert!(gitignore.contains("frame/.*"), "{gitignore}");
+    assert!(
+        !gitignore.lines().any(|l| l.trim() == "frame/.lock"),
+        "the pattern covers it, so the line should be gone: {gitignore}"
+    );
+    assert!(
+        !gitignore.lines().any(|l| l.trim() == "frame/.actor"),
+        "same: {gitignore}"
+    );
+    // Lines that are none of frame's business are untouched.
+    assert!(
+        gitignore.lines().any(|l| l.trim() == "*.log"),
+        "unrelated entries must survive: {gitignore}"
     );
 }
 
@@ -3391,11 +3413,15 @@ fn test_check_fix_renumbers_a_subtask_that_escaped_its_parent() {
     );
 }
 
-/// Repairing `.gitignore` adds the blanket pattern, once, however many local
-/// files were reported — it covers all of them and the next one added to
-/// `frame/` too, which enumerating never could.
+/// `fr git setup` adds the blanket pattern, once, however many local files were
+/// reported — it covers all of them and the next one added to `frame/` too,
+/// which enumerating never could.
+///
+/// `fr check --fix` deliberately does **not**: git readiness is one surface with
+/// one owner, so a user can predict what `--fix` touches. Both halves are
+/// asserted here, because the split is the point.
 #[test]
-fn test_check_fix_adds_the_gitignore_pattern() {
+fn test_git_setup_adds_the_gitignore_pattern() {
     let tmp = tempfile::TempDir::new().unwrap();
     if !std::process::Command::new("git")
         .args(["init", "-q"])
@@ -3409,7 +3435,15 @@ fn test_check_fix_adds_the_gitignore_pattern() {
     create_test_project(tmp.path());
     fs::write(tmp.path().join(".gitignore"), "target/\n").unwrap();
 
+    // --fix reports the leak but repairs nothing about it.
     run_fr_ok(tmp.path(), &["check", "--fix"]);
+    let untouched = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+    assert!(
+        !untouched.contains("frame/"),
+        "--fix must leave git readiness to `fr git setup`: {untouched}"
+    );
+
+    run_fr_ok(tmp.path(), &["git", "setup"]);
 
     let gitignore = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
     assert!(
@@ -3898,11 +3932,11 @@ fn test_inflight_gitignore_entry_is_reported_even_when_absent() {
         "should be reported even though the file is absent: {checked}"
     );
 
-    run_fr_ok(tmp.path(), &["check", "--fix"]);
+    run_fr_ok(tmp.path(), &["git", "setup"]);
     let gitignore = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
     assert!(
         gitignore.contains("frame/.*"),
-        "--fix should add the pattern, which covers it: {gitignore}"
+        "`fr git setup` should add the pattern, which covers it: {gitignore}"
     );
 
     // The persistent files keep the existence gate: `.ids.toml` never appears
@@ -3912,5 +3946,252 @@ fn test_inflight_gitignore_entry_is_reported_even_when_absent() {
     assert!(
         !checked.contains("frame/.ids.toml"),
         "an absent persistent file should stay unreported: {checked}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The merge driver, through real git
+//
+// The unit tests in `ops::merge_files` pin the merge algorithm. These pin the
+// part that only a real repository can show: that `.gitattributes` plus the
+// registered driver actually route a merge through frame, that the exit status
+// stops the operation when it should, and that git's own view of the path
+// agrees with the file frame left behind.
+// ---------------------------------------------------------------------------
+
+/// A git repo with a frame project, the driver registered, and one commit.
+///
+/// Returns `false` when git is unavailable, so the caller can skip.
+fn merge_repo(root: &Path) -> bool {
+    if !git_ok(root, &["init", "-q"]) {
+        return false;
+    }
+    git_ok(root, &["config", "user.email", "test@example.com"]);
+    git_ok(root, &["config", "user.name", "Test"]);
+    create_test_project(root);
+
+    // The driver is registered against the *test* binary. In real use it is a
+    // bare `fr`, which `fr git setup` writes; here PATH cannot be relied on.
+    let driver = format!(
+        "{} merge --base %O --ours %A --theirs %B --path %P",
+        fr_bin().display()
+    );
+    git_ok(root, &["config", "merge.frame.driver", &driver]);
+    git_ok(root, &["config", "merge.frame.recursive", "binary"]);
+    fs::write(
+        root.join(".gitattributes"),
+        "frame/tracks/*.md merge=frame\nframe/inbox.md merge=frame\n",
+    )
+    .unwrap();
+    // The harness points XDG_CONFIG_HOME inside the working directory, so the
+    // sandbox registry would otherwise be committed and conflict on every merge.
+    fs::write(root.join(".gitignore"), "frame/.*\n.xdg-config/\n").unwrap();
+
+    git_ok(root, &["add", "-A"]) && git_ok(root, &["commit", "-qm", "base"])
+}
+
+fn git_ok(dir: &Path, args: &[&str]) -> bool {
+    Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn git_out(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .expect("git runs");
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+/// The incident this whole feature exists for.
+///
+/// One branch finishes a task, which *relocates* it from `## Backlog` to
+/// `## Done`. The other appends a new task. A line-based merge reads the
+/// relocation as a delete plus an add and conflicts; resolving it by keeping
+/// both sides yields two copies of the same id, one `[ ]` and one `[x]`, and the
+/// hand-editing that follows is what ate a `## Parked` header.
+///
+/// Through the driver it is not a conflict at all.
+#[test]
+fn test_merge_driver_handles_a_relocation_and_an_append() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    if !merge_repo(tmp.path()) {
+        return; // git unavailable
+    }
+    let root = tmp.path();
+
+    git_ok(root, &["checkout", "-q", "-b", "theirs"]);
+    run_fr_ok(root, &["add", "main", "Third thing"]);
+    git_ok(root, &["add", "-A"]);
+    git_ok(root, &["commit", "-qm", "append"]);
+
+    git_ok(root, &["checkout", "-q", "main"]);
+    run_fr_ok(root, &["state", "M-001", "done"]);
+    git_ok(root, &["add", "-A"]);
+    git_ok(root, &["commit", "-qm", "done"]);
+
+    let merged = Command::new("git")
+        .current_dir(root)
+        .args(["merge", "theirs"])
+        .output()
+        .expect("git merge runs");
+    assert!(
+        merged.status.success(),
+        "the driver should merge this cleanly:\n{}\n{}",
+        String::from_utf8_lossy(&merged.stdout),
+        String::from_utf8_lossy(&merged.stderr)
+    );
+
+    let track = fs::read_to_string(root.join("frame/tracks/main.md")).unwrap();
+    assert!(!track.contains("<<<<<<<"), "no markers: {track}");
+    // Backticked, so a `dep: M-001` reference elsewhere is not counted as a
+    // second copy of the task.
+    assert_eq!(
+        track.matches("`M-001`").count(),
+        1,
+        "the relocated task must not be duplicated: {track}"
+    );
+    // It is finished, and it is in the section that says so.
+    let (_, done) = track.split_once("## Done").unwrap();
+    assert!(
+        done.contains("[x] `M-001`"),
+        "M-001 belongs in Done, done: {track}"
+    );
+    // Their addition survived.
+    assert!(track.contains("Third thing"), "theirs was dropped: {track}");
+    // Every section header is still there — the failure that started this.
+    for header in ["## Backlog", "## Parked", "## Done"] {
+        assert!(track.contains(header), "{header} was lost: {track}");
+    }
+
+    let checked = run_fr_ok(root, &["check"]);
+    assert!(
+        checked.contains("valid"),
+        "the merged project should be valid: {checked}"
+    );
+}
+
+/// Two sides editing one task differently has no right answer, so the merge
+/// stops — but it stops with a *readable* file rather than one full of markers,
+/// and it leaves a record that a decision is outstanding.
+#[test]
+fn test_merge_driver_conflict_leaves_a_valid_file_and_a_marker() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    if !merge_repo(tmp.path()) {
+        return; // git unavailable
+    }
+    let root = tmp.path();
+
+    git_ok(root, &["checkout", "-q", "-b", "theirs"]);
+    run_fr_ok(root, &["note", "M-001", "note from them"]);
+    git_ok(root, &["add", "-A"]);
+    git_ok(root, &["commit", "-qm", "their note"]);
+
+    git_ok(root, &["checkout", "-q", "main"]);
+    run_fr_ok(root, &["note", "M-001", "note from us"]);
+    git_ok(root, &["add", "-A"]);
+    git_ok(root, &["commit", "-qm", "our note"]);
+
+    let merged = Command::new("git")
+        .current_dir(root)
+        .args(["merge", "theirs"])
+        .output()
+        .expect("git merge runs");
+    assert!(
+        !merged.status.success(),
+        "an undecidable merge must stop the operation"
+    );
+
+    // Git knows the path is unmerged even though the file holds no markers.
+    let unmerged = git_out(root, &["ls-files", "-u", "frame/tracks/main.md"]);
+    assert!(
+        !unmerged.trim().is_empty(),
+        "the path should be staged as conflicted"
+    );
+
+    let track = fs::read_to_string(root.join("frame/tracks/main.md")).unwrap();
+    assert!(
+        !track.contains("<<<<<<<") && !track.contains(">>>>>>>"),
+        "conflict markers would make the file unreadable to every frame tool: {track}"
+    );
+    assert!(track.contains("note from us"), "ours is kept: {track}");
+    assert!(
+        track.contains("- conflict: both-edited"),
+        "the file has to record that a decision is outstanding: {track}"
+    );
+
+    // Their version is recoverable rather than lost.
+    let recovery = run_fr_ok(root, &["recovery"]);
+    assert!(
+        recovery.contains("note from them"),
+        "their version should be in the recovery log: {recovery}"
+    );
+
+    // And check reports it as an error until someone decides.
+    let checked = run_fr_ok(root, &["check"]);
+    assert!(
+        checked.contains("unresolved merge conflict"),
+        "check should report it: {checked}"
+    );
+    assert!(
+        !checked.contains("project is valid"),
+        "an unresolved conflict is not a valid project: {checked}"
+    );
+
+    // Resolving clears the marker and nothing else.
+    run_fr_ok(root, &["merge", "--resolve", "M-001"]);
+    let track = fs::read_to_string(root.join("frame/tracks/main.md")).unwrap();
+    assert!(
+        !track.contains("conflict:"),
+        "marker should be gone: {track}"
+    );
+    assert!(track.contains("note from us"), "content untouched: {track}");
+    let checked = run_fr_ok(root, &["check"]);
+    assert!(checked.contains("valid"), "and check is happy: {checked}");
+}
+
+/// The driver must decline anything that is not a frame markdown file, so git
+/// keeps using its own merge for it. `project.toml` line-merges perfectly well;
+/// a driver that tried to parse it as markdown would break a working merge.
+#[test]
+fn test_merge_declines_a_file_it_does_not_understand() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    let dir = tmp.path();
+    fs::write(dir.join("base.toml"), "a = 1\n").unwrap();
+    fs::write(dir.join("ours.toml"), "a = 2\n").unwrap();
+    fs::write(dir.join("theirs.toml"), "a = 3\n").unwrap();
+
+    let (_, stderr, ok) = run_fr(
+        dir,
+        &[
+            "merge",
+            "--base",
+            "base.toml",
+            "--ours",
+            "ours.toml",
+            "--theirs",
+            "theirs.toml",
+            "--path",
+            "frame/project.toml",
+        ],
+    );
+
+    assert!(!ok, "declining is a non-zero status");
+    assert!(
+        stderr.contains("declining"),
+        "it should say so plainly: {stderr}"
+    );
+    // Ours is left exactly as it was for git to merge itself.
+    assert_eq!(
+        fs::read_to_string(dir.join("ours.toml")).unwrap(),
+        "a = 2\n"
     );
 }

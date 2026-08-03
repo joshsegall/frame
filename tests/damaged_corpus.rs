@@ -716,6 +716,7 @@ const CASES: &[Case] = &[
             if !git(root, &["init", "-q"]) {
                 return Built::Skipped("git unavailable");
             }
+            register_merge_driver(root);
             Built::Ok
         },
         // `.actor` exists and is not ignored. `.inflight` is reported whether or
@@ -737,8 +738,9 @@ const CASES: &[Case] = &[
                 ],
             ),
         ],
-        // One pattern covers both, and the next local file too.
-        repair: Repair::Clears,
+        // `fr check --fix` deliberately leaves git readiness alone — one command
+        // owns that surface, and it is `fr git setup`.
+        repair: Repair::None,
     },
     Case {
         name: "local-directory-committed",
@@ -748,6 +750,7 @@ const CASES: &[Case] = &[
             if !git(root, &["init", "-q"]) {
                 return Built::Skipped("git unavailable");
             }
+            register_merge_driver(root);
             // The pattern is in place, so nothing else is reported and this case
             // is attributable to the one thing it breaks.
             std::fs::write(root.join(".gitignore"), "frame/.*\n").unwrap();
@@ -771,6 +774,49 @@ const CASES: &[Case] = &[
             ],
         )],
         // Untracking is `git rm --cached`, deliberately left to a human.
+        repair: Repair::None,
+    },
+    Case {
+        name: "merge-driver-unregistered",
+        provenance: "a fresh clone: `.gitattributes` arrives with it, but the driver \
+                     lives in `.git/config`, which cannot be committed",
+        covers: &["merge_driver_unregistered"],
+        build: |root| {
+            if !git(root, &["init", "-q"]) {
+                return Built::Skipped("git unavailable");
+            }
+            // Everything else about the repo is right, so this case reports one
+            // thing: git would merge track files line by line.
+            std::fs::write(root.join(".gitignore"), "frame/.*\n").unwrap();
+            Built::Ok
+        },
+        expect: &[warning("merge_driver_unregistered", &[])],
+        // The repair writes `.git/config`, which is machine state rather than
+        // project content — `fr git setup`, not `--fix`.
+        repair: Repair::None,
+    },
+    Case {
+        name: "unresolved-merge-conflict",
+        provenance: "`fr merge` could not decide a task and left its marker; the \
+                     other version went to the recovery log",
+        covers: &["unresolved_merge_conflict"],
+        build: |root| {
+            append_backlog(
+                root,
+                "- [ ] `M-004` Both sides touched this\n  - added: 2026-01-01\n  \
+                 - conflict: both-edited 2026-08-03T04:08:38Z\n",
+            );
+            Built::Ok
+        },
+        expect: &[error(
+            "unresolved_merge_conflict",
+            &[
+                ("task_id", Match::Eq("M-004")),
+                ("detail", Match::Eq("both-edited 2026-08-03T04:08:38Z")),
+            ],
+        )],
+        // Which side should win is the judgment a machine cannot make — the same
+        // reason `id_reissued_after_archive` has no repair.
         repair: Repair::None,
     },
     Case {
@@ -942,6 +988,20 @@ fn write_archive(root: &Path, content: &str) {
     let dir = root.join("frame/archive");
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("main.md"), content).unwrap();
+}
+
+/// Register frame's merge driver, so a case that needs a git repo is not also
+/// reporting an unregistered driver. The corpus rule is that each case breaks
+/// exactly one thing; the driver has its own case.
+fn register_merge_driver(dir: &Path) -> bool {
+    git(
+        dir,
+        &[
+            "config",
+            "merge.frame.driver",
+            "fr merge --base %O --ours %A --theirs %B --path %P",
+        ],
+    )
 }
 
 fn git(dir: &Path, args: &[&str]) -> bool {

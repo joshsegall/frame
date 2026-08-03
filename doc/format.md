@@ -130,6 +130,15 @@ Metadata lines are indented under their task (task indent + 2 spaces) and start 
 
 **`spec: path#section`** — Single spec file path with optional `#anchor`.
 
+**`conflict: reason timestamp`** — An unresolved merge conflict, written by `fr merge`. The value is a reason slug (`both-edited`, `edited-and-deleted`, `deleted-and-edited`, `ambiguous-title`) and the RFC 3339 timestamp of the recovery-log entry holding the other side's version:
+
+```markdown
+- [ ] `EFF-014` Task title
+  - conflict: both-edited 2026-08-03T04:08:38Z
+```
+
+It exists because `fr merge` deliberately writes no `<<<<<<<` markers — those would make the file unparseable — so this line is the only record in the file that a decision is outstanding. `fr check` reports it as an error; `fr merge --resolve EFF-014` removes it. Nothing else writes or reads it.
+
 **`note: text`** — Single-line note, or multi-line block:
 
 ```markdown

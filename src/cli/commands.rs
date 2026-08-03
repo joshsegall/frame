@@ -87,6 +87,67 @@ pub enum Commands {
     Actor(ActorCmd),
     /// View or manage the recovery log
     Recovery(RecoveryCmd),
+    /// Three-way merge two versions of a track or the inbox (see also: `fr actor merge`)
+    Merge(MergeArgs),
+    /// Git integration for this clone
+    Git(GitCmd),
+}
+
+// ---------------------------------------------------------------------------
+// Git args
+// ---------------------------------------------------------------------------
+
+#[derive(Args)]
+pub struct GitCmd {
+    #[command(subcommand)]
+    pub action: GitAction,
+}
+
+#[derive(Subcommand)]
+pub enum GitAction {
+    /// Configure this clone: .gitignore, .gitattributes, and the merge driver
+    Setup(GitSetupArgs),
+}
+
+#[derive(Args)]
+pub struct GitSetupArgs {
+    /// Report what would change without writing anything
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Merge args
+// ---------------------------------------------------------------------------
+
+/// Arguments mirror what a version control system hands a custom merge driver:
+/// an ancestor, two sides, and the path the result belongs at. Git spells them
+/// `%O %A %B %P`; Mercurial and jj use the same four in different words.
+#[derive(Args)]
+pub struct MergeArgs {
+    /// Common ancestor version (git: %O)
+    #[arg(long, value_name = "FILE", required_unless_present = "resolve")]
+    pub base: Option<String>,
+    /// Our version; the merged result is written here (git: %A)
+    #[arg(long, value_name = "FILE", required_unless_present = "resolve")]
+    pub ours: Option<String>,
+    /// Their version (git: %B)
+    #[arg(long, value_name = "FILE", required_unless_present = "resolve")]
+    pub theirs: Option<String>,
+    /// Path the result belongs at, used to tell a track from the inbox (git: %P)
+    #[arg(long, value_name = "PATH")]
+    pub path: Option<String>,
+    /// Force the file kind instead of inferring it from --path
+    #[arg(long, value_parser = ["track", "inbox"])]
+    pub kind: Option<String>,
+    /// Clear the conflict marker on tasks whose conflict you have resolved
+    #[arg(
+        long,
+        value_name = "ID",
+        num_args = 1..,
+        conflicts_with_all = ["base", "ours", "theirs", "path", "kind"]
+    )]
+    pub resolve: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------

@@ -27,6 +27,10 @@ pub struct TaskJson {
     pub added: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolved: Option<String>,
+    /// An unresolved merge conflict left by `fr merge`. Present only while the
+    /// task still carries one, so a consumer can gate on it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub subtasks: Vec<TaskJson>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -180,6 +184,7 @@ pub fn task_to_json(task: &Task) -> TaskJson {
     let mut note = None;
     let mut added = None;
     let mut resolved = None;
+    let mut conflict = None;
 
     for m in &task.metadata {
         match m {
@@ -189,6 +194,7 @@ pub fn task_to_json(task: &Task) -> TaskJson {
             Metadata::Note(n) => note = Some(n.clone()),
             Metadata::Added(a) => added = Some(a.clone()),
             Metadata::Resolved(r) => resolved = Some(r.clone()),
+            Metadata::Conflict(c) => conflict = Some(c.clone()),
         }
     }
 
@@ -203,6 +209,7 @@ pub fn task_to_json(task: &Task) -> TaskJson {
         note,
         added,
         resolved,
+        conflict,
         subtasks: task.subtasks.iter().map(task_to_json).collect(),
         ancestors: Vec::new(),
     }
@@ -303,6 +310,7 @@ pub fn format_task_detail(task: &Task) -> Vec<String> {
         match m {
             Metadata::Added(d) => lines.push(format!("added: {}", d)),
             Metadata::Resolved(d) => lines.push(format!("resolved: {}", d)),
+            Metadata::Conflict(c) => lines.push(format!("conflict: {}", c)),
             Metadata::Dep(deps) => lines.push(format!("dep: {}", deps.join(", "))),
             Metadata::Spec(s) => lines.push(format!("spec: {}", s)),
             Metadata::Ref(refs) => {
@@ -398,6 +406,7 @@ fn format_context_fields(task: &Task) -> Vec<String> {
         match m {
             Metadata::Added(d) => lines.push(format!("  added: {}", d)),
             Metadata::Resolved(d) => lines.push(format!("  resolved: {}", d)),
+            Metadata::Conflict(c) => lines.push(format!("  conflict: {}", c)),
             Metadata::Dep(deps) => lines.push(format!("  dep: {}", deps.join(", "))),
             Metadata::Spec(s) => lines.push(format!("  spec: {}", s)),
             Metadata::Ref(refs) => {

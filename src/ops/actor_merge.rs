@@ -281,7 +281,9 @@ pub fn apply_map_to_tasks(
                         }
                     }
                 }
-                Metadata::Added(_) | Metadata::Resolved(_) => {}
+                // A conflict marker holds a reason slug and a timestamp — no
+                // task IDs, so nothing for a namespace rewrite to find.
+                Metadata::Added(_) | Metadata::Resolved(_) | Metadata::Conflict(_) => {}
             }
         }
 
