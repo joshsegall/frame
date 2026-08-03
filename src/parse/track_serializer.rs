@@ -26,6 +26,14 @@ pub fn serialize_track(track: &Track) -> String {
         }
     }
 
+    // A section drained of its tasks — `fr clean` archiving the last Done task,
+    // say — contributes only its header and the blank that separated it from
+    // those tasks. At end of file that blank separates nothing, and leaving it
+    // means every clean re-adds a blank row someone then has to strip again.
+    if matches!(track.nodes.last(), Some(TrackNode::Section { tasks, .. }) if tasks.is_empty()) {
+        crate::parse::pop_trailing_blanks(&mut lines);
+    }
+
     let mut out = lines.join("\n");
     out.push('\n');
     out
@@ -81,6 +89,59 @@ mod tests {
         let track = parse_track(source);
         let output = serialize_track(&track);
         assert_eq!(output, source);
+    }
+
+    #[test]
+    fn test_emptied_last_section_leaves_no_blank_row() {
+        // The blank line under `## Done` belongs to that section's header_lines,
+        // so draining the section (what `fr clean` does when it archives) used
+        // to strand it at end of file.
+        let source = "\
+# Test Track
+
+## Backlog
+
+- [ ] `T-100` Keep me
+
+## Done
+
+- [x] `T-001` Archived away
+";
+
+        let mut track = parse_track(source);
+        for node in &mut track.nodes {
+            if let TrackNode::Section {
+                kind: crate::model::track::SectionKind::Done,
+                tasks,
+                ..
+            } = node
+            {
+                tasks.clear();
+            }
+        }
+
+        let output = serialize_track(&track);
+        assert!(
+            output.ends_with("## Done\n"),
+            "expected no trailing blank row, got {:?}",
+            output
+        );
+        // Idempotent: a second pass must not change it again.
+        assert_eq!(serialize_track(&parse_track(&output)), output);
+    }
+
+    #[test]
+    fn test_blanks_after_a_trailing_empty_section_are_dropped() {
+        let track = parse_track("# T\n\n## Backlog\n\n## Done\n\n\n");
+        assert_eq!(serialize_track(&track), "# T\n\n## Backlog\n\n## Done\n");
+    }
+
+    #[test]
+    fn test_blanks_after_a_trailing_task_survive() {
+        // Only an *empty* trailing section gets trimmed — blanks the user wrote
+        // after real content are their formatting.
+        let source = "# T\n\n## Done\n\n- [x] `T-001` Done thing\n\n\n";
+        assert_eq!(serialize_track(&parse_track(source)), source);
     }
 
     #[test]

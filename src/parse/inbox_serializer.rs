@@ -40,6 +40,12 @@ pub fn serialize_inbox(inbox: &Inbox) -> String {
         }
     }
 
+    // Same as the track serializer: with no items left, the blank under the
+    // `# Inbox` header has nothing to separate and would be re-added forever.
+    if inbox.items.is_empty() {
+        crate::parse::pop_trailing_blanks(&mut lines);
+    }
+
     let mut out = lines.join("\n");
     out.push('\n');
     out

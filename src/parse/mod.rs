@@ -28,6 +28,20 @@ pub(crate) fn count_indent(line: &str) -> usize {
     line.len() - line.trim_start_matches(' ').len()
 }
 
+/// Drop blank lines from the end of a file's serialized lines.
+///
+/// Only for use when the last thing in the file is an emptied container — a
+/// section whose tasks are all archived, an inbox with no items left. The blank
+/// line under a header lives in that header's own lines, so draining the
+/// container leaves the blank stranded at end of file with nothing left to
+/// separate: an extra blank row that comes back on every write. Trailing blanks
+/// that follow real content are the user's formatting and must survive.
+pub(crate) fn pop_trailing_blanks(lines: &mut Vec<String>) {
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+}
+
 pub use inbox_parser::parse_inbox;
 pub use inbox_serializer::serialize_inbox;
 pub use task_parser::{parse_tasks, parse_title_and_tags};

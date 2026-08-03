@@ -18,6 +18,9 @@ All notable changes to frame will be documented in this file.
 - **`fr check` warns when the merge driver is not registered in this clone.** `.gitattributes` is committed and arrives with a clone; the driver is in `.git/config`, which cannot be. So a teammate who clones a correctly-configured project silently falls back to line-based merges. This warning is the only thing that tells a fresh clone to run `fr git setup`. Like the existing local-file leak guard, it is a no-op outside git or when `git` cannot be run.
 - **`conflict:` task metadata**, written by `fr merge` and cleared by `fr merge --resolve`. Reported by `fr check` as an error and exposed as `conflict` in `--json` task output.
 
+### Fixed
+- **Emptying the last section no longer strands a blank row at end of file.** The blank line under a section header belongs to that header, so when `fr clean` archived away the final `## Done` task the blank had nothing left to separate and stayed put — every clean re-added a trailing blank row that someone then stripped, and the diff came back on the next run. Blank lines that follow real content are still preserved; only a trailing section drained of its tasks is trimmed. The inbox serializer had the same defect, reachable by removing the last inbox item.
+
 ### Removed
 - **`fr check --fix` no longer adds the `.gitignore` pattern.** It was the only part of git readiness `--fix` repaired, out of four, which left no way to predict what it would touch: the `.gitattributes` entries, the merge driver, and untracking an already-committed local file were all somebody else's job. `fr git setup` now owns that whole surface and `--fix` points at it. The check itself is unchanged — a leaking local-only file is still reported, with `fr git setup` as the remedy.
 
