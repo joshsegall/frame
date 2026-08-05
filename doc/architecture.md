@@ -271,7 +271,9 @@ All mutations (rename, create, delete) must update both. Config edits use `toml_
 
 **File locking**: Unix `flock()` on `frame/.lock` prevents concurrent CLI and TUI writes to the same project. The lock is acquired before any mutation and released on drop. The TUI holds the lock for the duration of each save operation (not the entire session).
 
-**Code**: `src/io/config_io.rs` (TOML mutations), `src/io/lock.rs` (FileLock), `src/model/track.rs` (TrackNode::Literal)
+**A CLI command reads the project *after* taking the lock, never before.** Waiting for the lock is the ordinary case, not an exotic one — another `fr` holds it for as long as its own write takes, and we block up to five seconds. A project read before that wait is a pre-write copy of files the other process is about to change, so saving it back erases whatever landed: silently, with no recovery entry, and most likely when contention is highest. `handlers::lock_and_load` discovers the root, locks, then loads, and returns the lock alongside the project so no caller can reintroduce the ordering. This is the CLI's answer to the collision the TUI handles with a baseline and `ops::reconcile` — a command that reads once and writes once needs no merge, only the right order.
+
+**Code**: `src/io/config_io.rs` (TOML mutations), `src/io/lock.rs` (FileLock), `src/model/track.rs` (TrackNode::Literal), `src/cli/handlers/mod.rs` (`lock_and_load`)
 
 ## Recovery Log
 

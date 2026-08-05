@@ -6,7 +6,7 @@ mod git;
 pub use git::cmd_git;
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use regex::Regex;
@@ -130,12 +130,15 @@ pub fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 // ---------------------------------------------------------------------------
 
 fn load_project_cwd() -> Result<Project, ProjectError> {
-    let start = match PROJECT_DIR_OVERRIDE.lock().unwrap().as_ref() {
-        Some(dir) => dir.clone(),
-        None => std::env::current_dir().map_err(ProjectError::IoError)?,
-    };
-    let root = project_io::discover_project(&start)?;
-    let project = project_io::load_project(&root)?;
+    load_project_at(&discover_project_root()?)
+}
+
+/// Load and register a project whose root is already known.
+///
+/// Split out so [`lock_and_load`] can discover the root, take the lock, and
+/// only then read the files.
+fn load_project_at(root: &Path) -> Result<Project, ProjectError> {
+    let project = project_io::load_project(root)?;
 
     // Auto-register and touch CLI timestamp
     registry::register_project(&project.config.project.name, &project.root);
@@ -1548,16 +1551,15 @@ fn cmd_check(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
 /// `fr delete` and `fr track rename --prefix`, and it keeps a half-applied plan
 /// from being a state anyone has to reason about.
 fn cmd_check_fix(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = load_project_cwd()?;
-
     // A dry run only previews, so it takes no lock and runs no recovery — the
-    // same split `fr clean` makes. A real run recovers first, like every other
-    // write path, so the plan is computed against a project that is no longer
-    // mid-operation.
-    let _lock = if args.dry_run {
-        None
+    // same split `fr clean` makes. A real run locks first, like every other
+    // write path, so the plan is computed against a project that is neither
+    // mid-operation nor a stale read of one another `fr` was writing.
+    let (mut project, _lock) = if args.dry_run {
+        (load_project_cwd()?, None)
     } else {
-        Some(lock_and_recover(&mut project)?)
+        let (project, lock) = lock_and_load()?;
+        (project, Some(lock))
     };
 
     let plan = fix::plan(&check::check_project(&project));
@@ -1670,19 +1672,38 @@ fn cmd_check_fix(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::
 // Write command handlers
 // ---------------------------------------------------------------------------
 
-/// Take the project lock, completing any interrupted operation first.
+/// Take the project lock, then read the project under it.
 ///
-/// Every write command goes through this. A previous `fr` that died partway
-/// through a multi-file operation left a marker (see [`crate::io::inflight`]);
-/// this is where the remaining steps get finished, before the new command
-/// touches anything. The common case is one `stat` that finds no marker.
+/// Every write command goes through this, and the order is the point. Waiting
+/// for the lock is the ordinary case, not an exotic one: another `fr` holds it
+/// for as long as its own write takes, and we block up to five seconds for it.
+/// A project read *before* that wait is a pre-write copy of files the other
+/// process is about to change, so saving it back erases whatever landed —
+/// silently, with no recovery entry, and precisely when contention is highest.
 ///
-/// Recovery may rewrite files the caller has already loaded, so the project is
-/// re-read when anything changed — otherwise the command would operate on a
-/// stale view and undo the repair.
-fn lock_and_recover(project: &mut Project) -> Result<FileLock, Box<dyn std::error::Error>> {
-    let lock = FileLock::acquire_default(&project.frame_dir)?;
+/// That is `ed273b2` from the CLI side. The TUI answered it with a baseline and
+/// `ops::reconcile` because it holds state across many writes and cannot simply
+/// re-read. A CLI command has no such constraint: it reads once and writes
+/// once, so reading after the lock closes the window outright.
+///
+/// Returning the lock alongside the project is what keeps it closed. There is
+/// no ordering left for a caller to get wrong.
+///
+/// A previous `fr` that died partway through a multi-file operation left a
+/// marker (see [`crate::io::inflight`]); this is where the remaining steps get
+/// finished, before the new command touches anything. The common case is one
+/// `stat` that finds no marker. Recovery rewrites files, so the project is
+/// re-read when it does anything — otherwise the command would undo the repair.
+fn lock_and_load() -> Result<(Project, FileLock), Box<dyn std::error::Error>> {
+    let root = discover_project_root()?;
+    let lock = FileLock::acquire_default(&root.join("frame"))?;
+    let mut project = load_project_at(&root)?;
+    recover_under_lock(&mut project)?;
+    Ok((project, lock))
+}
 
+/// Complete any interrupted operation. The project lock must already be held.
+fn recover_under_lock(project: &mut Project) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(outcome) = crate::ops::recover::recover_pending(project) {
         match &outcome {
             crate::ops::recover::Outcome::AlreadyComplete { .. } => {}
@@ -1702,7 +1723,7 @@ fn lock_and_recover(project: &mut Project) -> Result<FileLock, Box<dyn std::erro
         *project = project_io::load_project(&project.root)?;
     }
 
-    Ok(lock)
+    Ok(())
 }
 
 /// Resolve this clone's minting namespace for a CLI mint command, auto-claiming
@@ -1720,8 +1741,7 @@ fn resolve_mint_namespace(
 }
 
 fn cmd_add(args: AddArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = load_project_cwd()?;
-    let _lock = lock_and_recover(&mut project)?;
+    let (mut project, _lock) = lock_and_load()?;
 
     reject_add_to_shelved(&project, &args.track)?;
 
@@ -1754,8 +1774,7 @@ fn cmd_add(args: AddArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cmd_push(args: PushArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = load_project_cwd()?;
-    let _lock = lock_and_recover(&mut project)?;
+    let (mut project, _lock) = lock_and_load()?;
 
     reject_add_to_shelved(&project, &args.track)?;
 
@@ -1781,8 +1800,7 @@ fn cmd_push(args: PushArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cmd_sub(args: SubArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = load_project_cwd()?;
-    let _lock = lock_and_recover(&mut project)?;
+    let (mut project, _lock) = lock_and_load()?;
 
     // Find which track the parent task is in
     let track_id = find_task_track(&project, &args.id)
@@ -1802,8 +1820,7 @@ fn cmd_sub(args: SubArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cmd_inbox_add(args: InboxCmd) -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = load_project_cwd()?;
-    let _lock = lock_and_recover(&mut project)?;
+    let (mut project, _lock) = lock_and_load()?;
 
     let text = args.text.unwrap(); // We know it's Some from dispatch
     let inbox = project.inbox.get_or_insert_with(|| Inbox {
@@ -1834,8 +1851,7 @@ fn cmd_done(args: DoneArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cmd_state(args: StateArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = load_project_cwd()?;
-    let _lock = lock_and_recover(&mut project)?;
+    let (mut project, _lock) = lock_and_load()?;
 
     let new_state = parse_task_state(&args.state).map_err(Box::<dyn std::error::Error>::from)?;
 
@@ -1877,8 +1893,7 @@ fn cmd_state(args: StateArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cmd_tag(args: TagArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = load_project_cwd()?;
-    let _lock = lock_and_recover(&mut project)?;
+    let (mut project, _lock) = lock_and_load()?;
 
     let track_id = find_task_track(&project, &args.id)
         .ok_or_else(|| format!("task not found: {}", args.id))?
@@ -1899,8 +1914,7 @@ fn cmd_tag(args: TagArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cmd_dep(args: DepArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = load_project_cwd()?;
-    let _lock = lock_and_recover(&mut project)?;
+    let (mut project, _lock) = lock_and_load()?;
 
     let track_id = find_task_track(&project, &args.id)
         .ok_or_else(|| format!("task not found: {}", args.id))?
@@ -1927,8 +1941,7 @@ fn cmd_dep(args: DepArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cmd_note(args: NoteArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = load_project_cwd()?;
-    let _lock = lock_and_recover(&mut project)?;
+    let (mut project, _lock) = lock_and_load()?;
 
     let track_id = find_task_track(&project, &args.id)
         .ok_or_else(|| format!("task not found: {}", args.id))?
@@ -1949,8 +1962,7 @@ fn cmd_note(args: NoteArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cmd_ref(args: RefArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = load_project_cwd()?;
-    let _lock = lock_and_recover(&mut project)?;
+    let (mut project, _lock) = lock_and_load()?;
 
     let track_id = find_task_track(&project, &args.id)
         .ok_or_else(|| format!("task not found: {}", args.id))?
@@ -1967,8 +1979,7 @@ fn cmd_ref(args: RefArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cmd_spec(args: SpecArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = load_project_cwd()?;
-    let _lock = lock_and_recover(&mut project)?;
+    let (mut project, _lock) = lock_and_load()?;
 
     let track_id = find_task_track(&project, &args.id)
         .ok_or_else(|| format!("task not found: {}", args.id))?
@@ -1985,8 +1996,7 @@ fn cmd_spec(args: SpecArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cmd_title(args: TitleArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = load_project_cwd()?;
-    let _lock = lock_and_recover(&mut project)?;
+    let (mut project, _lock) = lock_and_load()?;
 
     let track_id = find_task_track(&project, &args.id)
         .ok_or_else(|| format!("task not found: {}", args.id))?
@@ -2003,8 +2013,7 @@ fn cmd_title(args: TitleArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = load_project_cwd()?;
-    let _lock = lock_and_recover(&mut project)?;
+    let (mut project, _lock) = lock_and_load()?;
     // Taken before the tracks are borrowed mutably below.
     let frame_dir = project.frame_dir.clone();
 
@@ -2319,8 +2328,7 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cmd_triage(args: TriageArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = load_project_cwd()?;
-    let _lock = lock_and_recover(&mut project)?;
+    let (mut project, _lock) = lock_and_load()?;
 
     reject_add_to_shelved(&project, &args.track)?;
 
@@ -2403,8 +2411,7 @@ fn cmd_track(args: TrackCmd) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cmd_track_new(args: TrackNewArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = load_project_cwd()?;
-    let _lock = lock_and_recover(&mut project)?;
+    let (mut project, _lock) = lock_and_load()?;
 
     let (mut config, mut doc) = config_io::read_config(&project.frame_dir)?;
 
@@ -2428,8 +2435,7 @@ fn cmd_track_state_change(
     track_id: String,
     action: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = load_project_cwd()?;
-    let _lock = lock_and_recover(&mut project)?;
+    let (project, _lock) = lock_and_load()?;
 
     let (mut config, mut doc) = config_io::read_config(&project.frame_dir)?;
 
@@ -2485,8 +2491,7 @@ fn cmd_track_state_change(
 }
 
 fn cmd_track_mv(args: TrackMvArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = load_project_cwd()?;
-    let _lock = lock_and_recover(&mut project)?;
+    let (mut project, _lock) = lock_and_load()?;
 
     track_ops::reorder_tracks(&mut project.config, &args.id, args.position)?;
 
@@ -2500,16 +2505,14 @@ fn cmd_track_mv(args: TrackMvArgs) -> Result<(), Box<dyn std::error::Error>> {
 
 fn cmd_track_cc_focus(args: CcFocusArgs) -> Result<(), Box<dyn std::error::Error>> {
     if args.clear {
-        let mut project = load_project_cwd()?;
-        let _lock = lock_and_recover(&mut project)?;
+        let (project, _lock) = lock_and_load()?;
         let (mut config, mut doc) = config_io::read_config(&project.frame_dir)?;
         track_ops::clear_cc_focus(&mut doc, &mut config);
         config_io::write_config(&project.frame_dir, &doc)?;
         println!("cc-focus cleared");
         Ok(())
     } else if let Some(id) = args.id {
-        let mut project = load_project_cwd()?;
-        let _lock = lock_and_recover(&mut project)?;
+        let (project, _lock) = lock_and_load()?;
         let (mut config, mut doc) = config_io::read_config(&project.frame_dir)?;
         track_ops::set_cc_focus(&mut doc, &mut config, &id)?;
         config_io::write_config(&project.frame_dir, &doc)?;
@@ -2521,8 +2524,7 @@ fn cmd_track_cc_focus(args: CcFocusArgs) -> Result<(), Box<dyn std::error::Error
 }
 
 fn cmd_track_delete(track_id: String) -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = load_project_cwd()?;
-    let _lock = lock_and_recover(&mut project)?;
+    let (project, _lock) = lock_and_load()?;
 
     // Check if track exists and is empty
     let track =
@@ -2546,8 +2548,7 @@ fn cmd_track_delete(track_id: String) -> Result<(), Box<dyn std::error::Error>> 
 }
 
 fn cmd_track_rename(args: TrackRenameArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = load_project_cwd()?;
-    let _lock = lock_and_recover(&mut project)?;
+    let (mut project, _lock) = lock_and_load()?;
 
     if args.name.is_none() && args.new_id.is_none() && args.prefix.is_none() {
         return Err("specify at least one of --name, --id, or --prefix".into());
@@ -2973,8 +2974,7 @@ fn cmd_projects_prune(
 }
 
 fn cmd_import(args: ImportArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = load_project_cwd()?;
-    let _lock = lock_and_recover(&mut project)?;
+    let (mut project, _lock) = lock_and_load()?;
 
     reject_add_to_shelved(&project, &args.track)?;
 
@@ -3017,8 +3017,7 @@ fn cmd_import(args: ImportArgs) -> Result<(), Box<dyn std::error::Error>> {
 fn cmd_delete(args: DeleteArgs) -> Result<(), Box<dyn std::error::Error>> {
     use crate::io::recovery;
 
-    let mut project = load_project_cwd()?;
-    let _lock = lock_and_recover(&mut project)?;
+    let (mut project, _lock) = lock_and_load()?;
 
     // Resolve each ID to its track
     let mut to_delete: Vec<(String, String)> = Vec::new(); // (track_id, task_id)

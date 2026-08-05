@@ -4207,3 +4207,103 @@ fn test_merge_declines_a_file_it_does_not_understand() {
         "a = 2\n"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Lock contention: a command that waited for the lock must not write a stale view
+//
+// A CLI command loads the project and *then* acquires `frame/.lock`, so
+// whatever landed on disk while it waited is in the files but not in its copy.
+// Writing that copy back erases it, silently and with no recovery entry. The
+// window is widest exactly when contention exists — the case `ed273b2` called
+// the dangerous one for the TUI, which the CLI never got.
+//
+// These hold the lock on a concurrent writer's behalf while a real `fr`
+// subprocess blocks on it, land a write in the gap, then release.
+// ---------------------------------------------------------------------------
+
+/// Spawn `fr` while `frame/.lock` is held, let it reach the lock, run
+/// `concurrent` in the gap, then release and wait for it to finish.
+fn write_while_the_lock_is_held(root: &Path, args: &[&str], concurrent: impl FnOnce()) {
+    let lock = frame::io::lock::FileLock::acquire_default(&root.join("frame"))
+        .expect("test could not take the project lock");
+
+    let child = Command::new(fr_bin())
+        .args(args)
+        .current_dir(root)
+        .env("XDG_CONFIG_HOME", root.join(".xdg-config"))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to spawn fr");
+
+    // Long enough for the child to load the project and block on the lock,
+    // short enough to stay under the 5s acquire timeout.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    concurrent();
+
+    drop(lock);
+
+    let out = child.wait_with_output().expect("failed to wait for fr");
+    assert!(
+        out.status.success(),
+        "fr {:?} failed:\nstdout: {}\nstderr: {}",
+        args,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+#[test]
+fn a_concurrent_track_write_survives_a_command_that_waited_for_the_lock() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    create_test_project(root);
+
+    let track = root.join("frame/tracks/main.md");
+
+    write_while_the_lock_is_held(root, &["add", "main", "Added while blocked"], || {
+        let before = fs::read_to_string(&track).unwrap();
+        let after = before.replace(
+            "- [ ] `M-001` First task #core\n",
+            "- [ ] `M-001` First task #core\n\
+             - [ ] `M-900` Landed while the lock was held\n  - added: 2025-05-04\n",
+        );
+        assert_ne!(before, after, "fixture shape changed");
+        fs::write(&track, after).unwrap();
+    });
+
+    let body = fs::read_to_string(&track).unwrap();
+    assert!(
+        body.contains("Added while blocked"),
+        "the command's own write is missing:\n{body}"
+    );
+    assert!(
+        body.contains("M-900"),
+        "the concurrent write was erased:\n{body}"
+    );
+}
+
+#[test]
+fn a_concurrent_inbox_capture_survives_a_command_that_waited_for_the_lock() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    create_test_project(root);
+
+    let inbox = root.join("frame/inbox.md");
+
+    write_while_the_lock_is_held(root, &["inbox", "Captured while blocked"], || {
+        let before = fs::read_to_string(&inbox).unwrap();
+        fs::write(&inbox, format!("{before}\n- Captured elsewhere first\n")).unwrap();
+    });
+
+    let body = fs::read_to_string(&inbox).unwrap();
+    assert!(
+        body.contains("Captured while blocked"),
+        "the command's own capture is missing:\n{body}"
+    );
+    assert!(
+        body.contains("Captured elsewhere first"),
+        "the concurrent capture was erased:\n{body}"
+    );
+}

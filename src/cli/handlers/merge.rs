@@ -100,8 +100,7 @@ pub fn cmd_merge(args: MergeArgs) -> i32 {
 /// out of that is a judgment only the person who read both can make. Clearing
 /// the marker *is* that judgment being recorded.
 pub fn cmd_merge_resolve(ids: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = super::load_project_cwd()?;
-    let _lock = super::lock_and_recover(&mut project)?;
+    let (mut project, _lock) = super::lock_and_load()?;
 
     let mut cleared = Vec::new();
     let mut not_conflicted = Vec::new();

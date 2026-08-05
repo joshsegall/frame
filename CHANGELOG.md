@@ -19,6 +19,10 @@ All notable changes to frame will be documented in this file.
 - **`conflict:` task metadata**, written by `fr merge` and cleared by `fr merge --resolve`. Reported by `fr check` as an error and exposed as `conflict` in `--json` task output.
 
 ### Fixed
+- **A CLI write no longer erases a change that landed while it waited for the lock.** Every write command read the project and *then* took `frame/.lock`, so a command that waited — the ordinary case when another `fr` is mid-write, and we block up to five seconds for it — went on to save a copy of the files taken before that other process changed them. Its work was overwritten silently, with nothing in the recovery log and nothing for `fr check` to see: the file it left behind is perfectly well-formed, just missing a task.
+
+  The exposure grows with concurrency, which is exactly backwards from what you want on a project several agents are driving through the CLI. It is the same collision the TUI answered in an earlier release with a baseline and a three-way merge; the CLI needs none of that, because a command reads once and writes once, so reading *after* the lock closes the window outright. The lock and the project now come from one call, and there is no ordering left to get wrong.
+
 - **The TUI no longer reopens holding last session's search.** The search pattern was persisted to `.state.json` and restored blind at startup, so a fresh launch came up with `/pattern` in the status bar, match highlighting across every view, and `n`/`N` and `Esc` rebound to search navigation — in a session where nobody had searched for anything. It read as the TUI having reopened in search mode, and the mode is in fact never persisted: what came back was the search itself, wearing the search chrome.
 
   It was not even a resumed search. The match index and count are not persisted, so `n` restarted from the top of the file rather than where you left off, and the status bar had no count to show beside the pattern. A search is view state of the same kind as a filter, and filters were already deliberately session-only.
