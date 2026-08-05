@@ -189,6 +189,16 @@ Metadata always comes before subtasks for a given task. Subtask IDs follow the p
 - Blank lines after the last task in a section are preserved.
 - Blank lines within multi-line notes are preserved.
 
+## Line Endings
+
+Frame writes back the line ending the file already used. A CRLF file stays CRLF; an LF file stays LF. A file that mixes both settles on whichever it uses more, since one ending is carried per file rather than per line — mixed files are malformed anyway, and putting a `\r` inside the model would put it inside titles and tags where nothing wants it.
+
+Every file frame creates uses LF.
+
+The ending is a property of the writer, not of the model's line content — the same decision as the terminal newline, and for the same reason. Both used to have nowhere to live: the parsers read with `str::lines()`, which strips `\r` along with `\n`, so a CRLF file came back LF with every line in it rewritten. That matters mostly because of what else writes these files. With `core.autocrlf` or a `text=auto` attribute, git re-applies CRLF on checkout and frame would strip it on the next write, so the two churn against each other forever with neither able to win.
+
+Every file frame writes ends with exactly one terminal newline, whatever the ending. This is added if the file lacked one.
+
 ## Inbox File
 
 `inbox.md` uses a simpler format — list items with no checkboxes or IDs:

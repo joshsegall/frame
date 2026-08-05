@@ -48,7 +48,7 @@ pub fn serialize_inbox(inbox: &Inbox) -> String {
 
     let mut out = lines.join("\n");
     out.push('\n');
-    out
+    inbox.eol.apply(out)
 }
 
 #[cfg(test)]

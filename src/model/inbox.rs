@@ -38,4 +38,7 @@ pub struct Inbox {
     pub items: Vec<InboxItem>,
     /// The original source lines
     pub source_lines: Vec<String>,
+    /// The line ending the file used, re-applied when it is written back.
+    /// See [`crate::parse::LineEnding`].
+    pub eol: crate::parse::LineEnding,
 }

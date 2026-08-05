@@ -1664,6 +1664,7 @@ mod tests {
                 InboxItem::new("Item 2".into()),
             ],
             source_lines: vec![],
+            eol: Default::default(),
         }
     }
 

@@ -36,7 +36,7 @@ pub fn serialize_track(track: &Track) -> String {
 
     let mut out = lines.join("\n");
     out.push('\n');
-    out
+    track.eol.apply(out)
 }
 
 #[cfg(test)]

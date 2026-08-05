@@ -1566,7 +1566,26 @@ fn cmd_check(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
             println!("✗ project has errors");
         }
     }
+
+    if !result.valid {
+        check_failed();
+    }
     Ok(())
+}
+
+/// Exit non-zero because the project has errors.
+///
+/// `exit` rather than an `Err`, for the same reason `fr merge` owns its status:
+/// the report *is* the output, and returning an error would print an `error:`
+/// line on top of it saying the command failed — which it did not. It ran, and
+/// what it found is on stdout.
+///
+/// Warnings do not reach here. Only `result.errors` clears `valid`, so the
+/// status answers "is this project sound", which is the question a pre-commit
+/// hook or a CI step is asking. Skipping destructors is safe on this path:
+/// check is read-only and holds no lock.
+fn check_failed() -> ! {
+    std::process::exit(1)
 }
 
 /// `fr check --fix`: apply the repairs check would otherwise only describe.
@@ -1588,7 +1607,8 @@ fn cmd_check_fix(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::
         (project, Some(lock))
     };
 
-    let plan = fix::plan(&check::check_project(&project));
+    let before = check::check_project(&project);
+    let plan = fix::plan(&before);
 
     if plan.is_empty() {
         if json {
@@ -1603,6 +1623,14 @@ fn cmd_check_fix(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::
             );
         } else {
             println!("nothing to repair");
+        }
+        // "Nothing to repair" is not "nothing wrong". Most errors have no
+        // repair by design — a dangling dep, an unresolved merge conflict, a
+        // track file nobody can find — so this is the *common* way a broken
+        // project leaves `--fix`, and it has to report the same status bare
+        // `check` would.
+        if !before.valid {
+            check_failed();
         }
         return Ok(());
     }
@@ -1691,6 +1719,14 @@ fn cmd_check_fix(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::
         );
     }
 
+    // Same rule as bare `fr check`, on the same re-read: `--fix` repairs what it
+    // can, and errors it could not repair are still errors. A run that fixed
+    // something and left an unresolved merge conflict behind has not made the
+    // project sound, and a caller keying off the status should not be told it
+    // has.
+    if !after.valid {
+        check_failed();
+    }
     Ok(())
 }
 
@@ -1853,6 +1889,9 @@ fn cmd_inbox_add(args: InboxCmd) -> Result<(), Box<dyn std::error::Error>> {
         header_lines: vec!["# Inbox".to_string(), String::new()],
         items: Vec::new(),
         source_lines: vec!["# Inbox".to_string(), String::new()],
+        // A file frame is creating, so frame picks: LF, like everything else
+        // it writes from scratch.
+        eol: crate::parse::LineEnding::default(),
     });
 
     inbox_ops::add_inbox_item(inbox, text.clone(), args.tag, args.note);

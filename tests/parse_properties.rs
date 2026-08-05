@@ -77,7 +77,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use frame::model::{Inbox, InboxItem, Metadata, SectionKind, Task, TaskState, Track, TrackNode};
-use frame::parse::{parse_inbox, parse_track, serialize_inbox, serialize_track};
+use frame::parse::{LineEnding, parse_inbox, parse_track, serialize_inbox, serialize_track};
 use proptest::prelude::*;
 
 // ---------------------------------------------------------------------------
@@ -293,6 +293,12 @@ fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
+/// Every fixture, plus a CRLF copy of each.
+///
+/// The files on disk are LF and should stay that way — they are read by the
+/// round-trip tests too, and a CRLF file in git is its own kind of trouble. The
+/// copies are made here instead, which doubles the corpus for the properties
+/// that mutate it without putting a `\r` in the repository.
 fn fixture_sources() -> Vec<String> {
     let mut out = Vec::new();
     for entry in fs::read_dir(fixture_dir()).expect("fixtures dir readable") {
@@ -302,6 +308,8 @@ fn fixture_sources() -> Vec<String> {
         }
     }
     assert!(!out.is_empty(), "no .md fixtures found");
+    let crlf: Vec<String> = out.iter().map(|s| s.replace('\n', "\r\n")).collect();
+    out.extend(crlf);
     out
 }
 
@@ -379,8 +387,14 @@ fn arb_soup() -> impl Strategy<Value = String> {
         .chain(DEEP_CONTENT_LINES)
         .copied()
         .collect();
-    prop::collection::vec(prop::sample::select(pool).prop_map(str::to_string), 0..40)
-        .prop_map(|lines| lines.join("\n"))
+    // Both endings. Every generator here used to `join("\n")`, so no case in
+    // the whole suite carried a `\r` and the CRLF-to-LF rewrite was invisible
+    // to all five properties at once.
+    (
+        prop::collection::vec(prop::sample::select(pool).prop_map(str::to_string), 0..40),
+        prop::bool::ANY,
+    )
+        .prop_map(|(lines, crlf)| lines.join(if crlf { "\r\n" } else { "\n" }))
 }
 
 /// A mutation applied to one line of a real fixture.
@@ -411,7 +425,9 @@ fn arb_mutation() -> impl Strategy<Value = Mutation> {
 /// ones aimed squarely at the old `line[block_indent..]` slice: both can leave a
 /// byte index pointing into the middle of a character.
 fn mutate(source: &str, idx: usize, mutation: &Mutation) -> String {
-    let mut lines: Vec<String> = source.lines().map(str::to_string).collect();
+    // `split` rather than `lines`, so a CRLF source stays CRLF through the
+    // mutation: the `\r` rides along at the end of each line's content.
+    let mut lines: Vec<String> = source.split('\n').map(str::to_string).collect();
     if lines.is_empty() {
         return source.to_string();
     }
@@ -614,13 +630,21 @@ fn section(kind: SectionKind, tasks: Vec<Task>, last: bool) -> TrackNode {
     }
 }
 
+/// Both line endings, so P3's ground-truth comparison runs against each. A
+/// model that says CRLF must serialize to a CRLF file and read back as the same
+/// model — which is the whole claim `LineEnding` makes.
+fn arb_eol() -> impl Strategy<Value = LineEnding> {
+    prop_oneof![Just(LineEnding::Lf), Just(LineEnding::Crlf)]
+}
+
 fn arb_track_model() -> impl Strategy<Value = Track> {
     (
         prop::collection::vec(arb_task_tree(), 0..3),
         prop::collection::vec(arb_task_tree(), 0..2),
         prop::collection::vec(arb_task_tree(), 0..2),
+        arb_eol(),
     )
-        .prop_map(|(backlog, parked, done)| Track {
+        .prop_map(|(backlog, parked, done, eol)| Track {
             title: "Generated Track".to_string(),
             description: None,
             nodes: vec![
@@ -630,47 +654,52 @@ fn arb_track_model() -> impl Strategy<Value = Track> {
                 section(SectionKind::Done, done, true),
             ],
             source_lines: Vec::new(),
+            eol,
         })
 }
 
 fn arb_inbox_model() -> impl Strategy<Value = Inbox> {
-    prop::collection::vec(
-        (
-            arb_title(),
-            arb_tags(),
-            prop::option::of(prop::collection::vec(
-                // First line must not be tag-only; `is_tag_only_line` would
-                // claim it as tags. Every candidate here starts with prose.
-                prop::sample::select(
-                    [
-                        "body line",
-                        "more detail here",
-                        "§ unicode body",
-                        "```lace",
-                        "let x = 1",
-                        "```",
-                    ]
-                    .as_slice(),
-                )
-                .prop_map(str::to_string),
-                1..4,
-            )),
+    (
+        prop::collection::vec(
+            (
+                arb_title(),
+                arb_tags(),
+                prop::option::of(prop::collection::vec(
+                    // First line must not be tag-only; `is_tag_only_line` would
+                    // claim it as tags. Every candidate here starts with prose.
+                    prop::sample::select(
+                        [
+                            "body line",
+                            "more detail here",
+                            "§ unicode body",
+                            "```lace",
+                            "let x = 1",
+                            "```",
+                        ]
+                        .as_slice(),
+                    )
+                    .prop_map(str::to_string),
+                    1..4,
+                )),
+            ),
+            0..4,
         ),
-        0..4,
+        arb_eol(),
     )
-    .prop_map(|items| Inbox {
-        header_lines: vec!["# Inbox".to_string(), String::new()],
-        items: items
-            .into_iter()
-            .map(|(title, tags, body)| {
-                let mut item = InboxItem::new(title);
-                item.tags = tags;
-                item.body = body.map(|lines| lines.join("\n"));
-                item
-            })
-            .collect(),
-        source_lines: Vec::new(),
-    })
+        .prop_map(|(items, eol)| Inbox {
+            header_lines: vec!["# Inbox".to_string(), String::new()],
+            items: items
+                .into_iter()
+                .map(|(title, tags, body)| {
+                    let mut item = InboxItem::new(title);
+                    item.tags = tags;
+                    item.body = body.map(|lines| lines.join("\n"));
+                    item
+                })
+                .collect(),
+            source_lines: Vec::new(),
+            eol,
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -905,6 +934,11 @@ proptest! {
 /// The non-blank lines of a file, in order. Blank lines are excluded because the
 /// parser genuinely normalizes them: a blank between two tasks is formatting, it
 /// belongs to no node, and losing one is cosmetic. A non-blank line is content.
+///
+/// Line *terminators* are not content and are not compared here — P6 owns them.
+/// Keeping them out is what lets this property ignore the terminal newline
+/// frame deliberately adds (`f1a4ff5`), which is a difference in the file's
+/// ending rather than in its lines.
 fn nonblank_lines(source: &str) -> Vec<&str> {
     source.lines().filter(|l| !l.trim().is_empty()).collect()
 }
@@ -950,6 +984,59 @@ proptest! {
 
         let written = serialize_track(&parse_track(&damaged));
         prop_assert_eq!(nonblank_lines(&damaged), nonblank_lines(&written));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P6 — a write keeps the file's line ending
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// A CRLF file must come back CRLF.
+    ///
+    /// Every parser reads with `str::lines`, which strips `\r` along with `\n`,
+    /// and every serializer joined with `"\n"` — so the carriage returns had
+    /// nowhere to live and the first write rewrote every line in the file. No
+    /// content was lost, which is why P1-P5 all pass on it: P2 and P3 compare
+    /// readings that agree, P5 compares lines whose terminators it strips, and
+    /// P4 converges happily because the file is stable *after* the one
+    /// destructive rewrite.
+    ///
+    /// It matters because of what else writes these files. With `core.autocrlf`
+    /// or a `text=auto` attribute, git re-applies CRLF on checkout and frame
+    /// strips it on the next write — the two churn against each other forever
+    /// with neither able to win, which is `1df7a69` from a third direction. And
+    /// a whole-file diff is where a one-line deletion hides, which is how
+    /// `3447fb6` went unnoticed for as long as it did.
+    #[test]
+    fn p6_a_write_keeps_the_line_ending(source in arb_soup()) {
+        let written = serialize_track(&parse_track(&source));
+        prop_assert_eq!(
+            LineEnding::detect(&source),
+            LineEnding::detect(&written),
+            "source: {:?}\nwritten: {:?}", source, written
+        );
+    }
+
+    #[test]
+    fn p6_an_inbox_write_keeps_the_line_ending(source in arb_soup()) {
+        let written = serialize_inbox(&parse_inbox(&source).0);
+        prop_assert_eq!(
+            LineEnding::detect(&source),
+            LineEnding::detect(&written),
+            "source: {:?}\nwritten: {:?}", source, written
+        );
+    }
+
+    /// And it survives repeated writes — a fixpoint, not a one-step accident.
+    /// The churn this prevents is precisely a file that never settles.
+    #[test]
+    fn p6_the_line_ending_is_a_fixpoint(source in arb_soup()) {
+        let once = serialize_track(&parse_track(&source));
+        let twice = serialize_track(&parse_track(&once));
+        prop_assert_eq!(once, twice);
     }
 }
 
@@ -1244,6 +1331,56 @@ fn a_stray_line_under_a_subtask_survives_a_write() {
 /// adding the customary final newline was undone by the next frame write, so the
 /// two churned against each other indefinitely. This is the `1df7a69` shape:
 /// frame and another writer disagreeing about a file forever.
+/// The concrete `LineEnding` claim, as fixed cases beside the property.
+#[test]
+fn a_crlf_track_comes_back_crlf() {
+    let source = "# Main\r\n\r\n## Backlog\r\n\r\n\
+                  - [ ] `M-001` One\r\n  - added: 2025-05-01\r\n\r\n## Done\r\n";
+    let written = serialize_track(&parse_track(source));
+    assert_eq!(
+        written, source,
+        "a CRLF file must survive a write unchanged"
+    );
+}
+
+#[test]
+fn a_crlf_inbox_comes_back_crlf() {
+    let source = "# Inbox\r\n\r\n- captured thing #tag\r\n";
+    let written = serialize_inbox(&parse_inbox(source).0);
+    assert_eq!(written, source);
+}
+
+/// An LF file must not acquire carriage returns because one line had one.
+#[test]
+fn a_mostly_lf_file_stays_lf() {
+    let source = "# Main\n\n## Backlog\r\n\n- [ ] `M-001` One\n\n## Done\n";
+    let written = serialize_track(&parse_track(source));
+    assert!(
+        !written.contains('\r'),
+        "the majority ending wins, and it is LF here: {written:?}"
+    );
+}
+
+/// A CRLF file that frame *edits* keeps its ending too — the canonical path
+/// rebuilds a task from its fields, so it is a different code path from the
+/// verbatim one the cases above take.
+#[test]
+fn a_dirtied_crlf_track_still_writes_crlf() {
+    let source = "# Main\r\n\r\n## Backlog\r\n\r\n- [ ] `M-001` One\r\n\r\n## Done\r\n";
+    let mut track = parse_track(source);
+    dirty_track(&mut track);
+    let written = serialize_track(&track);
+    assert_eq!(
+        LineEnding::detect(&written),
+        LineEnding::Crlf,
+        "{written:?}"
+    );
+    assert!(
+        !written.contains("\n\n\r"),
+        "no stray bare newlines: {written:?}"
+    );
+}
+
 #[test]
 fn a_write_leaves_exactly_one_terminal_newline() {
     for source in [

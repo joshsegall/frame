@@ -4147,7 +4147,7 @@ fn test_merge_driver_conflict_leaves_a_valid_file_and_a_marker() {
     );
 
     // And check reports it as an error until someone decides.
-    let checked = run_fr_ok(root, &["check"]);
+    let (checked, _, ok) = run_fr(root, &["check"]);
     assert!(
         checked.contains("unresolved merge conflict"),
         "check should report it: {checked}"
@@ -4155,6 +4155,10 @@ fn test_merge_driver_conflict_leaves_a_valid_file_and_a_marker() {
     assert!(
         !checked.contains("project is valid"),
         "an unresolved conflict is not a valid project: {checked}"
+    );
+    assert!(
+        !ok,
+        "and the status should say so, so a hook or CI step can key off it"
     );
 
     // Resolving clears the marker and nothing else.
@@ -4496,9 +4500,9 @@ fn a_track_file_renamed_out_from_under_config_is_reported() {
     )
     .unwrap();
 
-    let (stdout, _, _) = run_fr(root, &["check"]);
+    let (stdout, _, ok) = run_fr(root, &["check"]);
     assert!(
-        stdout.contains("project has errors"),
+        !ok && stdout.contains("project has errors"),
         "a track nobody can see is not a clean bill: {stdout}"
     );
     assert!(
@@ -4599,4 +4603,105 @@ fn test_clean_keeps_the_task_when_the_archive_write_is_cut() {
         "and archived exactly once: {archive}"
     );
     assert_eq!(archive.matches("`M-002`").count(), 1, "{archive}");
+}
+
+// ---------------------------------------------------------------------------
+// `fr check` reports soundness in its exit status
+// ---------------------------------------------------------------------------
+
+/// A clean project exits 0 — the baseline the rest of this depends on.
+#[test]
+fn check_exits_zero_on_a_clean_project() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    create_test_project(root);
+
+    let (stdout, _, ok) = run_fr(root, &["check"]);
+    assert!(ok, "a clean project must not report failure: {stdout}");
+}
+
+/// Errors set the status, so a pre-commit hook or a CI step can key off it
+/// instead of grepping stdout. It used to print `✗ project has errors` and exit
+/// 0, which meant `fr check && ...` ran the `&&` branch on a broken project.
+#[test]
+fn check_exits_non_zero_on_errors() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    create_test_project(root);
+
+    // A dangling dep: an error, and one with no repair.
+    let track = root.join("frame/tracks/main.md");
+    let body = fs::read_to_string(&track)
+        .unwrap()
+        .replace("- dep: M-001", "- dep: M-999");
+    fs::write(&track, body).unwrap();
+
+    let (stdout, _, ok) = run_fr(root, &["check"]);
+    assert!(!ok, "errors must set the status: {stdout}");
+    assert!(stdout.contains("project has errors"), "{stdout}");
+}
+
+/// Warnings do not. The status answers "is this project sound", and a warning
+/// is by definition something frame is willing to live with — gating a commit
+/// on one would make the whole signal useless.
+#[test]
+fn check_exits_zero_when_there_are_only_warnings() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    create_test_project(root);
+
+    // A task with no ID: a warning, and one `fr clean` fixes routinely.
+    let track = root.join("frame/tracks/main.md");
+    let body = fs::read_to_string(&track)
+        .unwrap()
+        .replace("## Parked", "- [ ] No ID at all\n\n## Parked");
+    fs::write(&track, body).unwrap();
+
+    let (stdout, _, ok) = run_fr(root, &["check"]);
+    assert!(
+        stdout.contains("Warnings:"),
+        "the fixture should warn: {stdout}"
+    );
+    assert!(!stdout.contains("Errors:"), "and only warn: {stdout}");
+    assert!(ok, "a warning is not a failure: {stdout}");
+}
+
+/// `--json` agrees with the status, so a consumer can use either.
+#[test]
+fn check_json_exits_non_zero_on_errors_too() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    create_test_project(root);
+
+    let track = root.join("frame/tracks/main.md");
+    let body = fs::read_to_string(&track)
+        .unwrap()
+        .replace("- dep: M-001", "- dep: M-999");
+    fs::write(&track, body).unwrap();
+
+    let (stdout, _, ok) = run_fr(root, &["check", "--json"]);
+    assert!(!ok, "{stdout}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    assert_eq!(v["valid"], serde_json::Value::Bool(false));
+}
+
+/// `--fix` follows the same rule, on the state it leaves behind: it repairs
+/// what it can, and an error it could not repair is still an error.
+#[test]
+fn check_fix_exits_non_zero_when_errors_remain() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    create_test_project(root);
+
+    let track = root.join("frame/tracks/main.md");
+    let body = fs::read_to_string(&track)
+        .unwrap()
+        .replace("- dep: M-001", "- dep: M-999");
+    fs::write(&track, body).unwrap();
+
+    let (stdout, _, ok) = run_fr(root, &["check", "--fix", "--yes"]);
+    assert!(
+        !ok,
+        "a dangling dep has no repair, so the project is still unsound: {stdout}"
+    );
 }

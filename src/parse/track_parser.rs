@@ -95,6 +95,7 @@ pub fn parse_track(source: &str) -> Track {
         description,
         nodes,
         source_lines: lines,
+        eol: crate::parse::LineEnding::detect(source),
     }
 }
 

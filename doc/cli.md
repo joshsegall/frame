@@ -162,7 +162,10 @@ With `--json`, the same tree is emitted nested, each node carrying `id` and `sta
 
 ### `fr check`
 
-Validate project integrity. Read-only unless `--fix` is passed. Reports dangling dependencies, broken refs/specs, duplicate IDs, missing metadata, and format warnings. Also flags actor issues: this clone's token drifting from `actors.toml`, and **multiple active tokens sharing one provenance name** (a sign a machine has accumulated tokens — e.g. a git-worktree-per-session workflow — with a suggested `fr actor merge` to collapse them).
+Validate project integrity. Read-only unless `--fix` is passed.
+
+**Exit status: 0 when the project has no errors, 1 when it has any** — so `fr check && git commit` and a CI step both work without grepping stdout. Warnings do not affect it: the status answers "is this project sound", and a warning is by definition something frame is willing to live with. `--json` sets the same status, agreeing with the `valid` field. `--fix` follows the rule on the state it leaves behind, including when it had nothing to repair — most errors have no repair by design, so "nothing to repair" is the common way a broken project leaves `--fix`.
+ Reports dangling dependencies, broken refs/specs, duplicate IDs, missing metadata, and format warnings. Also flags actor issues: this clone's token drifting from `actors.toml`, and **multiple active tokens sharing one provenance name** (a sign a machine has accumulated tokens — e.g. a git-worktree-per-session workflow — with a suggested `fr actor merge` to collapse them).
 
 It flags **ID collisions involving an archive**, which nothing else catches — the duplicate-ID *error* and `fr clean`'s duplicate resolution both compare live tracks only. These are two different problems and are reported separately:
 
