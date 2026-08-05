@@ -598,7 +598,10 @@ pub(super) fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo
                         save_config(app);
                     }
                 }
-                Some(Operation::TrackAdd { track_id: tid }) => {
+                Some(Operation::TrackAdd {
+                    track_id: tid,
+                    track_name,
+                }) => {
                     if is_undo {
                         // Remove the track
                         let file = app.track_file(&tid).map(|f| f.to_string());
@@ -611,8 +614,8 @@ pub(super) fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo
                         rebuild_active_track_ids(app);
                         save_config(app);
                     } else {
-                        // Re-create the track (minimal)
-                        let name = tid.clone(); // best effort — use ID as name for redo
+                        // Re-create the track under the name the user gave it.
+                        let name = track_name.clone();
                         let tc = crate::model::TrackConfig {
                             id: tid.clone(),
                             name: name.clone(),
@@ -644,16 +647,21 @@ pub(super) fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo
                     track_name,
                     old_state,
                     prefix,
+                    content,
                 }) => {
                     if is_undo {
-                        // Re-create the track
+                        // Restore the file as it was. Only when it could not be
+                        // read at delete time is there nothing to put back, and
+                        // a minimal shell is then the best available answer.
                         let tc = crate::model::TrackConfig {
                             id: tid.clone(),
                             name: track_name.clone(),
                             state: old_state.clone(),
                             file: format!("tracks/{}.md", tid),
                         };
-                        let track_content = format!("# {}\n\n## Backlog\n\n## Done\n", track_name);
+                        let track_content = content.clone().unwrap_or_else(|| {
+                            format!("# {}\n\n## Backlog\n\n## Done\n", track_name)
+                        });
                         let track_path = app.project.frame_dir.join(&tc.file);
                         let _ = crate::io::recovery::atomic_write(
                             &track_path,

@@ -228,9 +228,28 @@ pub(super) fn palette_delete_track(app: &mut App) {
         None => return,
     };
 
+    let track = match App::find_track_in_project(&app.project, &track_id) {
+        Some(t) => t,
+        None => return,
+    };
     let display_name = app.track_name(&track_id).to_string();
+
+    // Delete is for empty tracks only — the same rule `fr track delete`
+    // enforces, and the one `doc/tui.md` and `Operation::TrackDelete` both
+    // already state. Unlike archiving, this unlinks the file, so a track with
+    // tasks in it has nowhere to come back from once the session ends and the
+    // undo stack goes with it.
+    if !crate::ops::track_ops::is_track_empty_by_id(&app.project.frame_dir, track, &track_id) {
+        let count = crate::ops::track_ops::total_task_count(track);
+        app.status_message = Some(format!(
+            "\"{}\" has {} tasks — archive it instead",
+            display_name, count
+        ));
+        return;
+    }
+
     app.confirm_state = Some(crate::tui::app::ConfirmState {
-        message: format!("Delete track \"{}\"? [y/n]", display_name),
+        message: format!("Delete track \"{}\"? (empty) [y/n]", display_name),
         action: crate::tui::app::ConfirmAction::DeleteTrack { track_id },
     });
     app.mode = Mode::Confirm;

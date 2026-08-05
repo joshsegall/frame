@@ -4665,6 +4665,45 @@ fn resolve_track_for_path(
         .map(|tc| (tc.id.clone(), tc.file.clone()))
 }
 
+/// A project on disk, so the save paths have somewhere real to write.
+///
+/// Shared with the `tui::input` tests, which need a real `App` to drive the
+/// undo/redo arms that touch the filesystem.
+#[cfg(test)]
+pub(crate) fn app_on_disk(dir: &std::path::Path) -> App {
+    use crate::model::config::{
+        CleanConfig, IdConfig, ProjectConfig, ProjectInfo, TrackConfig, UiConfig,
+    };
+    const TRACK_A: &str = "# A\n\n## Backlog\n\n- [ ] `A-001` One\n\n## Done\n";
+    let frame_dir = dir.join("frame");
+    std::fs::create_dir_all(frame_dir.join("tracks")).unwrap();
+    std::fs::write(frame_dir.join("tracks/a.md"), TRACK_A).unwrap();
+    std::fs::write(frame_dir.join("inbox.md"), "# Inbox\n").unwrap();
+    let config = ProjectConfig {
+        project: ProjectInfo {
+            name: "saves".into(),
+        },
+        agent: Default::default(),
+        tracks: vec![TrackConfig {
+            id: "a".into(),
+            name: "A".into(),
+            state: "active".into(),
+            file: "tracks/a.md".into(),
+        }],
+        clean: CleanConfig::default(),
+        ids: IdConfig::default(),
+        ui: UiConfig::default(),
+    };
+    let project = crate::model::project::Project {
+        root: dir.to_path_buf(),
+        frame_dir,
+        config,
+        tracks: vec![("a".into(), crate::parse::parse_track(TRACK_A))],
+        inbox: Some(crate::parse::parse_inbox("# Inbox\n").0),
+    };
+    App::new(project)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5062,45 +5101,6 @@ mod tests {
     }
 
     // ---- Saving --------------------------------------------------------
-
-    /// A project on disk, so the save paths have somewhere real to write.
-    fn app_on_disk(dir: &std::path::Path) -> App {
-        use crate::model::config::{CleanConfig, IdConfig, ProjectConfig, ProjectInfo, UiConfig};
-        let frame_dir = dir.join("frame");
-        std::fs::create_dir_all(frame_dir.join("tracks")).unwrap();
-        std::fs::write(
-            frame_dir.join("tracks/a.md"),
-            "# A\n\n## Backlog\n\n- [ ] `A-001` One\n\n## Done\n",
-        )
-        .unwrap();
-        std::fs::write(frame_dir.join("inbox.md"), "# Inbox\n").unwrap();
-        let config = ProjectConfig {
-            project: ProjectInfo {
-                name: "saves".into(),
-            },
-            agent: Default::default(),
-            tracks: vec![TrackConfig {
-                id: "a".into(),
-                name: "A".into(),
-                state: "active".into(),
-                file: "tracks/a.md".into(),
-            }],
-            clean: CleanConfig::default(),
-            ids: IdConfig::default(),
-            ui: UiConfig::default(),
-        };
-        let project = crate::model::project::Project {
-            root: dir.to_path_buf(),
-            frame_dir,
-            config,
-            tracks: vec![(
-                "a".into(),
-                crate::parse::parse_track("# A\n\n## Backlog\n\n- [ ] `A-001` One\n\n## Done\n"),
-            )],
-            inbox: Some(crate::parse::parse_inbox("# Inbox\n").0),
-        };
-        App::new(project)
-    }
 
     // ---- UI state persistence ------------------------------------------
 

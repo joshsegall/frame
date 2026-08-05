@@ -1464,6 +1464,7 @@ pub(super) fn confirm_edit(app: &mut App) {
 
             app.undo_stack.push(Operation::TrackAdd {
                 track_id: track_id.clone(),
+                track_name: name.clone(),
             });
 
             // Move cursor to the new track

@@ -123,9 +123,13 @@ pub(super) fn confirm_delete_track(app: &mut App, track_id: &str) {
     };
     let prefix = app.project.config.ids.prefixes.get(track_id).cloned();
 
-    // Remove track file
+    // Read the file before unlinking it, so undo has something to put back.
+    // This is the only copy: delete does not archive, and nothing here reaches
+    // the recovery log.
+    let mut content = None;
     if let Some(file) = app.track_file(track_id).map(|f| f.to_string()) {
         let track_path = app.project.frame_dir.join(&file);
+        content = std::fs::read_to_string(&track_path).ok();
         let _ = std::fs::remove_file(&track_path);
     }
 
@@ -146,6 +150,7 @@ pub(super) fn confirm_delete_track(app: &mut App, track_id: &str) {
         track_name: tc.name.clone(),
         old_state: tc.state.clone(),
         prefix,
+        content,
     });
 
     app.status_message = Some(format!("deleted track \"{}\"", tc.name));
@@ -270,4 +275,155 @@ pub(super) fn reopen_recent_task(app: &mut App) {
 
     let track_name = app.track_name(&track_id).to_string();
     app.status_message = Some(format!("Reopening in {}...", track_name));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::app::app_on_disk;
+    use crate::tui::input::common::{perform_redo, perform_undo};
+    use crate::tui::input::tracks::palette_delete_track;
+
+    const TRACK_A: &str = "# A\n\n## Backlog\n\n- [ ] `A-001` One\n\n## Done\n";
+
+    fn track_path(app: &App) -> std::path::PathBuf {
+        app.project.frame_dir.join("tracks/a.md")
+    }
+
+    /// Deleting a track unlinks the file — nothing is archived and nothing
+    /// reaches the recovery log, so the undo entry is the only copy. It used to
+    /// carry the name and not the content, and undo rebuilt an empty shell: the
+    /// track came back in the sidebar with its name, prefix and position, and
+    /// every task in it was gone with no error reported.
+    #[test]
+    fn undoing_a_track_delete_restores_the_file_it_removed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+
+        confirm_delete_track(&mut app, "a");
+        assert!(!track_path(&app).exists(), "the file should be gone");
+
+        perform_undo(&mut app);
+
+        assert_eq!(
+            std::fs::read_to_string(track_path(&app)).unwrap(),
+            TRACK_A,
+            "undo must put back the bytes that were there, not a fresh shell"
+        );
+        let track = App::find_track_in_project(&app.project, "a").expect("track back in memory");
+        assert_eq!(
+            crate::ops::track_ops::total_task_count(track),
+            1,
+            "and the tasks with it"
+        );
+    }
+
+    /// Redo re-deletes, so the recorded content has to survive being replayed
+    /// in both directions.
+    #[test]
+    fn a_track_delete_survives_undo_redo_undo() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+
+        confirm_delete_track(&mut app, "a");
+        perform_undo(&mut app);
+        perform_redo(&mut app);
+        assert!(!track_path(&app).exists(), "redo deletes it again");
+
+        perform_undo(&mut app);
+        assert_eq!(
+            std::fs::read_to_string(track_path(&app)).unwrap(),
+            TRACK_A,
+            "and the second undo restores it just as the first did"
+        );
+    }
+
+    /// An unreadable file leaves nothing to record. Undo then has no better
+    /// answer than the shell, which is the old behaviour — it must not panic
+    /// or leave the track missing from the config.
+    #[test]
+    fn a_delete_with_no_readable_file_still_undoes_to_something() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        std::fs::remove_file(track_path(&app)).unwrap();
+
+        confirm_delete_track(&mut app, "a");
+        perform_undo(&mut app);
+
+        assert!(
+            std::fs::read_to_string(track_path(&app))
+                .unwrap()
+                .starts_with("# A"),
+            "a shell, but a real one"
+        );
+        assert!(app.project.config.tracks.iter().any(|t| t.id == "a"));
+    }
+
+    /// The CLI refuses to delete a track with tasks in it, `doc/tui.md` says
+    /// the TUI does too, and `Operation::TrackDelete` calls itself "empty track
+    /// only". Only the code disagreed: the prompt went straight up with no
+    /// count and no check, and `y` unlinked the file.
+    #[test]
+    fn deleting_a_track_with_tasks_is_refused_before_the_prompt() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        app.tracks_cursor = 0;
+
+        palette_delete_track(&mut app);
+
+        assert!(
+            app.confirm_state.is_none(),
+            "a non-empty track never reaches the confirmation"
+        );
+        assert!(!matches!(app.mode, Mode::Confirm));
+        let msg = app.status_message.clone().unwrap_or_default();
+        assert!(
+            msg.contains("1 tasks") && msg.contains("archive"),
+            "it should say how much is there and where to put it: {msg}"
+        );
+        assert!(track_path(&app).exists(), "and touch nothing");
+    }
+
+    /// An empty track is still deletable — the guard is a guard, not a removal
+    /// of the feature.
+    #[test]
+    fn deleting_an_empty_track_still_prompts() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        std::fs::write(track_path(&app), "# A\n\n## Backlog\n\n## Done\n").unwrap();
+        app.replace_track(
+            "a",
+            crate::parse::parse_track("# A\n\n## Backlog\n\n## Done\n"),
+        );
+        app.tracks_cursor = 0;
+
+        palette_delete_track(&mut app);
+
+        assert!(app.confirm_state.is_some(), "an empty track prompts");
+        assert!(matches!(app.mode, Mode::Confirm));
+    }
+
+    /// Redo of a track add rebuilt the name as `tid.clone()`, so a track called
+    /// "My Track" came back called "my-track".
+    #[test]
+    fn redoing_a_track_add_keeps_the_name_the_user_typed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        app.undo_stack.push(Operation::TrackAdd {
+            track_id: "a".to_string(),
+            track_name: "A".to_string(),
+        });
+
+        perform_undo(&mut app);
+        perform_redo(&mut app);
+
+        let tc = app
+            .project
+            .config
+            .tracks
+            .iter()
+            .find(|t| t.id == "a")
+            .expect("track is back");
+        assert_eq!(tc.name, "A", "redo must not rename the track to its ID");
+    }
 }

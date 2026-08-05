@@ -480,7 +480,7 @@ Some actions are **palette-only** (no direct key binding):
 | Delete task | Track, Detail, Recent | Permanently delete a task (supports bulk with multi-select) |
 | Import tasks | Track | Import tasks from a markdown file into the current track |
 | Archive track | Tracks | Archive a non-empty track |
-| Delete track | Tracks | Delete an empty track |
+| Delete track | Tracks | Delete an empty track (a track with tasks must be archived instead) |
 | Unarchive track | Tracks | Restore an archived track to active |
 | Rename track prefix | Tracks | Rename a track's ID prefix |
 | Check project | Global | Run project integrity check and display results |
@@ -592,6 +592,8 @@ Full undo/redo stack for all TUI mutations: state changes, title edits, task cre
 Undo navigates to the affected item — switching views and tracks if needed — and briefly highlights it.
 
 External file changes insert a sync marker that blocks undo across the boundary. The undo stack starts empty on each launch, so there is nothing to undo from a previous session. When a sync marker is inserted, the redo stack is cleared permanently.
+
+Undo of a track deletion restores the track file as it was, byte for byte — the undo entry carries the file's content, because deleting a track unlinks it and no copy goes to the archive or the recovery log. Since the stack does not survive a restart, deleting a track is only reversible within the session that did it; the emptiness rule is what keeps that from mattering.
 
 Inline edit undo (`Ctrl+Z`/`Ctrl+Y` in Edit mode) operates within the current editing session separately from the main undo stack.
 

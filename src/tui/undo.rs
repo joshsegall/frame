@@ -232,7 +232,7 @@ pub fn nav_target_for_op(op: &Operation, is_undo: bool) -> Option<UndoNavTarget>
                 })
             }
         }
-        Operation::TrackAdd { track_id } => Some(UndoNavTarget::TracksView {
+        Operation::TrackAdd { track_id, .. } => Some(UndoNavTarget::TracksView {
             track_id: track_id.clone(),
         }),
         Operation::TrackNameEdit { track_id, .. }
@@ -514,7 +514,12 @@ pub enum Operation {
         done_index: usize,
     },
     /// A new track was created (in TUI)
-    TrackAdd { track_id: String },
+    TrackAdd {
+        track_id: String,
+        /// The display name, so redo re-creates the track with the name the
+        /// user typed rather than falling back to the ID.
+        track_name: String,
+    },
     /// A track's display name was edited
     TrackNameEdit {
         track_id: String,
@@ -535,6 +540,14 @@ pub enum Operation {
         track_name: String,
         old_state: String,
         prefix: Option<String>,
+        /// The track file exactly as it was. Undo writes these bytes back, so
+        /// a restore returns the file rather than a fresh empty one — which
+        /// matters even for an empty track, whose header, section order and
+        /// blank lines are the user's and not ours to canonicalize.
+        ///
+        /// `None` when the file could not be read at delete time; undo then
+        /// falls back to a minimal shell.
+        content: Option<String>,
     },
     /// The cc-focus track was changed
     TrackCcFocus {
