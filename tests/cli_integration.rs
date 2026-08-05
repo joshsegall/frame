@@ -4705,3 +4705,116 @@ fn check_fix_exits_non_zero_when_errors_remain() {
         "a dangling dep has no repair, so the project is still unsound: {stdout}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Un-archiving brings the file back
+//
+// `fr track archive` moves the track file to `archive/_tracks/`. `fr track
+// activate` used to set `state = "active"` and stop there, leaving the config
+// naming a file that is not in `tracks/` — and `load_project` skips such a
+// track, so it and every task in it left the project while the command printed
+// success. The TUI's unarchive has always moved the file back.
+// ---------------------------------------------------------------------------
+
+/// A track archived and then activated must be whole again: file in place,
+/// tasks visible, project clean.
+#[test]
+fn activating_an_archived_track_brings_its_file_back() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    two_track_project(root);
+
+    run_fr_ok(root, &["track", "archive", "a"]);
+    assert!(
+        root.join("frame/archive/_tracks/a.md").exists(),
+        "archive moved the file"
+    );
+    assert!(!root.join("frame/tracks/a.md").exists());
+
+    run_fr_ok(root, &["track", "activate", "a"]);
+
+    assert!(
+        root.join("frame/tracks/a.md").exists(),
+        "activate must bring it back"
+    );
+    assert!(
+        !root.join("frame/archive/_tracks/a.md").exists(),
+        "and not leave a second copy behind"
+    );
+
+    let out = run_fr_ok(root, &["list"]);
+    assert!(
+        out.contains("the task to move"),
+        "the tasks are visible again: {out}"
+    );
+
+    let (check, _, ok) = run_fr(root, &["check"]);
+    assert!(ok, "and the project is sound: {check}");
+}
+
+/// Activating a *shelved* track is a config edit and nothing more — its file
+/// never moved, so there is nothing to restore and nothing to break.
+#[test]
+fn activating_a_shelved_track_touches_no_files() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    two_track_project(root);
+
+    run_fr_ok(root, &["track", "shelve", "a"]);
+    let before = fs::read_to_string(root.join("frame/tracks/a.md")).unwrap();
+
+    run_fr_ok(root, &["track", "activate", "a"]);
+
+    assert_eq!(
+        fs::read_to_string(root.join("frame/tracks/a.md")).unwrap(),
+        before,
+        "a shelved track's file stays exactly where it was"
+    );
+    let (check, _, ok) = run_fr(root, &["check"]);
+    assert!(ok, "{check}");
+}
+
+/// Activating an already-active track is a no-op, not an error. It reaches
+/// `restore_track_file` with nothing to move in the marker-recovery path, so
+/// the idempotence guard there has to hold.
+#[test]
+fn activating_an_active_track_is_harmless() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    two_track_project(root);
+
+    run_fr_ok(root, &["track", "activate", "a"]);
+    assert!(root.join("frame/tracks/a.md").exists());
+    let (check, _, ok) = run_fr(root, &["check"]);
+    assert!(ok, "{check}");
+}
+
+/// Cutting the restore leaves the file where it started, in
+/// `archive/_tracks/` — recoverable, with nothing lost. This is the test the
+/// fault hook on `restore_track_file` was added for and had no caller to reach
+/// it from until `activate` gained one.
+#[test]
+fn a_cut_unarchive_leaves_the_file_in_the_archive() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    two_track_project(root);
+
+    run_fr_ok(root, &["track", "archive", "a"]);
+
+    let (_, stderr, ok) = run_fr_env(
+        root,
+        &["track", "activate", "a"],
+        &[("FRAME_FAIL_WRITE", "_tracks/a.md")],
+    );
+    assert!(
+        !ok,
+        "the injected failure should fail the command: {stderr}"
+    );
+
+    assert!(
+        root.join("frame/archive/_tracks/a.md").exists(),
+        "the file must still be somewhere — the move is what was cut"
+    );
+    let archived = fs::read_to_string(root.join("frame/archive/_tracks/a.md")).unwrap();
+    assert!(archived.contains("the task to move"), "intact: {archived}");
+}

@@ -453,11 +453,11 @@ Set track state to `shelved` (hidden from default listings).
 
 ### `fr track activate ID`
 
-Set track state to `active`.
+Set track state to `active`. **This is also how a track is un-archived**: on an archived track it moves the file back out of `frame/archive/_tracks/` as well as setting the state, since the state alone would leave the config naming a file that is not there — and a configured track whose file is missing is skipped entirely, taking its tasks out of every view. On a shelved track there is nothing to move; the file never left `tracks/`.
 
 ### `fr track archive ID`
 
-Set track state to `archived` and move file to `frame/archive/`.
+Set track state to `archived` and move file to `frame/archive/_tracks/`. Reverse it with `fr track activate`.
 
 ### `fr track delete ID`
 

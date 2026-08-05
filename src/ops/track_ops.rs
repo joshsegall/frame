@@ -418,6 +418,15 @@ pub fn restore_track_file(
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(ProjectError::IoError)?;
     }
+
+    // Already moved is success, not failure — the same rule `archive_track_file`
+    // states, and needed for the same two reasons: recovery re-runs this after
+    // an interruption, and a user re-running the command that was interrupted
+    // should not be told it failed on a job that is already done.
+    if !archive_path.exists() && dest.exists() {
+        return Ok(());
+    }
+
     // The other half of `archive_track_file`, and it gets the same hook for the
     // same reason: a rename is not an `atomic_write`, so nothing else can cut it.
     crate::io::fault::maybe_fail(&archive_path).map_err(ProjectError::IoError)?;

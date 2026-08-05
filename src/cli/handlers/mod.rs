@@ -2511,6 +2511,15 @@ fn cmd_track_state_change(
         .find(|t| t.id == track_id)
         .map(|t| t.file.clone());
 
+    // And the state it is coming *from*, because `activate` means two different
+    // operations. From shelved it is a config edit and nothing else; from
+    // archived it also has to bring the file back out of `archive/_tracks/`.
+    let was_archived = config
+        .tracks
+        .iter()
+        .find(|t| t.id == track_id)
+        .is_some_and(|t| t.state == "archived");
+
     match action {
         "shelve" => track_ops::shelve_track(&mut doc, &mut config, &track_id)?,
         "activate" => track_ops::activate_track(&mut doc, &mut config, &track_id)?,
@@ -2542,9 +2551,22 @@ fn cmd_track_state_change(
 
     // Move the track file to archive/_tracks/ after archiving
     if action == "archive"
-        && let Some(file) = track_file
+        && let Some(file) = &track_file
     {
-        track_ops::archive_track_file(&project.frame_dir, &track_id, &file)?;
+        track_ops::archive_track_file(&project.frame_dir, &track_id, file)?;
+    }
+
+    // And back out of it when un-archiving, which is the same two writes in the
+    // same order. Without this the config says active while the file is still in
+    // `archive/_tracks/` — and `load_project` skips a configured track whose
+    // file is missing, so the track and every task in it leave the project while
+    // the command reports success. The TUI's unarchive has always done this;
+    // the CLI's `activate` did not.
+    if action == "activate"
+        && was_archived
+        && let Some(file) = &track_file
+    {
+        track_ops::restore_track_file(&project.frame_dir, &track_id, file)?;
     }
 
     if let Some(marker) = marker {
