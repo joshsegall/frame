@@ -2531,20 +2531,27 @@ fn cmd_track_state_change(
     // between it leaves config claiming the track is archived while the file is
     // still in tracks/, which `fr check` reports as a perfectly valid project.
     // Record the intent so the next command finishes the move.
-    let marker = if action == "archive" {
-        match &track_file {
-            Some(file) => Some(crate::io::inflight::InFlight::begin(
-                &project.frame_dir,
-                crate::io::inflight::Operation::TrackArchive {
-                    track_id: track_id.clone(),
-                    file: file.clone(),
-                },
-                &format!("fr track archive {track_id}"),
-            )?),
-            None => None,
-        }
-    } else {
-        None
+    // Un-archiving is the same two writes in the same order, so it records the
+    // same way — and its interruption is the worse of the two, since it leaves
+    // the config naming a file that is not there.
+    let marker = match (action, &track_file) {
+        ("archive", Some(file)) => Some(crate::io::inflight::InFlight::begin(
+            &project.frame_dir,
+            crate::io::inflight::Operation::TrackArchive {
+                track_id: track_id.clone(),
+                file: file.clone(),
+            },
+            &format!("fr track archive {track_id}"),
+        )?),
+        ("activate", Some(file)) if was_archived => Some(crate::io::inflight::InFlight::begin(
+            &project.frame_dir,
+            crate::io::inflight::Operation::TrackUnarchive {
+                track_id: track_id.clone(),
+                file: file.clone(),
+            },
+            &format!("fr track activate {track_id}"),
+        )?),
+        _ => None,
     };
 
     config_io::write_config(&project.frame_dir, &doc)?;

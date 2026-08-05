@@ -1192,11 +1192,33 @@ pub(super) fn confirm_unarchive_track(app: &mut App, track_id: &str) {
     {
         tc.state = "active".to_string();
     }
+    // Config first, file second — so record the intent, as the CLI does. Cut in
+    // between, the config names a file that is not in `tracks/` and the track
+    // drops out of the project entirely; the next write command completes it.
+    let marker = app
+        .track_file(track_id)
+        .map(|f| f.to_string())
+        .and_then(|file| {
+            crate::io::inflight::InFlight::begin(
+                &app.project.frame_dir,
+                crate::io::inflight::Operation::TrackUnarchive {
+                    track_id: track_id.to_string(),
+                    file,
+                },
+                &format!("unarchive {track_id}"),
+            )
+            .ok()
+        });
+
     save_config(app);
 
     // Restore track file from archive/_tracks/
     if let Some(file) = app.track_file(track_id).map(|f| f.to_string()) {
         let _ = crate::ops::track_ops::restore_track_file(&app.project.frame_dir, track_id, &file);
+    }
+
+    if let Some(marker) = marker {
+        marker.commit();
     }
 
     // Reload track into memory

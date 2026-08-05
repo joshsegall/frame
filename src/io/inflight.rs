@@ -84,6 +84,15 @@ pub enum Operation {
     },
     /// A track marked archived in config, its file moved to `archive/_tracks/`.
     TrackArchive { track_id: String, file: String },
+    /// The inverse: a track marked active in config, its file moved back out of
+    /// `archive/_tracks/` into `tracks/`.
+    ///
+    /// Same two writes in the same order as [`Operation::TrackArchive`], and the
+    /// interruption is worse. A cut archive leaves the file in `tracks/` where
+    /// everything can still read it; a cut un-archive leaves the config naming a
+    /// file that is not there, and `load_project` skips such a track — so the
+    /// track and every task in it drop out of the project until this completes.
+    TrackUnarchive { track_id: String, file: String },
     /// A track's id changed: its file renamed, its archive renamed, and the
     /// config entry rewritten to match.
     ///
@@ -121,6 +130,7 @@ impl Operation {
         match self {
             Operation::CrossTrackMove { .. } => "mv --track",
             Operation::TrackArchive { .. } => "track archive",
+            Operation::TrackUnarchive { .. } => "track activate",
             Operation::TrackRename { .. } => "track rename --id",
             Operation::ActorMerge { .. } => "actor merge",
             Operation::Triage { .. } => "triage",

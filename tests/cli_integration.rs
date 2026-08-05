@@ -4793,8 +4793,12 @@ fn activating_an_active_track_is_harmless() {
 /// `archive/_tracks/` — recoverable, with nothing lost. This is the test the
 /// fault hook on `restore_track_file` was added for and had no caller to reach
 /// it from until `activate` gained one.
+///
+/// The half-applied state here is the dangerous one: the config already says
+/// active while the file is not in `tracks/`, so the track is *absent* from the
+/// project rather than merely misfiled. The next write command has to finish it.
 #[test]
-fn a_cut_unarchive_leaves_the_file_in_the_archive() {
+fn a_cut_unarchive_is_completed_by_the_next_write_command() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
     two_track_project(root);
@@ -4811,10 +4815,41 @@ fn a_cut_unarchive_leaves_the_file_in_the_archive() {
         "the injected failure should fail the command: {stderr}"
     );
 
+    // Nothing was lost — the file is still where it started.
     assert!(
         root.join("frame/archive/_tracks/a.md").exists(),
         "the file must still be somewhere — the move is what was cut"
     );
     let archived = fs::read_to_string(root.join("frame/archive/_tracks/a.md")).unwrap();
     assert!(archived.contains("the task to move"), "intact: {archived}");
+
+    // But the track is invisible until this is finished, which is why the state
+    // must not be left standing.
+    assert!(
+        root.join("frame/.inflight").exists(),
+        "the intent is recorded"
+    );
+    let (check, _, _) = run_fr(root, &["check"]);
+    assert!(
+        check.contains("track file is missing"),
+        "and check says so meanwhile: {check}"
+    );
+
+    // Any following write command completes it.
+    run_fr_ok(root, &["add", "b", "unrelated"]);
+
+    assert!(
+        root.join("frame/tracks/a.md").exists(),
+        "recovery should finish the move back"
+    );
+    assert!(!root.join("frame/archive/_tracks/a.md").exists());
+    assert!(
+        !root.join("frame/.inflight").exists(),
+        "and clear the marker"
+    );
+
+    let out = run_fr_ok(root, &["list"]);
+    assert!(out.contains("the task to move"), "tasks are back: {out}");
+    let (check, _, ok) = run_fr(root, &["check"]);
+    assert!(ok, "and the project is sound again: {check}");
 }

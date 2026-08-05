@@ -25,8 +25,15 @@
 //! |---|---|---|
 //! | `mv --track` | does the target hold the new ID? | yes → drop the old ID from the source; no → nothing landed |
 //! | `track archive` | is the file still in `tracks/`? | yes → move it to `archive/_tracks/` |
+//! | `track activate` (un-archive) | is the file still in `archive/_tracks/`? | yes → move it back to `tracks/` |
+//! | `track rename --id` | does the config still name the old id? | yes → finish the renames and the config entry |
 //! | `actor merge` | is a source token still active? | yes → retire it |
 //! | `triage` | is the item still in the inbox *and* present as a task? | yes → drop the inbox item |
+//!
+//! Un-archive is the one where leaving it half-applied is worst: the config
+//! says active while the file is elsewhere, and `load_project` skips a
+//! configured track whose file is missing — so the project runs one whole track
+//! short until this completes.
 //!
 //! # Preconditions gate every destructive step
 //!
@@ -100,6 +107,9 @@ fn apply(project: &mut Project, marker: &Marker) -> Outcome {
         } => recover_cross_track_move(project, operation, moves, source_track, target_track),
         Operation::TrackArchive { track_id, file } => {
             recover_track_archive(project, operation, track_id, file)
+        }
+        Operation::TrackUnarchive { track_id, file } => {
+            recover_track_unarchive(project, operation, track_id, file)
         }
         Operation::TrackRename {
             old_id,
@@ -237,6 +247,41 @@ fn recover_track_archive(
         Err(e) => Outcome::Indeterminate {
             operation,
             reason: format!("could not move {file}: {e}"),
+        },
+    }
+}
+
+/// The inverse, verified the same way from the other side: the file is still in
+/// `archive/_tracks/` and the config already says active, so the remaining step
+/// is the move back.
+///
+/// Worth completing promptly rather than merely reporting, because until it
+/// happens the track is not merely misfiled — it is absent. `load_project`
+/// skips it, so every command runs against a project one whole track short.
+fn recover_track_unarchive(
+    project: &mut Project,
+    operation: String,
+    track_id: &str,
+    file: &str,
+) -> Outcome {
+    let archived = project
+        .frame_dir
+        .join("archive")
+        .join("_tracks")
+        .join(format!("{track_id}.md"));
+    if !archived.exists() {
+        return Outcome::AlreadyComplete { operation };
+    }
+    match crate::ops::track_ops::restore_track_file(&project.frame_dir, track_id, file) {
+        Ok(()) => Outcome::Completed {
+            operation,
+            steps: vec![format!(
+                "moved archive/_tracks/{track_id}.md back to {file} — config already had it active"
+            )],
+        },
+        Err(e) => Outcome::Indeterminate {
+            operation,
+            reason: format!("could not restore {file}: {e}"),
         },
     }
 }

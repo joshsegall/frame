@@ -99,11 +99,33 @@ pub(super) fn confirm_archive_track(app: &mut App, track_id: &str) {
     {
         tc.state = "archived".to_string();
     }
+    // Config first, file second, same as the CLI — and recorded the same way,
+    // so an interruption between them is completed by the next write command
+    // rather than left for `fr check` to report.
+    let marker = app
+        .track_file(track_id)
+        .map(|f| f.to_string())
+        .and_then(|file| {
+            crate::io::inflight::InFlight::begin(
+                &app.project.frame_dir,
+                crate::io::inflight::Operation::TrackArchive {
+                    track_id: track_id.to_string(),
+                    file,
+                },
+                &format!("archive {track_id}"),
+            )
+            .ok()
+        });
+
     save_config(app);
 
     // Move track file to archive/_tracks/
     if let Some(file) = app.track_file(track_id).map(|f| f.to_string()) {
         let _ = crate::ops::track_ops::archive_track_file(&app.project.frame_dir, track_id, &file);
+    }
+
+    if let Some(marker) = marker {
+        marker.commit();
     }
 
     rebuild_active_track_ids(app);
