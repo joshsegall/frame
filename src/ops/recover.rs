@@ -101,6 +101,12 @@ fn apply(project: &mut Project, marker: &Marker) -> Outcome {
         Operation::TrackArchive { track_id, file } => {
             recover_track_archive(project, operation, track_id, file)
         }
+        Operation::TrackRename {
+            old_id,
+            new_id,
+            old_file,
+            new_file,
+        } => recover_track_rename(project, operation, old_id, new_id, old_file, new_file),
         Operation::ActorMerge { sources, target } => {
             recover_actor_merge(project, operation, sources, target)
         }
@@ -232,6 +238,101 @@ fn recover_track_archive(
             operation,
             reason: format!("could not move {file}: {e}"),
         },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Track rename
+// ---------------------------------------------------------------------------
+
+/// The files move first and the config follows, so an interruption leaves the
+/// config naming a file that no longer exists — and a configured track whose
+/// file is missing is skipped by `load_project`, so the track and its tasks
+/// disappear from every view until this runs.
+///
+/// Each step is checked before it is taken and each is idempotent, so this is
+/// safe whether the interruption fell before the track rename, between the two
+/// renames, or between them and the config write.
+fn recover_track_rename(
+    project: &mut Project,
+    operation: String,
+    old_id: &str,
+    new_id: &str,
+    old_file: &str,
+    new_file: &str,
+) -> Outcome {
+    let mut steps = Vec::new();
+
+    // The track file, then the archive: the same order the operation uses.
+    let moves = [
+        (
+            project.frame_dir.join(old_file),
+            project.frame_dir.join(new_file),
+            format!("moved {old_file} to {new_file}"),
+        ),
+        (
+            project
+                .frame_dir
+                .join("archive")
+                .join(format!("{old_id}.md")),
+            project
+                .frame_dir
+                .join("archive")
+                .join(format!("{new_id}.md")),
+            format!("moved archive/{old_id}.md to archive/{new_id}.md"),
+        ),
+    ];
+    for (from, to, describe) in moves {
+        // Both present is not ours to resolve: the destination was not written
+        // by this operation, and picking a winner could discard either.
+        if from.exists() && to.exists() {
+            return Outcome::Indeterminate {
+                operation,
+                reason: format!(
+                    "{} and {} both exist — move or remove one, then re-run",
+                    from.display(),
+                    to.display()
+                ),
+            };
+        }
+        // Absent from the source means either already moved or never there.
+        if !from.exists() {
+            continue;
+        }
+        if let Err(e) = std::fs::rename(&from, &to) {
+            return Outcome::Indeterminate {
+                operation,
+                reason: format!("could not move {}: {e}", from.display()),
+            };
+        }
+        steps.push(describe);
+    }
+
+    // The config write is what makes the track findable again.
+    if project.config.tracks.iter().any(|t| t.id == old_id) {
+        let Ok((_, mut doc)) = crate::io::config_io::read_config(&project.frame_dir) else {
+            return Outcome::Indeterminate {
+                operation,
+                reason: "project.toml could not be read".to_string(),
+            };
+        };
+        crate::io::config_io::update_track_id(&mut doc, old_id, new_id);
+        crate::io::config_io::rename_prefix_key(&mut doc, old_id, new_id);
+        if let Err(e) = crate::io::config_io::write_config(&project.frame_dir, &doc) {
+            return Outcome::Indeterminate {
+                operation,
+                reason: format!("could not write project.toml: {e}"),
+            };
+        }
+        steps.push(format!(
+            "renamed track {old_id} to {new_id} in project.toml"
+        ));
+    }
+
+    if steps.is_empty() {
+        Outcome::AlreadyComplete { operation }
+    } else {
+        Outcome::Completed { operation, steps }
     }
 }
 

@@ -70,6 +70,49 @@ pub enum CheckError {
         /// entry holding the other version.
         detail: String,
     },
+    /// `project.toml` lists a track whose file is not where it says it is.
+    ///
+    /// `load_project` skips a configured track whose file is missing, so the
+    /// track and every task in it silently leave the project: absent from `fr
+    /// list`, from the TUI, and from every other check here, which can only see
+    /// tracks that loaded. Nothing else reports it — that is what makes this an
+    /// error rather than a warning.
+    ///
+    /// An archived track is expected to live at `archive/_tracks/<id>.md`
+    /// instead, and is only reported when it is missing from *there*.
+    ///
+    /// **No `--fix`.** Both repairs guess: dropping the entry discards a track
+    /// that may be one `git checkout` from returning, and recreating the file
+    /// fabricates content.
+    #[serde(rename = "track_file_missing")]
+    TrackFileMissing {
+        track_id: String,
+        /// Where the file was expected, relative to `frame/`.
+        path: String,
+        /// The track's configured state, since it decides where to look.
+        state: String,
+    },
+    /// A `.md` file in `tracks/` that no `[[tracks]]` entry references.
+    ///
+    /// The other direction of the same drift, and the same consequence: the
+    /// file is real, its tasks are real, and nothing shows them. IDs inside it
+    /// are also invisible to the duplicate-ID check, so a collision with a live
+    /// track goes unreported until the file is wired back in.
+    ///
+    /// **No `--fix`.** Adopting the file means inventing an id, a name and an
+    /// ID prefix, and when this is the far half of an interrupted rename the
+    /// right answer is to restore the *original* entry rather than mint a
+    /// second track beside the dangling one. Which of those it is, only the
+    /// person who knows what they renamed can say — the same reasoning as
+    /// `stranded_line` and `UnresolvedMergeConflict`.
+    #[serde(rename = "track_file_unreferenced")]
+    TrackFileUnreferenced {
+        /// Path relative to `frame/`.
+        path: String,
+        /// The `# Title` the file carries, when it has one — the name to give
+        /// the track if it is adopted.
+        title: Option<String>,
+    },
 }
 
 /// A validation warning (non-critical issue).
@@ -328,6 +371,11 @@ pub fn check_project(project: &Project) -> CheckResult {
     // Numbers handed out twice, where one holder is archived (invisible to the
     // live-tracks-only duplicate check above).
     check_archived_id_collisions(project, &mut result);
+
+    // The track roster in `project.toml` against what is actually in `tracks/`.
+    // Every other check here runs over `project.tracks`, which only holds what
+    // loaded — so a track whose file went missing is invisible to all of them.
+    check_track_roster(project, &mut result);
 
     // The durable ID frontier store: unreadable, or reset at some point.
     check_id_frontier(&project.frame_dir, &mut result);
@@ -911,6 +959,92 @@ fn is_transient(name: &str) -> bool {
     name == crate::io::inflight::MARKER_FILE
 }
 
+/// Reconcile the track roster in `project.toml` against the files in `tracks/`.
+///
+/// This is the one check that cannot work from `project.tracks`. That vector
+/// holds the tracks that *loaded*, and `load_project` skips a configured track
+/// whose file is missing — so the failure this looks for is precisely the one
+/// every other check is blind to. Reproduced by renaming a track file out from
+/// under its config entry: `fr list` goes empty and `fr check` used to call the
+/// project valid while the tasks sat unreferenced on disk.
+///
+/// A crash partway through `fr track rename --id` is one way in. A merge that
+/// took one side's `project.toml` and the other's file layout, a manual `mv`,
+/// an editor's "rename file", and a partial checkout all reach the same state,
+/// which is why the detector matters more than any single window.
+fn check_track_roster(project: &Project, result: &mut CheckResult) {
+    let frame_dir = &project.frame_dir;
+    let mut referenced: HashSet<String> = HashSet::new();
+
+    for tc in &project.config.tracks {
+        if tc.state == "archived" {
+            // An archived track keeps its `file` pointing at `tracks/`, but the
+            // file itself was moved to `archive/_tracks/` — see
+            // `track_ops::archive_track_file`. Missing from `tracks/` is the
+            // expected state, so look where it actually went.
+            let archived = frame_dir
+                .join("archive")
+                .join("_tracks")
+                .join(format!("{}.md", tc.id));
+            if !archived.exists() {
+                result.errors.push(CheckError::TrackFileMissing {
+                    track_id: tc.id.clone(),
+                    path: format!("archive/_tracks/{}.md", tc.id),
+                    state: tc.state.clone(),
+                });
+            }
+            continue;
+        }
+
+        referenced.insert(tc.file.clone());
+        if !frame_dir.join(&tc.file).exists() {
+            result.errors.push(CheckError::TrackFileMissing {
+                track_id: tc.id.clone(),
+                path: tc.file.clone(),
+                state: tc.state.clone(),
+            });
+        }
+    }
+
+    // The other direction: a real file nothing points at.
+    let tracks_dir = frame_dir.join("tracks");
+    let Ok(entries) = std::fs::read_dir(&tracks_dir) else {
+        return;
+    };
+    let mut unreferenced: Vec<(String, Option<String>)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "md") || !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let rel = format!("tracks/{}", name);
+        if referenced.contains(&rel) {
+            continue;
+        }
+        unreferenced.push((rel, track_title(&path)));
+    }
+    // `read_dir` order is filesystem order; sort so two runs agree.
+    unreferenced.sort();
+    for (path, title) in unreferenced {
+        result
+            .errors
+            .push(CheckError::TrackFileUnreferenced { path, title });
+    }
+}
+
+/// The `# Title` a track file carries, if any — the name to give the track when
+/// an unreferenced file is adopted.
+fn track_title(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    text.lines()
+        .find_map(|line| line.strip_prefix("# "))
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+}
+
 /// Report an operation that started and did not finish.
 ///
 /// Read-only, like everything else here: the marker is left in place. Completing
@@ -994,11 +1128,19 @@ mod tests {
         }
     }
 
+    /// A project whose config and whose files agree, which is what
+    /// `check_track_roster` requires of a clean project: the track file is
+    /// written to disk at the path `make_config` says it lives at. Before that
+    /// check existed these fixtures were config-only, and every one of them
+    /// described a project with a missing track file.
     fn make_project_at(root: &Path, track_src: &str) -> Project {
         let track = parse_track(track_src);
+        let frame_dir = root.join("frame");
+        std::fs::create_dir_all(frame_dir.join("tracks")).unwrap();
+        std::fs::write(frame_dir.join("tracks/main.md"), track_src).unwrap();
         Project {
             root: root.to_path_buf(),
-            frame_dir: root.join("frame"),
+            frame_dir,
             config: make_config(),
             tracks: vec![("main".to_string(), track)],
             inbox: None,
@@ -1480,9 +1622,17 @@ mod tests {
             },
         ];
 
+        // These two live at the frame-dir root rather than in `tracks/`, which
+        // the config is free to say. Write them where it says they are, so the
+        // roster check has nothing to report.
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+        std::fs::write(frame_dir.join("a.md"), "# A\n").unwrap();
+        std::fs::write(frame_dir.join("b.md"), "# B\n").unwrap();
+
         let project = Project {
             root: tmp.path().to_path_buf(),
-            frame_dir: tmp.path().join("frame"),
+            frame_dir,
             config,
             tracks: vec![("a".to_string(), track_a), ("b".to_string(), track_b)],
             inbox: None,

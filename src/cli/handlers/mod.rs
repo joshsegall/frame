@@ -1312,6 +1312,32 @@ fn cmd_check(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
                     } => {
                         println!("  [{}] {} has broken spec: {}", track_id, task_id, path);
                     }
+                    check::CheckError::TrackFileMissing {
+                        track_id,
+                        path,
+                        state,
+                    } => {
+                        println!(
+                            "  [{}] track file is missing: {} — the track and its tasks are absent from every view{}",
+                            track_id,
+                            path,
+                            if state == "archived" {
+                                " (archived track)"
+                            } else {
+                                ""
+                            }
+                        );
+                    }
+                    check::CheckError::TrackFileUnreferenced { path, title } => {
+                        println!(
+                            "  {} is not listed in project.toml — its tasks are invisible; add a [[tracks]] entry for it{}",
+                            path,
+                            title
+                                .as_ref()
+                                .map(|t| format!(" (titled \"{}\")", t))
+                                .unwrap_or_default()
+                        );
+                    }
                     check::CheckError::DuplicateId { task_id, track_ids } => {
                         println!(
                             "  {} is duplicated in tracks: {}",
@@ -2569,6 +2595,33 @@ fn cmd_track_rename(args: TrackRenameArgs) -> Result<(), Box<dyn std::error::Err
     }
 
     // Handle --id (track ID rename)
+    //
+    // The files move here and the config lands at the end of this function,
+    // with the whole `--prefix` block in between — a wide window, and an
+    // interruption inside it leaves the config naming a file that is gone.
+    // `load_project` skips such a track, so it and its tasks drop out of every
+    // view. Record the intent so the next command finishes the rename.
+    let rename_marker = if let Some(ref new_id) = args.new_id {
+        let old_file = config
+            .tracks
+            .iter()
+            .find(|t| t.id == args.id)
+            .map(|t| t.file.clone())
+            .ok_or_else(|| format!("track not found: {}", args.id))?;
+        Some(crate::io::inflight::InFlight::begin(
+            &project.frame_dir,
+            crate::io::inflight::Operation::TrackRename {
+                old_id: args.id.clone(),
+                new_id: new_id.clone(),
+                old_file,
+                new_file: format!("tracks/{}.md", new_id),
+            },
+            &format!("fr track rename {} --new-id {}", args.id, new_id),
+        )?)
+    } else {
+        None
+    };
+
     let effective_id = if let Some(ref new_id) = args.new_id {
         track_ops::rename_track_id(&project.frame_dir, &mut doc, &mut config, &args.id, new_id)?;
         println!("id {} → {}", args.id, new_id);
@@ -2681,6 +2734,11 @@ fn cmd_track_rename(args: TrackRenameArgs) -> Result<(), Box<dyn std::error::Err
     }
 
     config_io::write_config(&project.frame_dir, &doc)?;
+    // The config is what makes the renamed track findable again, so the
+    // operation is complete only now.
+    if let Some(marker) = rename_marker {
+        marker.commit();
+    }
     Ok(())
 }
 

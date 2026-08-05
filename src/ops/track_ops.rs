@@ -418,6 +418,9 @@ pub fn restore_track_file(
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(ProjectError::IoError)?;
     }
+    // The other half of `archive_track_file`, and it gets the same hook for the
+    // same reason: a rename is not an `atomic_write`, so nothing else can cut it.
+    crate::io::fault::maybe_fail(&archive_path).map_err(ProjectError::IoError)?;
     fs::rename(&archive_path, &dest).map_err(ProjectError::IoError)?;
     Ok(())
 }
@@ -477,10 +480,14 @@ pub fn rename_track_id(
     let old_file = tc.file.clone();
     let new_file = format!("tracks/{}.md", new_id);
 
-    // Move track file
+    // Move track file. Renames, not `atomic_write`, so they need the fault hook
+    // of their own — the same reason `archive_track_file` carries one. This is a
+    // three-step sequence (track file, archive, config) and these are its first
+    // two; an interruption here leaves the config naming a file that is gone.
     let old_path = frame_dir.join(&old_file);
     let new_path = frame_dir.join(&new_file);
     if old_path.exists() {
+        crate::io::fault::maybe_fail(&old_path).map_err(ProjectError::IoError)?;
         fs::rename(&old_path, &new_path).map_err(ProjectError::IoError)?;
     }
 
@@ -488,6 +495,7 @@ pub fn rename_track_id(
     let old_archive = frame_dir.join("archive").join(format!("{}.md", old_id));
     if old_archive.exists() {
         let new_archive = frame_dir.join("archive").join(format!("{}.md", new_id));
+        crate::io::fault::maybe_fail(&old_archive).map_err(ProjectError::IoError)?;
         fs::rename(&old_archive, &new_archive).map_err(ProjectError::IoError)?;
     }
 

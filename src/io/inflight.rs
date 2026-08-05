@@ -84,6 +84,23 @@ pub enum Operation {
     },
     /// A track marked archived in config, its file moved to `archive/_tracks/`.
     TrackArchive { track_id: String, file: String },
+    /// A track's id changed: its file renamed, its archive renamed, and the
+    /// config entry rewritten to match.
+    ///
+    /// The files move before the config does, so an interruption leaves the
+    /// config pointing at a name nothing answers to — and `load_project` skips
+    /// a track whose file is missing, so the track and every task in it drop
+    /// out of the project silently. `fr check` reports that state now
+    /// (`track_file_missing` / `track_file_unreferenced`); this is what lets
+    /// the next command simply finish the job.
+    TrackRename {
+        old_id: String,
+        new_id: String,
+        /// The `file` field as config still has it, relative to `frame/`.
+        old_file: String,
+        /// Where the file was moved to, relative to `frame/`.
+        new_file: String,
+    },
     /// One or more actor namespaces renumbered into a target, sources retired.
     ActorMerge {
         sources: Vec<String>,
@@ -104,6 +121,7 @@ impl Operation {
         match self {
             Operation::CrossTrackMove { .. } => "mv --track",
             Operation::TrackArchive { .. } => "track archive",
+            Operation::TrackRename { .. } => "track rename --id",
             Operation::ActorMerge { .. } => "actor merge",
             Operation::Triage { .. } => "triage",
         }

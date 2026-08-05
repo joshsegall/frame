@@ -703,6 +703,12 @@ pub(super) fn palette_check_project(app: &mut App) {
                     task_id,
                     path,
                 } => format!("  [{}] {} has broken spec: {}", track_id, task_id, path),
+                check::CheckError::TrackFileMissing { track_id, path, .. } => {
+                    format!("  [{}] track file is missing: {}", track_id, path)
+                }
+                check::CheckError::TrackFileUnreferenced { path, .. } => {
+                    format!("  {} is not listed in project.toml", path)
+                }
                 check::CheckError::DuplicateId { task_id, track_ids } => {
                     format!("  {} duplicated in: {}", task_id, track_ids.join(", "))
                 }

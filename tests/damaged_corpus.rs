@@ -904,6 +904,86 @@ const CASES: &[Case] = &[
         )],
         repair: Repair::None,
     },
+    // --- the track roster against the files ------------------------------
+    Case {
+        name: "track-file-missing",
+        provenance: "the file was deleted, or a checkout landed project.toml \
+                     without it — the track and its tasks then vanish from \
+                     every view, because load_project skips a configured track \
+                     whose file is absent",
+        covers: &["track_file_missing"],
+        build: |root| {
+            fs::remove_file(track_path(root)).unwrap();
+            Built::Ok
+        },
+        expect: &[error(
+            "track_file_missing",
+            &[
+                ("track_id", Match::Eq("main")),
+                ("path", Match::Eq("tracks/main.md")),
+                ("state", Match::Eq("active")),
+            ],
+        )],
+        // Dropping the entry discards a track a checkout may restore;
+        // recreating the file fabricates content. Neither is a repair.
+        repair: Repair::None,
+    },
+    Case {
+        name: "track-file-unreferenced",
+        provenance: "a track file arrived from a merge or a copy without its \
+                     [[tracks]] entry — the tasks are real and nothing shows them",
+        covers: &["track_file_unreferenced"],
+        build: |root| {
+            fs::write(
+                root.join("frame/tracks/stray.md"),
+                "# Stray Work\n\n## Backlog\n\n- [ ] `S-001` Invisible task\n  - added: 2026-01-01\n\n## Done\n",
+            )
+            .unwrap();
+            Built::Ok
+        },
+        expect: &[error(
+            "track_file_unreferenced",
+            &[
+                ("path", Match::Eq("tracks/stray.md")),
+                ("title", Match::Eq("Stray Work")),
+            ],
+        )],
+        // Adopting it invents an id, a name and a prefix — and when it is the
+        // far half of a rename, the right answer is the original entry back.
+        repair: Repair::None,
+    },
+    Case {
+        name: "track-file-renamed-out-from-under-config",
+        provenance: "`fr track rename --id` interrupted between the file rename \
+                     and the config write, or a manual `mv` of a track file — \
+                     the shape that motivated both detectors, and the one where \
+                     `fr check` used to answer `✓ project is valid`",
+        covers: &["track_file_missing", "track_file_unreferenced"],
+        build: |root| {
+            fs::rename(track_path(root), root.join("frame/tracks/renamed.md")).unwrap();
+            Built::Ok
+        },
+        // Both halves, from the one rename: the entry points nowhere and the
+        // file answers to nobody.
+        expect: &[
+            error(
+                "track_file_missing",
+                &[
+                    ("track_id", Match::Eq("main")),
+                    ("path", Match::Eq("tracks/main.md")),
+                    ("state", Match::Eq("active")),
+                ],
+            ),
+            error(
+                "track_file_unreferenced",
+                &[
+                    ("path", Match::Eq("tracks/renamed.md")),
+                    ("title", Match::Eq("Main")),
+                ],
+            ),
+        ],
+        repair: Repair::None,
+    },
 ];
 
 // ---------------------------------------------------------------------------

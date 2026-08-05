@@ -4425,3 +4425,178 @@ fn a_failed_inline_trim_keeps_the_log_and_still_appends() {
     );
     assert!(after.contains("M-001"), "with the deleted task in it");
 }
+
+/// `fr track rename --id` moves the track file, moves the archive, then writes
+/// the config — with the whole `--prefix` block in between. Cut the file move
+/// and the config keeps naming a file that is gone; `load_project` skips such a
+/// track, so it and every task in it drop out of `fr list`, the TUI, and every
+/// other check. `fr check` reported none of that until `track_file_missing`.
+#[test]
+fn test_track_rename_recovers_from_an_interrupted_file_move() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    two_track_project(tmp.path());
+    let root = tmp.path();
+
+    // The rename moves tracks/a.md; cut it after the marker is written.
+    let (_, _, ok) = run_fr_env(
+        root,
+        &["track", "rename", "a", "--new-id", "alpha"],
+        &[("FRAME_FAIL_WRITE", "tracks/a.md")],
+    );
+    assert!(!ok, "the injected failure should fail the command");
+
+    // Nothing moved and the config is untouched, so the project is still whole.
+    assert!(root.join("frame/tracks/a.md").exists());
+    assert!(
+        root.join("frame/.inflight").exists(),
+        "the intent is recorded"
+    );
+
+    // Any following write command completes the rename.
+    run_fr_ok(root, &["add", "b", "unrelated"]);
+
+    assert!(
+        root.join("frame/tracks/alpha.md").exists(),
+        "recovery should finish the file move"
+    );
+    assert!(!root.join("frame/tracks/a.md").exists());
+    let config = fs::read_to_string(root.join("frame/project.toml")).unwrap();
+    assert!(
+        config.contains("id = \"alpha\""),
+        "and the config entry with it: {config}"
+    );
+    assert!(
+        !root.join("frame/.inflight").exists(),
+        "the marker is cleared once the operation is complete"
+    );
+
+    // The whole point: the track is visible again, tasks intact.
+    let out = run_fr_ok(root, &["list"]);
+    assert!(
+        out.contains("the task to move"),
+        "tasks are back in view: {out}"
+    );
+    let check = run_fr_ok(root, &["check"]);
+    assert!(check.contains("valid"), "and the project is clean: {check}");
+}
+
+/// The half-applied state `fr check` used to call valid. Reached here by hand
+/// rather than by a crash, because that is the point: a merge that took one
+/// side's `project.toml` and the other's file layout, a manual `mv`, or an
+/// editor's "rename file" all land in it.
+#[test]
+fn a_track_file_renamed_out_from_under_config_is_reported() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    create_test_project(root);
+
+    fs::rename(
+        root.join("frame/tracks/main.md"),
+        root.join("frame/tracks/renamed.md"),
+    )
+    .unwrap();
+
+    let (stdout, _, _) = run_fr(root, &["check"]);
+    assert!(
+        stdout.contains("project has errors"),
+        "a track nobody can see is not a clean bill: {stdout}"
+    );
+    assert!(
+        stdout.contains("track file is missing") && stdout.contains("tracks/main.md"),
+        "the dangling config entry: {stdout}"
+    );
+    assert!(
+        stdout.contains("not listed in project.toml") && stdout.contains("tracks/renamed.md"),
+        "and the file nothing points at: {stdout}"
+    );
+}
+
+/// An archived track keeps `file = "tracks/<id>.md"` in config while the file
+/// itself lives in `archive/_tracks/`. That is the expected state, not damage,
+/// and reporting it would fire on every project that has ever archived a track.
+#[test]
+fn an_archived_track_is_not_reported_as_missing() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    two_track_project(root);
+
+    run_fr_ok(root, &["track", "archive", "a"]);
+
+    let (stdout, _, _) = run_fr(root, &["check"]);
+    assert!(
+        stdout.contains("valid"),
+        "archiving is not damage: {stdout}"
+    );
+    assert!(!stdout.contains("track file is missing"), "{stdout}");
+}
+
+/// A project `fr clean` will actually archive from: two done tasks over a
+/// threshold of one. The shared fixture's threshold is 100, so clean does
+/// nothing there and the crash window never opens.
+fn clean_ready_project(root: &Path) {
+    let frame_dir = root.join("frame");
+    fs::create_dir_all(frame_dir.join("tracks")).unwrap();
+    fs::write(frame_dir.join(".actor"), "null\n").unwrap();
+    fs::write(
+        frame_dir.join("project.toml"),
+        "[project]\nname = \"clean-test\"\n\n\
+         [clean]\ndone_threshold = 1\ndone_retain = 0\n\n\
+         [[tracks]]\nid = \"main\"\nname = \"Main\"\nstate = \"active\"\n\
+         file = \"tracks/main.md\"\n\n[ids.prefixes]\nmain = \"M\"\n",
+    )
+    .unwrap();
+    fs::write(
+        frame_dir.join("tracks/main.md"),
+        "# Main\n\n## Backlog\n\n\
+         - [ ] `M-005` Still open\n  - added: 2026-01-01\n\n\
+         ## Done\n\n\
+         - [x] `M-001` Archive me\n  - added: 2026-01-01\n  - resolved: 2026-01-02\n\
+         - [x] `M-002` Archive me too\n  - added: 2026-01-01\n  - resolved: 2026-01-02\n",
+    )
+    .unwrap();
+    fs::write(frame_dir.join("inbox.md"), "# Inbox\n").unwrap();
+}
+
+/// `fr clean` appends to the archive before removing from the track, so an
+/// interruption duplicates rather than loses — and the duplicate is
+/// self-healing (`9e183a8`). `src/io/fault.rs` names this as the ordering the
+/// harness exists to verify; nothing verified it until now.
+#[test]
+fn test_clean_keeps_the_task_when_the_archive_write_is_cut() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    clean_ready_project(root);
+
+    let (_, stderr, ok) = run_fr_env(root, &["clean"], &[("FRAME_FAIL_WRITE", "archive/main.md")]);
+    // Clean degrades rather than aborting: it skips the track whose archive it
+    // could not write and says so. That is the ordering doing its job — there
+    // is nothing to roll back, because nothing was removed yet.
+    assert!(
+        ok,
+        "clean should skip the track, not fail outright: {stderr}"
+    );
+    assert!(
+        stderr.contains("could not write archive"),
+        "and it should say which track it skipped: {stderr}"
+    );
+
+    // Append-before-remove means the tasks are still in the track: the archive
+    // write is the one that was cut, so nothing was removed on its strength.
+    let track = fs::read_to_string(root.join("frame/tracks/main.md")).unwrap();
+    assert!(
+        track.contains("M-001") && track.contains("M-002"),
+        "no task may leave the track before its archive copy lands: {track}"
+    );
+
+    // And a re-run completes it, without duplicating.
+    run_fr_ok(root, &["clean"]);
+    let track = fs::read_to_string(root.join("frame/tracks/main.md")).unwrap();
+    let archive = fs::read_to_string(root.join("frame/archive/main.md")).unwrap();
+    assert!(!track.contains("M-001"), "now removed from the track");
+    assert_eq!(
+        archive.matches("`M-001`").count(),
+        1,
+        "and archived exactly once: {archive}"
+    );
+    assert_eq!(archive.matches("`M-002`").count(), 1, "{archive}");
+}
