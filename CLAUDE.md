@@ -89,3 +89,19 @@ Do not skip these steps. Fix all formatting and clippy issues before finishing.
 ## Test Fixtures
 
 Integration tests live in `tests/round_trip.rs`. Fixture files in `tests/fixtures/` cover: simple/complex tracks, metadata variants, 3-level nesting, empty sections, code blocks in notes, inbox items, and project config.
+
+## The test suites and what each is for
+
+Each answers a different question; a new test usually belongs in one of them rather than in a new file.
+
+| Suite | Question it answers |
+|---|---|
+| `round_trip.rs` | does a fixture survive parse → serialize? |
+| `parse_properties.rs` | P1–P6 on the **parse/serialize pair**: no panic, content preserved, conserved against ground truth, converges, every line accounted for, line ending kept |
+| `conservation.rs` | P7 on **operation sequences**: does a random run of real ops lose a title, an ID, or a line frame does not own — and does every file it writes land settled? |
+| `damaged_corpus.rs` | does `fr check` report **exactly** the right findings for a known-damaged project, and repair exactly what it claims? |
+| `merge_simulation.rs` | do independent actors minting IDs concurrently ever collide? |
+| `parity.rs` | do human and `--json` output, and CLI and TUI, agree? |
+| `cli_integration.rs` | the CLI surface, including crash injection via `FRAME_FAIL_WRITE` |
+
+**When adding a detector to `fr check`, add a case to `damaged_corpus.rs`** — `every_finding_tag_has_a_case` fails the build until you do, on purpose.

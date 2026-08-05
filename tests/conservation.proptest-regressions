@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 03d1dc421c7c9749304e63eab9cad9010bfb8bde8cdf96b6235ab744e5471dda # shrinks to ops = [Delete { task: 4 }, AddTask { track: 0, title: "a plain new task" }, Delete { task: 8 }, Clean]
