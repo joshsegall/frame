@@ -4307,3 +4307,121 @@ fn a_concurrent_inbox_capture_survives_a_command_that_waited_for_the_lock() {
         "the concurrent capture was erased:\n{body}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The recovery log survives its own rewrites
+//
+// The log is the copy of last resort: everything in it reached nowhere else.
+// Both places that shrink it used to truncate in place — `File::create` in the
+// inline trim, `fs::write` in the prune — so an interruption between the
+// truncate and the write destroyed the file. Both go through `atomic_write`
+// now, which is what makes `FRAME_FAIL_WRITE` able to cut them and these tests
+// able to say what an interruption leaves behind.
+// ---------------------------------------------------------------------------
+
+/// Write a recovery log holding `count` entries, all old enough to be prunable.
+///
+/// A fixed past timestamp rather than a computed one: the prune cutoff is 30
+/// days, and 2020 will still be older than it.
+fn seed_recovery_log(root: &Path, count: usize, body: &str) {
+    const TS: &str = "2020-01-01T00:00:00Z";
+    let mut content = String::from(
+        "<!-- frame recovery log — append-only error recovery data\n     \
+         This file captures data that Frame couldn't save normally.\n     \
+         If something went missing, check here.\n     View with: fr recovery\n     \
+         Prune old entries: fr recovery prune\n     \
+         Safe to delete if empty or stale. -->\n\n---\n",
+    );
+    for i in 0..count {
+        content.push_str(&format!(
+            "## {TS} — write: seeded {i}\n\nSource: tracks/main.md\n\n```text\n{body}\n```\n\n---\n"
+        ));
+    }
+    fs::write(root.join("frame/.recovery.log"), content).unwrap();
+}
+
+/// `fr recovery prune --all` whose rewrite fails must leave every entry where
+/// it was. Truncating in place emptied the log and reported the error after.
+#[test]
+fn a_failed_prune_leaves_the_recovery_log_whole() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    create_test_project(root);
+    seed_recovery_log(root, 3, "content that exists nowhere else");
+
+    let log = root.join("frame/.recovery.log");
+    let before = fs::read_to_string(&log).unwrap();
+
+    let (_, stderr, ok) = run_fr_env(
+        root,
+        &["recovery", "prune", "--all"],
+        &[("FRAME_FAIL_WRITE", ".recovery.log")],
+    );
+    assert!(!ok, "the injected failure must surface: {stderr}");
+
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        before,
+        "a prune that could not write must not have removed anything"
+    );
+}
+
+/// Same for the age-based prune, which takes the other branch.
+#[test]
+fn a_failed_dated_prune_leaves_the_recovery_log_whole() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    create_test_project(root);
+    seed_recovery_log(root, 2, "content that exists nowhere else");
+
+    let log = root.join("frame/.recovery.log");
+    let before = fs::read_to_string(&log).unwrap();
+
+    let (_, stderr, ok) = run_fr_env(
+        root,
+        &["recovery", "prune"],
+        &[("FRAME_FAIL_WRITE", ".recovery.log")],
+    );
+    assert!(!ok, "the injected failure must surface: {stderr}");
+    assert_eq!(fs::read_to_string(&log).unwrap(), before);
+}
+
+/// The inline trim fires from inside `log_recovery` once the log passes 1 MB —
+/// in the middle of an operation that is already logging because something went
+/// wrong. A failure there must cost nothing: the old entries stay, and the new
+/// entry, which is the whole reason we were here, still lands.
+///
+/// Only the trim goes through `atomic_write`; the append is an `O_APPEND`
+/// write, so the injected failure cuts the trim and leaves the append alone.
+#[test]
+fn a_failed_inline_trim_keeps_the_log_and_still_appends() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    create_test_project(root);
+
+    // Past MAX_LOG_SIZE (1 MB), old enough that the trim would remove it.
+    let filler = "x".repeat(2048);
+    seed_recovery_log(root, 600, &filler);
+    let log = root.join("frame/.recovery.log");
+    assert!(fs::metadata(&log).unwrap().len() > 1_048_576);
+    let before = fs::read_to_string(&log).unwrap();
+
+    // `fr delete` logs the task's source text to the recovery log.
+    let (_, stderr, ok) = run_fr_env(
+        root,
+        &["delete", "M-001", "--yes"],
+        &[("FRAME_FAIL_WRITE", ".recovery.log")],
+    );
+    assert!(ok, "the delete itself must still succeed: {stderr}");
+
+    let after = fs::read_to_string(&log).unwrap();
+    assert!(
+        after.starts_with(&before),
+        "the trim failed, so nothing should have been removed"
+    );
+    assert!(
+        after.len() > before.len(),
+        "and the entry that mattered still had to land"
+    );
+    assert!(after.contains("M-001"), "with the deleted task in it");
+}

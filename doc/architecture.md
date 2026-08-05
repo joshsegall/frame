@@ -285,9 +285,15 @@ Frame includes a recovery system to prevent silent data loss. An append-only mar
 - **Conflict dismissals** — TUI conflict popup text is saved before being cleared
 - **Cross-track move failures** — if the target track write fails after the source was already saved
 
-**Atomic writes**: All file mutations use `NamedTempFile` + rename (`atomic_write()`) to prevent partial writes. The recovery log itself uses `O_APPEND` for concurrent-safe appends.
+**Atomic writes**: All file mutations use `NamedTempFile` + rename (`atomic_write()`) to prevent partial writes. The recovery log itself uses `O_APPEND` for appends and `atomic_write()` for the two operations that *shrink* it.
 
-**Size management**: When the log exceeds 1MB, a non-blocking inline trim removes entries older than 30 days. Users can also run `fr recovery prune` manually.
+**The log is the one file with no backstop of its own**, so it gets the same discipline as everything it protects. Both places that shrink it — the inline trim and `fr recovery prune` — rewrite by temp-file + rename, because truncating in place puts the whole log at risk of an interruption between the truncate and the write, and this is the file holding content that reached nowhere else. Shrinking it is also the one operation with nothing to fall back on: a failed track write logs its content here, and a failed write *of this file* has nowhere left to go. So a failure leaves the log exactly as it was.
+
+**Its lock is a separate file, `frame/.recovery.lock`, never removed** — the discipline `FileLock::acquire_at` documents and `io::ids` already relies on. Locking the log itself would let a waiter hold the lock on an inode that a rename has since unlinked, while a newcomer locks the fresh file: two writers, one "lock". Appends take the lock too, since an append racing a rename lands on the unlinked inode and is gone; an append that cannot get the lock proceeds anyway and warns, because a refused append loses the entry for certain while a raced one only might. Reads take no lock — rename gives them either the old file or the new one, never a torn mix.
+
+**Size management**: When the log exceeds 1MB, an inline trim removes entries older than 30 days, under the lock the append already holds (`FileLock` is not re-entrant, so the trim never takes one of its own). Users can also run `fr recovery prune` manually.
+
+**The `.rescue/` dump** (`App::dump_unsaved`, written at exit for work that never reached disk) is atomic for the same reason: a half-written rescue file is worse than none, because it looks like the thing you lost.
 
 **`fr check` integration**: Reports `#lost` tagged tasks and recovery log summary (entry count + oldest timestamp).
 

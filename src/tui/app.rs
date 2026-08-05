@@ -2807,7 +2807,10 @@ impl App {
                 }
             };
             let path = dir.join(name);
-            if std::fs::write(&path, text).is_ok() {
+            // Atomic, like the recovery log and for the same reason: this is a
+            // copy of work that reached nowhere else, and a half-written rescue
+            // file is worse than none — it looks like the thing you lost.
+            if crate::io::recovery::atomic_write(&path, text.as_bytes()).is_ok() {
                 written.push(path);
             }
         }

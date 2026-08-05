@@ -18,10 +18,11 @@ use crate::parse::{parse_inbox, parse_track};
 /// `fr check` verifies these against git from this one list. `.gitignore`
 /// coverage is a single pattern rather than an entry each — see
 /// [`gitignore_pattern_for`].
-pub const LOCAL_ONLY_FRAME_FILES: [&str; 8] = [
+pub const LOCAL_ONLY_FRAME_FILES: [&str; 9] = [
     ".state.json",
     ".lock",
     ".recovery.log",
+    crate::io::recovery::RECOVERY_LOCK,
     ".actor",
     crate::io::inflight::MARKER_FILE,
     crate::io::ids::LOCAL_STORE,

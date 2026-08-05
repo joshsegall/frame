@@ -1,13 +1,25 @@
 use std::fmt;
-use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::fs::OpenOptions;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use tempfile::NamedTempFile;
 
+use crate::io::lock::FileLock;
+
 /// Maximum size of the recovery log before inline trimming (1 MB).
 const MAX_LOG_SIZE: u64 = 1_048_576;
+
+/// The lock file guarding recovery-log mutations. Never removed — see
+/// [`recovery_lock_path`].
+pub const RECOVERY_LOCK: &str = ".recovery.lock";
+
+/// How long to wait for the recovery-log lock. Short: the critical section is
+/// one read plus one rename, and the callers are error paths that must not
+/// stall the operation that is already going wrong.
+const LOG_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Default number of days before entries are prunable.
 pub const PRUNE_AGE_DAYS: i64 = 30;
@@ -89,6 +101,21 @@ pub fn recovery_log_path(frame_dir: &Path) -> PathBuf {
     frame_dir.join(".recovery.log")
 }
 
+/// The lock guarding mutations of the recovery log.
+///
+/// A separate, never-removed file, for the reason [`FileLock::acquire_at`]
+/// gives and [`crate::io::ids`] already relies on: the log is replaced by
+/// `rename(2)`, so locking the log itself would let a waiter hold the lock on
+/// an unlinked inode while a newcomer locks the fresh file.
+pub fn recovery_lock_path(frame_dir: &Path) -> PathBuf {
+    frame_dir.join(RECOVERY_LOCK)
+}
+
+/// Take the recovery-log lock, or `None` if it cannot be had in time.
+fn lock_log(frame_dir: &Path) -> Option<FileLock> {
+    FileLock::acquire_at(&recovery_lock_path(frame_dir), LOG_LOCK_TIMEOUT).ok()
+}
+
 // ---------------------------------------------------------------------------
 // Atomic file write
 // ---------------------------------------------------------------------------
@@ -159,11 +186,21 @@ pub fn log_recovery(frame_dir: &Path, entry: RecoveryEntry) {
 fn log_recovery_inner(frame_dir: &Path, entry: RecoveryEntry) -> io::Result<()> {
     let path = recovery_log_path(frame_dir);
 
-    // Check size and try inline trim (non-blocking)
+    // Held across the trim and the append both. The append needs it as much as
+    // the trim does: the log is replaced by rename, and an append racing that
+    // rename lands on the unlinked inode and is gone. Falling back to an
+    // unlocked append is deliberate — see `lock_log`'s callers below.
+    let guard = lock_log(frame_dir);
+    if guard.is_none() {
+        eprintln!("warning: recovery log is busy; appending without the lock");
+    }
+
+    // Trim while we already hold the lock, so the trim does not take one of its
+    // own — `FileLock` is not re-entrant.
     if let Ok(meta) = std::fs::metadata(&path)
         && meta.len() > MAX_LOG_SIZE
     {
-        try_inline_trim(&path);
+        trim_locked(&path);
     }
 
     let needs_header = !path.exists() || std::fs::metadata(&path).map_or(true, |m| m.len() == 0);
@@ -180,43 +217,24 @@ fn log_recovery_inner(frame_dir: &Path, entry: RecoveryEntry) -> io::Result<()> 
     Ok(())
 }
 
-/// Try to trim old entries when the log exceeds MAX_LOG_SIZE.
-/// Uses a non-blocking try-lock on the file itself.
-fn try_inline_trim(path: &Path) {
-    // Try to acquire exclusive lock non-blocking
-    let file = match OpenOptions::new().read(true).write(true).open(path) {
-        Ok(f) => f,
-        Err(_) => return,
-    };
-
-    // Non-blocking flock
-    let fd = {
-        use std::os::unix::io::AsRawFd;
-        file.as_raw_fd()
-    };
-    let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-    if ret != 0 {
-        return; // Couldn't get lock — skip trim
-    }
-
-    // Read content, trim oldest entries until under limit
-    let mut content = String::new();
-    let mut reader = io::BufReader::new(&file);
-    if reader.read_to_string(&mut content).is_err() {
+/// Trim entries older than the cutoff when the log exceeds `MAX_LOG_SIZE`.
+///
+/// The caller must hold the recovery-log lock.
+///
+/// Best-effort: a log that cannot be read or rewritten is left as it is, which
+/// is the right failure. Trimming is housekeeping, and the alternative to an
+/// oversized log is not a smaller one, it is no log at all.
+fn trim_locked(path: &Path) {
+    let Ok(content) = std::fs::read_to_string(path) else {
         return;
-    }
+    };
 
     let cutoff = Utc::now() - chrono::Duration::days(PRUNE_AGE_DAYS);
     let trimmed = prune_entries_before(&content, &cutoff);
 
     if trimmed.len() < content.len() {
-        // Rewrite the file
-        if let Ok(mut f) = File::create(path) {
-            let _ = f.write_all(trimmed.as_bytes());
-        }
+        let _ = atomic_write(path, trimmed.as_bytes());
     }
-
-    // Lock released on drop
 }
 
 /// Log a task deletion to the recovery log.
@@ -398,37 +416,25 @@ pub fn prune_recovery(
         return Ok(0);
     }
 
-    // Acquire exclusive lock
-    let file = OpenOptions::new().read(true).write(true).open(&path)?;
-    let fd = {
-        use std::os::unix::io::AsRawFd;
-        file.as_raw_fd()
-    };
-
-    // Blocking lock with ~1s timeout: try non-blocking first, then sleep-retry
-    let mut locked = false;
-    for _ in 0..10 {
-        let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-        if ret == 0 {
-            locked = true;
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    if !locked {
-        return Err(io::Error::new(
+    // Unlike an append, a prune that cannot get the lock simply does not run.
+    // The user asked for it and can ask again; there is nothing to lose by
+    // waiting, and a great deal to lose by rewriting the log underneath
+    // whoever holds it.
+    let _guard = lock_log(frame_dir).ok_or_else(|| {
+        io::Error::new(
             io::ErrorKind::WouldBlock,
             "recovery log is in use, try again later",
-        ));
-    }
+        )
+    })?;
 
     let content = std::fs::read_to_string(&path)?;
 
     if all {
         let entries = parse_entries(&content);
         let count = entries.len();
-        // Write header only
-        std::fs::write(&path, FILE_HEADER)?;
+        // Header only — but through a rename, so a failure here leaves the log
+        // whole rather than truncated.
+        atomic_write(&path, FILE_HEADER.as_bytes())?;
         return Ok(count);
     }
 
@@ -440,7 +446,7 @@ pub fn prune_recovery(
     let new_entries = parse_entries(&trimmed);
     let new_count = new_entries.len();
 
-    std::fs::write(&path, &trimmed)?;
+    atomic_write(&path, trimmed.as_bytes())?;
     Ok(original_count - new_count)
 
     // Lock released on drop
@@ -904,5 +910,50 @@ mod tests {
             Some(RecoveryCategory::Delete)
         );
         assert_eq!(RecoveryCategory::parse_category("unknown"), None);
+    }
+
+    /// The lock guarding the log is a separate file that outlives the lock, for
+    /// the reason `FileLock::acquire_at` documents: the log is replaced by
+    /// rename, so locking the log itself would let a waiter hold a lock on an
+    /// unlinked inode while a newcomer locks the fresh file.
+    #[test]
+    fn the_log_lock_is_a_separate_file_that_survives_release() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+
+        log_recovery(
+            &frame_dir,
+            make_entry(RecoveryCategory::Parser, "test", "body"),
+        );
+
+        let lock_path = recovery_lock_path(&frame_dir);
+        assert!(lock_path.exists(), "the lock file is left in place");
+        assert_ne!(lock_path, recovery_log_path(&frame_dir));
+    }
+
+    /// Pruning replaces the log by rename. The lock is a different file, so it
+    /// is still there afterwards and still guards the new inode.
+    #[test]
+    fn the_log_lock_outlives_a_prune() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+
+        log_recovery(
+            &frame_dir,
+            make_entry(RecoveryCategory::Parser, "test", "body"),
+        );
+        prune_recovery(&frame_dir, None, true).unwrap();
+
+        assert!(recovery_lock_path(&frame_dir).exists());
+        // And the log is still usable: a later entry appends cleanly.
+        log_recovery(
+            &frame_dir,
+            make_entry(RecoveryCategory::Write, "after", "body"),
+        );
+        let entries = read_recovery_entries(&frame_dir, None, None);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].description, "after");
     }
 }
