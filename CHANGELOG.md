@@ -19,6 +19,11 @@ All notable changes to frame will be documented in this file.
 - **`conflict:` task metadata**, written by `fr merge` and cleared by `fr merge --resolve`. Reported by `fr check` as an error and exposed as `conflict` in `--json` task output.
 
 ### Fixed
+- **The TUI no longer reopens holding last session's search.** The search pattern was persisted to `.state.json` and restored blind at startup, so a fresh launch came up with `/pattern` in the status bar, match highlighting across every view, and `n`/`N` and `Esc` rebound to search navigation — in a session where nobody had searched for anything. It read as the TUI having reopened in search mode, and the mode is in fact never persisted: what came back was the search itself, wearing the search chrome.
+
+  It was not even a resumed search. The match index and count are not persisted, so `n` restarted from the top of the file rather than where you left off, and the status bar had no count to show beside the pattern. A search is view state of the same kind as a filter, and filters were already deliberately session-only.
+
+  The pattern is now dropped on restart and when switching projects, which went through the same restore. Search **history** — `Up`/`Down` recall in the search prompt — is unaffected and still persists, as does everything else in `.state.json`: cursor, scroll, expanded tasks, note wrap, board mode. A state file written by an older version is read without complaint; the stale key is ignored and disappears on the next save.
 - **Emptying the last section no longer strands a blank row at end of file.** The blank line under a section header belongs to that header, so when `fr clean` archived away the final `## Done` task the blank had nothing left to separate and stayed put — every clean re-added a trailing blank row that someone then stripped, and the diff came back on the next run. Blank lines that follow real content are still preserved; only a trailing section drained of its tasks is trimmed. The inbox serializer had the same defect, reachable by removing the last inbox item.
 
 ### Removed

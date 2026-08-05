@@ -428,6 +428,8 @@ With selection active (Select mode):
 
 After confirming a search with `Enter`, clear the active search with `Esc` in most views. In Detail view, use `Backspace` instead (since `Esc` navigates back).
 
+Like filters, an active search is session-only — not persisted to `.state.json`, cleared on restart and when switching projects. The search *history* (`Up`/`Down` in the prompt) does persist.
+
 ### Triage Mode
 
 **Step 1 — Select track:**

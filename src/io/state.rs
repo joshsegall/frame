@@ -15,9 +15,6 @@ pub struct UiState {
     /// Per-track state
     #[serde(default)]
     pub tracks: HashMap<String, TrackUiState>,
-    /// Last search pattern
-    #[serde(default)]
-    pub last_search: Option<String>,
     /// Per-session note wrap override (None = use config default)
     #[serde(default)]
     pub note_wrap_override: Option<bool>,
@@ -74,7 +71,6 @@ mod tests {
         let mut state = UiState {
             view: "track".into(),
             active_track: "effects".into(),
-            last_search: Some("pattern".into()),
             note_wrap_override: Some(false),
             search_history: vec!["foo".into(), "bar".into()],
             ..Default::default()
@@ -93,7 +89,6 @@ mod tests {
 
         assert_eq!(loaded.view, "track");
         assert_eq!(loaded.active_track, "effects");
-        assert_eq!(loaded.last_search, Some("pattern".into()));
         assert_eq!(loaded.note_wrap_override, Some(false));
         assert_eq!(loaded.search_history, vec!["foo", "bar"]);
         let ts = loaded.tracks.get("effects").unwrap();
@@ -122,9 +117,20 @@ mod tests {
         assert_eq!(state.view, "track");
         assert_eq!(state.active_track, "");
         assert!(state.tracks.is_empty());
-        assert!(state.last_search.is_none());
         assert!(state.note_wrap_override.is_none());
         assert!(state.search_history.is_empty());
+    }
+
+    #[test]
+    fn legacy_last_search_key_is_ignored() {
+        // `last_search` used to be persisted. State files written by older
+        // versions still carry it, so the struct must not reject unknown keys
+        // -- adding #[serde(deny_unknown_fields)] would break every one of them.
+        let state: UiState =
+            serde_json::from_str(r#"{"view":"track","active_track":"a","last_search":"foo"}"#)
+                .unwrap();
+        assert_eq!(state.view, "track");
+        assert_eq!(state.active_track, "a");
     }
 
     #[test]

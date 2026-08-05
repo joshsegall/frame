@@ -92,7 +92,7 @@ View determines which renderer draws the main area and which input handler proce
 
 **FlatItem flattening**: The task tree is flattened into a `Vec<FlatItem>` for rendering. Each `FlatItem::Task` carries depth, tree-line ancestry info (`ancestor_last: Vec<bool>`), expand/collapse state, and an `is_context` flag for filtered ancestor rows. This flat list is the single source of truth for cursor position, scroll offset, and rendering.
 
-**Persistence**: Per-track cursor/scroll/expanded-set is saved to `.state.json` (debounced, every 5 keystrokes). Filters, selections, and ephemeral mode state are not persisted.
+**Persistence**: Per-track cursor/scroll/expanded-set is saved to `.state.json` (debounced, every 5 keystrokes). Filters, selections, the active view search, and ephemeral mode state are not persisted — search *history* is. `UiState` must not gain `#[serde(deny_unknown_fields)]`: state files written by older versions carry keys that have since been dropped.
 
 **Code**: `src/tui/app.rs` (App struct, Mode, View, FlatItem, build_flat_items), `src/io/state.rs` (.state.json I/O)
 

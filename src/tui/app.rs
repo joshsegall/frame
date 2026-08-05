@@ -3899,9 +3899,8 @@ pub fn restore_ui_state(app: &mut App) {
         state.expanded = track_ui.expanded.clone();
     }
 
-    // Restore last search
-    app.last_search = ui_state.last_search;
-
+    // Search history is restored, but the active search itself is not: a
+    // pattern from a previous session is not the search you are running now.
     // Restore search history
     app.search_history = ui_state.search_history;
 
@@ -3967,7 +3966,6 @@ pub fn save_ui_state(app: &App) {
         view: view_str,
         active_track,
         tracks,
-        last_search: app.last_search.clone(),
         search_history: app.search_history.clone(),
         note_wrap_override,
         project_search_history: app.project_search_history.clone(),
@@ -5102,6 +5100,45 @@ mod tests {
             inbox: Some(crate::parse::parse_inbox("# Inbox\n").0),
         };
         App::new(project)
+    }
+
+    // ---- UI state persistence ------------------------------------------
+
+    /// A search is view state, not a preference: restoring the pattern brought
+    /// back the `/pattern` status bar, the match highlighting and the `n`/`N`
+    /// and `Esc` rebinds in a session where nobody had searched for anything --
+    /// and without the match index or count, so it was not even the search you
+    /// left. The rest of the restore has to keep working.
+    #[test]
+    fn restore_drops_a_persisted_search_but_keeps_the_view() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        std::fs::write(
+            app.project.frame_dir.join(".state.json"),
+            r#"{"view":"recent","last_search":"widget","search_history":["widget"]}"#,
+        )
+        .unwrap();
+
+        restore_ui_state(&mut app);
+
+        assert!(app.last_search.is_none(), "search must not come back");
+        assert_eq!(app.view, View::Recent, "the rest of the restore still runs");
+        assert_eq!(app.search_history, vec!["widget".to_string()]);
+    }
+
+    #[test]
+    fn save_does_not_write_the_active_search() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        app.last_search = Some("widget".into());
+
+        save_ui_state(&app);
+
+        let text = std::fs::read_to_string(app.project.frame_dir.join(".state.json")).unwrap();
+        assert!(
+            !text.contains("last_search"),
+            "search pattern leaked into .state.json:\n{text}"
+        );
     }
 
     // ---- Auto-clean write-back -----------------------------------------
