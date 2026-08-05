@@ -111,8 +111,14 @@ writable` straight away rather than letting you find out at the first save.
 
 Quitting with anything still unsaved copies it into `frame/.rescue/`, prints what
 could not be saved and where the copies went, and exits non-zero. The copy is
-best-effort — the cause of the failed save may stop it too, and the report says so
-when it does.
+best-effort — the cause of the failed save may stop it too.
+
+**The report says which files have a copy and which do not, one by one.** A file
+that got no copy is marked `[NO RESCUE COPY — this one is gone]` on its own line,
+and the summary says how many of the listed files were actually written. A rescue
+that saves some files and not others is the case worth being precise about: it is
+the one where a reassuring message would send you to a directory expecting to find
+work that is not in it.
 
 ### Track View — Navigate Mode
 

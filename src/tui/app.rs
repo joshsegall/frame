@@ -961,6 +961,30 @@ pub enum SaveTarget {
     Inbox,
 }
 
+/// What the exit dump managed to copy into `frame/.rescue/`, and what it did
+/// not.
+///
+/// Both halves, deliberately. `dump_unsaved` used to return only the paths it
+/// wrote, and the exit report branched on whether that list was empty — so a run
+/// that rescued two files out of three said "Copies of the unsaved work were
+/// written to …" and pointed at a directory, with nothing to say that the third
+/// file has no copy anywhere. The work that was really gone read exactly like
+/// the work that was saved.
+#[derive(Debug, Default)]
+pub struct Rescue {
+    /// Files whose copy reached `.rescue/`, and where it went.
+    pub written: Vec<(SaveTarget, PathBuf)>,
+    /// Files with no copy anywhere. This is the set that is actually lost.
+    pub failed: Vec<SaveTarget>,
+}
+
+impl Rescue {
+    /// Whether this file left no copy behind.
+    pub fn lost(&self, target: &SaveTarget) -> bool {
+        self.failed.contains(target)
+    }
+}
+
 impl SaveTarget {
     /// How this file is named to the user, in messages and the recovery log.
     pub fn label(&self) -> String {
@@ -2769,52 +2793,60 @@ impl App {
 
     /// Write every file that never reached disk into `frame/.rescue/`.
     ///
-    /// Returns the paths written. Called at exit, when the in-memory copy is
-    /// about to stop existing and is the only one there is.
+    /// Called at exit, when the in-memory copy is about to stop existing and is
+    /// the only one there is.
     ///
     /// **Best-effort by design.** The save failed because something was wrong
     /// with writing to this project, so the dump may well fail for the same
-    /// reason; when it does the file is skipped and the exit report says so.
-    /// There is no fallback location — a rescue copy somewhere the user will
-    /// never look is not a rescue, and a temp directory that the OS may clear is
-    /// worse than an honest report of what was lost.
-    pub fn dump_unsaved(&self) -> Vec<PathBuf> {
+    /// reason. There is no fallback location — a rescue copy somewhere the user
+    /// will never look is not a rescue, and a temp directory that the OS may
+    /// clear is worse than an honest report of what was lost.
+    ///
+    /// Which makes the *reporting* the job. This returns both halves, because
+    /// returning only the successes made a partial rescue read exactly like a
+    /// complete one.
+    pub fn dump_unsaved(&self) -> Rescue {
+        let mut rescue = Rescue::default();
         if self.unsaved.is_empty() {
-            return Vec::new();
+            return rescue;
         }
         let dir = self.project.frame_dir.join(RESCUE_DIR);
         if std::fs::create_dir_all(&dir).is_err() {
-            return Vec::new();
+            // Nowhere to write anything, so nothing has a copy. Say so for every
+            // file rather than returning an empty result that reads as "no work
+            // was outstanding".
+            rescue.failed = self.unsaved.keys().cloned().collect();
+            return rescue;
         }
 
-        let mut written = Vec::new();
         for target in self.unsaved.keys() {
-            let (name, text) = match target {
-                SaveTarget::Track(id) => {
-                    let Some(track) = Self::find_track_in_project(&self.project, id) else {
-                        continue;
-                    };
-                    (
-                        self.display_name(target),
-                        crate::parse::serialize_track(track),
-                    )
-                }
-                SaveTarget::Inbox => {
-                    let Some(inbox) = self.project.inbox.as_ref() else {
-                        continue;
-                    };
-                    ("inbox.md".to_string(), crate::parse::serialize_inbox(inbox))
-                }
+            let content = match target {
+                SaveTarget::Track(id) => Self::find_track_in_project(&self.project, id)
+                    .map(|t| (self.display_name(target), crate::parse::serialize_track(t))),
+                SaveTarget::Inbox => self
+                    .project
+                    .inbox
+                    .as_ref()
+                    .map(|i| ("inbox.md".to_string(), crate::parse::serialize_inbox(i))),
             };
+            // No in-memory copy to write is still a file with no rescue — the
+            // old code skipped these silently, which is the same misreport.
+            let Some((name, text)) = content else {
+                rescue.failed.push(target.clone());
+                continue;
+            };
+
             let path = dir.join(name);
             // Atomic, like the recovery log and for the same reason: this is a
             // copy of work that reached nowhere else, and a half-written rescue
             // file is worse than none — it looks like the thing you lost.
             if crate::io::recovery::atomic_write(&path, text.as_bytes()).is_ok() {
-                written.push(path);
+                rescue.written.push((target.clone(), path));
+            } else {
+                rescue.failed.push(target.clone());
             }
         }
-        written
+        rescue
     }
 
     /// What the unsaved indicator should show, or `None` for nothing.
@@ -4162,9 +4194,12 @@ pub fn run(project_dir_override: Option<&str>) -> Result<(), Box<dyn std::error:
 
 /// The exit report for work that never reached disk, or `None` when all is well.
 ///
-/// Names each file and why it failed, then where the rescue copy went — or says
-/// plainly that there is none, which is the case worth being loudest about.
-fn unsaved_exit_report(app: &App, rescued: &[PathBuf]) -> Option<String> {
+/// Names each file, why it failed, and — per file — whether a rescue copy
+/// exists. Per file rather than per run, because a partial rescue is the case
+/// that used to be reported wrongly: the user was pointed at a directory and
+/// told to move the copies into place, with no way to tell that one of the
+/// files listed above had no copy in it.
+fn unsaved_exit_report(app: &App, rescue: &Rescue) -> Option<String> {
     if app.unsaved.is_empty() {
         return None;
     }
@@ -4176,10 +4211,19 @@ fn unsaved_exit_report(app: &App, rescued: &[PathBuf]) -> Option<String> {
         if app.unsaved.len() == 1 { "" } else { "s" }
     ));
     for (target, f) in &app.unsaved {
-        out.push_str(&format!("  {} — {}\n", app.display_name(target), f.error));
+        out.push_str(&format!(
+            "  {} — {}{}\n",
+            app.display_name(target),
+            f.error,
+            if rescue.lost(target) {
+                "  [NO RESCUE COPY — this one is gone]"
+            } else {
+                ""
+            }
+        ));
     }
 
-    if rescued.is_empty() {
+    if rescue.written.is_empty() {
         out.push_str(
             "\nNo rescue copy could be written either — the same problem that \
              stopped the save.\nThe contents are gone; nothing further can be \
@@ -4187,10 +4231,30 @@ fn unsaved_exit_report(app: &App, rescued: &[PathBuf]) -> Option<String> {
         );
     } else {
         out.push_str(&format!(
-            "\nCopies of the unsaved work were written to:\n  {}\n",
+            "\nCopies were written to:\n  {}\n",
             app.project.frame_dir.join(RESCUE_DIR).display()
         ));
-        out.push_str("Move them into place once the cause is fixed.\n");
+        if rescue.failed.is_empty() {
+            out.push_str("Move them into place once the cause is fixed.\n");
+        } else {
+            // The dangerous middle case. Naming the count again here is
+            // deliberate: the marks above are easy to skim past, and "some of
+            // them" is the difference between recovering everything and
+            // believing you did.
+            out.push_str(&format!(
+                "…but only for {} of the {} files above. The {} marked [NO RESCUE \
+                 COPY] {} no copy anywhere.\nMove what is there into place once \
+                 the cause is fixed.\n",
+                rescue.written.len(),
+                app.unsaved.len(),
+                rescue.failed.len(),
+                if rescue.failed.len() == 1 {
+                    "has"
+                } else {
+                    "have"
+                },
+            ));
+        }
     }
     out.push_str(&format!(
         "Details: {}\n",
@@ -5453,17 +5517,22 @@ mod tests {
             &"Read-only file system".to_string(),
         );
 
-        let written = app.dump_unsaved();
-        assert_eq!(written.len(), 1, "the unsaved track should be dumped");
-        let text = std::fs::read_to_string(&written[0]).unwrap();
+        let rescue = app.dump_unsaved();
+        assert_eq!(
+            rescue.written.len(),
+            1,
+            "the unsaved track should be dumped"
+        );
+        assert!(rescue.failed.is_empty(), "and nothing left without a copy");
+        let path = &rescue.written[0].1;
+        let text = std::fs::read_to_string(path).unwrap();
         assert!(
             text.contains("Never reached disk"),
             "the dump must hold the in-memory content: {text}"
         );
         assert!(
-            written[0].starts_with(app.project.frame_dir.join(RESCUE_DIR)),
-            "dumped to {:?}",
-            written[0]
+            path.starts_with(app.project.frame_dir.join(RESCUE_DIR)),
+            "dumped to {path:?}"
         );
     }
 
@@ -5471,7 +5540,8 @@ mod tests {
     fn nothing_outstanding_dumps_nothing() {
         let tmp = tempfile::TempDir::new().unwrap();
         let app = app_on_disk(tmp.path());
-        assert!(app.dump_unsaved().is_empty());
+        let rescue = app.dump_unsaved();
+        assert!(rescue.written.is_empty() && rescue.failed.is_empty());
         assert!(
             !app.project.frame_dir.join(RESCUE_DIR).exists(),
             "a clean exit should not leave a rescue directory behind"
@@ -5506,7 +5576,13 @@ mod tests {
             &"Read-only file system".to_string(),
         );
 
-        let report = unsaved_exit_report(&app, &[]).unwrap();
+        // Nothing written and the file named as having no copy — the state
+        // `dump_unsaved` produces when `frame/` cannot be written at all.
+        let rescue = Rescue {
+            written: Vec::new(),
+            failed: vec![SaveTarget::Track("a".into())],
+        };
+        let report = unsaved_exit_report(&app, &rescue).unwrap();
         assert!(report.contains("No rescue copy"), "{report}");
         assert!(
             !report.contains("Move them into place"),
@@ -5514,11 +5590,87 @@ mod tests {
         );
     }
 
+    /// The case that used to be reported wrongly, and the worst of the three:
+    /// some files got a copy and some did not. The old report branched on
+    /// "were *any* written", so it printed the reassuring message and pointed at
+    /// a directory — leaving the file with no copy anywhere looking exactly like
+    /// the ones that were saved.
+    #[test]
+    fn the_exit_report_says_which_files_have_no_copy() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        app.record_save_failure(
+            SaveTarget::Track("a".into()),
+            &"Read-only file system".to_string(),
+        );
+        app.record_save_failure(SaveTarget::Inbox, &"Read-only file system".to_string());
+
+        // The track got a copy; the inbox did not.
+        let rescue = Rescue {
+            written: vec![(
+                SaveTarget::Track("a".into()),
+                app.project.frame_dir.join(RESCUE_DIR).join("a.md"),
+            )],
+            failed: vec![SaveTarget::Inbox],
+        };
+        let report = unsaved_exit_report(&app, &rescue).unwrap();
+
+        assert!(
+            report.contains("NO RESCUE COPY"),
+            "the file with no copy must be marked: {report}"
+        );
+        // The mark has to be on the inbox line, not the track's.
+        let inbox_line = report
+            .lines()
+            .find(|l| l.contains("inbox.md"))
+            .expect("inbox is listed");
+        assert!(inbox_line.contains("NO RESCUE COPY"), "{report}");
+        let track_line = report
+            .lines()
+            .find(|l| l.trim_start().starts_with("a.md"))
+            .expect("track is listed");
+        assert!(
+            !track_line.contains("NO RESCUE COPY"),
+            "the file that *was* copied must not be marked: {report}"
+        );
+        assert!(
+            report.contains("only for 1 of the 2"),
+            "and the summary must not imply everything was saved: {report}"
+        );
+    }
+
+    /// A rescue that fails per-file rather than wholesale. Driven through a real
+    /// `dump_unsaved`, so the write path is what decides the outcome — the other
+    /// report tests construct `Rescue` by hand and would not notice
+    /// `dump_unsaved` mis-classifying anything.
+    #[test]
+    fn a_file_with_no_in_memory_copy_counts_as_unrescued() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        // A save failure recorded against a track that is not in the project:
+        // there is nothing to serialize, so there can be no copy. This used to
+        // `continue` past it silently, leaving it out of both lists.
+        app.record_save_failure(
+            SaveTarget::Track("gone".into()),
+            &"Read-only file system".to_string(),
+        );
+
+        let rescue = app.dump_unsaved();
+        assert!(rescue.written.is_empty());
+        assert_eq!(
+            rescue.failed,
+            vec![SaveTarget::Track("gone".into())],
+            "a file with nothing to write is a file with no copy"
+        );
+        let report = unsaved_exit_report(&app, &rescue).unwrap();
+        assert!(report.contains("No rescue copy"), "{report}");
+    }
+
     #[test]
     fn a_clean_exit_reports_nothing() {
         let tmp = tempfile::TempDir::new().unwrap();
         let app = app_on_disk(tmp.path());
-        assert!(unsaved_exit_report(&app, &[]).is_none());
+        assert!(unsaved_exit_report(&app, &Rescue::default()).is_none());
     }
 
     /// The rescue directory is working-copy-local, so `fr check`'s leak guard
