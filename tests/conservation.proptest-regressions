@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 03d1dc421c7c9749304e63eab9cad9010bfb8bde8cdf96b6235ab744e5471dda # shrinks to ops = [Delete { task: 4 }, AddTask { track: 0, title: "a plain new task" }, Delete { task: 8 }, Clean]
+cc bc56dd50da2f5b3b303b2114308f83909345a7c88ee897fa650e3bacff69b8ff # shrinks to ops = [SetNote { task: 2, text: "a note\nwith two lines" }, SetNote { task: 2, text: "a note" }]

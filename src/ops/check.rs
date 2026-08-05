@@ -241,6 +241,29 @@ pub enum CheckWarning {
         /// The line itself, trimmed.
         line: String,
     },
+    /// The same problem one position over: a line indented past a task's
+    /// metadata that is neither metadata, nor a subtask, nor part of a `- note:`
+    /// block. Carried on the task it sits *under* and re-emitted there.
+    ///
+    /// A separate finding from `stranded_line` rather than the same one with a
+    /// flag, because the likely remedy differs and the message should say so. A
+    /// line *above* a task is usually mis-indented prose that belongs to
+    /// whatever came before it. A line *under* a task, past its metadata, is
+    /// usually a note that lost its `- note:` key — the fix is nearly always to
+    /// add one back, which is a different thing to tell someone.
+    ///
+    /// Not repairable automatically, for `stranded_line`'s reason: "nearly
+    /// always" is not always, and guessing wrong rewrites prose.
+    #[serde(rename = "stranded_line_under")]
+    StrandedLineUnder {
+        track_id: String,
+        /// The task the line sits under — `None` if that task has no ID yet.
+        under_task_id: Option<String>,
+        /// The title of that task, which identifies it when the ID is absent.
+        under_title: String,
+        /// The line itself, trimmed.
+        line: String,
+    },
     /// A **live** task holding an ID an **archived** task already has: the number
     /// was reissued after the original left the live track.
     ///
@@ -506,6 +529,17 @@ fn check_task(
             track_id: track_id.to_string(),
             before_task_id: task.id.as_ref().map(|id| id.to_string()),
             before_title: task.title.clone(),
+            line: line.trim().to_string(),
+        });
+    }
+
+    // And the same, held *under* this task rather than above it: content past
+    // its metadata that is neither metadata nor a subtask.
+    for line in task.trailing_lines.iter().filter(|l| !l.trim().is_empty()) {
+        result.warnings.push(CheckWarning::StrandedLineUnder {
+            track_id: track_id.to_string(),
+            under_task_id: task.id.as_ref().map(|id| id.to_string()),
+            under_title: task.title.clone(),
             line: line.trim().to_string(),
         });
     }
@@ -2261,18 +2295,83 @@ mod tests {
             })
             .collect();
 
-        // Reported against the task it sits above — M-002, not the M-001 block
-        // it visually hangs off. Where it *belongs* is exactly what frame does
-        // not know; where it *is* is what the user needs to find it.
+        // Indented past M-001's metadata, so it is carried *under* M-001 and
+        // reported as such. It used to be reported against M-002, the task it
+        // sits above — which is where the parser put it, not where it visually
+        // hangs off, and that mismatch is what F12 was: anchored to a task it
+        // did not belong to, and left behind when that task's neighbour moved.
+        assert!(
+            stranded.is_empty(),
+            "this shape is no longer carried on the following task: {stranded:?}"
+        );
+
+        let under: Vec<_> = result
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                CheckWarning::StrandedLineUnder {
+                    under_task_id,
+                    line,
+                    ..
+                } => Some((under_task_id.clone(), line.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            under,
+            vec![(
+                Some("M-001".to_string()),
+                "**Shape.** A line that lost its indent.".to_string()
+            )]
+        );
+
+        // Nothing structural is broken — the file still parses and still writes
+        // back unchanged.
+        assert!(result.valid);
+    }
+
+    /// A line stranded *between* two tasks, at the metadata indent rather than
+    /// past it, still goes to the following task. The two shapes render in the
+    /// same place, so moving this one would change which task carries every
+    /// existing stranded line for no gain.
+    #[test]
+    fn test_warn_stranded_line_between_tasks() {
+        let tmp = TempDir::new().unwrap();
+        let project = make_project_at(
+            tmp.path(),
+            "\
+# Main
+
+## Done
+
+- [x] `M-001` Sharded map lowering
+  - resolved: 2026-07-20
+  a line at the metadata indent
+- [x] `M-002` Next task
+  - resolved: 2026-07-21
+",
+        );
+
+        let result = check_project(&project);
+        let stranded: Vec<_> = result
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                CheckWarning::StrandedLine {
+                    before_task_id,
+                    line,
+                    ..
+                } => Some((before_task_id.clone(), line.clone())),
+                _ => None,
+            })
+            .collect();
         assert_eq!(
             stranded,
             vec![(
                 Some("M-002".to_string()),
-                "**Shape.** A line that lost its indent.".to_string()
+                "a line at the metadata indent".to_string()
             )]
         );
-        // Nothing structural is broken — the file still parses and still writes
-        // back unchanged.
         assert!(result.valid);
     }
 

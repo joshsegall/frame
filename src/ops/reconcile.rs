@@ -706,6 +706,7 @@ fn same_content(a: &Task, b: &Task) -> bool {
         && a.tags == b.tags
         && a.metadata == b.metadata
         && a.leading_lines == b.leading_lines
+        && a.trailing_lines == b.trailing_lines
         && a.id.as_ref().map(|i| i.to_string()) == b.id.as_ref().map(|i| i.to_string())
 }
 

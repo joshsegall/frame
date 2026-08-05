@@ -570,12 +570,13 @@ const CASES: &[Case] = &[
         provenance: "prose that lost its indent in an editor, or a fragment left by a merge",
         covers: &["stranded_line"],
         build: |root| {
-            // Indented past the metadata it follows, so it is neither metadata
-            // nor a task nor part of a note block. Carried on the task below it.
+            // At the metadata indent, between two tasks: not metadata, not a
+            // task, and not inside either one. Carried on the task below it,
+            // which is where it renders.
             let path = track_path(root);
             let text = fs::read_to_string(&path).unwrap().replace(
                 "- [ ] `M-002` Second task\n",
-                "    **Shape.** prose that lost its indent\n- [ ] `M-002` Second task\n",
+                "  **Shape.** prose that lost its indent\n- [ ] `M-002` Second task\n",
             );
             fs::write(&path, text).unwrap();
             Built::Ok
@@ -588,6 +589,36 @@ const CASES: &[Case] = &[
             ],
         )],
         // Where the line was meant to go is a guess, and guessing rewrites prose.
+        repair: Repair::None,
+    },
+    Case {
+        name: "stranded-line-under",
+        provenance: "a note whose `- note:` key was deleted, leaving the body \
+                     indented under the task with nothing to claim it",
+        covers: &["stranded_line_under"],
+        build: |root| {
+            // Indented *past* M-001's metadata, so it is inside that task rather
+            // than between two of them. Carried on the task it sits under, which
+            // is what makes it travel when that task moves — before that it was
+            // carried on the following task, and a section move left it behind
+            // for a neighbour's note to absorb and the next edit to delete.
+            let path = track_path(root);
+            let text = fs::read_to_string(&path).unwrap().replace(
+                "- [ ] `M-001` First task\n  - added: 2026-01-01\n",
+                "- [ ] `M-001` First task\n  - added: 2026-01-01\n    body text with no note key\n",
+            );
+            fs::write(&path, text).unwrap();
+            Built::Ok
+        },
+        expect: &[warning(
+            "stranded_line_under",
+            &[
+                ("under_task_id", Match::Eq("M-001")),
+                ("line", Match::Eq("body text with no note key")),
+            ],
+        )],
+        // Adding a `- note:` key is the usual fix and usually right, but "usually"
+        // is not always, and guessing wrong rewrites prose.
         repair: Repair::None,
     },
     Case {

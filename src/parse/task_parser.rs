@@ -123,6 +123,7 @@ fn parse_single_task(
         subtasks: Vec::new(),
         depth,
         leading_lines: Vec::new(),
+        trailing_lines: Vec::new(),
         source_lines: None,
         source_text: None,
         dirty: false,
@@ -130,6 +131,9 @@ fn parse_single_task(
 
     let mut idx = start_idx + 1;
     let meta_indent = indent + 2;
+    // Where this task's own lines stop, when that is earlier than where parsing
+    // stops — set only when a stranded run is taken into `trailing_lines`.
+    let mut own_end: Option<usize> = None;
 
     // Parse metadata lines (before subtasks)
     while idx < lines.len() {
@@ -156,14 +160,65 @@ fn parse_single_task(
         // the task went dirty, because the canonical path rebuilds the task from
         // its fields and the line is in none of them.
         //
-        // Stop instead, and hand the line back to `parse_tasks`, which keeps it:
-        // as a task if it looks like one, otherwise as literal text on the track.
-        // The cost is that metadata *after* stray content is no longer collected
-        // onto this task — it becomes literal text too. Trading a silent deletion
-        // for a visible mis-grouping is the right way round, and both shapes are
-        // malformed input either way.
+        // Either way this task stops collecting metadata here, so metadata
+        // *after* stray content is not gathered onto it. Trading a silent
+        // deletion for a visible mis-grouping is the right way round, and both
+        // shapes are malformed input regardless.
         let line_indent = count_indent(line);
         if line_indent > indent && !line.trim().is_empty() {
+            // Two things reach here, and only one is ours.
+            //
+            // An over-deep *task* line goes back to `parse_tasks`, which reads
+            // it at its real indent and records it at the enclosing depth —
+            // nesting past `MAX_DEPTH` is flattened rather than dropped. That
+            // is `e89450d`'s behaviour and must not change.
+            //
+            // Content at or above `meta_indent` also goes back. It sits between
+            // two tasks at *this* level, so `parse_tasks` hands it to the next
+            // one as `leading_lines` and it renders in the same place either
+            // way — the two anchors are textually identical for that shape, and
+            // changing it would move every existing stranded line onto a
+            // different task for no gain.
+            //
+            // What is left is content indented *past this task's own metadata*:
+            // inside the task, below everything it owns, and with no task at
+            // this level to hand it to. That is the shape that used to fall out
+            // to an enclosing level and land on a task at a different nesting
+            // depth — where a section move left it behind for a neighbour's
+            // note to absorb.
+            if task_indent(line).is_some() || line_indent <= meta_indent {
+                break;
+            }
+
+            // Take the whole contiguous run so a stranded paragraph keeps its
+            // shape, with interior blanks but not trailing ones: a blank after
+            // the last content line separates this task from what follows and
+            // belongs to neither.
+            let mut run: Vec<String> = Vec::new();
+            let mut blanks: Vec<String> = Vec::new();
+            let mut scan = idx;
+            let mut end = idx;
+            while scan < lines.len() {
+                let candidate = &lines[scan];
+                if candidate.trim().is_empty() {
+                    blanks.push(String::new());
+                    scan += 1;
+                } else if count_indent(candidate) > meta_indent && task_indent(candidate).is_none()
+                {
+                    run.append(&mut blanks);
+                    run.push(candidate.clone());
+                    scan += 1;
+                    end = scan;
+                } else {
+                    break;
+                }
+            }
+            task.trailing_lines = run;
+            // `source_text` is this task's *own* lines and must not include the
+            // run — the serializer emits the two separately, so counting these
+            // lines twice writes them twice, and again on every rewrite.
+            own_end = Some(idx);
+            idx = end;
             break;
         }
 
@@ -190,7 +245,7 @@ fn parse_single_task(
 
     // Record the task's OWN source text (task line + metadata, NOT subtask lines).
     // This enables selective rewrite: editing a subtask doesn't reformat the parent.
-    let own_end_idx = idx;
+    let own_end_idx = own_end.unwrap_or(idx);
     task.source_text = Some(lines[start_idx..own_end_idx].to_vec());
 
     // Now parse subtasks (they get their own independent source_text)

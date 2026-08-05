@@ -1475,6 +1475,21 @@ fn cmd_check(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
                             track_id, who, line
                         );
                     }
+                    check::CheckWarning::StrandedLineUnder {
+                        track_id,
+                        under_task_id,
+                        under_title,
+                        line,
+                    } => {
+                        let who = match under_task_id {
+                            Some(id) => id.clone(),
+                            None => format!("\"{}\"", under_title),
+                        };
+                        println!(
+                            "  [{}] a line under {}, past its metadata, belongs to no field: \"{}\" — kept as-is on every write; if it is a note, add a `- note:` line above it",
+                            track_id, who, line
+                        );
+                    }
                     check::CheckWarning::UnclosedInboxFence {
                         index,
                         title,

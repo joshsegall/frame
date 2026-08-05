@@ -835,6 +835,21 @@ pub(super) fn palette_check_project(app: &mut App) {
                         track_id, who, line
                     )
                 }
+                check::CheckWarning::StrandedLineUnder {
+                    track_id,
+                    under_task_id,
+                    under_title,
+                    line,
+                } => {
+                    let who = match under_task_id {
+                        Some(id) => id.clone(),
+                        None => format!("\"{}\"", under_title),
+                    };
+                    format!(
+                        "  [{}] a line under {} belongs to no field: \"{}\"",
+                        track_id, who, line
+                    )
+                }
                 check::CheckWarning::UnclosedInboxFence {
                     index,
                     title,

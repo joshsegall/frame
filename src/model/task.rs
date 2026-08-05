@@ -114,11 +114,39 @@ pub struct Task {
     /// because filling one task's `resolved:` date rewrites the whole track.
     ///
     /// Attaching to the *following* task rather than the preceding one is what
-    /// lets a single field cover every case: a line is only ever droppable when
-    /// a task follows it at the same level, so there is always a successor to
-    /// hang it on.
+    /// lets a single field cover every case **of this shape**: a line stranded
+    /// between tasks is only ever droppable when a task follows it at the same
+    /// level, so there is always a successor to hang it on. Content stranded
+    /// *inside* a task is a different shape and wants the opposite anchor — see
+    /// [`Task::trailing_lines`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub leading_lines: Vec<String>,
+    /// Lines that sit *after* this task's metadata, indented past it, that are
+    /// neither metadata nor a subtask nor part of a `- note:` block — a note
+    /// that lost its `- note:` key, the residue of a bad hand edit. Carried
+    /// verbatim and re-emitted in place, before any subtasks.
+    ///
+    /// The mirror of [`Task::leading_lines`], and it exists because the two
+    /// shapes want opposite anchors. This content used to go to the *following*
+    /// task as well, which put it on a task at a different nesting level: the
+    /// line lived inside one task's subtree and was carried by that task's
+    /// parent's *sibling*. Nothing recorded where it really sat, so a section
+    /// move relocated the task and left the line behind — where, re-emitted at
+    /// its original indent into a neighbourhood that had changed, it was read
+    /// as part of a *different* task's note and destroyed by the next ordinary
+    /// edit of that task.
+    ///
+    /// Anchoring it to the task it sits under is what makes it travel: a
+    /// section move, an archive, a cross-track move all carry the task, and the
+    /// line goes with it at the same relative position, so it parses back the
+    /// same way. The successor argument above does not apply here — content
+    /// stranded inside a task always has a predecessor, namely the task whose
+    /// metadata it followed.
+    ///
+    /// An over-deep *task* line is not this: it still goes back to
+    /// `parse_tasks`, which flattens it into a real task at the enclosing level.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trailing_lines: Vec<String>,
 
     // --- Source tracking ---
     /// Line range in the original source file (0-indexed)
@@ -144,6 +172,7 @@ impl Task {
             subtasks: Vec::new(),
             depth: 0,
             leading_lines: Vec::new(),
+            trailing_lines: Vec::new(),
             source_lines: None,
             source_text: None,
             dirty: true,
@@ -156,11 +185,11 @@ impl Task {
     }
 }
 
-/// Compares the *semantic* fields only. `source_text`, `source_lines`, `dirty`
-/// and `leading_lines` are carried source, not task identity: two tasks that say
-/// the same thing are equal even if one of them is dragging a stranded line
-/// behind it. Conservation of `leading_lines` is checked at the text level by
-/// the parse properties, not here.
+/// Compares the *semantic* fields only. `source_text`, `source_lines`, `dirty`,
+/// `leading_lines` and `trailing_lines` are carried source, not task identity:
+/// two tasks that say the same thing are equal even if one of them is dragging a
+/// stranded line behind it. Conservation of the stranded lines is checked at the
+/// text level by the parse properties, not here.
 impl PartialEq for Task {
     fn eq(&self, other: &Self) -> bool {
         self.state == other.state

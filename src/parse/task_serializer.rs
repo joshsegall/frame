@@ -28,6 +28,9 @@ fn serialize_task(task: &Task, indent: usize, lines: &mut Vec<String>) {
     {
         // Emit this task's own lines (task line + metadata) verbatim
         lines.extend(source.iter().cloned());
+        // Then the lines stranded after that metadata, in the place they were
+        // found — same rule as `leading_lines`, opposite end.
+        lines.extend(task.trailing_lines.iter().cloned());
         // Still recurse into subtasks — they have their own dirty flags
         for subtask in &task.subtasks {
             serialize_task(subtask, indent + 2, lines);
@@ -106,6 +109,12 @@ fn serialize_task(task: &Task, indent: usize, lines: &mut Vec<String>) {
             }
         }
     }
+
+    // Lines stranded after the metadata, verbatim — canonicalizing them is not
+    // possible, since frame does not know what they mean, and dropping them is
+    // the bug they exist to prevent. Before the subtasks, which is where they
+    // were found.
+    lines.extend(task.trailing_lines.iter().cloned());
 
     // Subtasks at indent + 2
     for subtask in &task.subtasks {
