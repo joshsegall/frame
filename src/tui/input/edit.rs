@@ -35,7 +35,15 @@ pub(super) fn toggle_cc_tag(app: &mut App) {
         return;
     };
 
-    // Check if task already has cc tag (immutable borrow)
+    // The tag list before and after, in the buffer form `FieldEdit` replays.
+    // Recorded here rather than derived on undo: this is the same field the
+    // tags editor writes, so it undoes through the same arm.
+    let before = App::find_track_in_project(&app.project, &track_id)
+        .and_then(|t| task_ops::find_task_in_track(t, &task_id))
+        .map(|t| fields::field_to_buffer(t, DetailRegion::Tags));
+    let Some(old_value) = before else {
+        return;
+    };
     let has_cc = App::find_track_in_project(&app.project, &track_id)
         .and_then(|t| task_ops::find_task_in_track(t, &task_id))
         .map(|t| t.tags.iter().any(|tag| tag == "cc"))
@@ -52,6 +60,20 @@ pub(super) fn toggle_cc_tag(app: &mut App) {
         let _ = task_ops::add_tag(track, &task_id, "cc");
     }
     app.save_track_logged(&track_id);
+
+    let new_value = App::find_track_in_project(&app.project, &track_id)
+        .and_then(|t| task_ops::find_task_in_track(t, &task_id))
+        .map(|t| fields::field_to_buffer(t, DetailRegion::Tags))
+        .unwrap_or_else(|| old_value.clone());
+    if new_value != old_value {
+        app.undo_stack.push(Operation::FieldEdit {
+            track_id: track_id.clone(),
+            task_id: task_id.clone(),
+            field: "tags".to_string(),
+            old_value,
+            new_value,
+        });
+    }
 
     // Record repeatable action
     app.last_action = Some(RepeatableAction::ToggleCcTag);
@@ -3224,5 +3246,25 @@ mod tests {
 
         app.undo_stack.undo(&mut app.project.tracks, None);
         assert_eq!(track_text(&app), TRACK);
+    }
+
+    /// `c` toggles the `#cc` tag, writes the file, and used to record nothing —
+    /// the one single-key mutation in the track view that undo could not
+    /// reverse. Editing the same field through `t` has always pushed a
+    /// `FieldEdit`; this now goes through the same arm.
+    #[test]
+    fn toggling_the_cc_tag_can_be_undone() {
+        let mut app = app_in_detail_view(TRACK, "T-001");
+        let before = track_text(&app);
+
+        toggle_cc_tag(&mut app);
+        assert!(
+            track_text(&app).contains("#cc"),
+            "the tag went on: {:?}",
+            track_text(&app)
+        );
+
+        app.undo_stack.undo(&mut app.project.tracks, None);
+        assert_eq!(track_text(&app), before, "and undo takes it off again");
     }
 }
