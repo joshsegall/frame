@@ -1023,20 +1023,6 @@ pub(super) fn task_state_action(app: &mut App, action: StateAction) {
             app.cancel_pending_subtask_hide(&track_id, &task_id);
         }
 
-        // Leaving Done: `set_state` has already stripped the resolved date, but
-        // the task stays in the Done section until the move fires, so the Done
-        // column and the Recent view still show it — and both sort on that date.
-        // It is put back for the grace period and stripped again on flush.
-        if old_state == crate::model::task::TaskState::Done
-            && new_state != crate::model::task::TaskState::Done
-            && let Some(ref resolved) = old_resolved
-        {
-            let track = app.find_track_mut(&track_id).expect("track exists");
-            let task = task_ops::find_task_mut_in_track(track, &task_id).expect("task exists");
-            task.metadata.push(Metadata::Resolved(resolved.clone()));
-            task.mark_dirty();
-        }
-
         // Board: pin the task to its current column for the grace period so it
         // does not jump the instant the key is pressed. A task on its way out of
         // Done needs no pin — it is still in the Done section, and so still in
@@ -1063,7 +1049,7 @@ pub(super) fn task_state_action(app: &mut App, action: StateAction) {
             task_id: task_id.clone(),
             old_state,
             new_state,
-            old_resolved,
+            old_resolved: old_resolved.clone(),
             new_resolved,
         });
 
@@ -1096,6 +1082,32 @@ pub(super) fn task_state_action(app: &mut App, action: StateAction) {
                     task_id: task_id.clone(),
                     deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
                 });
+        }
+
+        // Leaving Done: `set_state` has already stripped the resolved date, but
+        // while a move out of the Done section is pending the task is still
+        // *in* that section, so the Done column and the Recent view still show
+        // it — and both sort on that date. Put it back for the grace period;
+        // the flush that performs the move strips it again.
+        //
+        // Which is why this asks for the pending move rather than for the old
+        // state. Mark a Backlog task done and change your mind inside the grace
+        // period and there is no move out of Done to schedule — the move *into*
+        // Done never fired — so nothing would ever strip the date again, and the
+        // task kept a `resolved:` it had never earned. Undo could not take it
+        // back either: the recorded `new_resolved` was captured before the date
+        // was restored, so the operation and the file disagreed about what the
+        // keystroke had done. That disagreement is what
+        // `tests/undo_properties.rs` reported.
+        let move_out_of_done_pending = app
+            .pending_moves
+            .iter()
+            .any(|pm| pm.track_id == track_id && pm.task_id == task_id && pm.leaves_done());
+        if move_out_of_done_pending && let Some(ref resolved) = old_resolved {
+            let track = app.find_track_mut(&track_id).expect("track exists");
+            let task = task_ops::find_task_mut_in_track(track, &task_id).expect("task exists");
+            task.metadata.push(Metadata::Resolved(resolved.clone()));
+            task.mark_dirty();
         }
     }
 
@@ -1651,4 +1663,78 @@ pub(super) fn rebuild_active_track_ids(app: &mut App) {
     } else {
         app.tracks_cursor = 0;
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::app::app_on_disk;
+
+    fn track_text(app: &App) -> String {
+        std::fs::read_to_string(app.project.frame_dir.join("tracks/a.md")).unwrap()
+    }
+
+    /// Marking a Backlog task done and changing your mind inside the grace
+    /// period must not leave a resolution date behind.
+    ///
+    /// Leaving Done puts the date back so the row holds its place in the Done
+    /// column while the move out of Done is pending, and the flush that
+    /// performs that move strips it again. But the move *into* Done had not
+    /// fired yet, so there was no move out of Done to schedule — and nothing
+    /// left to strip the date. The task sat in the Backlog, state todo, wearing
+    /// a `resolved:` it had never earned, and undo could not take it off: the
+    /// recorded `new_resolved` was captured before the date was restored, so the
+    /// operation and the file disagreed about what the keystroke had done.
+    #[test]
+    fn changing_your_mind_about_done_leaves_no_resolution_date() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        assert!(app.jump_to_task("A-001"));
+
+        task_state_action(&mut app, StateAction::Done);
+        task_state_action(&mut app, StateAction::SetTodo);
+
+        let text = track_text(&app);
+        assert!(
+            !text.contains("resolved:"),
+            "a todo task carries no resolution date: {text:?}"
+        );
+    }
+
+    /// A task that really is in the Done section keeps the date for the grace
+    /// period — the Done column and the Recent view both sort on it, and the
+    /// row is still there until the move fires.
+    #[test]
+    fn a_task_on_its_way_out_of_done_keeps_its_date_until_the_move_fires() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        assert!(app.jump_to_task("A-001"));
+
+        task_state_action(&mut app, StateAction::Done);
+        for track_id in app.flush_all_pending_moves() {
+            app.save_track_logged(&track_id);
+        }
+        assert!(track_text(&app).contains("resolved:"), "it is done");
+
+        // The track view does not list Done tasks, so a user reaches this one
+        // from the detail view — as `tests/parity.rs` does for the same reason.
+        app.view = View::Detail {
+            track_id: "a".into(),
+            task_id: "A-001".into(),
+        };
+        task_state_action(&mut app, StateAction::SetTodo);
+        assert!(
+            track_text(&app).contains("resolved:"),
+            "and still shows as done until the move out of Done fires"
+        );
+
+        for track_id in app.flush_all_pending_moves() {
+            app.save_track_logged(&track_id);
+        }
+        assert!(
+            !track_text(&app).contains("resolved:"),
+            "which is what strips it"
+        );
+    }
+
 }
