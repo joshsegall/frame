@@ -3057,6 +3057,47 @@ fn test_archived_ids_are_not_reissued() {
     assert_eq!(out.trim(), "M-051", "mint ignored the archive");
 }
 
+/// The same guarantee, with one ordinary markdown bullet in the archive header.
+///
+/// Every archive reader used to find the task list with
+/// `line.starts_with("- [")`, which a link bullet matches, so `- [notes](x.md)`
+/// above the tasks read as the first task line — and `parse_tasks` starting on a
+/// line that is not a task line stops at once. The archive then held no tasks as
+/// far as the mint scan, `fr check` and search were concerned, while the TUI's
+/// Recent view, which asked the stricter question, still listed every one of
+/// them.
+///
+/// There is no local frontier store here, which is the state of any fresh clone
+/// — `.ids.toml` is working-copy-local and never committed. The archive scan is
+/// the only thing that remembers the number was spent, so hiding the archive
+/// hands it straight back out, and `fr check` calls the result valid.
+#[test]
+fn test_a_link_in_the_archive_header_does_not_hide_its_ids() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    assert!(
+        !tmp.path().join("frame/.ids.toml").exists(),
+        "fixture must have no frontier store, or the archive scan is not what is under test"
+    );
+    fs::create_dir_all(tmp.path().join("frame/archive")).unwrap();
+    fs::write(
+        tmp.path().join("frame/archive/main.md"),
+        "# Archive — main\n- [context](notes.md)\n\n- [x] `M-050` archived task\n  - resolved: 2025-06-01\n",
+    )
+    .unwrap();
+
+    let out = run_fr_ok(tmp.path(), &["add", "main", "after archiving"]);
+    assert_eq!(
+        out.trim(),
+        "M-051",
+        "an archived number was reissued because a link bullet hid the archive"
+    );
+
+    // And the link is still a header line, not something a rewrite relocated.
+    let archive = fs::read_to_string(tmp.path().join("frame/archive/main.md")).unwrap();
+    assert!(archive.contains("- [context](notes.md)"), "{archive}");
+}
+
 /// A deleted task's number stays spent — the frontier never walks backwards.
 #[test]
 fn test_deleted_ids_are_not_reissued() {

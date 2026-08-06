@@ -168,13 +168,8 @@ fn archived_tasks_max(path: &Path, prefix_dash: &str, token: Option<&Token>, max
     let Ok(content) = std::fs::read_to_string(path) else {
         return;
     };
-    let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
-    let start = lines
-        .iter()
-        .position(|l| l.starts_with("- ["))
-        .unwrap_or(lines.len());
-    let (tasks, _) = crate::parse::parse_tasks(&lines, start, 0, 0);
-    find_max_id_in_tasks(&tasks, prefix_dash, token, max);
+    let archive = crate::parse::parse_archive(&content);
+    find_max_id_in_tasks(&archive.tasks, prefix_dash, token, max);
 }
 
 /// Scan `frame/archive/_tracks/<track>.md` — a whole archived track file, so it

@@ -31,16 +31,7 @@ pub fn build_recent_entries(app: &App) -> Vec<RecentEntry> {
         for tc in &app.project.config.tracks {
             let archive_path = archive_dir.join(format!("{}.md", tc.id));
             if let Ok(text) = std::fs::read_to_string(&archive_path) {
-                let lines: Vec<String> = text.lines().map(String::from).collect();
-                // Skip non-task preamble (e.g. "# Archive — {track_id}" header)
-                let start = lines
-                    .iter()
-                    .position(|l| {
-                        let t = l.trim_start();
-                        t.starts_with("- [") && t.len() >= 5 && t.as_bytes()[4] == b']'
-                    })
-                    .unwrap_or(lines.len());
-                let (tasks, _) = crate::parse::parse_tasks(&lines, start, 0, 0);
+                let tasks = crate::parse::parse_archive(&text).tasks;
                 let track_name = app.track_name(&tc.id).to_string();
                 for task in &tasks {
                     push_done_entry(&mut entries, task, &tc.id, &track_name, true);

@@ -233,14 +233,7 @@ pub fn load_archives(
             source: e,
         })?;
 
-        // Parse task lines, skipping the "# Archive — ..." header
-        let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
-        let start = lines
-            .iter()
-            .position(|l| l.starts_with("- ["))
-            .unwrap_or(lines.len());
-        let (tasks, _) = crate::parse::parse_tasks(&lines, start, 0, 0);
-
+        let tasks = crate::parse::parse_archive(&content).tasks;
         if !tasks.is_empty() {
             archives.push((track_id, tasks));
         }
