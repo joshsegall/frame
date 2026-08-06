@@ -1634,6 +1634,142 @@ fn test_path_field_force_accepts_an_uncontained_path() {
     }
 }
 
+/// A project in a git repo that ignores `scratch/` and `*.tmp`. `None` when git
+/// is unavailable, so callers skip rather than fail.
+fn project_ignoring_scratch(root: &Path) -> Option<()> {
+    create_test_project(root);
+    create_ref_targets(root);
+    fs::create_dir_all(root.join("scratch")).unwrap();
+    fs::write(root.join("scratch/notes.md"), "notes\n").unwrap();
+    fs::write(root.join("doc/draft.tmp"), "draft\n").unwrap();
+    fs::write(root.join(".gitignore"), "scratch/\n*.tmp\nframe/.*\n").unwrap();
+    Command::new("git")
+        .current_dir(root)
+        .args(["init", "-q"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+        .then_some(())
+}
+
+/// A gitignored file is in this working copy and will be in no one else's, so a
+/// ref to it resolves here and nowhere else — the same failure as an escaping
+/// path, arrived at a different way.
+#[test]
+fn test_path_field_refuses_a_gitignored_path() {
+    for field in PATH_FIELDS {
+        let tmp = tempfile::TempDir::new().unwrap();
+        if project_ignoring_scratch(tmp.path()).is_none() {
+            return; // git unavailable
+        }
+
+        for path in ["scratch/notes.md", "doc/draft.tmp"] {
+            let (_, stderr, ok) = run_fr(tmp.path(), &[field, "M-001", "add", path]);
+            assert!(!ok, "{} accepted {}", field, path);
+            assert!(
+                stderr.contains(path) && stderr.contains("ignored by git"),
+                "{} on {}: {}",
+                field,
+                path,
+                stderr
+            );
+        }
+
+        // The file next to them, covered by no rule, is fine.
+        run_fr_ok(tmp.path(), &[field, "M-001", "add", "doc/design.md"]);
+        let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+        assert!(
+            track.contains(&format!("{}: doc/design.md", field)),
+            "{}",
+            track
+        );
+    }
+}
+
+/// The suffix is stripped before git is asked — `doc/draft.tmp:12` is not a
+/// filename, and the `*.tmp` rule would not match it.
+#[test]
+fn test_path_field_gitignore_check_ignores_the_suffix() {
+    for field in PATH_FIELDS {
+        let tmp = tempfile::TempDir::new().unwrap();
+        if project_ignoring_scratch(tmp.path()).is_none() {
+            return;
+        }
+
+        let (_, stderr, ok) = run_fr(tmp.path(), &[field, "M-001", "add", "doc/draft.tmp:12"]);
+        assert!(!ok, "{} accepted a suffixed gitignored path", field);
+        assert!(stderr.contains("ignored by git"), "{}", stderr);
+    }
+}
+
+/// Ignore rules do not apply to files already in the index, so a tracked path
+/// travels whatever `.gitignore` says — and refusing it would be a lie.
+#[test]
+fn test_path_field_accepts_a_gitignored_path_that_is_tracked() {
+    for field in PATH_FIELDS {
+        let tmp = tempfile::TempDir::new().unwrap();
+        if project_ignoring_scratch(tmp.path()).is_none() {
+            return;
+        }
+        // Force it into the index, as someone would for a file that must be
+        // committed despite a broad rule.
+        assert!(git(tmp.path(), &["add", "-f", "scratch/notes.md"]));
+
+        run_fr_ok(tmp.path(), &[field, "M-001", "add", "scratch/notes.md"]);
+        let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+        assert!(
+            track.contains(&format!("{}: scratch/notes.md", field)),
+            "{}",
+            track
+        );
+    }
+}
+
+#[test]
+fn test_path_field_force_accepts_a_gitignored_path() {
+    for field in PATH_FIELDS {
+        let tmp = tempfile::TempDir::new().unwrap();
+        if project_ignoring_scratch(tmp.path()).is_none() {
+            return;
+        }
+
+        run_fr_ok(
+            tmp.path(),
+            &[field, "M-001", "add", "scratch/notes.md", "--force"],
+        );
+        let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+        assert!(
+            track.contains(&format!("{}: scratch/notes.md", field)),
+            "{}",
+            track
+        );
+    }
+}
+
+/// Outside a repo frame cannot tell what git would ignore, so it allows.
+#[test]
+fn test_path_field_gitignore_check_is_a_no_op_outside_a_repo() {
+    for field in PATH_FIELDS {
+        let tmp = tempfile::TempDir::new().unwrap();
+        create_test_project(tmp.path());
+        create_ref_targets(tmp.path());
+        fs::create_dir_all(tmp.path().join("scratch")).unwrap();
+        fs::write(tmp.path().join("scratch/notes.md"), "notes\n").unwrap();
+        fs::write(tmp.path().join(".gitignore"), "scratch/\n").unwrap();
+        // No `git init`: the `.gitignore` is just a file with no repo to read it.
+
+        run_fr_ok(tmp.path(), &[field, "M-001", "add", "scratch/notes.md"]);
+        let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+        assert!(
+            track.contains(&format!("{}: scratch/notes.md", field)),
+            "{}",
+            track
+        );
+    }
+}
+
 /// `rm` is never refused. An uncontained ref already in a file is exactly what
 /// someone needs to be able to take out.
 #[test]

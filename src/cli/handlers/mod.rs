@@ -2138,6 +2138,40 @@ fn reject_uncontained_paths(
     }
 }
 
+/// Refuse paths git is ignoring, naming every one.
+///
+/// Checked last of the three, because it is the only one that needs the file to
+/// be there: a path that does not resolve is already reported as missing, and
+/// asking git about it would answer a different question. Outside a repo, or
+/// with `git` unavailable, this is a no-op — frame cannot tell, so it does not
+/// guess.
+fn reject_ignored_paths(
+    project_root: &std::path::Path,
+    paths: &[String],
+    force: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if force {
+        return Ok(());
+    }
+    let bad = refs::ignored(project_root, paths);
+    let reason = refs::PathRejection::Ignored.reason();
+    match bad.len() {
+        0 => Ok(()),
+        1 => Err(format!("{} {}\n  (pass --force to add it anyway)", bad[0], reason).into()),
+        _ => {
+            let list = bad
+                .iter()
+                .map(|p| format!("\n  {} {}", p, reason))
+                .collect::<String>();
+            Err(format!(
+                "these paths cannot be stored:{}\n  (pass --force to add them anyway)",
+                list
+            )
+            .into())
+        }
+    }
+}
+
 fn cmd_ref(args: PathFieldArgs) -> Result<(), Box<dyn std::error::Error>> {
     cmd_path_field(PathField::Ref, args)
 }
@@ -2164,6 +2198,7 @@ fn cmd_path_field(field: PathField, args: PathFieldArgs) -> Result<(), Box<dyn s
     if matches!(args.action.as_str(), "add" | "set") {
         reject_uncontained_paths(&args.paths, args.force)?;
         reject_missing_paths(&project.root, &args.paths, args.force)?;
+        reject_ignored_paths(&project.root, &args.paths, args.force)?;
     }
 
     let track_id = find_task_track(&project, &args.id)

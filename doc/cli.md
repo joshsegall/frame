@@ -413,7 +413,17 @@ error: /Users/me/proj/doc/design.md is absolute — a ref is relative to the
 
 This is the opposite failure from a broken ref, and the reason it is worth refusing: the file *is* there, so nothing looks wrong until someone else clones the project. It is checked before the existence check, so `../typo.md` is reported as the escape it is rather than as a missing file. The test runs on the folded value, so `doc/../../outside.md` is caught too, while `doc/../src/parser.rs` — out of a subdirectory and back in — is fine. `--force` overrides this the same way it overrides the existence check.
 
-**`rm` never checks the filesystem**, since a path is most worth removing precisely when the file behind it is gone. It is never refused for leaving the project either: a ref already in a file is exactly what you need to be able to take out.
+**`add` and `set` refuse a path git is ignoring**, for the same reason: a gitignored file is in your working copy and will be in nobody else's.
+
+```
+$ fr ref EFF-014 add scratch/notes.md
+error: scratch/notes.md is ignored by git — it is in this working copy and
+  will not be in anyone else's
+```
+
+`git check-ignore` decides, so the rule is git's own rather than a second copy of it, and the **resolved** path is what git is asked about — `doc/draft.tmp:12` is not a filename. Two things are deliberately not refused: a **tracked** file, even when a rule covers it (ignore rules do not apply to what is already in the index, so it does travel), and anything at all when the project is **not in a git repository** or `git` cannot be run — frame cannot tell, so it allows.
+
+**`rm` never checks the filesystem**, since a path is most worth removing precisely when the file behind it is gone. It is never refused for leaving the project or being ignored either: a ref already in a file is exactly what you need to be able to take out.
 
 #### One file, one entry
 

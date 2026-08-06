@@ -72,10 +72,12 @@ Paths are stored folded — `./sub/../real.md` is stored as `real.md` — and `a
 never holds one file twice. The location suffix is part of the identity:
 `rm src/parser.rs` does not remove `src/parser.rs:807`.
 
-**Relative to the project root means exactly that.** `add`/`set` refuse a path
-that escapes upward (`../notes.md`) or is absolute (`/etc/hosts`, and also
-`/abs/path/into/the/project`) — such a ref resolves here and nowhere else. `rm`
-is never refused, so an existing one can always be taken out.
+**Refs have to travel.** `add`/`set` refuse a path that escapes upward
+(`../notes.md`), one that is absolute (`/etc/hosts`, and also
+`/abs/path/into/the/project`), and one git is ignoring (`scratch/notes.md`) —
+each resolves here and nowhere else. A file that is tracked despite an ignore
+rule is fine, and outside a git repo nothing is checked. `rm` is never refused,
+so an existing one can always be taken out.
 
 Subtasks nest up to 3 levels. Position in the backlog *is* priority —
 there are no priority fields.

@@ -160,11 +160,16 @@ pub fn tracked_paths(toplevel: &Path, rel_paths: &[String]) -> Option<Vec<String
     git_paths(toplevel, &["ls-files", "--cached"], rel_paths)
 }
 
-/// Which of `rel_paths` (repo-relative) `.gitignore` covers. A *tracked* path is
-/// reported as not ignored — which is the honest answer for "will this get
-/// committed?", since ignore rules don't apply to files already in the index.
-pub fn ignored_paths(toplevel: &Path, rel_paths: &[String]) -> Option<Vec<String>> {
-    git_paths(toplevel, &["check-ignore"], rel_paths)
+/// Which of `paths` `.gitignore` covers. A *tracked* path is reported as not
+/// ignored — which is the honest answer for "will this get committed?", since
+/// ignore rules don't apply to files already in the index.
+///
+/// `dir` is where git runs, and `paths` are resolved against it — repo-relative
+/// from the toplevel, or project-relative from a project root somewhere inside
+/// the repo. Matches come back spelled exactly as they were passed in, so a
+/// caller can compare them against what it sent.
+pub fn ignored_paths(dir: &Path, paths: &[String]) -> Option<Vec<String>> {
+    git_paths(dir, &["check-ignore"], paths)
 }
 
 /// Which of `rel_paths` (repo-relative) have unstaged modifications — the working

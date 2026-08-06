@@ -141,6 +141,8 @@ pub enum PathRejection {
     Absolute,
     /// Escapes the project root after folding: `../outside.md`.
     Escapes,
+    /// Inside the project, but git is ignoring it: `scratch/notes.md`.
+    Ignored,
 }
 
 impl PathRejection {
@@ -153,6 +155,10 @@ impl PathRejection {
             }
             PathRejection::Escapes => {
                 "leaves the project root — nothing outside it travels with the project"
+            }
+            PathRejection::Ignored => {
+                "is ignored by git — it is in this working copy and will not be in \
+                 anyone else's"
             }
         }
     }
@@ -187,15 +193,65 @@ pub fn same_path(a: &str, b: &str) -> bool {
     normalize(a) == normalize(b)
 }
 
-/// Whether a `ref:`/`spec:` value resolves to a file in the project.
-pub fn exists(project_root: &Path, value: &str) -> bool {
+/// The reading of a value that actually finds a file — the path it points at,
+/// with any suffix already accounted for. `None` when nothing resolves.
+///
+/// Anything that has to hand the path to something else (git, say) wants this
+/// rather than the raw value: `src/parser.rs:807` is not a filename.
+pub fn resolved(project_root: &Path, value: &str) -> Option<String> {
     let value = value.trim();
     if value.is_empty() {
-        return false;
+        return None;
     }
     candidates(value)
         .into_iter()
-        .any(|c| project_root.join(c).exists())
+        .find(|c| project_root.join(c).exists())
+        .map(|c| c.to_string())
+}
+
+/// Whether a `ref:`/`spec:` value resolves to a file in the project.
+pub fn exists(project_root: &Path, value: &str) -> bool {
+    resolved(project_root, value).is_some()
+}
+
+/// Which of `values` point at a file git is ignoring, in the order given.
+///
+/// **Batched.** One `git check-ignore` for the whole list rather than one per
+/// path — the same call `fr check`'s local-file leak guard already makes. Paths
+/// are passed relative to the project root and git resolves them against it, so
+/// a project living in a subdirectory of its repo needs no special handling.
+///
+/// **Asks about the resolved path, not the raw value.** A value carrying a
+/// suffix is not a filename, and `scratch/notes.md:12` would miss a `*.md` rule
+/// that `scratch/notes.md` matches. Values that resolve to nothing are left out
+/// entirely: a broken ref is already reported as one, and asking git about a
+/// file that is not there would answer a different question.
+///
+/// **Empty when frame cannot tell** — outside a repo, or with `git`
+/// unavailable. Callers read that as "allow", because a guess either way would
+/// be worse than the silence.
+///
+/// A *tracked* path is never reported, which is `io::git::ignored_paths`'
+/// deliberate behaviour: ignore rules do not apply to files already in the
+/// index, so a tracked one does travel, whatever `.gitignore` says about it.
+pub fn ignored(project_root: &Path, values: &[String]) -> Vec<String> {
+    let (probes, owners): (Vec<String>, Vec<usize>) = values
+        .iter()
+        .enumerate()
+        .filter_map(|(i, v)| resolved(project_root, v).map(|p| (p, i)))
+        .unzip();
+    if probes.is_empty() {
+        return Vec::new();
+    }
+    let Some(matched) = crate::io::git::ignored_paths(project_root, &probes) else {
+        return Vec::new();
+    };
+    probes
+        .iter()
+        .zip(owners)
+        .filter(|(probe, _)| matched.contains(probe))
+        .map(|(_, i)| values[i].clone())
+        .collect()
 }
 
 #[cfg(test)]
@@ -322,6 +378,103 @@ mod tests {
         assert_eq!(normalize("doc/..hidden.md"), "doc/..hidden.md");
         assert_eq!(normalize("doc/a..b.md"), "doc/a..b.md");
         assert_eq!(normalize("...md"), "...md");
+    }
+
+    /// A git repo whose `.gitignore` covers `scratch/`, alongside the ordinary
+    /// files. Returns `None` when git is unavailable, as `io::git`'s own tests
+    /// do — every caller skips rather than failing.
+    fn ignoring_project(dir: &Path) -> Option<()> {
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+        fs::create_dir_all(dir.join("scratch")).ok()?;
+        fs::create_dir_all(dir.join("doc")).ok()?;
+        fs::write(dir.join(".gitignore"), "scratch/\n*.tmp\n").ok()?;
+        fs::write(dir.join("scratch/notes.md"), "x").ok()?;
+        fs::write(dir.join("doc/design.md"), "x").ok()?;
+        fs::write(dir.join("doc/draft.tmp"), "x").ok()?;
+        git(&["init", "-q"]).then_some(())
+    }
+
+    #[test]
+    fn ignored_reports_what_git_covers_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        if ignoring_project(dir.path()).is_none() {
+            return; // git unavailable
+        }
+        let values: Vec<String> = ["scratch/notes.md", "doc/design.md", "doc/draft.tmp"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            ignored(dir.path(), &values),
+            vec!["scratch/notes.md".to_string(), "doc/draft.tmp".to_string()]
+        );
+    }
+
+    /// The suffix is stripped before git is asked. `doc/draft.tmp:12` is not a
+    /// filename, and the `*.tmp` rule would miss it.
+    #[test]
+    fn ignored_asks_about_the_resolved_path_not_the_raw_value() {
+        let dir = tempfile::tempdir().unwrap();
+        if ignoring_project(dir.path()).is_none() {
+            return;
+        }
+        let values = vec!["doc/draft.tmp:12".to_string()];
+        assert_eq!(ignored(dir.path(), &values), values);
+    }
+
+    /// A path with nothing behind it is left out: it is already reported as a
+    /// broken ref, and git would be answering a different question.
+    #[test]
+    fn ignored_says_nothing_about_a_path_that_does_not_resolve() {
+        let dir = tempfile::tempdir().unwrap();
+        if ignoring_project(dir.path()).is_none() {
+            return;
+        }
+        let values = vec!["scratch/gone.md".to_string()];
+        assert!(ignored(dir.path(), &values).is_empty());
+    }
+
+    /// Outside a repo frame cannot tell, so it allows rather than guessing.
+    #[test]
+    fn ignored_is_silent_outside_a_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("scratch")).unwrap();
+        fs::write(dir.path().join("scratch/notes.md"), "x").unwrap();
+        // Guard against the tempdir itself sitting inside a repo, which would
+        // make this pass for the wrong reason.
+        if crate::io::git::ignored_paths(dir.path(), &["scratch/notes.md".to_string()]).is_some() {
+            return;
+        }
+        let values = vec!["scratch/notes.md".to_string()];
+        assert!(ignored(dir.path(), &values).is_empty());
+    }
+
+    #[test]
+    fn resolved_returns_the_path_without_its_suffix() {
+        let dir = project();
+        assert_eq!(
+            resolved(dir.path(), "src/parser.rs:807").as_deref(),
+            Some("src/parser.rs")
+        );
+        assert_eq!(
+            resolved(dir.path(), "doc/design.md#why").as_deref(),
+            Some("doc/design.md")
+        );
+        // The literal value wins, so a `#` or `:` in the name survives.
+        assert_eq!(
+            resolved(dir.path(), "doc/issue#3.md").as_deref(),
+            Some("doc/issue#3.md")
+        );
+        assert_eq!(resolved(dir.path(), "doc/missing.md"), None);
     }
 
     #[test]

@@ -23,7 +23,7 @@ All notable changes to frame will be documented in this file.
 > **Breaking, in one place each — read these three if you script `fr` or parse its JSON:**
 > 1. `fr ref` and `fr spec` now require an action: `fr ref ID add|rm|set PATH...`. `fr ref ID PATH` and `fr spec ID PATH` no longer parse.
 > 2. `--json` `spec` is an array of strings, not a string.
-> 3. `fr ref` and `fr spec` exit non-zero on a path with no file behind it, and on one that leaves the project root or is absolute. Add `--force` to keep the old behaviour.
+> 3. `fr ref` and `fr spec` exit non-zero on a path with no file behind it, on one that leaves the project root or is absolute, and on one git is ignoring. Add `--force` to keep the old behaviour.
 >
 > Each is detailed below.
 
@@ -52,6 +52,12 @@ All notable changes to frame will be documented in this file.
   These are the opposite failure from a broken ref: the file *is* there, which is exactly what makes the reference look fine until someone else clones the project — where the absolute path names a different machine and whatever sat outside the root is not the same. So the refusal is checked before the existence check, and reports the greater of the two problems for a path like `../typo.md`. An absolute path pointing *into* the project is refused too: it still names this machine.
 
   The check runs on the folded value, so `doc/../../outside.md` is caught as readily as a leading `..`, while a path that dips out of a subdirectory and comes back (`doc/../src/parser.rs`) is fine. `--force` writes it anyway — one flag, one meaning. `rm` is never refused, since an uncontained ref already in a file is exactly what someone needs to be able to take out.
+
+- **BREAKING: `fr ref add|set` and `fr spec add|set` refuse a path git is ignoring.** A gitignored file is in your working copy and will be in nobody else's, so a ref to `scratch/notes.md` resolves here and nowhere else — the same failure as an escaping path, reached a different way.
+
+  Decided by `git check-ignore` rather than a configured prefix list, because git already owns this rule and a second copy of it would drift. One batched call covers the whole list, and paths are passed relative to the project root, so a project living in a subdirectory of its repo needs no special handling. The **resolved** path is what git is asked about, not the raw value: `doc/draft.tmp:12` is not a filename, and a `*.tmp` rule would not match it.
+
+  Two deliberate non-refusals. A **tracked** file is accepted even when a rule covers it — ignore rules do not apply to what is already in the index, so it does travel. And **outside a git repository, or with `git` unavailable, nothing is checked**: frame cannot tell, so it allows rather than guessing. `--force` overrides, and `rm` is never refused.
 
 - **`ref:` and `spec:` paths are stored in normal form, and matched in it.** One file has many spellings — `real.md`, `./real.md`, `sub/../real.md` — and every one of them resolves, so a list could hold the same file twice while `rm` failed to find what was plainly there. Both went wrong in practice: with `./sub/../real.md` stored, `fr ref ID rm real.md` reported `unchanged (not present)`, and `fr ref ID add real.md` appended a second entry for the same file.
 
