@@ -916,6 +916,29 @@ pub(super) fn palette_check_project(app: &mut App) {
                         command, started
                     )
                 }
+                check::CheckWarning::RefOutsideProject {
+                    track_id,
+                    task_id,
+                    field,
+                    path,
+                    ..
+                } => {
+                    format!(
+                        "  [{}] {} {}: {} leaves the project",
+                        track_id, task_id, field, path
+                    )
+                }
+                check::CheckWarning::RefGitignored {
+                    track_id,
+                    task_id,
+                    field,
+                    path,
+                } => {
+                    format!(
+                        "  [{}] {} {}: {} is ignored by git",
+                        track_id, task_id, field, path
+                    )
+                }
             };
             lines.push(Line::from(Span::styled(msg, yellow)));
         }

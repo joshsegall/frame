@@ -362,6 +362,50 @@ pub enum CheckWarning {
         /// RFC3339 timestamp of when it started.
         started: String,
     },
+    /// A `ref:`/`spec:` path that leaves the project — absolute, or escaping
+    /// upward.
+    ///
+    /// A **warning**, where a path with no file behind it is an error, and the
+    /// difference is the point: this one resolves. Nothing about the project is
+    /// invalid *here*; what is wrong is that the reference means something else,
+    /// or nothing, on any other machine. Errors exit non-zero, and a policy
+    /// invented after these values were written should not fail a build that was
+    /// passing yesterday.
+    ///
+    /// **No `--fix`.** Removing the ref discards intent, and rewriting it would
+    /// mean guessing which file inside the project was meant — the same
+    /// reasoning as [`CheckError::DanglingDep`].
+    #[serde(rename = "ref_outside_project")]
+    RefOutsideProject {
+        track_id: String,
+        task_id: String,
+        /// `ref` or `spec` — one finding for both keys, since the rule and the
+        /// remedy are identical.
+        field: String,
+        path: String,
+        /// Why it cannot travel, already phrased for a message.
+        reason: String,
+    },
+    /// A `ref:`/`spec:` path that git is ignoring, so it exists in this working
+    /// copy and in nobody else's.
+    ///
+    /// Warning rather than error for the same reason as
+    /// [`CheckWarning::RefOutsideProject`], and reported only for paths that
+    /// resolve — one that does not is already a broken ref. A **tracked** file is
+    /// never reported, however broadly a rule covers it: ignore rules do not
+    /// apply to what is in the index, so it does travel.
+    ///
+    /// Silent outside a git repository, or when `git` cannot be run.
+    ///
+    /// **No `--fix`.** Un-ignoring the file is a decision about the repository,
+    /// not about the task.
+    #[serde(rename = "ref_gitignored")]
+    RefGitignored {
+        track_id: String,
+        task_id: String,
+        field: String,
+        path: String,
+    },
 }
 
 /// Informational messages (not errors or warnings).
@@ -411,6 +455,9 @@ pub fn check_project(project: &Project) -> CheckResult {
 
     // Actor proliferation: several active tokens under one provenance name.
     check_actor_name_collisions(&project.frame_dir, &mut result);
+
+    // `ref:`/`spec:` values that resolve here and nowhere else.
+    check_ref_portability(project, &mut result);
 
     // Working-copy-local frame files leaking into git.
     check_local_files_ignored(&project.frame_dir, &mut result);
@@ -773,6 +820,87 @@ fn check_actor_name_collisions(frame_dir: &Path, result: &mut CheckResult) {
                 .warnings
                 .push(CheckWarning::ActorNameCollision { name, tokens });
         }
+    }
+}
+
+/// Flag `ref:`/`spec:` values that resolve in this working copy and nowhere
+/// else — absolute or escaping paths, and paths git is ignoring.
+///
+/// **Project-wide rather than per-task**, unlike every other metadata check, and
+/// the reason is the git call: one `check-ignore` for every reference in the
+/// project instead of one per task. The same rule the write path enforces
+/// (`ops::refs`), applied to values that predate it or arrived past it — through
+/// `--force`, through the TUI, or by hand.
+fn check_ref_portability(project: &Project, result: &mut CheckResult) {
+    // (track, task, field, value), in report order.
+    let mut all: Vec<(String, String, &'static str, String)> = Vec::new();
+    for (track_id, track) in &project.tracks {
+        for node in &track.nodes {
+            if let TrackNode::Section { tasks, .. } = node {
+                collect_ref_values(tasks, track_id, &mut all);
+            }
+        }
+    }
+    if all.is_empty() {
+        return;
+    }
+
+    for (track_id, task_id, field, value) in &all {
+        if let Some(rejection) = refs_ops::containment(value) {
+            result.warnings.push(CheckWarning::RefOutsideProject {
+                track_id: track_id.clone(),
+                task_id: task_id.clone(),
+                field: field.to_string(),
+                path: value.clone(),
+                reason: rejection.reason().to_string(),
+            });
+        }
+    }
+
+    // Only values that stay inside are worth asking git about: an escaping one
+    // is already reported, and `check-ignore` would answer about a path outside
+    // the repo.
+    let inside: Vec<String> = all
+        .iter()
+        .filter(|(_, _, _, v)| refs_ops::containment(v).is_none())
+        .map(|(_, _, _, v)| v.clone())
+        .collect();
+    let ignored = refs_ops::ignored(&project.root, &inside);
+    if ignored.is_empty() {
+        return;
+    }
+    for (track_id, task_id, field, value) in &all {
+        if ignored.contains(value) {
+            result.warnings.push(CheckWarning::RefGitignored {
+                track_id: track_id.clone(),
+                task_id: task_id.clone(),
+                field: field.to_string(),
+                path: value.clone(),
+            });
+        }
+    }
+}
+
+/// Every `ref:`/`spec:` value in `tasks` and their subtasks, tagged with where
+/// it came from. Depth-first, so findings report in file order.
+fn collect_ref_values(
+    tasks: &[Task],
+    track_id: &str,
+    out: &mut Vec<(String, String, &'static str, String)>,
+) {
+    for task in tasks {
+        let task_id = task.id.as_deref().unwrap_or("").to_string();
+        for meta in &task.metadata {
+            let (field, values) = match meta {
+                Metadata::Ref(v) => ("ref", v),
+                Metadata::Spec(v) => ("spec", v),
+                _ => continue,
+            };
+            for value in values {
+                out.push((track_id.to_string(), task_id.clone(), field, value.clone()));
+            }
+        }
+        collect_ref_values(&task.subtasks, track_id, out);
     }
 }
 

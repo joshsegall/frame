@@ -15,6 +15,12 @@ All notable changes to frame will be documented in this file.
 - **`fr git setup` — make a clone frame-ready, idempotently.** Ensures the `.gitignore` pattern, writes the `.gitattributes` entries routing frame markdown to the merge driver, and registers the driver in `.git/config`. `fr init` runs it for you inside a repo.
 
   It also **collapses legacy per-file `.gitignore` entries** into the blanket `frame/.*` pattern. Only lines it can name are removed — an exact match for a working-copy-local frame file, in any of its usual spellings, that the pattern genuinely covers. Unrecognised entries, nested ones like `frame/archive/.keep`, and negations are left alone. Outside a git repository it reports that there is nothing to configure and writes nothing.
+- **`fr check` reports `ref:`/`spec:` paths that resolve here and nowhere else** — `ref_outside_project` for an absolute or escaping path, `ref_gitignored` for one git is ignoring. The same rule `fr ref add` enforces, applied to values already in a file: written before the rule existed, past it with `--force`, in the TUI, or by hand.
+
+  **Warnings, not errors.** These paths resolve — nothing about the project is invalid on this machine, and errors exit non-zero, so a project that passed yesterday should not fail because a rule was added today. No `--fix`: which file inside the project was meant is a guess, and un-ignoring one is a decision about the repository, not the task.
+
+  The gitignore half makes one batched `git check-ignore` call for the whole project rather than one per reference, and is silent outside a repo or when a file is tracked despite a rule.
+
 - **`fr check` warns when the merge driver is not registered in this clone.** `.gitattributes` is committed and arrives with a clone; the driver is in `.git/config`, which cannot be. So a teammate who clones a correctly-configured project silently falls back to line-based merges. This warning is the only thing that tells a fresh clone to run `fr git setup`. Like the existing local-file leak guard, it is a no-op outside git or when `git` cannot be run.
 - **`conflict:` task metadata**, written by `fr merge` and cleared by `fr merge --resolve`. Reported by `fr check` as an error and exposed as `conflict` in `--json` task output.
 

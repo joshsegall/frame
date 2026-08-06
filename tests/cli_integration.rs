@@ -1770,6 +1770,66 @@ fn test_path_field_gitignore_check_is_a_no_op_outside_a_repo() {
     }
 }
 
+/// `fr check` applies the same rule to values already in the file — written by
+/// `--force`, by an older `fr`, by the TUI, or by hand. As **warnings**: the
+/// paths resolve, so nothing here is invalid, and a policy added later must not
+/// turn a passing project red.
+#[test]
+fn test_check_warns_about_refs_that_will_not_travel_without_failing() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    if project_ignoring_scratch(tmp.path()).is_none() {
+        return; // git unavailable
+    }
+    let absolute = tmp
+        .path()
+        .join("doc/design.md")
+        .to_string_lossy()
+        .into_owned();
+    for path in [absolute.as_str(), "scratch/notes.md"] {
+        run_fr_ok(tmp.path(), &["ref", "M-001", "add", path, "--force"]);
+    }
+
+    let (stdout, _, ok) = run_fr(tmp.path(), &["check"]);
+    assert!(ok, "warnings must not fail the check: {}", stdout);
+    assert!(stdout.contains("is absolute"), "{}", stdout);
+    assert!(stdout.contains("ignored by git"), "{}", stdout);
+
+    // And the same two findings in `--json`, since both surfaces must agree.
+    let (json, _, ok) = run_fr(tmp.path(), &["check", "--json"]);
+    assert!(ok);
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let tags: Vec<&str> = value["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|w| w["type"].as_str())
+        .collect();
+    assert!(
+        tags.contains(&"ref_outside_project") && tags.contains(&"ref_gitignored"),
+        "{:?}",
+        tags
+    );
+}
+
+/// A ref that resolves and stays inside says nothing, in a project where the
+/// checks are live. Guards the finding against firing on ordinary refs.
+#[test]
+fn test_check_is_silent_about_an_ordinary_ref() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    if project_ignoring_scratch(tmp.path()).is_none() {
+        return;
+    }
+    run_fr_ok(tmp.path(), &["ref", "M-001", "add", "doc/design.md"]);
+
+    let (stdout, _, ok) = run_fr(tmp.path(), &["check"]);
+    assert!(ok, "{}", stdout);
+    assert!(
+        !stdout.contains("is absolute") && !stdout.contains("ignored by git"),
+        "{}",
+        stdout
+    );
+}
+
 /// `rm` is never refused. An uncontained ref already in a file is exactly what
 /// someone needs to be able to take out.
 #[test]

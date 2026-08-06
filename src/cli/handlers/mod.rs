@@ -1565,6 +1565,33 @@ fn cmd_check(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
                         );
                         let _ = operation;
                     }
+                    check::CheckWarning::RefOutsideProject {
+                        track_id,
+                        task_id,
+                        field,
+                        path,
+                        reason,
+                    } => {
+                        println!(
+                            "  [{}] {} {}: {} {}",
+                            track_id, task_id, field, path, reason
+                        );
+                    }
+                    check::CheckWarning::RefGitignored {
+                        track_id,
+                        task_id,
+                        field,
+                        path,
+                    } => {
+                        println!(
+                            "  [{}] {} {}: {} {}",
+                            track_id,
+                            task_id,
+                            field,
+                            path,
+                            refs::PathRejection::Ignored.reason()
+                        );
+                    }
                 }
             }
         }

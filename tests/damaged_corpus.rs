@@ -381,6 +381,105 @@ const CASES: &[Case] = &[
         repair: Repair::None,
     },
     Case {
+        name: "ref-absolute",
+        provenance: "an absolute path pasted from an editor, a stack trace or a \
+                     shell — it resolves here, so nothing looked wrong",
+        covers: &["ref_outside_project"],
+        build: |root| {
+            // A file that genuinely exists, named from the filesystem root. This
+            // is the shape that made `fr check` call such a project valid: the
+            // ref is not broken, it is just meaningless anywhere else.
+            let absolute = root.join("frame/tracks/main.md");
+            append_backlog(
+                root,
+                &format!(
+                    "- [ ] `M-004` Points at itself the long way\n  - added: 2026-01-01\n  - ref: {}\n",
+                    absolute.display()
+                ),
+            );
+            Built::Ok
+        },
+        expect: &[warning(
+            "ref_outside_project",
+            &[
+                ("task_id", Match::Eq("M-004")),
+                ("field", Match::Eq("ref")),
+                ("path", Match::Suffix("frame/tracks/main.md")),
+            ],
+        )],
+        // Which file inside the project was meant is a guess, and dropping the
+        // ref discards intent — the same reasoning as `DanglingDep`.
+        repair: Repair::None,
+    },
+    Case {
+        name: "ref-escapes-upward",
+        provenance: "a ref to a sibling checkout, written from a machine that had \
+                     both",
+        covers: &["ref_outside_project"],
+        build: |root| {
+            append_backlog(
+                root,
+                "- [ ] `M-004` Points next door\n  - added: 2026-01-01\n  - spec: ../other-repo/doc/api.md\n",
+            );
+            Built::Ok
+        },
+        // Both findings, and the pair is the point: the escape is reported
+        // whether or not anything is there, and here nothing is, so it is a
+        // broken spec as well. Neither finding subsumes the other.
+        expect: &[
+            error(
+                "broken_spec",
+                &[
+                    ("task_id", Match::Eq("M-004")),
+                    ("path", Match::Eq("../other-repo/doc/api.md")),
+                ],
+            ),
+            warning(
+                "ref_outside_project",
+                &[
+                    ("task_id", Match::Eq("M-004")),
+                    ("field", Match::Eq("spec")),
+                    ("path", Match::Eq("../other-repo/doc/api.md")),
+                ],
+            ),
+        ],
+        repair: Repair::None,
+    },
+    Case {
+        name: "ref-gitignored",
+        provenance: "a ref to a scratch file or a build artifact — present in the \
+                     working copy that wrote it, absent from every clone",
+        covers: &["ref_gitignored"],
+        build: |root| {
+            if !git(root, &["init", "-q"]) {
+                return Built::Skipped("git unavailable");
+            }
+            register_merge_driver(root);
+            // Everything else about the repo is right, so this case reports one
+            // thing.
+            std::fs::write(root.join(".gitignore"), "frame/.*\nscratch/\n").unwrap();
+            std::fs::create_dir_all(root.join("scratch")).unwrap();
+            std::fs::write(root.join("scratch/notes.md"), "notes\n").unwrap();
+            append_backlog(
+                root,
+                "- [ ] `M-004` Points at a scratch file\n  - added: 2026-01-01\n  - ref: scratch/notes.md\n",
+            );
+            Built::Ok
+        },
+        // Not a broken ref: the file is there. That is exactly what makes it
+        // worth reporting — nothing else would ever say so.
+        expect: &[warning(
+            "ref_gitignored",
+            &[
+                ("task_id", Match::Eq("M-004")),
+                ("field", Match::Eq("ref")),
+                ("path", Match::Eq("scratch/notes.md")),
+            ],
+        )],
+        // Un-ignoring the file is a decision about the repository, not the task.
+        repair: Repair::None,
+    },
+    Case {
         name: "duplicate-id",
         provenance: "a three-way merge kept both sides of a task added on two branches",
         covers: &["duplicate_id"],
