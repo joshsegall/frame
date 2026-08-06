@@ -884,6 +884,21 @@ pub(super) fn palette_check_project(app: &mut App) {
                         archives.join(", ")
                     )
                 }
+                check::CheckWarning::ArchivedPrefixStale {
+                    archive,
+                    found,
+                    expected,
+                    task_ids,
+                    ..
+                } => {
+                    format!(
+                        "  {} id(s) in {} still on {}- — track uses {}- now",
+                        task_ids.len(),
+                        archive,
+                        found,
+                        expected
+                    )
+                }
                 check::CheckWarning::IdFrontierUnreadable { path, detail } => {
                     format!("  ID frontier {} is unreadable ({})", path, detail)
                 }

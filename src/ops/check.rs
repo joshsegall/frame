@@ -299,6 +299,32 @@ pub enum CheckWarning {
         /// every copy, which is the usual shape).
         archives: Vec<String>,
     },
+    /// Archived tasks carrying an ID prefix their track no longer uses.
+    ///
+    /// `fr track rename --prefix` renames the live tasks and the archive. Until
+    /// it was fixed it renamed only the live ones — it read the archive as a
+    /// track, found no `## Section` headers, and wrote nothing — so a project
+    /// renamed before that has archived IDs on the old prefix to this day, and
+    /// nothing said so: the command reported success and `fr check` called the
+    /// result valid.
+    ///
+    /// Latent rather than broken, which is why it is a warning. The archived
+    /// tasks are still readable and still unique. What makes it worth reporting
+    /// is what happens if that abandoned prefix is ever handed to another track:
+    /// the new track mints from its own files, cannot see this archive, and
+    /// reissues numbers it already holds.
+    #[serde(rename = "archived_prefix_stale")]
+    ArchivedPrefixStale {
+        track_id: String,
+        /// The archive holding them, as check reports paths elsewhere.
+        archive: String,
+        /// The prefix on the archived IDs.
+        found: String,
+        /// The prefix the track uses now.
+        expected: String,
+        /// The IDs involved, sorted.
+        task_ids: Vec<String>,
+    },
     /// The durable ID frontier store exists but doesn't parse. The next mint
     /// moves it aside and falls back to scanning, which cannot see another
     /// worktree's uncommitted tasks — so IDs can collide until it refills.
@@ -394,6 +420,7 @@ pub fn check_project(project: &Project) -> CheckResult {
     // Numbers handed out twice, where one holder is archived (invisible to the
     // live-tracks-only duplicate check above).
     check_archived_id_collisions(project, &mut result);
+    check_archived_prefixes(project, &mut result);
 
     // The track roster in `project.toml` against what is actually in `tracks/`.
     // Every other check here runs over `project.tracks`, which only holds what
@@ -927,6 +954,57 @@ fn check_archived_id_collisions(project: &Project, result: &mut CheckResult) {
                 task_id: id.clone(),
                 total: in_archives.len(),
                 archives: dedup_sorted(in_archives),
+            });
+        }
+    }
+}
+
+/// Flag archived IDs whose prefix is not the one their track uses now.
+///
+/// Only the per-track done archives: `archive/<track>.md` is the file
+/// `fr track rename --prefix` is responsible for, and the one it used to skip.
+/// A whole archived track under `_tracks/` is not renamed by anything, so
+/// reporting it would be a finding with no fix and no fault.
+fn check_archived_prefixes(project: &Project, result: &mut CheckResult) {
+    use std::collections::BTreeMap;
+
+    let Ok(archives) = crate::io::project_io::load_archives(&project.frame_dir) else {
+        return;
+    };
+    let mut archives = archives;
+    archives.sort_by(|a, b| a.0.cmp(&b.0));
+
+    for (track_id, tasks) in archives {
+        let Some(expected) = project.config.ids.prefixes.get(&track_id) else {
+            continue;
+        };
+
+        let mut by_prefix: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut ids: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        collect_id_locations(&tasks, &track_id, &mut ids);
+        for id in ids.keys() {
+            // A subtask id extends its parent's (`MAI-001.2`), so the prefix is
+            // still whatever sits before the first dash.
+            if let Some((prefix, _)) = id.split_once('-') {
+                by_prefix
+                    .entry(prefix.to_string())
+                    .or_default()
+                    .push(id.clone());
+            }
+        }
+
+        for (found, mut task_ids) in by_prefix {
+            if &found == expected {
+                continue;
+            }
+            task_ids.sort();
+            result.warnings.push(CheckWarning::ArchivedPrefixStale {
+                track_id: track_id.clone(),
+                archive: format!("archive/{}.md", track_id),
+                found,
+                expected: expected.clone(),
+                task_ids,
             });
         }
     }

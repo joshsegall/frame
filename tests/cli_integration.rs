@@ -3431,6 +3431,38 @@ fn test_check_fix_yes_dedupes_archive_and_logs_recovery() {
     );
 }
 
+/// The stale-prefix repair renames archived ids onto the track's current prefix
+/// — unless one of them would land on an id that already exists.
+///
+/// A partial rename is the bad outcome here: the archive would hold two prefixes
+/// with nothing recording which tasks moved, and the finding that explains it
+/// would be half-cleared. So one collision refuses the whole file and the
+/// warning stays.
+#[test]
+fn test_check_fix_refuses_a_colliding_archived_prefix_rename() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    fs::create_dir_all(tmp.path().join("frame/archive")).unwrap();
+    // M-001 is live in the fixture, so OLD-001 has nowhere to go.
+    let archive = "# Archive — main\n\n- [x] `OLD-001` archived under a dead prefix\n  - resolved: 2025-12-01\n";
+    fs::write(tmp.path().join("frame/archive/main.md"), archive).unwrap();
+
+    let out = run_fr_ok(tmp.path(), &["check", "--fix", "--yes"]);
+    assert!(
+        out.contains("skipped") && out.contains("already exists"),
+        "the repair should refuse and say why: {out}"
+    );
+    assert_eq!(
+        fs::read_to_string(tmp.path().join("frame/archive/main.md")).unwrap(),
+        archive,
+        "a refused repair must not half-rename the file"
+    );
+    assert!(
+        run_fr_ok(tmp.path(), &["check"]).contains("still use the prefix OLD-"),
+        "and the warning stays"
+    );
+}
+
 /// The damage `fr clean` used to leave behind: a duplicated *subtask* id
 /// resolved with a top-level number, so the task ends up as `M-020` nested under
 /// `M-003`. Projects cleaned before that was fixed still hold it on disk, which

@@ -1524,6 +1524,23 @@ fn cmd_check(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
                             archives.join(", ")
                         );
                     }
+                    check::CheckWarning::ArchivedPrefixStale {
+                        archive,
+                        found,
+                        expected,
+                        task_ids,
+                        ..
+                    } => {
+                        println!(
+                            "  {} archived id(s) in {} still use the prefix {}-, but the track uses {}- now ({}) — a prefix rename that did not reach the archive. Harmless until {}- is given to another track, which would then reissue these numbers",
+                            task_ids.len(),
+                            archive,
+                            found,
+                            expected,
+                            task_ids.join(", "),
+                            found
+                        );
+                    }
                     check::CheckWarning::IdFrontierUnreadable { path, detail } => {
                         println!(
                             "  the ID frontier at {} is unreadable ({}) — the next mint resets it and falls back to scanning, which can't see another worktree's uncommitted tasks. Fix or delete the file",

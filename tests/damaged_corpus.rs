@@ -687,6 +687,35 @@ const CASES: &[Case] = &[
         repair: Repair::Clears,
     },
     Case {
+        name: "archived-prefix-stale",
+        provenance: "`fr track rename --prefix` before it reached the archive: it read the \
+                     archive as a track, found no sections, and renamed only the live tasks",
+        covers: &["archived_prefix_stale"],
+        build: |root| {
+            // The track's prefix is M. These archived ids are on the prefix it
+            // had before someone renamed it, which is the state that rename left
+            // on disk — and which nothing reported.
+            // Numbers the live track does not use: the repair refuses on any
+            // collision, and a collision here would be testing that instead.
+            write_archive(
+                root,
+                "# Archive — main\n\n- [x] `OLD-050` Archived before the rename\n  - resolved: 2025-12-01\n- [x] `OLD-051` Also before it\n  - resolved: 2025-12-02\n",
+            );
+            Built::Ok
+        },
+        expect: &[warning(
+            "archived_prefix_stale",
+            &[
+                ("track_id", Match::Eq("main")),
+                ("archive", Match::Eq("archive/main.md")),
+                ("found", Match::Eq("OLD")),
+                ("expected", Match::Eq("M")),
+                ("task_ids", Match::Eq("OLD-050,OLD-051")),
+            ],
+        )],
+        repair: Repair::Clears,
+    },
+    Case {
         name: "actor-token-unregistered",
         provenance: "the committed registry lost this clone's claim in a merge",
         covers: &["actor_token_unregistered"],

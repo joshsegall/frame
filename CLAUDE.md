@@ -38,8 +38,8 @@ Frame is a markdown-based task tracker (TUI + CLI) where `.md` files are the sou
 
 ### Module Layout
 
-- **`src/model/`** — Data types: `Task`, `Track`, `Inbox`, `ProjectConfig`, `Project`
-- **`src/parse/`** — Markdown parser and serializer pairs for tasks, tracks, and inbox
+- **`src/model/`** — Data types: `Task`, `Track`, `Archive`, `Inbox`, `ProjectConfig`, `Project`
+- **`src/parse/`** — Markdown parser and serializer pairs for tasks, tracks, archives, and inbox
 - **`src/io/`** — Project discovery, file locking, config I/O, UI state persistence, file watcher, project registry, durable ID frontier (`ids.rs`), in-flight operation marker (`inflight.rs`), debug-only write fault injection (`fault.rs`)
 - **`src/ops/`** — Business logic: task CRUD, ID minting (`ids.rs` — the one chokepoint), track management, inbox, search, clean, check, automatic repair (`fix.rs`), interrupted-operation recovery (`recover.rs`), import
 - **`src/cli/`** — CLI interface (clap commands, handlers, JSON/human output)
@@ -97,7 +97,7 @@ Each answers a different question; a new test usually belongs in one of them rat
 | Suite | Question it answers |
 |---|---|
 | `round_trip.rs` | does a fixture survive parse → serialize? |
-| `parse_properties.rs` | P1–P6 on the **parse/serialize pair**: no panic, content preserved, conserved against ground truth, converges, every line accounted for, line ending kept |
+| `parse_properties.rs` | P1–P6 on each **parse/serialize pair** (track, archive, inbox): no panic, content preserved, conserved against ground truth, converges, every line accounted for, line ending kept |
 | `conservation.rs` | P7 on **operation sequences**: does a random run of real ops lose a title, an ID, or a line frame does not own — and does every file it writes land settled? |
 | `damaged_corpus.rs` | does `fr check` report **exactly** the right findings for a known-damaged project, and repair exactly what it claims? |
 | `merge_simulation.rs` | do independent actors minting IDs concurrently ever collide? |

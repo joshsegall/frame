@@ -98,6 +98,17 @@ pub enum Repair {
         /// Archive paths holding it, as check reports them.
         archives: Vec<String>,
     },
+    /// Put archived IDs back on the prefix their track uses now. **Destructive**
+    /// — the old IDs stop existing, exactly as a prefix rename intends.
+    #[serde(rename = "restore_archived_prefix")]
+    RestoreArchivedPrefix {
+        track_id: String,
+        archive: String,
+        from: String,
+        to: String,
+        /// How many IDs the rename covers.
+        count: usize,
+    },
     /// Remove the leftover frontier-store backup. **Destructive.**
     #[serde(rename = "remove_frontier_backup")]
     RemoveFrontierBackup { path: String },
@@ -168,6 +179,7 @@ impl Repair {
             Repair::DedupeArchivedTask { .. }
             | Repair::RemoveFrontierBackup { .. }
             | Repair::ClearInflightMarker { .. }
+            | Repair::RestoreArchivedPrefix { .. }
             | Repair::RenumberSubtask { .. } => true,
         }
     }
@@ -203,6 +215,19 @@ impl Repair {
                     total - 1,
                     if *total == 2 { "y" } else { "ies" },
                     archives.join(", ")
+                )
+            }
+            Repair::RestoreArchivedPrefix {
+                archive,
+                from,
+                to,
+                count,
+                ..
+            } => {
+                format!(
+                    "{archive}: rename {count} archived id{} from {from}- to {to}-, \
+                     the prefix the track uses now",
+                    if *count == 1 { "" } else { "s" }
                 )
             }
             Repair::RemoveFrontierBackup { path } => {
@@ -309,6 +334,19 @@ pub fn plan(check: &CheckResult) -> Vec<Repair> {
                 task_id: task_id.clone(),
                 total: *total,
                 archives: archives.clone(),
+            }),
+            CheckWarning::ArchivedPrefixStale {
+                track_id,
+                archive,
+                found,
+                expected,
+                task_ids,
+            } => plan.push(Repair::RestoreArchivedPrefix {
+                track_id: track_id.clone(),
+                archive: archive.clone(),
+                from: found.clone(),
+                to: expected.clone(),
+                count: task_ids.len(),
             }),
             CheckWarning::ChildIdNotUnderParent {
                 track_id,
@@ -447,6 +485,15 @@ pub fn apply(project: &mut Project, plan: &[Repair]) -> FixResult {
                     reason,
                 }),
             },
+            Repair::RestoreArchivedPrefix {
+                track_id, from, to, ..
+            } => match apply_restore_archived_prefix(project, track_id, from, to) {
+                Ok(()) => result.applied.push(repair.clone()),
+                Err(reason) => result.skipped.push(SkippedRepair {
+                    repair: repair.clone(),
+                    reason,
+                }),
+            },
             Repair::RenumberSubtask {
                 track_id,
                 task_id,
@@ -563,6 +610,90 @@ fn dedupe_archived(frame_dir: &Path, task_id: &str, archives: &[String]) -> Resu
         Ok(())
     } else {
         Err(format!("{task_id} no longer appears in the archives"))
+    }
+}
+
+/// Put a track's archived IDs back on the prefix the track uses now.
+///
+/// The repair for damage `fr track rename --prefix` used to leave behind: it
+/// renamed the live tasks and silently skipped the archive, so the archived IDs
+/// still carry a prefix nothing owns.
+///
+/// **Refuses rather than renames on any collision.** Every target ID is checked
+/// against every ID in the project first — live tracks and all archives,
+/// including this one, since an archive can already hold both prefixes if a
+/// clean ran after a rename. One collision skips the whole file: a partial
+/// rename would leave the archive holding two prefixes with no record of which
+/// tasks moved, and the finding stays to say so.
+fn apply_restore_archived_prefix(
+    project: &Project,
+    track_id: &str,
+    from: &str,
+    to: &str,
+) -> Result<(), String> {
+    let path = project
+        .frame_dir
+        .join("archive")
+        .join(format!("{track_id}.md"));
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    let mut archive = crate::parse::parse_archive(&content);
+
+    let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (_, track) in &project.tracks {
+        for node in &track.nodes {
+            if let crate::model::track::TrackNode::Section { tasks, .. } = node {
+                collect_all_ids(tasks, &mut taken);
+            }
+        }
+    }
+    if let Ok(archives) = crate::io::project_io::load_archives(&project.frame_dir) {
+        for (_, tasks) in archives {
+            collect_all_ids(&tasks, &mut taken);
+        }
+    }
+
+    let old_dash = format!("{from}-");
+    let new_dash = format!("{to}-");
+    let mut renaming = Vec::new();
+    collect_prefixed_ids(&archive.tasks, &old_dash, &mut renaming);
+    for id in &renaming {
+        let target = format!("{new_dash}{}", &id[old_dash.len()..]);
+        if taken.contains(&target) {
+            return Err(format!(
+                "{id} would become {target}, which already exists — rename it by hand"
+            ));
+        }
+    }
+
+    let count = crate::ops::track_ops::rename_task_ids(&mut archive.tasks, from, to);
+    if count == 0 {
+        return Err(format!("no {from}- ids remain in archive/{track_id}.md"));
+    }
+    crate::io::recovery::atomic_write(&path, crate::parse::serialize_archive(&archive).as_bytes())
+        .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    Ok(())
+}
+
+/// Every ID in `tasks`, including subtasks.
+fn collect_all_ids(tasks: &[Task], out: &mut std::collections::HashSet<String>) {
+    for task in tasks {
+        if let Some(id) = &task.id {
+            out.insert(id.to_string());
+        }
+        collect_all_ids(&task.subtasks, out);
+    }
+}
+
+/// Every ID under `prefix_dash` in `tasks`, including subtasks.
+fn collect_prefixed_ids(tasks: &[Task], prefix_dash: &str, out: &mut Vec<String>) {
+    for task in tasks {
+        if let Some(id) = &task.id
+            && id.as_str().starts_with(prefix_dash)
+        {
+            out.push(id.to_string());
+        }
+        collect_prefixed_ids(&task.subtasks, prefix_dash, out);
     }
 }
 
@@ -817,8 +948,15 @@ mod tests {
             CheckWarning::IdFrontierWasReset {
                 path: "/x/frame-ids.toml.bak".into(),
             },
+            CheckWarning::ArchivedPrefixStale {
+                track_id: "t".into(),
+                archive: "archive/t.md".into(),
+                found: "OLD".into(),
+                expected: "T".into(),
+                task_ids: vec!["OLD-050".into()],
+            },
         ]));
-        assert_eq!(plan.len(), 4);
+        assert_eq!(plan.len(), 5);
     }
 
     /// The findings with no safe automatic repair must produce nothing. If a new

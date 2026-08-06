@@ -46,7 +46,11 @@ One consequence worth knowing: `trailing_lines` must be emitted after all of a t
 
 **Boundary rule**: The task parser stops at blank lines. The track parser handles inter-section blank lines as trailing content on the preceding section or leading content on the next header. Getting this boundary wrong causes blank lines to accumulate or disappear on repeated save cycles.
 
-**Code**: `src/parse/task_parser.rs`, `src/parse/task_serializer.rs`, `src/parse/track_parser.rs`, `src/parse/track_serializer.rs`
+A blank at the *end* of a stranded run is dropped by both anchors. Inside a run it is content — it keeps two stranded paragraphs from being glued together — but a blank between the run and the task below separates the two and belongs to neither. The anchors have to agree about this, because which one claims a given line depends only on that line's indent: when they disagreed, one write emitted the blank and the next re-read the run under the other anchor and dropped it, so a single edit changed the file twice. P6's fixpoint check is what states that.
+
+**One format, one parser.** Every file shape under `frame/` has exactly one parse/serialize pair, and reading a file with the wrong one is a real and recurring bug rather than a hypothetical. A done-task archive (`archive/<track>.md`) is a bare task list under an `# Archive` heading with no `## Section` headers; an archived whole track (`archive/_tracks/<track>.md`) is a track file moved there intact. Reading the first as a track finds no sections, so a repair or a rename "succeeds" having changed nothing; reading the second as a task list stops at its first section header, so a rewrite deletes every section below. Both have happened, in `ops/fix.rs`, `ops/track_ops.rs` and `fr actor merge` respectively. `parse_archive`/`serialize_archive` exist so there is one answer, and it carries the header, the tail below the last task, and the file's line ending — the three things four hand-rolled readers each dropped.
+
+**Code**: `src/parse/task_parser.rs`, `src/parse/task_serializer.rs`, `src/parse/track_parser.rs`, `src/parse/track_serializer.rs`, `src/parse/archive_parser.rs`, `src/parse/archive_serializer.rs`
 
 ## Task ID System
 

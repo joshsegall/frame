@@ -199,6 +199,40 @@ The ending is a property of the writer, not of the model's line content — the 
 
 Every file frame writes ends with exactly one terminal newline, whatever the ending. This is added if the file lacked one.
 
+## Archive Files
+
+Two different files live under `frame/archive/`, and they are **not** the same shape. Reading one as the other loses data, which has happened in both directions.
+
+### `archive/<track>.md` — a done-task archive
+
+Written by `fr clean` when a track's `## Done` section passes its threshold. A heading, then a flat task list — **no `## Section` headers at all**:
+
+```markdown
+# Archive — main
+
+- [x] `MAI-002` Second task
+  - added: 2026-08-01
+  - resolved: 2026-08-05
+- [x] `MAI-001` First task
+  - resolved: 2026-08-04
+```
+
+Task syntax, metadata and nesting are exactly as in a track file. The file has three parts:
+
+- **Header** — everything above the first task line. The heading, the blank under it, and anything a person added. Carried verbatim through any rewrite.
+- **Tasks** — the flat list. New tasks are appended after the last one.
+- **Tail** — anything below the last task the parser will claim: a note, a rule, an HTML comment. Also carried verbatim.
+
+Because there are no sections, walking `## Section` headers finds nothing in one. Parse it with `parse_archive`, never `parse_track`.
+
+The first task line is found with the parser's own definition of a task line, at any indent. A bullet that merely *looks* like one — an ordinary markdown link, `- [notes](x.md)` — is header text, not the start of the list.
+
+### `archive/_tracks/<track>.md` — an archived whole track
+
+Written by `fr track archive`, which moves the track file there intact. It **is** a track file, sections and all, and parses as one. `fr track activate` moves it back.
+
+Archived task IDs keep the prefix of the track they belong to; `fr track rename --prefix` renames them alongside the live ones, and `fr check` reports any left on a prefix the track no longer uses.
+
 ## Inbox File
 
 `inbox.md` uses a simpler format — list items with no checkboxes or IDs:
