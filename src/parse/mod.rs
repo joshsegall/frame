@@ -1,3 +1,5 @@
+pub mod archive_parser;
+pub mod archive_serializer;
 pub mod inbox_parser;
 pub mod inbox_serializer;
 pub mod span;
@@ -96,6 +98,8 @@ pub(crate) fn pop_trailing_blanks(lines: &mut Vec<String>) {
     }
 }
 
+pub use archive_parser::parse_archive;
+pub use archive_serializer::serialize_archive;
 pub use inbox_parser::parse_inbox;
 pub use inbox_serializer::serialize_inbox;
 pub use task_parser::{parse_tasks, parse_title_and_tags};

@@ -392,7 +392,14 @@ pub fn parse_title_and_tags(s: &str) -> (String, Vec<String>) {
 
 /// Check if a line is a task line (starts with `- [` at some indent)
 /// Returns the indent level if it is.
-fn task_indent(line: &str) -> Option<usize> {
+///
+/// The one definition of "is this a task line", and the one every reader should
+/// ask. A looser spelling of it (`line.starts_with("- [")`) also matches an
+/// ordinary markdown link bullet, which is how a header line could hide an
+/// entire archive from the code that reads it — see [`parse_archive`].
+///
+/// [`parse_archive`]: crate::parse::parse_archive
+pub(crate) fn task_indent(line: &str) -> Option<usize> {
     let indent = count_indent(line);
     let content = &line[indent..];
     if content.starts_with("- [") && content.len() >= 5 && content.as_bytes().get(4) == Some(&b']')
