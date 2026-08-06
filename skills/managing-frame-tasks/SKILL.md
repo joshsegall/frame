@@ -67,6 +67,11 @@ location is kept and never validated. `fr check` reports a path with no file
 behind it as an error, and `fr ref`/`fr spec` refuse to write one (pass
 `--force` for a file you are about to create).
 
+Paths are stored folded — `./sub/../real.md` is stored as `real.md` — and `add`,
+`rm` and `set` match that way, so any spelling of a file reaches it and a list
+never holds one file twice. The location suffix is part of the identity:
+`rm src/parser.rs` does not remove `src/parser.rs:807`.
+
 Subtasks nest up to 3 levels. Position in the backlog *is* priority —
 there are no priority fields.
 

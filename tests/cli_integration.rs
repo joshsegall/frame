@@ -1196,6 +1196,215 @@ fn test_path_field_rm_of_an_absent_path_says_so() {
     }
 }
 
+/// Write a `ref:`/`spec:` value into the track file directly, bypassing the CLI.
+///
+/// The only way to produce a value in a spelling frame would no longer write —
+/// which is exactly the case that matters, since the point of matching by normal
+/// form is to reach values written before normalization existed. Any project
+/// touched by an older `fr` can hold these.
+fn store_raw_path_value(root: &Path, field: &str, value: &str) {
+    let path = root.join("frame/tracks/main.md");
+    let track = fs::read_to_string(&path).unwrap();
+    let updated = track.replace(
+        "- [ ] `M-001` First task #core\n  - added: 2025-05-01\n",
+        &format!(
+            "- [ ] `M-001` First task #core\n  - added: 2025-05-01\n  - {}: {}\n",
+            field, value
+        ),
+    );
+    assert_ne!(
+        track, updated,
+        "fixture shape changed; nothing was injected"
+    );
+    fs::write(&path, updated).unwrap();
+}
+
+/// One file has many spellings. The one that gets stored is the folded one, so
+/// the list reads as a set of files rather than a set of strings.
+#[test]
+fn test_path_field_stores_the_normal_form() {
+    for field in PATH_FIELDS {
+        let tmp = tempfile::TempDir::new().unwrap();
+        create_test_project(tmp.path());
+        create_ref_targets(tmp.path());
+
+        let out = run_fr_ok(
+            tmp.path(),
+            &[field, "M-001", "add", "./doc/../doc/design.md"],
+        );
+        assert!(out.contains("doc/design.md"), "{}: {}", field, out);
+        assert!(
+            !out.contains(".."),
+            "{} echoed the raw spelling: {}",
+            field,
+            out
+        );
+
+        let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+        assert!(
+            track.contains(&format!("{}: doc/design.md", field)),
+            "{} stored an unfolded path:\n{}",
+            field,
+            track
+        );
+    }
+}
+
+/// The suffix rides through normalization untouched.
+#[test]
+fn test_path_field_normalizes_without_disturbing_the_suffix() {
+    for field in PATH_FIELDS {
+        let tmp = tempfile::TempDir::new().unwrap();
+        create_test_project(tmp.path());
+        create_ref_targets(tmp.path());
+
+        run_fr_ok(
+            tmp.path(),
+            &[
+                field,
+                "M-001",
+                "add",
+                "./doc/../doc/design.md#rationale",
+                "./src/../src/parser.rs:807",
+            ],
+        );
+        let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+        assert!(
+            track.contains(&format!(
+                "{}: doc/design.md#rationale, src/parser.rs:807",
+                field
+            )),
+            "{}:\n{}",
+            field,
+            track
+        );
+    }
+}
+
+/// `rm` matches by normal form, so the argument reaches the stored value
+/// whichever of the two carries the awkward spelling.
+#[test]
+fn test_path_field_rm_matches_an_equivalent_spelling() {
+    for field in PATH_FIELDS {
+        // Stored folded, asked for unfolded.
+        let tmp = tempfile::TempDir::new().unwrap();
+        create_test_project(tmp.path());
+        create_ref_targets(tmp.path());
+        run_fr_ok(tmp.path(), &[field, "M-001", "add", "doc/design.md"]);
+        let out = run_fr_ok(
+            tmp.path(),
+            &[field, "M-001", "rm", "./doc/../doc/design.md"],
+        );
+        assert!(out.contains("removed"), "{}: {}", field, out);
+        let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+        assert!(!track.contains("design.md"), "{}:\n{}", field, track);
+
+        // Stored unfolded — a value from before normalization existed — and
+        // asked for folded. This is the direction that was unreachable.
+        let tmp = tempfile::TempDir::new().unwrap();
+        create_test_project(tmp.path());
+        create_ref_targets(tmp.path());
+        store_raw_path_value(tmp.path(), field, "./doc/../doc/design.md");
+        let out = run_fr_ok(tmp.path(), &[field, "M-001", "rm", "doc/design.md"]);
+        assert!(out.contains("removed"), "{}: {}", field, out);
+        // The message names what actually left the file, not what was typed.
+        assert!(
+            out.contains("./doc/../doc/design.md"),
+            "{} reported the argument rather than the stored value: {}",
+            field,
+            out
+        );
+        let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+        assert!(!track.contains("design.md"), "{}:\n{}", field, track);
+    }
+}
+
+/// Dedup matches by normal form too, or `add` appends a second entry for a file
+/// the task already carries under another spelling.
+#[test]
+fn test_path_field_add_does_not_duplicate_an_equivalent_spelling() {
+    for field in PATH_FIELDS {
+        let tmp = tempfile::TempDir::new().unwrap();
+        create_test_project(tmp.path());
+        create_ref_targets(tmp.path());
+        store_raw_path_value(tmp.path(), field, "./doc/../doc/design.md");
+
+        let out = run_fr_ok(tmp.path(), &[field, "M-001", "add", "doc/design.md"]);
+        assert!(out.contains("unchanged"), "{}: {}", field, out);
+
+        let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+        assert_eq!(
+            track.matches("design.md").count(),
+            1,
+            "{} stored one file twice:\n{}",
+            field,
+            track
+        );
+    }
+}
+
+/// The suffix is part of the identity: a ref to a file and a ref to a line in it
+/// are different references, and removing one must not take the other.
+#[test]
+fn test_path_field_rm_keeps_a_line_reference_apart() {
+    for field in PATH_FIELDS {
+        let tmp = tempfile::TempDir::new().unwrap();
+        create_test_project(tmp.path());
+        create_ref_targets(tmp.path());
+
+        run_fr_ok(
+            tmp.path(),
+            &[field, "M-001", "add", "src/parser.rs", "src/parser.rs:807"],
+        );
+        run_fr_ok(tmp.path(), &[field, "M-001", "rm", "src/parser.rs"]);
+
+        let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+        assert!(
+            track.contains(&format!("{}: src/parser.rs:807", field)),
+            "{} removed the line reference too:\n{}",
+            field,
+            track
+        );
+    }
+}
+
+/// `set` is the one door through which a list could be handed two spellings of
+/// one file at once.
+#[test]
+fn test_path_field_set_dedupes_equivalent_spellings() {
+    for field in PATH_FIELDS {
+        let tmp = tempfile::TempDir::new().unwrap();
+        create_test_project(tmp.path());
+        create_ref_targets(tmp.path());
+
+        let out = run_fr_ok(
+            tmp.path(),
+            &[
+                field,
+                "M-001",
+                "set",
+                "doc/design.md",
+                "./doc/../doc/design.md",
+                "src/parser.rs",
+            ],
+        );
+        assert!(
+            out.contains("set: doc/design.md, src/parser.rs"),
+            "{} reported what it was handed rather than what it stored: {}",
+            field,
+            out
+        );
+
+        let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+        assert!(
+            track.contains(&format!("{}: doc/design.md, src/parser.rs", field)),
+            "{}:\n{}",
+            field,
+            track
+        );
+    }
+}
+
 #[test]
 fn test_path_field_unknown_action_is_refused() {
     for field in PATH_FIELDS {

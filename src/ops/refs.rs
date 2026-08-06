@@ -16,6 +16,13 @@
 //! line number goes stale on the next edit above it; neither is a broken
 //! reference in the sense worth reporting, and frame does not read the target to
 //! find out.
+//!
+//! It also says how a value is **spelled** ([`normalize`]). One file has many
+//! spellings — `real.md`, `./real.md`, `sub/../real.md` — and every one of them
+//! resolves, so a stored list could carry the same file twice and `rm` could
+//! fail to find what was plainly there. Storing the normal form and comparing by
+//! it is what makes the list behave like a set of files rather than a set of
+//! strings.
 
 use std::path::Path;
 
@@ -66,6 +73,67 @@ fn is_line_segment(s: &str) -> bool {
     };
     let digits = |x: &str| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit());
     digits(start) && end.is_none_or(digits)
+}
+
+/// The value with `.` and `..` segments folded away, so that every spelling of
+/// one file gives one string.
+///
+/// **Lexical, and over the whole value.** Nothing is read from disk, so a
+/// symlink cannot change the answer and a path that does not exist normalizes
+/// just as well as one that does. Folding runs over `/`-separated segments of
+/// the entire value rather than a stripped path part, which is what keeps the
+/// suffix safe: neither a `#anchor` nor a `:line` can contain a `/`, so
+/// `./sub/../real.md:807` folds to `real.md:807` while `doc/issue#3.md` and
+/// `src/odd:9.rs` are left exactly as they are. Doing it the other way round
+/// would mean choosing a candidate first — and `candidates` tries the literal
+/// value ahead of the stripped ones precisely because that choice cannot be made
+/// reliably.
+///
+/// Two things survive folding on purpose: a leading `/`, so the value stays
+/// absolute, and a leading `..` with nothing to pop, so it still escapes.
+/// Whether either is *allowed* is a separate question from how it is spelled.
+pub fn normalize(value: &str) -> String {
+    let value = value.trim();
+    // An empty value stays empty. Folding it to `.` would name the project root,
+    // which exists — turning a value `exists` refuses into one it accepts.
+    if value.is_empty() {
+        return String::new();
+    }
+    let absolute = value.starts_with('/');
+    let mut out: Vec<&str> = Vec::new();
+    for segment in value.split('/') {
+        match segment {
+            // `.` and the empty segment from `//` (or a trailing slash) carry no
+            // information; an absolute path's leading empty segment is already
+            // recorded in `absolute`.
+            "." | "" => {}
+            ".." => match out.last() {
+                // Nothing to cancel: at the root of an absolute path `..` is
+                // itself, and a leading `..` is kept so containment can see it.
+                None | Some(&"..") => out.push(segment),
+                Some(_) => {
+                    out.pop();
+                }
+            },
+            _ => out.push(segment),
+        }
+    }
+    let joined = out.join("/");
+    match (absolute, joined.is_empty()) {
+        (true, _) => format!("/{joined}"),
+        // Everything folded away — `./` or `sub/..` — which names the project
+        // root itself.
+        (false, true) => ".".to_string(),
+        (false, false) => joined,
+    }
+}
+
+/// Whether two values name the same file, whatever spelling each uses.
+///
+/// The suffix is part of the identity: `real.md` and `real.md:807` are different
+/// references, and removing one must not take the other with it.
+pub fn same_path(a: &str, b: &str) -> bool {
+    normalize(a) == normalize(b)
 }
 
 /// Whether a `ref:`/`spec:` value resolves to a file in the project.
@@ -143,6 +211,78 @@ mod tests {
         assert_eq!(strip_line_ref("src/parser.rs"), "src/parser.rs");
         assert_eq!(strip_line_ref("src/parser.rs:807"), "src/parser.rs");
         assert_eq!(strip_line_ref("src/parser.rs:807-820"), "src/parser.rs");
+    }
+
+    #[test]
+    fn normalize_folds_dot_and_dotdot() {
+        assert_eq!(normalize("./sub/../real.md"), "real.md");
+        assert_eq!(normalize("doc/../src/parser.rs"), "src/parser.rs");
+        assert_eq!(normalize("./real.md"), "real.md");
+        assert_eq!(normalize("a//b"), "a/b");
+        assert_eq!(normalize("doc/"), "doc");
+        assert_eq!(normalize("  real.md  "), "real.md");
+        // Already normal: folding is idempotent, which is what lets a stored
+        // value be compared against a fresh one without re-deriving either.
+        assert_eq!(normalize("src/parser.rs"), "src/parser.rs");
+        assert_eq!(normalize(normalize("./sub/../real.md").as_str()), "real.md");
+    }
+
+    /// The suffix rides along untouched — folding whole `/`-separated segments
+    /// cannot see inside one, which is the entire reason it is done that way.
+    #[test]
+    fn normalize_leaves_the_suffix_alone() {
+        assert_eq!(normalize("./sub/../real.md:807"), "real.md:807");
+        assert_eq!(normalize("./doc/../design.md#why"), "design.md#why");
+        assert_eq!(normalize("doc/issue#3.md"), "doc/issue#3.md");
+        assert_eq!(normalize("src/odd:9.rs"), "src/odd:9.rs");
+        assert_eq!(normalize("src/parser.rs:807-820"), "src/parser.rs:807-820");
+    }
+
+    /// Absoluteness and an unpoppable `..` are the two things a later
+    /// containment check needs to still be able to see.
+    #[test]
+    fn normalize_keeps_what_makes_a_path_escape() {
+        assert_eq!(normalize("../outside.md"), "../outside.md");
+        assert_eq!(normalize("a/../../b.md"), "../b.md");
+        assert_eq!(normalize("../../b.md"), "../../b.md");
+        assert_eq!(normalize("/etc/hosts"), "/etc/hosts");
+        assert_eq!(normalize("/etc/../etc/hosts"), "/etc/hosts");
+        // `..` above the root of an absolute path has nowhere to go.
+        assert_eq!(normalize("/../etc/hosts"), "/../etc/hosts");
+    }
+
+    /// A value that folds to the project root becomes `.` — but an *empty* one
+    /// stays empty, because `.` exists and empty does not, and normalization
+    /// must never turn a value `exists` refuses into one it accepts.
+    #[test]
+    fn normalize_handles_values_that_fold_to_nothing() {
+        assert_eq!(normalize("."), ".");
+        assert_eq!(normalize("./"), ".");
+        assert_eq!(normalize("sub/.."), ".");
+        assert_eq!(normalize(""), "");
+        assert_eq!(normalize("   "), "");
+        assert!(!exists(project().path(), &normalize("")));
+    }
+
+    /// A file with a name of its own that happens to contain `..` is not a
+    /// traversal — only a whole segment counts.
+    #[test]
+    fn normalize_does_not_fold_inside_a_segment() {
+        assert_eq!(normalize("doc/..hidden.md"), "doc/..hidden.md");
+        assert_eq!(normalize("doc/a..b.md"), "doc/a..b.md");
+        assert_eq!(normalize("...md"), "...md");
+    }
+
+    #[test]
+    fn same_path_sees_through_spelling_but_not_through_the_suffix() {
+        assert!(same_path("real.md", "./sub/../real.md"));
+        assert!(same_path("./sub/../real.md", "real.md"));
+        assert!(same_path("./sub/../real.md", "./sub/../real.md"));
+        assert!(same_path("doc/design.md#why", "./doc/design.md#why"));
+        // Different references to the same file, and `rm` must keep them apart.
+        assert!(!same_path("real.md", "real.md:807"));
+        assert!(!same_path("doc/design.md", "doc/design.md#why"));
+        assert!(!same_path("real.md", "other.md"));
     }
 
     /// Only a line, a range, or a column follows the colon. Anything else is

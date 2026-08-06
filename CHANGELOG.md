@@ -47,6 +47,12 @@ All notable changes to frame will be documented in this file.
 
 - **BREAKING: `fr ref add|set` and `fr spec add|set` refuse a path with no file behind it**, naming every bad one and writing nothing — an exit code where there used to be none. `--force` writes it anyway, for the file you are about to create. `fr check` calls a broken ref an error, so accepting one silently was frame creating work for itself, and a typo is cheapest to fix at the moment it is typed. Both commands also take several paths at once now.
 
+- **`ref:` and `spec:` paths are stored in normal form, and matched in it.** One file has many spellings — `real.md`, `./real.md`, `sub/../real.md` — and every one of them resolves, so a list could hold the same file twice while `rm` failed to find what was plainly there. Both went wrong in practice: with `./sub/../real.md` stored, `fr ref ID rm real.md` reported `unchanged (not present)`, and `fr ref ID add real.md` appended a second entry for the same file.
+
+  Values are now stored with `.` and `..` folded away, and `add`, `rm` and `set` compare by that normal form. Folding runs over whole `/`-separated path segments, so a `#anchor` or `:line` suffix rides through untouched and a filename that genuinely contains `..`, `#` or `:` is left alone. It is purely lexical — nothing is read from disk, so a symlink cannot change the answer.
+
+  **No existing file is rewritten.** Matching by normal form is what reaches values written by older versions instead: `rm real.md` finds a stored `./sub/../real.md` and reports the spelling that actually left the file. The suffix stays part of a reference's identity, so `rm src/parser.rs` does not take `src/parser.rs:807` with it — a reference to a file and a reference to a line in it are different references.
+
 - **The TUI detail view shows a ref or spec path with no file behind it in the error colour**, which makes a reference that went stale when its file moved visible without running `fr check`. Editing still accepts whatever you type.
 
 - **BREAKING: `spec:` accepts several paths, comma-separated, like `ref:`.** A task can have more than one spec worth pointing at, and there was no way to say so. `fr check` validates each path and reports them individually; the detail view lists them one per line.

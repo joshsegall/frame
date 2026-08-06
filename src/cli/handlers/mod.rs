@@ -2149,8 +2149,10 @@ fn cmd_path_field(field: PathField, args: PathFieldArgs) -> Result<(), Box<dyn s
             }
         }
         "set" => {
-            task_ops::set_paths(track, &args.id, field, args.paths.clone())?;
-            format!("{} {} set: {}", args.id, key, args.paths.join(", "))
+            // Report what was stored, not what was asked for: normalization and
+            // dedup can both make the two differ.
+            let stored = task_ops::set_paths(track, &args.id, field, args.paths.clone())?;
+            format!("{} {} set: {}", args.id, key, stored.join(", "))
         }
         other => {
             return Err(format!("unknown action '{}' (expected: add, rm, set)", other).into());

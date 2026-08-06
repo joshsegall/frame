@@ -402,6 +402,21 @@ error: no such file: src/parsr.rs
 
 **`rm` never checks the filesystem**, since a path is most worth removing precisely when the file behind it is gone.
 
+#### One file, one entry
+
+A path is stored in its **normal form**: `.` and `..` segments are folded away, so `./sub/../real.md` is stored as `real.md`. The suffix is untouched — `./doc/../design.md#why` becomes `design.md#why`, and a file whose *name* contains `..` or `#` is left exactly as it is.
+
+Both `add` and `rm` **match by normal form**, so a spelling reaches a stored value whichever of the two is the awkward one:
+
+```
+$ fr ref EFF-014 rm real.md            # stored as ./sub/../real.md
+EFF-014 ref removed: ./sub/../real.md
+```
+
+The message names what left the file rather than what you typed. This is what keeps values written by older versions of frame reachable — no existing file is rewritten to satisfy the rule. `add` uses the same comparison, so it will not append a second entry for a file the task already carries under another spelling, and `set` drops later entries that duplicate earlier ones the same way.
+
+The suffix is part of a reference's identity: `rm src/parser.rs` does **not** remove `src/parser.rs:807`. A reference to a file and a reference to a line in it are different references.
+
 ### `fr title ID TITLE`
 
 Change a task's title.

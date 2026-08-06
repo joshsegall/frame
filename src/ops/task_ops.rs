@@ -4,6 +4,7 @@ use crate::model::task::{Metadata, Task, TaskState};
 use crate::model::task_id::{TaskId, Token};
 use crate::model::track::{SectionKind, Track, TrackNode};
 use crate::ops::ids::Mint;
+use crate::ops::refs;
 use crate::parse::parse_title_and_tags;
 
 /// Error type for task operations
@@ -409,6 +410,10 @@ fn store_paths(task: &mut Task, field: PathField, paths: Vec<String>) {
 /// Appending rather than replacing is what makes this safe to run concurrently:
 /// it does not need to read the current list first, so two writers adding
 /// different paths do not clobber each other.
+///
+/// Values are stored in normal form and compared in it, so a list holds one
+/// entry per file rather than one per spelling. Without that, `add real.md`
+/// against a stored `./sub/../real.md` appends a second entry for the same file.
 pub fn add_paths(
     track: &mut Track,
     task_id: &str,
@@ -420,9 +425,10 @@ pub fn add_paths(
     let mut current = paths_of(task, field);
     let mut added = Vec::new();
     for p in paths {
-        if !current.contains(p) {
+        let p = refs::normalize(p);
+        if !current.iter().any(|c| refs::same_path(c, &p)) {
             current.push(p.clone());
-            added.push(p.clone());
+            added.push(p);
         }
     }
     if !added.is_empty() {
@@ -431,7 +437,19 @@ pub fn add_paths(
     Ok(added)
 }
 
-/// Drop paths the task carries. Returns the ones removed.
+/// Drop paths the task carries. Returns the ones removed, **as they were
+/// stored** rather than as they were asked for.
+///
+/// Matching is by normal form, so an argument reaches a stored value whichever
+/// of the two is the awkward spelling. That is what keeps values written before
+/// normalization existed reachable without rewriting anyone's files: `rm
+/// real.md` finds a stored `./sub/../real.md`, and `rm ./sub/../real.md` finds a
+/// stored `real.md`.
+///
+/// Reporting the stored spelling matters for the same reason — the caller's
+/// message then names what actually left the file. Two stored values that
+/// normalize alike both go: they name one file, and a normalized write would
+/// never have produced the pair.
 pub fn remove_paths(
     track: &mut Track,
     task_id: &str,
@@ -441,32 +459,38 @@ pub fn remove_paths(
     let task = find_task_mut_in_track(track, task_id)
         .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
     let current = paths_of(task, field);
-    let removed: Vec<String> = paths
-        .iter()
-        .filter(|p| current.contains(p))
-        .cloned()
-        .collect();
+    let matches = |stored: &String| paths.iter().any(|p| refs::same_path(stored, p));
+    let removed: Vec<String> = current.iter().filter(|p| matches(p)).cloned().collect();
     if !removed.is_empty() {
-        let kept: Vec<String> = current
-            .into_iter()
-            .filter(|p| !removed.contains(p))
-            .collect();
+        let kept: Vec<String> = current.into_iter().filter(|p| !matches(p)).collect();
         store_paths(task, field, kept);
     }
     Ok(removed)
 }
 
-/// Replace the whole list. An empty list removes the field.
+/// Replace the whole list. An empty list removes the field. Returns the list as
+/// stored, so a caller reports what landed rather than what it was handed.
+///
+/// Normalizes as `add_paths` does, and drops later entries that name a file an
+/// earlier one already named — otherwise `set` is the one door through which a
+/// list can be given two spellings of one file.
 pub fn set_paths(
     track: &mut Track,
     task_id: &str,
     field: PathField,
     paths: Vec<String>,
-) -> Result<(), TaskError> {
+) -> Result<Vec<String>, TaskError> {
     let task = find_task_mut_in_track(track, task_id)
         .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
-    store_paths(task, field, paths);
-    Ok(())
+    let mut deduped: Vec<String> = Vec::with_capacity(paths.len());
+    for p in paths {
+        let p = refs::normalize(&p);
+        if !deduped.iter().any(|d| refs::same_path(d, &p)) {
+            deduped.push(p);
+        }
+    }
+    store_paths(task, field, deduped.clone());
+    Ok(deduped)
 }
 
 // ---------------------------------------------------------------------------
