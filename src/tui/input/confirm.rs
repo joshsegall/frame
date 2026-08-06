@@ -139,11 +139,18 @@ pub(super) fn confirm_archive_track(app: &mut App, track_id: &str) {
 }
 
 pub(super) fn confirm_delete_track(app: &mut App, track_id: &str) {
-    let tc = match app.project.config.tracks.iter().find(|t| t.id == track_id) {
-        Some(tc) => tc.clone(),
+    let (config_index, tc) = match app
+        .project
+        .config
+        .tracks
+        .iter()
+        .position(|t| t.id == track_id)
+    {
+        Some(i) => (i, app.project.config.tracks[i].clone()),
         None => return,
     };
     let prefix = app.project.config.ids.prefixes.get(track_id).cloned();
+    let prefix_index = app.project.config.ids.prefixes.get_index_of(track_id);
 
     // Read the file before unlinking it, so undo has something to put back.
     // This is the only copy: delete does not archive, and nothing here reaches
@@ -172,6 +179,8 @@ pub(super) fn confirm_delete_track(app: &mut App, track_id: &str) {
         track_name: tc.name.clone(),
         old_state: tc.state.clone(),
         prefix,
+        config_index,
+        prefix_index,
         content,
     });
 
@@ -434,6 +443,8 @@ mod tests {
         app.undo_stack.push(Operation::TrackAdd {
             track_id: "a".to_string(),
             track_name: "A".to_string(),
+            config_index: 0,
+            prefix: "A".to_string(),
         });
 
         perform_undo(&mut app);
@@ -447,5 +458,101 @@ mod tests {
             .find(|t| t.id == "a")
             .expect("track is back");
         assert_eq!(tc.name, "A", "redo must not rename the track to its ID");
+    }
+
+    /// A new track goes among the *active* ones, which is not the end of the
+    /// list when something shelved sits below. Redo appended, so the track came
+    /// back in a different place than the add had put it — and re-derived its
+    /// prefix from the current prefix set rather than replaying the one it was
+    /// given, which is a different question with a different answer.
+    #[test]
+    fn redoing_a_track_add_restores_its_position_and_prefix() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        app.project.config.tracks.push(crate::model::TrackConfig {
+            id: "z".into(),
+            name: "Z".into(),
+            state: "shelved".into(),
+            file: "tracks/z.md".into(),
+        });
+        // As the add records it: inserted at index 1, ahead of the shelved
+        // track, carrying the prefix it assigned.
+        app.project.config.tracks.insert(
+            1,
+            crate::model::TrackConfig {
+                id: "b".into(),
+                name: "B".into(),
+                state: "active".into(),
+                file: "tracks/b.md".into(),
+            },
+        );
+        app.project
+            .config
+            .ids
+            .prefixes
+            .insert("b".into(), "B".into());
+        app.undo_stack.push(Operation::TrackAdd {
+            track_id: "b".into(),
+            track_name: "B".into(),
+            config_index: 1,
+            prefix: "B".into(),
+        });
+
+        perform_undo(&mut app);
+        perform_redo(&mut app);
+
+        let ids: Vec<_> = app
+            .project
+            .config
+            .tracks
+            .iter()
+            .map(|t| t.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["a", "b", "z"], "redo puts it back where it was");
+        assert_eq!(
+            app.project.config.ids.prefixes.get("b").map(String::as_str),
+            Some("B"),
+            "with the prefix the add assigned"
+        );
+    }
+
+    /// And the same for a delete, from the other side: undo used to push the
+    /// restored track onto the end of both the track list and the prefix map,
+    /// so deleting the first track and undoing brought it back as the last one.
+    /// The file was restored intact and the project still looked rearranged.
+    #[test]
+    fn undoing_a_track_delete_restores_its_position() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        app.project
+            .config
+            .ids
+            .prefixes
+            .insert("a".into(), "A".into());
+        app.project.config.tracks.push(crate::model::TrackConfig {
+            id: "z".into(),
+            name: "Z".into(),
+            state: "active".into(),
+            file: "tracks/z.md".into(),
+        });
+        app.project
+            .config
+            .ids
+            .prefixes
+            .insert("z".into(), "Z".into());
+
+        confirm_delete_track(&mut app, "a");
+        perform_undo(&mut app);
+
+        let ids: Vec<_> = app
+            .project
+            .config
+            .tracks
+            .iter()
+            .map(|t| t.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["a", "z"], "back at the front, not appended");
+        let prefixes: Vec<_> = app.project.config.ids.prefixes.keys().cloned().collect();
+        assert_eq!(prefixes, vec!["a", "z"], "and the prefix map with it");
     }
 }

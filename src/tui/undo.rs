@@ -532,6 +532,16 @@ pub enum Operation {
         /// The display name, so redo re-creates the track with the name the
         /// user typed rather than falling back to the ID.
         track_name: String,
+        /// Where it went in `config.tracks`. `p` and `-` place a new track
+        /// among the *active* ones, which is not the end of the list when a
+        /// shelved or archived track sits below — redo appended, and the track
+        /// came back in a different place than the add had put it.
+        config_index: usize,
+        /// The prefix the add assigned. Redo used to re-derive it from the
+        /// current prefix set, which is not the set the add saw: a prefix that
+        /// had since been taken would push redo onto a different letter, and
+        /// prefixes are load-bearing for id minting.
+        prefix: String,
     },
     /// A track's display name was edited
     TrackNameEdit {
@@ -553,6 +563,11 @@ pub enum Operation {
         track_name: String,
         old_state: String,
         prefix: Option<String>,
+        /// Where it sat in `config.tracks`, and where its prefix sat in the
+        /// prefix map. Undo used to push both onto the end, so deleting the
+        /// first track and undoing brought it back as the last one.
+        config_index: usize,
+        prefix_index: Option<usize>,
         /// The track file exactly as it was. Undo writes these bytes back, so
         /// a restore returns the file rather than a fresh empty one — which
         /// matters even for an empty track, whose header, section order and

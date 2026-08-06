@@ -1492,7 +1492,7 @@ pub(super) fn confirm_edit(app: &mut App) {
                 .config
                 .ids
                 .prefixes
-                .insert(track_id.clone(), prefix);
+                .insert(track_id.clone(), prefix.clone());
             save_config(app);
 
             // Load the new track into memory
@@ -1506,6 +1506,8 @@ pub(super) fn confirm_edit(app: &mut App) {
             app.undo_stack.push(Operation::TrackAdd {
                 track_id: track_id.clone(),
                 track_name: name.clone(),
+                config_index: insert_config_idx,
+                prefix,
             });
 
             // Move cursor to the new track

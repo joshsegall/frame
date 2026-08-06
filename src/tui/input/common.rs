@@ -601,6 +601,8 @@ pub(super) fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo
                 Some(Operation::TrackAdd {
                     track_id: tid,
                     track_name,
+                    config_index,
+                    prefix,
                 }) => {
                     if is_undo {
                         // Remove the track
@@ -622,17 +624,18 @@ pub(super) fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo
                             state: "active".to_string(),
                             file: format!("tracks/{}.md", tid),
                         };
-                        let existing_prefixes: Vec<String> =
-                            app.project.config.ids.prefixes.values().cloned().collect();
-                        let prefix =
-                            crate::ops::track_ops::generate_prefix(&tid, &existing_prefixes);
                         let track_content = format!("# {}\n\n## Backlog\n\n## Done\n", name);
                         let track_path = app.project.frame_dir.join(&tc.file);
                         let _ = crate::io::recovery::atomic_write(
                             &track_path,
                             track_content.as_bytes(),
                         );
-                        app.project.config.tracks.push(tc);
+                        // Both recorded by the add. Re-deriving the prefix here
+                        // would ask the *current* prefix set a question only
+                        // the original set could answer, and appending would
+                        // put the track somewhere the add never put it.
+                        let idx = config_index.min(app.project.config.tracks.len());
+                        app.project.config.tracks.insert(idx, tc);
                         app.project.config.ids.prefixes.insert(tid.clone(), prefix);
                         if let Ok(text) = std::fs::read_to_string(&track_path) {
                             let track = crate::parse::parse_track(&text);
@@ -647,6 +650,8 @@ pub(super) fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo
                     track_name,
                     old_state,
                     prefix,
+                    config_index,
+                    prefix_index,
                     content,
                 }) => {
                     if is_undo {
@@ -667,13 +672,21 @@ pub(super) fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo
                             &track_path,
                             track_content.as_bytes(),
                         );
-                        app.project.config.tracks.push(tc);
+                        // Back where it was, in both lists. Pushing put a
+                        // deleted first track back as the last one — the file
+                        // was restored intact and the project still looked
+                        // rearranged.
+                        let idx = config_index.min(app.project.config.tracks.len());
+                        app.project.config.tracks.insert(idx, tc);
                         if let Some(p) = &prefix {
-                            app.project
-                                .config
-                                .ids
-                                .prefixes
-                                .insert(tid.clone(), p.clone());
+                            let pidx = prefix_index
+                                .unwrap_or(usize::MAX)
+                                .min(app.project.config.ids.prefixes.len());
+                            app.project.config.ids.prefixes.shift_insert(
+                                pidx,
+                                tid.clone(),
+                                p.clone(),
+                            );
                         }
                         if let Ok(text) = std::fs::read_to_string(&track_path) {
                             let track = crate::parse::parse_track(&text);
