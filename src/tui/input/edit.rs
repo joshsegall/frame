@@ -15,6 +15,21 @@ use crate::tui::wrap;
 
 use super::*;
 
+/// Where a freshly added subtask sits among its parent's children, for
+/// `Operation::SubtaskAdd` to replay. Mirrors what the `TaskAdd` sites do with
+/// the backlog: ask the tree, rather than assume the end.
+fn subtask_index(app: &App, track_id: &str, parent_id: &str, task_id: &str) -> usize {
+    App::find_track_in_project(&app.project, track_id)
+        .and_then(|t| task_ops::find_task_in_track(t, parent_id))
+        .and_then(|parent| {
+            parent
+                .subtasks
+                .iter()
+                .position(|s| s.id.as_deref() == Some(task_id))
+        })
+        .unwrap_or(0)
+}
+
 /// Toggle the `cc` tag on the task under the cursor (track view only).
 pub(super) fn toggle_cc_tag(app: &mut App) {
     let (track_id, task_id) = if let View::Detail { track_id, task_id } = &app.view {
@@ -1154,10 +1169,12 @@ pub(super) fn confirm_edit(app: &mut App) {
 
                     if let Some(ref pid) = parent_id {
                         app.undo_stack.push_sync_marker();
+                        let pos_idx = subtask_index(app, &track_id, pid, &task_id);
                         app.undo_stack.push(Operation::SubtaskAdd {
                             track_id: track_id.clone(),
                             parent_id: pid.clone(),
                             task_id: task_id.clone(),
+                            position_index: pos_idx,
                             title: title.clone(),
                         });
                     } else {
@@ -1187,10 +1204,12 @@ pub(super) fn confirm_edit(app: &mut App) {
                 let _ = task_ops::edit_title(track, &task_id, title.clone());
 
                 if let Some(pid) = &parent_id {
+                    let pos_idx = subtask_index(app, &track_id, pid, &task_id);
                     app.undo_stack.push(Operation::SubtaskAdd {
                         track_id: track_id.clone(),
                         parent_id: pid.clone(),
                         task_id: task_id.clone(),
+                        position_index: pos_idx,
                         title: title.clone(),
                     });
                 } else {

@@ -437,6 +437,14 @@ pub enum Operation {
         track_id: String,
         parent_id: String,
         task_id: String,
+        /// Position among the parent's subtasks where it was inserted.
+        ///
+        /// Carried for the same reason `TaskAdd` carries one: `-` inserts a
+        /// sibling *after the cursor*, so a subtask added in the middle of a
+        /// list has a position that appending cannot reproduce. Redo used to
+        /// append, which quietly relocated the task it was supposed to be
+        /// putting back.
+        position_index: usize,
         /// The title set during the add (so redo can restore it)
         title: String,
     },
@@ -1201,6 +1209,7 @@ fn apply_forward(
             track_id,
             parent_id,
             task_id,
+            position_index,
             title,
         } => {
             let track = find_track_mut(tracks, track_id)?;
@@ -1210,7 +1219,8 @@ fn apply_forward(
             sub.metadata.push(crate::model::task::Metadata::Added(
                 chrono::Local::now().format("%Y-%m-%d").to_string(),
             ));
-            parent.subtasks.push(sub);
+            let idx = (*position_index).min(parent.subtasks.len());
+            parent.subtasks.insert(idx, sub);
             parent.mark_dirty();
             Some(track_id.clone())
         }
@@ -2044,6 +2054,7 @@ mod tests {
             track_id: "t".into(),
             parent_id: "T-001".into(),
             task_id: "T-001.1".into(),
+            position_index: 0,
             title: "Sub".into(),
         });
         stack.undo(&mut tracks, None);
@@ -2067,6 +2078,7 @@ mod tests {
             track_id: "t".into(),
             parent_id: "T-001".into(),
             task_id: "T-001.1".into(),
+            position_index: 0,
             title: "Sub".into(),
         });
         stack.undo(&mut tracks, None);
@@ -2075,6 +2087,46 @@ mod tests {
         let parent = task_ops::find_task_in_track(track, "T-001").unwrap();
         assert_eq!(parent.subtasks.len(), 1);
         assert_eq!(parent.subtasks[0].id.as_deref(), Some("T-001.1"));
+    }
+
+    /// `-` inserts a sibling *after the cursor*, so a subtask can be added in
+    /// the middle of a list. Redo appended, which put the task back somewhere
+    /// the add had never put it — silently reordering two of the user's tasks.
+    #[test]
+    fn subtask_add_redo_restores_the_position_the_add_used() {
+        let mut stack = UndoStack::new();
+        let mut tracks = tracks_vec("t", sample_track());
+        {
+            let track = &mut tracks[0].1;
+            let parent = task_ops::find_task_mut_in_track(track, "T-001").unwrap();
+            for id in ["T-001.1", "T-001.2"] {
+                let mut sub = Task::new(TaskState::Todo, Some(id.into()), id.into());
+                sub.depth = 1;
+                parent.subtasks.push(sub);
+            }
+            // The new one lands between them, as `-` on `T-001.1` does.
+            let mut sub = Task::new(TaskState::Todo, Some("T-001.3".into()), "Middle".into());
+            sub.depth = 1;
+            parent.subtasks.insert(1, sub);
+        }
+        stack.push(Operation::SubtaskAdd {
+            track_id: "t".into(),
+            parent_id: "T-001".into(),
+            task_id: "T-001.3".into(),
+            position_index: 1,
+            title: "Middle".into(),
+        });
+        stack.undo(&mut tracks, None);
+        stack.redo(&mut tracks, None);
+
+        let track = &tracks[0].1;
+        let parent = task_ops::find_task_in_track(track, "T-001").unwrap();
+        let ids: Vec<_> = parent
+            .subtasks
+            .iter()
+            .map(|s| s.id.as_deref().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["T-001.1", "T-001.3", "T-001.2"]);
     }
 
     // -----------------------------------------------------------------------
@@ -2733,6 +2785,7 @@ mod tests {
             track_id: "t1".into(),
             parent_id: "T-010".into(),
             task_id: "T-010.1".into(),
+            position_index: 0,
             title: "Sub task".into(),
         };
         let (_, task_id, _, task_removed, _) = expect_task(nav_target_for_op(&op, true).unwrap());
@@ -2746,6 +2799,7 @@ mod tests {
             track_id: "t1".into(),
             parent_id: "T-010".into(),
             task_id: "T-010.1".into(),
+            position_index: 0,
             title: "Sub task".into(),
         };
         let (_, task_id, _, _, _) = expect_task(nav_target_for_op(&op, false).unwrap());
