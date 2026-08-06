@@ -416,8 +416,24 @@ pub(super) fn collect_bulk_task_ids(op: Option<&Operation>) -> HashSet<String> {
 pub(super) fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo: bool) {
     match nav {
         UndoNavTarget::Task { track_id, .. } => {
-            app.save_track_logged(track_id);
             // For cross-track moves (including bulk), also save other tracks
+            let op = if is_undo {
+                app.undo_stack.peek_last_redo()
+            } else {
+                app.undo_stack.peek_last_undo()
+            };
+            // A *re*done triage navigates to the new task, so it lands here
+            // rather than in the `Inbox` arm below — but it removed an inbox
+            // item, and that removal has to reach disk in the same lock as the
+            // task that replaced it. Saving only the track left the item in
+            // `inbox.md` *and* the task in the track: the same duplicate the
+            // Inbox arm takes one lock to avoid, arrived at from the other
+            // direction.
+            if matches!(op, Some(Operation::InboxTriage { .. })) {
+                app.save_batch_logged(&[track_id.as_str()], true);
+            } else {
+                app.save_track_logged(track_id);
+            }
             let op = if is_undo {
                 app.undo_stack.peek_last_redo()
             } else {
@@ -1750,4 +1766,53 @@ mod tests {
         );
     }
 
+    /// Redoing a triage navigates to the new task, so it lands in the `Task`
+    /// arm of `apply_nav_side_effects` rather than the `Inbox` one — and that
+    /// arm saved only the track. The item was removed from the inbox in memory
+    /// and left in `inbox.md` on disk, so the same note existed twice: once as
+    /// an inbox item and once as the task that replaced it.
+    #[test]
+    fn redoing_a_triage_takes_the_item_out_of_the_inbox_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        let inbox_path = app.project.frame_dir.join("inbox.md");
+        std::fs::write(&inbox_path, "# Inbox\n\n- Look into the parser\n").unwrap();
+        app.project.inbox =
+            Some(crate::parse::parse_inbox("# Inbox\n\n- Look into the parser\n").0);
+
+        // The state a triage leaves behind: item gone, task in the track.
+        let item = app.project.inbox.as_mut().unwrap().items.remove(0);
+        let track = app.find_track_mut("a").unwrap();
+        let task = crate::model::task::Task::new(
+            crate::model::task::TaskState::Todo,
+            Some("A-002".into()),
+            item.title.clone(),
+        );
+        track
+            .section_tasks_mut(SectionKind::Backlog)
+            .unwrap()
+            .push(task);
+        app.undo_stack.push(Operation::InboxTriage {
+            inbox_index: 0,
+            item,
+            track_id: "a".into(),
+            task_id: "A-002".into(),
+        });
+        app.save_batch_logged(&["a"], true);
+
+        perform_undo(&mut app);
+        assert!(
+            std::fs::read_to_string(&inbox_path)
+                .unwrap()
+                .contains("Look into the parser"),
+            "undo puts the item back"
+        );
+
+        perform_redo(&mut app);
+        let on_disk = std::fs::read_to_string(&inbox_path).unwrap();
+        assert!(
+            !on_disk.contains("Look into the parser"),
+            "and redo takes it away again, on disk and not only in memory: {on_disk:?}"
+        );
+    }
 }
