@@ -186,15 +186,17 @@ fn search_task(re: &Regex, task: &Task, track_id: &str, hits: &mut Vec<SearchHit
                     }
                 }
             }
-            Metadata::Spec(spec) => {
-                let spans = find_matches(re, spec);
-                if !spans.is_empty() {
-                    hits.push(SearchHit {
-                        track_id: track_id.to_string(),
-                        task_id: task_id.to_string(),
-                        field: MatchField::Spec,
-                        spans,
-                    });
+            Metadata::Spec(specs) => {
+                for spec in specs {
+                    let spans = find_matches(re, spec);
+                    if !spans.is_empty() {
+                        hits.push(SearchHit {
+                            track_id: track_id.to_string(),
+                            task_id: task_id.to_string(),
+                            field: MatchField::Spec,
+                            spans,
+                        });
+                    }
                 }
             }
             _ => {} // Added, Resolved not searched

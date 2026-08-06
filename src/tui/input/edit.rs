@@ -1,7 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::model::SectionKind;
-use crate::model::task::Metadata;
 use crate::ops::ids::Mint;
 use crate::ops::task_ops::{self, InsertPosition};
 use crate::util::unicode;
@@ -10,6 +9,7 @@ use crate::tui::app::{
     App, AutocompleteKind, AutocompleteState, DetailRegion, EditHistory, EditTarget, FlatItem,
     Mode, RepeatEditRegion, RepeatableAction, View, resolve_task_from_flat,
 };
+use crate::tui::fields;
 use crate::tui::undo::Operation;
 use crate::tui::wrap;
 
@@ -1885,75 +1885,8 @@ pub(super) fn detail_enter_edit(app: &mut App, cursor_at_end: bool) {
         None => return,
     };
 
-    let (initial_value, is_multiline) = match region {
-        DetailRegion::Title => (task.title.clone(), false),
-        DetailRegion::Tags => {
-            let tag_str = task
-                .tags
-                .iter()
-                .map(|t| format!("#{}", t))
-                .collect::<Vec<_>>()
-                .join(" ");
-            (tag_str, false)
-        }
-        DetailRegion::Deps => {
-            let deps: Vec<String> = task
-                .metadata
-                .iter()
-                .flat_map(|m| {
-                    if let Metadata::Dep(d) = m {
-                        d.clone()
-                    } else {
-                        Vec::new()
-                    }
-                })
-                .collect();
-            (deps.join(", "), false)
-        }
-        DetailRegion::Spec => {
-            let spec = task
-                .metadata
-                .iter()
-                .find_map(|m| {
-                    if let Metadata::Spec(s) = m {
-                        Some(s.clone())
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_default();
-            (spec, false)
-        }
-        DetailRegion::Refs => {
-            let refs: Vec<String> = task
-                .metadata
-                .iter()
-                .flat_map(|m| {
-                    if let Metadata::Ref(r) = m {
-                        r.clone()
-                    } else {
-                        Vec::new()
-                    }
-                })
-                .collect();
-            (refs.join(" "), false)
-        }
-        DetailRegion::Note => {
-            let note = task
-                .metadata
-                .iter()
-                .find_map(|m| {
-                    if let Metadata::Note(n) = m {
-                        Some(n.clone())
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_default();
-            (note, true)
-        }
-        _ => return,
-    };
+    let initial_value = fields::field_to_buffer(task, region);
+    let is_multiline = region == DetailRegion::Note;
 
     if is_multiline {
         // Multi-line editing (note): use detail_state's edit fields
@@ -2696,7 +2629,9 @@ pub(super) fn confirm_detail_multiline(app: &mut App) {
         .map(|ds| ds.edit_original.clone())
         .unwrap_or_default();
 
-    // Apply the note change
+    // Apply the note change. As in `confirm_detail_edit`, the field decides
+    // whether anything changed — opening a note and closing it must not rewrite
+    // the task's lines.
     let track = match app.find_track_mut(&track_id) {
         Some(t) => t,
         None => {
@@ -2704,10 +2639,13 @@ pub(super) fn confirm_detail_multiline(app: &mut App) {
             return;
         }
     };
-    let _ = task_ops::set_note(track, &task_id, new_value.clone());
-    app.save_track_logged(&track_id);
+    let changed = match task_ops::find_task_mut_in_track(track, &task_id) {
+        Some(task) => fields::apply_buffer(task, DetailRegion::Note, &new_value),
+        None => false,
+    };
 
-    if new_value != original {
+    if changed {
+        app.save_track_logged(&track_id);
         app.undo_stack.push(Operation::FieldEdit {
             track_id,
             task_id,
@@ -2801,162 +2739,43 @@ pub(super) fn confirm_detail_edit(app: &mut App) {
         .map(|ds| ds.edit_original.clone())
         .unwrap_or_default();
 
-    // Apply the change based on region
-    match region {
-        DetailRegion::Title => {
-            if !new_value.trim().is_empty() && new_value != original {
-                let track = match app.find_track_mut(&track_id) {
-                    Some(t) => t,
-                    None => {
-                        app.mode = Mode::Navigate;
-                        return;
-                    }
-                };
-                let _ = task_ops::edit_title(track, &task_id, new_value.clone());
-
-                app.undo_stack.push(Operation::TitleEdit {
-                    track_id: track_id.clone(),
-                    task_id: task_id.clone(),
-                    old_title: original,
-                    new_title: new_value,
-                });
-
-                app.save_track_logged(&track_id);
-            }
+    // Apply the change, and let the field itself say whether there was one. The
+    // buffer strings cannot answer that — they are a lossy view of the field, so
+    // comparing them both wrote files nobody had edited and hid real writes from
+    // undo. See `tui::fields`.
+    let track = match app.find_track_mut(&track_id) {
+        Some(t) => t,
+        None => {
+            app.mode = Mode::Navigate;
+            return;
         }
-        DetailRegion::Tags => {
-            // Parse tags from input: "#tag1 #tag2" or "tag1 tag2" (deduplicated)
-            let new_tags: Vec<String> = dedup_preserve_order(
-                new_value
-                    .split_whitespace()
-                    .map(|s| s.strip_prefix('#').unwrap_or(s).to_string())
-                    .filter(|s| !s.is_empty()),
-            );
+    };
+    let changed = match task_ops::find_task_mut_in_track(track, &task_id) {
+        Some(task) => fields::apply_buffer(task, region, &new_value),
+        None => false,
+    };
 
-            let track = match app.find_track_mut(&track_id) {
-                Some(t) => t,
-                None => {
-                    app.mode = Mode::Navigate;
-                    return;
-                }
-            };
-            if let Some(task) = task_ops::find_task_mut_in_track(track, &task_id) {
-                task.tags = new_tags;
-                task.mark_dirty();
-            }
-            app.save_track_logged(&track_id);
+    if changed {
+        app.save_track_logged(&track_id);
 
-            if new_value != original {
-                app.undo_stack.push(Operation::FieldEdit {
-                    track_id: track_id.clone(),
-                    task_id: task_id.clone(),
-                    field: "tags".to_string(),
-                    old_value: original,
-                    new_value,
-                });
-            }
+        let op = match region {
+            DetailRegion::Title => Some(Operation::TitleEdit {
+                track_id: track_id.clone(),
+                task_id: task_id.clone(),
+                old_title: original,
+                new_title: new_value,
+            }),
+            _ => fields::field_name(region).map(|field| Operation::FieldEdit {
+                track_id: track_id.clone(),
+                task_id: task_id.clone(),
+                field: field.to_string(),
+                old_value: original,
+                new_value,
+            }),
+        };
+        if let Some(op) = op {
+            app.undo_stack.push(op);
         }
-        DetailRegion::Deps => {
-            // Parse deps: "EFF-003, MOD-007" or "EFF-003 MOD-007" (deduplicated)
-            let new_deps: Vec<String> = dedup_preserve_order(
-                new_value
-                    .split(|c: char| c == ',' || c.is_whitespace())
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty()),
-            );
-
-            let track = match app.find_track_mut(&track_id) {
-                Some(t) => t,
-                None => {
-                    app.mode = Mode::Navigate;
-                    return;
-                }
-            };
-            if let Some(task) = task_ops::find_task_mut_in_track(track, &task_id) {
-                // Remove existing deps and add new ones
-                task.metadata.retain(|m| !matches!(m, Metadata::Dep(_)));
-                if !new_deps.is_empty() {
-                    task.metadata.push(Metadata::Dep(new_deps));
-                }
-                task.mark_dirty();
-            }
-            app.save_track_logged(&track_id);
-
-            if new_value != original {
-                app.undo_stack.push(Operation::FieldEdit {
-                    track_id: track_id.clone(),
-                    task_id: task_id.clone(),
-                    field: "deps".to_string(),
-                    old_value: original,
-                    new_value,
-                });
-            }
-        }
-        DetailRegion::Spec => {
-            let track = match app.find_track_mut(&track_id) {
-                Some(t) => t,
-                None => {
-                    app.mode = Mode::Navigate;
-                    return;
-                }
-            };
-            if !new_value.trim().is_empty() {
-                let _ = task_ops::set_spec(track, &task_id, new_value.trim().to_string());
-            } else {
-                // Remove spec
-                if let Some(task) = task_ops::find_task_mut_in_track(track, &task_id) {
-                    task.metadata.retain(|m| !matches!(m, Metadata::Spec(_)));
-                    task.mark_dirty();
-                }
-            }
-            app.save_track_logged(&track_id);
-
-            if new_value != original {
-                app.undo_stack.push(Operation::FieldEdit {
-                    track_id: track_id.clone(),
-                    task_id: task_id.clone(),
-                    field: "spec".to_string(),
-                    old_value: original,
-                    new_value,
-                });
-            }
-        }
-        DetailRegion::Refs => {
-            // Parse refs: space or comma separated paths (deduplicated)
-            let new_refs: Vec<String> = dedup_preserve_order(
-                new_value
-                    .split(|c: char| c == ',' || c.is_whitespace())
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty()),
-            );
-
-            let track = match app.find_track_mut(&track_id) {
-                Some(t) => t,
-                None => {
-                    app.mode = Mode::Navigate;
-                    return;
-                }
-            };
-            if let Some(task) = task_ops::find_task_mut_in_track(track, &task_id) {
-                task.metadata.retain(|m| !matches!(m, Metadata::Ref(_)));
-                if !new_refs.is_empty() {
-                    task.metadata.push(Metadata::Ref(new_refs));
-                }
-                task.mark_dirty();
-            }
-            app.save_track_logged(&track_id);
-
-            if new_value != original {
-                app.undo_stack.push(Operation::FieldEdit {
-                    track_id: track_id.clone(),
-                    task_id: task_id.clone(),
-                    field: "refs".to_string(),
-                    old_value: original,
-                    new_value,
-                });
-            }
-        }
-        _ => {}
     }
 
     // Record repeatable action for detail view edits
@@ -3093,8 +2912,9 @@ pub(super) fn autocomplete_filter_text(buffer: &str, kind: AutocompleteKind) -> 
             word.to_string()
         }
         AutocompleteKind::FilePath => {
-            // Get current entry (after last space for multi-value refs)
-            let word = buffer.rsplit(' ').next().unwrap_or(buffer).trim();
+            // Current entry: after the last comma. `ref:` and `spec:` are
+            // comma-separated *only*, since a path may carry a note beside it.
+            let word = buffer.rsplit(',').next().unwrap_or(buffer).trim();
             word.to_string()
         }
         AutocompleteKind::JumpTaskId => {
@@ -3195,31 +3015,37 @@ pub(super) fn autocomplete_accept(app: &mut App) {
             app.edit_cursor = app.edit_buffer.len();
         }
         AutocompleteKind::FilePath => {
-            // Support space-separated entries (for refs); normalized to commas on confirm
-            // Check for duplicate: skip if this path is already in the buffer
-            let existing: Vec<&str> = app.edit_buffer.split_whitespace().collect();
+            // Comma-separated entries, and the separator is typed for the user —
+            // which is what keeps the comma-only grammar of `ref:`/`spec:` from
+            // being a thing anyone has to remember.
+            let existing: Vec<&str> = app
+                .edit_buffer
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let last_sep = app.edit_buffer.rfind(',');
             if existing.iter().any(|e| *e == selected) {
-                // Already present — just move cursor to end and dismiss current filter word
-                let buf = &app.edit_buffer;
-                let last_space = buf.rfind(' ');
-                if let Some(pos) = last_space {
-                    app.edit_buffer.truncate(pos + 1);
-                } else {
+                // Already present — drop the partial word being typed
+                match last_sep {
+                    Some(pos) => app.edit_buffer.truncate(pos + 1),
+                    None => app.edit_buffer.clear(),
+                }
+                if !app.edit_buffer.is_empty() && !app.edit_buffer.ends_with(' ') {
                     app.edit_buffer.push(' ');
                 }
-                app.edit_cursor = app.edit_buffer.len();
             } else {
-                let buf = &app.edit_buffer;
-                let last_space = buf.rfind(' ');
-                if let Some(pos) = last_space {
-                    app.edit_buffer.truncate(pos + 1);
-                    app.edit_buffer.push_str(&selected);
-                } else {
-                    app.edit_buffer = selected;
+                match last_sep {
+                    Some(pos) => {
+                        app.edit_buffer.truncate(pos + 1);
+                        app.edit_buffer.push(' ');
+                        app.edit_buffer.push_str(&selected);
+                    }
+                    None => app.edit_buffer = selected,
                 }
-                app.edit_buffer.push(' ');
-                app.edit_cursor = app.edit_buffer.len();
+                app.edit_buffer.push_str(", ");
             }
+            app.edit_cursor = app.edit_buffer.len();
         }
     }
 
@@ -3229,3 +3055,174 @@ pub(super) fn autocomplete_accept(app: &mut App) {
 
 // ---------------------------------------------------------------------------
 // Inbox interactions (Phase 7.2)
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parse::serialize_track;
+    use crate::tui::render::test_helpers::app_in_detail_view;
+
+    /// A task whose fields are all populated and none of which is in the shape
+    /// the old editor would have produced: the ref carries prose, the spec holds
+    /// two paths, and both sit *above* the note rather than below it.
+    const TRACK: &str = "\
+# Test
+
+## Backlog
+
+- [ ] `T-001` Fix modqual dep record field reds #design #urgent
+  - dep: T-002, T-003
+  - ref: compiler/src/module_signature.rs:807, tests/name-resolution/bac178 — this ticket's own red (first fixture)
+  - spec: doc/spec.md#anchor, doc/design notes.md
+  - note:
+    Some body text.
+
+    A second paragraph.
+- [ ] `T-002` Another task
+- [ ] `T-003` A third task
+
+## Parked
+
+## Done
+";
+
+    const EDITABLE: [DetailRegion; 6] = [
+        DetailRegion::Title,
+        DetailRegion::Tags,
+        DetailRegion::Deps,
+        DetailRegion::Spec,
+        DetailRegion::Refs,
+        DetailRegion::Note,
+    ];
+
+    fn open(region: DetailRegion) -> App {
+        let mut app = app_in_detail_view(TRACK, "T-001");
+        if let Some(ds) = &mut app.detail_state {
+            ds.region = region;
+        }
+        app
+    }
+
+    fn confirm(app: &mut App, region: DetailRegion) {
+        if region == DetailRegion::Note {
+            confirm_detail_multiline(app);
+        } else {
+            confirm_detail_edit(app);
+        }
+    }
+
+    fn track_text(app: &App) -> String {
+        serialize_track(&app.project.tracks[0].1)
+    }
+
+    #[test]
+    fn the_fixture_is_already_settled() {
+        let app = app_in_detail_view(TRACK, "T-001");
+        assert_eq!(track_text(&app), TRACK);
+    }
+
+    /// The bug this file's `fields` module exists for: opening a field and
+    /// closing it without typing rewrote the task — and, because the check for
+    /// "did anything change" compared buffer strings, recorded no undo for it.
+    #[test]
+    fn opening_a_field_and_confirming_changes_nothing() {
+        for region in EDITABLE {
+            let mut app = open(region);
+            detail_enter_edit(&mut app, false);
+            confirm(&mut app, region);
+
+            assert_eq!(
+                track_text(&app),
+                TRACK,
+                "{:?} rewrote the track on a no-op edit",
+                region
+            );
+            assert!(
+                app.undo_stack.is_empty(),
+                "{:?} pushed an undo entry for a no-op edit",
+                region
+            );
+        }
+    }
+
+    /// Note is absent: Esc *saves* a note rather than discarding it, so it has
+    /// no cancel path — `opening_a_field_and_confirming_changes_nothing` is what
+    /// covers it.
+    #[test]
+    fn cancelling_a_field_changes_nothing() {
+        for region in EDITABLE {
+            if region == DetailRegion::Note {
+                continue;
+            }
+            let mut app = open(region);
+            detail_enter_edit(&mut app, false);
+            cancel_detail_edit(&mut app);
+            assert_eq!(track_text(&app), TRACK, "{:?} rewrote on cancel", region);
+            assert!(app.undo_stack.is_empty(), "{:?} recorded a cancel", region);
+        }
+    }
+
+    #[test]
+    fn a_real_edit_is_saved_and_recorded_once() {
+        let mut app = open(DetailRegion::Refs);
+        detail_enter_edit(&mut app, false);
+        app.edit_buffer = format!("{}, doc/new.md", app.edit_buffer);
+        confirm_detail_edit(&mut app);
+
+        assert!(track_text(&app).contains("doc/new.md"));
+        // Exactly one entry: undoing it once returns the track to where it began.
+        assert!(!app.undo_stack.is_empty());
+        app.undo_stack.undo(&mut app.project.tracks, None);
+        assert_eq!(track_text(&app), TRACK);
+        assert!(app.undo_stack.is_empty());
+    }
+
+    /// Editing one entry must not reformat the others — the old confirm split the
+    /// whole field on whitespace, so touching any ref shattered every ref.
+    #[test]
+    fn editing_one_ref_leaves_the_rest_verbatim() {
+        let mut app = open(DetailRegion::Refs);
+        detail_enter_edit(&mut app, false);
+        app.edit_buffer = app.edit_buffer.replace(":807", ":900");
+        confirm_detail_edit(&mut app);
+
+        let text = track_text(&app);
+        assert!(
+            text.contains(
+                "- ref: compiler/src/module_signature.rs:900, \
+                 tests/name-resolution/bac178 — this ticket's own red (first fixture)"
+            ),
+            "refs came back as:\n{}",
+            text
+        );
+    }
+
+    /// An edited field stays where the user put it. `retain` + `push` moved it
+    /// under the note block instead.
+    #[test]
+    fn an_edited_field_keeps_its_place_in_the_task() {
+        let mut app = open(DetailRegion::Spec);
+        detail_enter_edit(&mut app, false);
+        app.edit_buffer = "doc/only.md".to_string();
+        confirm_detail_edit(&mut app);
+
+        let text = track_text(&app);
+        let spec_at = text.find("- spec:").expect("spec line");
+        let note_at = text.find("- note:").expect("note line");
+        assert!(spec_at < note_at, "spec moved below the note:\n{}", text);
+    }
+
+    /// Undo must restore the field exactly, which means reading the recorded
+    /// buffer back with the grammar that wrote it.
+    #[test]
+    fn undo_restores_a_ref_carrying_prose() {
+        let mut app = open(DetailRegion::Refs);
+        detail_enter_edit(&mut app, false);
+        app.edit_buffer = "doc/replacement.md".to_string();
+        confirm_detail_edit(&mut app);
+        assert_ne!(track_text(&app), TRACK);
+
+        app.undo_stack.undo(&mut app.project.tracks, None);
+        assert_eq!(track_text(&app), TRACK);
+    }
+}

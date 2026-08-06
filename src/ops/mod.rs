@@ -10,6 +10,7 @@ pub mod inbox_ops;
 pub mod merge_files;
 pub mod reconcile;
 pub mod recover;
+pub mod refs;
 pub mod search;
 pub mod task_ops;
 pub mod track_ops;

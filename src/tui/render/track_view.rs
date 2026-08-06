@@ -984,7 +984,11 @@ fn hidden_match_indicator(task: &Task, search_re: Option<&Regex>) -> Option<Stri
                     ref_count += re.find_iter(r).count();
                 }
             }
-            Metadata::Spec(spec) => spec_count += re.find_iter(spec).count(),
+            Metadata::Spec(specs) => {
+                for s in specs {
+                    spec_count += re.find_iter(s).count();
+                }
+            }
             _ => {}
         }
     }

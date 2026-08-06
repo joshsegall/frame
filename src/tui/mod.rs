@@ -1,5 +1,6 @@
 pub mod app;
 pub mod command_actions;
+pub mod fields;
 pub mod input;
 pub mod render;
 pub mod theme;

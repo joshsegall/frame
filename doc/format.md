@@ -114,7 +114,7 @@ Metadata lines are indented under their task (task indent + 2 spaces) and start 
   - added: 2025-05-10
   - dep: EFF-003, INFRA-007
   - ref: doc/design.md, src/parser.rs
-  - spec: doc/spec.md#section
+  - spec: doc/spec.md#section, doc/rfc.md
   - note: Short note text
 ```
 
@@ -128,7 +128,22 @@ Metadata lines are indented under their task (task indent + 2 spaces) and start 
 
 **`ref: path1, path2`** — Comma-separated file paths (relative to project root).
 
-**`spec: path#section`** — Single spec file path with optional `#anchor`.
+**`spec: path#section, path2`** — Comma-separated spec file paths.
+
+`ref:` and `spec:` differ in meaning, not in form: a spec is the document a task implements, a ref a file it touches. Both hold **file paths relative to the project root**, and both are read by the same rule.
+
+**A path may carry a location suffix**, which says where in the file to look:
+
+| Suffix | Example |
+|---|---|
+| `#anchor` | `doc/design.md#rationale` |
+| `:line` | `src/parser.rs:807` |
+| `:line-range` | `src/parser.rs:807-820` |
+| `:line:col` | `src/parser.rs:807:12` |
+
+**Only the file is validated.** `fr check` reports a path with no file behind it as an error; it does not open the file, so an anchor naming a heading that moved and a line number gone stale are not errors — they are stale in a way frame cannot distinguish from correct. A filename that genuinely contains `#` or `:` still resolves, because the literal path is tried before any suffix is stripped.
+
+**The separator is the comma and only the comma**, so a path may contain spaces (`doc/design notes.md`). None may contain a comma, since nothing can quote one.
 
 **`conflict: reason timestamp`** — An unresolved merge conflict, written by `fr merge`. The value is a reason slug (`both-edited`, `edited-and-deleted`, `deleted-and-edited`, `ambiguous-title`) and the RFC 3339 timestamp of the recovery-log entry holding the other side's version:
 

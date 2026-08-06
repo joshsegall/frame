@@ -250,7 +250,7 @@ pub enum AutocompleteKind {
     Tag,
     /// Task IDs (all task IDs across tracks)
     TaskId,
-    /// File paths (walk project directory)
+    /// File paths (walk project directory), comma-separated — `ref:` and `spec:`
     FilePath,
     /// Task IDs for jump-to-task (entries are "ID  title", whole buffer is filter)
     JumpTaskId,
@@ -305,8 +305,16 @@ impl AutocompleteState {
                     .unwrap_or(0)
             }
             AutocompleteKind::FilePath => {
-                // Last entry starts after the last space
-                buffer.rfind(' ').map(|i| i + 1).unwrap_or(0)
+                // Last entry starts after the last comma. Not the last space:
+                // `ref:` and `spec:` values may contain them.
+                buffer
+                    .rfind(',')
+                    .map(|i| {
+                        let rest = &buffer[i + 1..];
+                        let trimmed = rest.len() - rest.trim_start().len();
+                        i + 1 + trimmed
+                    })
+                    .unwrap_or(0)
             }
             AutocompleteKind::JumpTaskId => {
                 // Whole buffer is the filter text

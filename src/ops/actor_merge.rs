@@ -259,7 +259,7 @@ pub fn apply_map_to_tasks(
                         }
                     }
                 }
-                Metadata::Note(s) | Metadata::Spec(s) => {
+                Metadata::Note(s) => {
                     let (new_text, found) = scan_prose(s, map, rewrite_notes);
                     if !found.is_empty() {
                         hits.extend(found);
@@ -269,7 +269,7 @@ pub fn apply_map_to_tasks(
                         }
                     }
                 }
-                Metadata::Ref(refs) => {
+                Metadata::Ref(refs) | Metadata::Spec(refs) => {
                     for r in refs.iter_mut() {
                         let (new_text, found) = scan_prose(r, map, rewrite_notes);
                         if !found.is_empty() {

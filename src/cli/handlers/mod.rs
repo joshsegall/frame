@@ -26,8 +26,9 @@ use crate::model::project::Project;
 use crate::model::task::{Metadata, Task, TaskState};
 use crate::model::track::{Track, TrackNode};
 use crate::ops::ids::Mint;
+use crate::ops::task_ops::PathField;
 use crate::ops::{
-    actor_merge, check, clean, deps, fix, import, inbox_ops, search, task_ops, track_ops,
+    actor_merge, check, clean, deps, fix, import, inbox_ops, refs, search, task_ops, track_ops,
 };
 
 // ---------------------------------------------------------------------------
@@ -2058,25 +2059,70 @@ fn cmd_note(args: NoteArgs) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn cmd_ref(args: RefArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let (mut project, _lock) = lock_and_load()?;
-
-    let track_id = find_task_track(&project, &args.id)
-        .ok_or_else(|| format!("task not found: {}", args.id))?
-        .to_string();
-
-    let track = find_track_mut(&mut project, &track_id)
-        .ok_or_else(|| format!("track not found: {}", track_id))?;
-
-    task_ops::add_ref(track, &args.id, &args.path)?;
-
-    save_track(&project, &track_id)?;
-    println!("{} ref added: {}", args.id, args.path);
-    Ok(())
+/// Refuse paths with no file behind them, naming every one.
+///
+/// `fr check` reports a broken ref as an *error*, so writing one without a word
+/// would be frame creating work for itself: the typo is cheapest to fix at the
+/// moment it is typed, and an agent piping this into a script sees a non-zero
+/// exit rather than a warning scrolling past. `--force` is for the legitimate
+/// case the check cannot tell apart — a reference to a file about to be written.
+fn reject_missing_paths(
+    project_root: &std::path::Path,
+    paths: &[String],
+    force: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if force {
+        return Ok(());
+    }
+    let missing: Vec<&String> = paths
+        .iter()
+        .filter(|p| !refs::exists(project_root, p))
+        .collect();
+    match missing.len() {
+        0 => Ok(()),
+        1 => Err(format!(
+            "no such file: {}\n  (pass --force to add it anyway)",
+            missing[0]
+        )
+        .into()),
+        _ => {
+            let list = missing
+                .iter()
+                .map(|p| format!("\n  {}", p))
+                .collect::<String>();
+            Err(format!(
+                "no such files:{}\n  (pass --force to add them anyway)",
+                list
+            )
+            .into())
+        }
+    }
 }
 
-fn cmd_spec(args: SpecArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_ref(args: PathFieldArgs) -> Result<(), Box<dyn std::error::Error>> {
+    cmd_path_field(PathField::Ref, args)
+}
+
+fn cmd_spec(args: PathFieldArgs) -> Result<(), Box<dyn std::error::Error>> {
+    cmd_path_field(PathField::Spec, args)
+}
+
+/// `fr ref` and `fr spec`, which differ only in the field they write.
+///
+/// The action is explicit — `add`, `rm` or `set` — matching `fr tag` and
+/// `fr dep`, the other two list-valued fields. `add` is the safe default to
+/// reach for: it needs no read of the current list, so two writers adding
+/// different paths to one task do not clobber each other, and it cannot
+/// silently discard a list the caller did not know was there.
+fn cmd_path_field(field: PathField, args: PathFieldArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let key = field.key();
     let (mut project, _lock) = lock_and_load()?;
+
+    // `rm` deliberately skips the existence check: a path is most worth removing
+    // precisely when the file behind it is gone.
+    if matches!(args.action.as_str(), "add" | "set") {
+        reject_missing_paths(&project.root, &args.paths, args.force)?;
+    }
 
     let track_id = find_task_track(&project, &args.id)
         .ok_or_else(|| format!("task not found: {}", args.id))?
@@ -2085,10 +2131,34 @@ fn cmd_spec(args: SpecArgs) -> Result<(), Box<dyn std::error::Error>> {
     let track = find_track_mut(&mut project, &track_id)
         .ok_or_else(|| format!("track not found: {}", track_id))?;
 
-    task_ops::set_spec(track, &args.id, args.path.clone())?;
+    let message = match args.action.as_str() {
+        "add" => {
+            let added = task_ops::add_paths(track, &args.id, field, &args.paths)?;
+            if added.is_empty() {
+                format!("{} {} unchanged (already present)", args.id, key)
+            } else {
+                format!("{} {} added: {}", args.id, key, added.join(", "))
+            }
+        }
+        "rm" => {
+            let removed = task_ops::remove_paths(track, &args.id, field, &args.paths)?;
+            if removed.is_empty() {
+                format!("{} {} unchanged (not present)", args.id, key)
+            } else {
+                format!("{} {} removed: {}", args.id, key, removed.join(", "))
+            }
+        }
+        "set" => {
+            task_ops::set_paths(track, &args.id, field, args.paths.clone())?;
+            format!("{} {} set: {}", args.id, key, args.paths.join(", "))
+        }
+        other => {
+            return Err(format!("unknown action '{}' (expected: add, rm, set)", other).into());
+        }
+    };
 
     save_track(&project, &track_id)?;
-    println!("{} spec set: {}", args.id, args.path);
+    println!("{}", message);
     Ok(())
 }
 

@@ -10,6 +10,7 @@ use crate::model::task::{Metadata, Task, TaskState};
 use crate::model::task_id::{TaskId, Token};
 use crate::model::track::{SectionKind, Track, TrackNode};
 use crate::ops::ids::Mint;
+use crate::ops::refs as refs_ops;
 use crate::ops::task_ops::renumber_subtasks;
 
 /// Result of a clean operation
@@ -858,7 +859,7 @@ fn validate_refs_in_tasks(
             match meta {
                 Metadata::Ref(refs) => {
                     for r in refs {
-                        if !path_exists(project_root, r) {
+                        if !refs_ops::exists(project_root, r) {
                             result.broken_refs.push(BrokenRef {
                                 track_id: track_id.to_string(),
                                 task_id: task_id.to_string(),
@@ -868,16 +869,16 @@ fn validate_refs_in_tasks(
                         }
                     }
                 }
-                Metadata::Spec(spec) => {
-                    // spec can have #section suffix — strip it for file check
-                    let file_path = spec.split('#').next().unwrap_or(spec);
-                    if !path_exists(project_root, file_path) {
-                        result.broken_refs.push(BrokenRef {
-                            track_id: track_id.to_string(),
-                            task_id: task_id.to_string(),
-                            path: spec.clone(),
-                            kind: RefKind::Spec,
-                        });
+                Metadata::Spec(specs) => {
+                    for spec in specs {
+                        if !refs_ops::exists(project_root, spec) {
+                            result.broken_refs.push(BrokenRef {
+                                track_id: track_id.to_string(),
+                                task_id: task_id.to_string(),
+                                path: spec.clone(),
+                                kind: RefKind::Spec,
+                            });
+                        }
                     }
                 }
                 _ => {}
@@ -885,10 +886,6 @@ fn validate_refs_in_tasks(
         }
         validate_refs_in_tasks(&task.subtasks, track_id, project_root, result);
     }
-}
-
-fn path_exists(project_root: &Path, relative_path: &str) -> bool {
-    project_root.join(relative_path).exists()
 }
 
 // ---------------------------------------------------------------------------

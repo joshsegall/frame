@@ -17,8 +17,10 @@ pub struct TaskJson {
     pub tags: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub deps: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub spec: Option<String>,
+    /// Spec paths. An array since 0.1.8 — a task may carry several, the same way
+    /// `refs` always could. It was a bare string before that.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub spec: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub refs: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -180,7 +182,7 @@ pub struct InboxSearchHitJson {
 pub fn task_to_json(task: &Task) -> TaskJson {
     let mut deps = Vec::new();
     let mut refs = Vec::new();
-    let mut spec = None;
+    let mut spec = Vec::new();
     let mut note = None;
     let mut added = None;
     let mut resolved = None;
@@ -190,7 +192,7 @@ pub fn task_to_json(task: &Task) -> TaskJson {
         match m {
             Metadata::Dep(d) => deps.extend(d.iter().cloned()),
             Metadata::Ref(r) => refs.extend(r.iter().cloned()),
-            Metadata::Spec(s) => spec = Some(s.clone()),
+            Metadata::Spec(s) => spec.extend(s.iter().cloned()),
             Metadata::Note(n) => note = Some(n.clone()),
             Metadata::Added(a) => added = Some(a.clone()),
             Metadata::Resolved(r) => resolved = Some(r.clone()),
@@ -312,7 +314,11 @@ pub fn format_task_detail(task: &Task) -> Vec<String> {
             Metadata::Resolved(d) => lines.push(format!("resolved: {}", d)),
             Metadata::Conflict(c) => lines.push(format!("conflict: {}", c)),
             Metadata::Dep(deps) => lines.push(format!("dep: {}", deps.join(", "))),
-            Metadata::Spec(s) => lines.push(format!("spec: {}", s)),
+            Metadata::Spec(specs) => {
+                for s in specs {
+                    lines.push(format!("spec: {}", s));
+                }
+            }
             Metadata::Ref(refs) => {
                 for r in refs {
                     lines.push(format!("ref: {}", r));
@@ -408,7 +414,11 @@ fn format_context_fields(task: &Task) -> Vec<String> {
             Metadata::Resolved(d) => lines.push(format!("  resolved: {}", d)),
             Metadata::Conflict(c) => lines.push(format!("  conflict: {}", c)),
             Metadata::Dep(deps) => lines.push(format!("  dep: {}", deps.join(", "))),
-            Metadata::Spec(s) => lines.push(format!("  spec: {}", s)),
+            Metadata::Spec(specs) => {
+                for s in specs {
+                    lines.push(format!("  spec: {}", s));
+                }
+            }
             Metadata::Ref(refs) => {
                 for r in refs {
                     lines.push(format!("  ref: {}", r));

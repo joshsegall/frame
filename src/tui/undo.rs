@@ -4,6 +4,7 @@ use crate::model::track::{SectionKind, Track};
 use crate::ops::task_ops;
 
 use super::app::DetailRegion;
+use super::fields;
 
 const UNDO_STACK_LIMIT: usize = 500;
 
@@ -101,6 +102,10 @@ pub fn nav_target_for_op(op: &Operation, is_undo: bool) -> Option<UndoNavTarget>
             field,
             ..
         } => {
+            // A navigation hint, not the field mapping in `tui::fields`: `Some`
+            // here pulls the user into Detail view, and "tags" is left out
+            // because a bulk tag edit is undone from Track view, where that
+            // would be a view change nobody asked for.
             let detail_region = match field.as_str() {
                 "note" => Some(DetailRegion::Note),
                 "deps" => Some(DetailRegion::Deps),
@@ -1573,62 +1578,16 @@ fn apply_forward(
     }
 }
 
-/// Apply a value to the appropriate task field based on field name
+/// Apply a value to the appropriate task field based on field name.
+///
+/// The value is a buffer string recorded by the editor, so it must be read back
+/// with the **same** grammar that wrote it — `tui::fields` owns both halves.
+/// This function used to carry its own third copy of the parsing, which split
+/// `refs` on commas alone while the editor had joined them with spaces: undoing
+/// a ref edit collapsed the whole list into one entry.
 fn apply_field_value(task: &mut Task, field: &str, value: &str) {
-    match field {
-        "tags" => {
-            task.tags = value
-                .split_whitespace()
-                .map(|s| s.strip_prefix('#').unwrap_or(s).to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            task.mark_dirty();
-        }
-        "deps" => {
-            task.metadata
-                .retain(|m| !matches!(m, crate::model::task::Metadata::Dep(_)));
-            let deps: Vec<String> = value
-                .split(|c: char| c == ',' || c.is_whitespace())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            if !deps.is_empty() {
-                task.metadata.push(crate::model::task::Metadata::Dep(deps));
-            }
-            task.mark_dirty();
-        }
-        "spec" => {
-            task.metadata
-                .retain(|m| !matches!(m, crate::model::task::Metadata::Spec(_)));
-            if !value.trim().is_empty() {
-                task.metadata
-                    .push(crate::model::task::Metadata::Spec(value.trim().to_string()));
-            }
-            task.mark_dirty();
-        }
-        "refs" => {
-            task.metadata
-                .retain(|m| !matches!(m, crate::model::task::Metadata::Ref(_)));
-            let refs: Vec<String> = value
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            if !refs.is_empty() {
-                task.metadata.push(crate::model::task::Metadata::Ref(refs));
-            }
-            task.mark_dirty();
-        }
-        "note" => {
-            task.metadata
-                .retain(|m| !matches!(m, crate::model::task::Metadata::Note(_)));
-            if !value.is_empty() {
-                task.metadata
-                    .push(crate::model::task::Metadata::Note(value.to_string()));
-            }
-            task.mark_dirty();
-        }
-        _ => {}
+    if let Some(region) = fields::region_from_field_name(field) {
+        fields::apply_buffer(task, region, value);
     }
 }
 
@@ -2252,7 +2211,8 @@ mod tests {
         {
             let track = &mut tracks[0].1;
             let task = task_ops::find_task_mut_in_track(track, "T-001").unwrap();
-            task.metadata.push(Metadata::Spec("doc/spec.md".into()));
+            task.metadata
+                .push(Metadata::Spec(vec!["doc/spec.md".into()]));
         }
         stack.push(Operation::FieldEdit {
             track_id: "t".into(),

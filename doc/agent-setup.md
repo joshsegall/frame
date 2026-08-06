@@ -107,7 +107,7 @@ A typical agent session:
    into subtasks
 5. Do the work          →  (write code, run tests, etc.)
 6. Report progress      →  fr state ID.1 done
-                           fr ref ID src/changed_file.rs
+                           fr ref ID add src/changed_file.rs
                            fr note ID "implementation details"
 7. File discoveries     →  fr inbox "bug found" --tag bug
                            fr add track "new task" --found-from ID

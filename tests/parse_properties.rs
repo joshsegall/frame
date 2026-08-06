@@ -567,11 +567,26 @@ fn arb_metadata() -> impl Strategy<Value = Vec<Metadata>> {
             prop::sample::select(["T-001", "T-002", "EFF-a3"].as_slice()).prop_map(str::to_string),
             1..3,
         )),
+        // A ref may carry spaces — `ref:` is comma-separated, so "path — why it
+        // is the ref" is one value, not five. It round-trips or the pair is
+        // broken; nothing else in this generator would catch that.
         prop::option::of(prop::collection::vec(
-            prop::sample::select(["src/a.rs", "doc/b.md"].as_slice()).prop_map(str::to_string),
+            prop::sample::select(
+                [
+                    "src/a.rs",
+                    "doc/b.md",
+                    "src/c.rs:42 — the fix site (first red)",
+                ]
+                .as_slice(),
+            )
+            .prop_map(str::to_string),
             1..3,
         )),
-        prop::option::of(Just("doc/spec.md#section".to_string())),
+        prop::option::of(prop::collection::vec(
+            prop::sample::select(["doc/spec.md#section", "doc/other spec.md"].as_slice())
+                .prop_map(str::to_string),
+            1..3,
+        )),
         prop::option::of(arb_note()),
     )
         .prop_map(|(added, resolved, dep, refs, spec, note)| {

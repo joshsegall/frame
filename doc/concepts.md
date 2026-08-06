@@ -118,8 +118,8 @@ Tasks can have metadata lines indented below the task line:
 | `added` | `added: 2025-05-14` | Date the task was created |
 | `resolved` | `resolved: 2025-05-14` | Date the task was completed |
 | `dep` | `dep: EFF-003, INFRA-007` | Task dependencies (comma-separated IDs) |
-| `ref` | `ref: doc/design.md, src/lib.rs` | File references (comma-separated paths) |
-| `spec` | `spec: doc/spec.md#section` | Spec file with optional anchor |
+| `ref` | `ref: doc/design.md, src/lib.rs:807` | Files the task touches (comma-separated paths) |
+| `spec` | `spec: doc/spec.md#section, doc/rfc.md` | Files the task implements (comma-separated paths) |
 | `note` | `note: Free text` | Note (single-line or multi-line block) |
 | `conflict` | `conflict: both-edited 2026-08-03T04:08:38Z` | An unresolved merge conflict, written by `fr merge` and cleared by `fr merge --resolve` |
 

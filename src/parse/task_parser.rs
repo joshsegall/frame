@@ -479,7 +479,14 @@ fn parse_metadata(lines: &[String], idx: usize, indent: usize) -> (Metadata, usi
                 .collect();
             (Metadata::Ref(refs), idx + 1)
         }
-        "spec" => (Metadata::Spec(value.to_string()), idx + 1),
+        "spec" => {
+            let specs: Vec<String> = value
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            (Metadata::Spec(specs), idx + 1)
+        }
         "added" => (Metadata::Added(value.to_string()), idx + 1),
         "resolved" => (Metadata::Resolved(value.to_string()), idx + 1),
         "conflict" => (Metadata::Conflict(value.to_string()), idx + 1),
@@ -629,7 +636,7 @@ mod tests {
         assert!(matches!(&tasks[0].metadata[0], Metadata::Added(d) if d == "2025-05-10"));
         assert!(matches!(&tasks[0].metadata[1], Metadata::Dep(d) if d == &["EFF-003"]));
         assert!(
-            matches!(&tasks[0].metadata[2], Metadata::Spec(s) if s == "doc/spec/effects.md#closure-effects")
+            matches!(&tasks[0].metadata[2], Metadata::Spec(s) if s == &["doc/spec/effects.md#closure-effects"])
         );
         assert!(
             matches!(&tasks[0].metadata[3], Metadata::Ref(r) if r == &["doc/design/effect-handlers-v2.md"])
@@ -861,7 +868,7 @@ mod tests {
         let (tasks, _) = parse_tasks(&input, 0, 0, 0);
         assert_eq!(tasks[0].metadata.len(), 3); // note, spec, dep
         assert!(matches!(&tasks[0].metadata[0], Metadata::Note(n) if n.is_empty()));
-        assert!(matches!(&tasks[0].metadata[1], Metadata::Spec(s) if s == "some-file.md"));
+        assert!(matches!(&tasks[0].metadata[1], Metadata::Spec(s) if s == &["some-file.md"]));
         assert!(matches!(&tasks[0].metadata[2], Metadata::Dep(d) if d == &["T-002"]));
     }
 

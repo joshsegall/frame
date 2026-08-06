@@ -63,10 +63,10 @@ pub enum Commands {
     Dep(DepArgs),
     /// Set task note
     Note(NoteArgs),
-    /// Add file reference
-    Ref(RefArgs),
-    /// Set spec reference
-    Spec(SpecArgs),
+    /// Add, remove or set file references
+    Ref(PathFieldArgs),
+    /// Add, remove or set spec references
+    Spec(PathFieldArgs),
     /// Change task title
     Title(TitleArgs),
     /// Move a task (reorder or cross-track)
@@ -337,20 +337,21 @@ pub struct NoteArgs {
     pub replace: bool,
 }
 
+/// Shared by `fr ref` and `fr spec`: the two fields hold the same kind of value
+/// and take the same actions, so they take the same arguments.
 #[derive(Args)]
-pub struct RefArgs {
+pub struct PathFieldArgs {
     /// Task ID
     pub id: String,
-    /// File path
-    pub path: String,
-}
-
-#[derive(Args)]
-pub struct SpecArgs {
-    /// Task ID
-    pub id: String,
-    /// Spec path (e.g., doc/spec.md#section)
-    pub path: String,
+    /// Action: "add", "rm", or "set" (set replaces the whole list)
+    pub action: String,
+    /// File paths relative to the project root, each optionally carrying a
+    /// `#anchor`, `:line`, `:line-range` or `:line:col`
+    #[arg(required = true, num_args = 1..)]
+    pub paths: Vec<String>,
+    /// Accept paths that do not exist in the project. Never needed for "rm".
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Args)]

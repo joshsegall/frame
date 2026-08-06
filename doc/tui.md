@@ -584,7 +584,11 @@ Activates automatically during editing:
 
 The dropdown appears immediately when entering edit mode on an eligible field — no keypress is needed to trigger it. It also activates during inline tag editing (`t` in Track view), filter tag selection (`ft`), and jump-to-task (`J`).
 
-Filtering is case-insensitive substring matching. Word extraction depends on the field: tag autocomplete matches the word after the last space; dep autocomplete matches after the last comma or space; file path autocomplete matches after the last space.
+Filtering is case-insensitive substring matching. Word extraction depends on the field: tag autocomplete matches the word after the last space; dep autocomplete matches after the last comma or space; file path autocomplete matches after the last **comma**, since a `ref:` or `spec:` value may contain spaces.
+
+**Ref and spec fields are comma-separated when you edit them**, matching the file format — accepting a completion inserts the `, ` for you. Splitting them on whitespace as well would make `doc/design notes.md` into two refs.
+
+A ref or spec path with **no file behind it renders in the error colour**, so a reference that went stale when its file moved is visible without running `fr check`. Editing still accepts anything you type; a location suffix (`#anchor`, `:807`, `:807-820`) is not validated.
 
 `Tab` accepts the selected suggestion and stays in edit mode. `Enter` accepts and confirms the edit. `Esc` dismisses the dropdown but stays in edit mode.
 

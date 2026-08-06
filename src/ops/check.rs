@@ -7,6 +7,7 @@ use serde::Serialize;
 use crate::model::project::Project;
 use crate::model::task::{Metadata, Task, TaskState};
 use crate::model::track::{Track, TrackNode};
+use crate::ops::refs as refs_ops;
 
 /// Structured result from `fr check`, suitable for --json output.
 #[derive(Debug, Default, Serialize)]
@@ -609,7 +610,7 @@ fn check_task(
             }
             Metadata::Ref(refs) => {
                 for r in refs {
-                    if !project_root.join(r).exists() {
+                    if !refs_ops::exists(project_root, r) {
                         result.errors.push(CheckError::BrokenRef {
                             track_id: track_id.to_string(),
                             task_id: task_id.to_string(),
@@ -618,14 +619,15 @@ fn check_task(
                     }
                 }
             }
-            Metadata::Spec(spec) => {
-                let file_path = spec.split('#').next().unwrap_or(spec);
-                if !project_root.join(file_path).exists() {
-                    result.errors.push(CheckError::BrokenSpec {
-                        track_id: track_id.to_string(),
-                        task_id: task_id.to_string(),
-                        path: spec.clone(),
-                    });
+            Metadata::Spec(specs) => {
+                for spec in specs {
+                    if !refs_ops::exists(project_root, spec) {
+                        result.errors.push(CheckError::BrokenSpec {
+                            track_id: track_id.to_string(),
+                            task_id: task_id.to_string(),
+                            path: spec.clone(),
+                        });
+                    }
                 }
             }
             Metadata::Note(note) => {
@@ -1867,6 +1869,77 @@ mod tests {
             .filter(|e| matches!(e, CheckError::BrokenSpec { .. }))
             .collect();
         assert!(broken.is_empty());
+    }
+
+    /// `ref:` and `spec:` resolve by the same rule. The anchor was stripped for
+    /// one and not the other, so `doc/design.md#rationale` was a valid spec and
+    /// a broken ref — and a line reference, which is how most refs to code get
+    /// written, was broken in both.
+    #[test]
+    fn a_ref_resolves_exactly_like_a_spec() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("doc")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("doc/design.md"), "# Design").unwrap();
+        std::fs::write(tmp.path().join("src/parser.rs"), "fn main() {}").unwrap();
+
+        let project = make_project_at(
+            tmp.path(),
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Task one
+  - added: 2025-05-01
+  - ref: doc/design.md#rationale, src/parser.rs:807, src/parser.rs:807-820
+  - spec: doc/design.md#rationale, src/parser.rs:807
+
+## Done
+",
+        );
+
+        let result = check_project(&project);
+        let broken: Vec<_> = result
+            .errors
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    CheckError::BrokenRef { .. } | CheckError::BrokenSpec { .. }
+                )
+            })
+            .collect();
+        assert!(broken.is_empty(), "unexpected findings: {:?}", broken);
+    }
+
+    /// A suffix is not a way to make a missing file look present: the path in
+    /// front of it still has to exist.
+    #[test]
+    fn a_suffix_does_not_excuse_a_missing_file() {
+        let tmp = TempDir::new().unwrap();
+        let project = make_project_at(
+            tmp.path(),
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Task one
+  - added: 2025-05-01
+  - ref: src/gone.rs:807, doc/gone.md#anchor
+
+## Done
+",
+        );
+
+        let result = check_project(&project);
+        let broken: Vec<_> = result
+            .errors
+            .iter()
+            .filter(|e| matches!(e, CheckError::BrokenRef { .. }))
+            .collect();
+        assert_eq!(broken.len(), 2, "{:?}", result.errors);
     }
 
     // --- Duplicate IDs ---

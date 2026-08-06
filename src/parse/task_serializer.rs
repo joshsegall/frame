@@ -76,8 +76,8 @@ fn serialize_task(task: &Task, indent: usize, lines: &mut Vec<String>) {
             Metadata::Ref(refs) => {
                 lines.push(format!("{}- ref: {}", meta_indent, refs.join(", ")));
             }
-            Metadata::Spec(spec) => {
-                lines.push(format!("{}- spec: {}", meta_indent, spec));
+            Metadata::Spec(specs) => {
+                lines.push(format!("{}- spec: {}", meta_indent, specs.join(", ")));
             }
             Metadata::Note(note) => {
                 // The single-line form `- note: <text>` cannot carry leading or
@@ -172,7 +172,7 @@ mod tests {
         task.metadata = vec![
             Metadata::Added("2025-05-10".to_string()),
             Metadata::Dep(vec!["EFF-003".to_string(), "INFRA-007".to_string()]),
-            Metadata::Spec("doc/spec/effects.md#closures".to_string()),
+            Metadata::Spec(vec!["doc/spec/effects.md#closures".to_string()]),
         ];
         let lines = serialize_tasks(&[task], 0);
         assert_eq!(lines[0], "- [>] `EFF-014` Test task");

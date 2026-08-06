@@ -366,21 +366,41 @@ Set a task's note (replaces existing).
 fr note EFF-014 "Found while working on closures"
 ```
 
-### `fr ref ID PATH`
+### `fr ref ID ACTION PATH...`
+### `fr spec ID ACTION PATH...`
 
-Add a file reference.
+Manage the files a task points at. `ref:` is the files it touches, `spec:` the documents it implements; the two differ in meaning only, and take the same actions — the same `add`/`rm` shape as [`fr tag`](#fr-tag-id-action-tag) and [`fr dep`](#fr-dep-id-action-dep_id).
+
+| Action | Effect |
+|---|---|
+| `add` | Append paths the task does not already have |
+| `rm` | Drop the named paths; removing the last one removes the metadata line |
+| `set` | Replace the whole list |
 
 ```
-fr ref EFF-014 doc/design/effects.md
+fr ref EFF-014 add doc/design/effects.md
+fr ref EFF-014 add src/parser.rs:807 src/parser.rs:920-934
+fr ref EFF-014 rm src/parser.rs:807
+fr spec EFF-014 set doc/spec.md#closure-effects doc/rfc-012.md
 ```
 
-### `fr spec ID PATH`
+**Prefer `add`.** It needs no read of the current list, so two agents adding different paths to one task do not clobber each other, and it cannot silently discard a list the caller did not know was there. It is idempotent — adding a path already present changes nothing and says so. `set` is the deliberate destructive form.
 
-Set the spec reference.
+#### Paths, and what is checked
+
+Paths are relative to the project root, each optionally carrying a `#anchor`, `:line`, `:line-range` or `:line:col` suffix (see [format.md](format.md#metadata-types)). The suffix is kept and never validated — only the file has to exist.
+
+**`add` and `set` refuse a path with no file behind it**, naming every bad path and writing nothing:
 
 ```
-fr spec EFF-014 doc/spec.md#closure-effects
+$ fr ref EFF-014 add src/parsr.rs
+error: no such file: src/parsr.rs
+  (pass --force to add it anyway)
 ```
+
+`fr check` reports a broken ref as an error, so the alternative is frame creating work for itself: the typo is cheapest to fix where it is typed. `--force` covers the case the check cannot tell apart — pointing at a file you are about to write.
+
+**`rm` never checks the filesystem**, since a path is most worth removing precisely when the file behind it is gone.
 
 ### `fr title ID TITLE`
 

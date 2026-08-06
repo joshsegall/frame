@@ -561,8 +561,8 @@ fn build_snippet_for_field(field: &MatchField, task: Option<&Task>, re: &Regex) 
         }
         MatchField::Spec => {
             for meta in &task.metadata {
-                if let Metadata::Spec(spec) = meta {
-                    return Some(spec.clone());
+                if let Metadata::Spec(specs) = meta {
+                    return Some(specs.join(", "));
                 }
             }
             None
@@ -1402,7 +1402,7 @@ pub(super) fn search_in_detail(
     let has_spec_match = task
         .metadata
         .iter()
-        .any(|m| matches!(m, Metadata::Spec(s) if re.is_match(s)));
+        .any(|m| matches!(m, Metadata::Spec(specs) if specs.iter().any(|s| re.is_match(s))));
     if has_spec_match {
         positions.push((DetailRegion::Spec, None));
     }
@@ -1669,15 +1669,12 @@ pub(super) fn count_matches_in_task(task: &Task, re: &Regex) -> usize {
                     }
                 }
             }
-            Metadata::Ref(refs) => {
+            Metadata::Ref(refs) | Metadata::Spec(refs) => {
                 for r in refs {
                     if re.is_match(r) {
                         return 1;
                     }
                 }
-            }
-            Metadata::Spec(spec) if re.is_match(spec) => {
-                return 1;
             }
             _ => {}
         }

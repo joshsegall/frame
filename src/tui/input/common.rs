@@ -1143,12 +1143,7 @@ pub(super) fn remove_task_from_section(
     }
 }
 
-/// Find the byte offset of the previous word boundary
-/// Deduplicate items while preserving first-occurrence order.
-pub(super) fn dedup_preserve_order(iter: impl Iterator<Item = String>) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    iter.filter(|s| seen.insert(s.clone())).collect()
-}
+pub(super) use crate::tui::fields::dedup_preserve_order;
 
 pub(super) fn word_boundary_left(s: &str, pos: usize) -> usize {
     unicode::word_boundary_left(s, pos)

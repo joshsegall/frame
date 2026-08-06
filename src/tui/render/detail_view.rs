@@ -9,6 +9,7 @@ use regex::Regex;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::model::{Metadata, Task, TaskState};
+use crate::ops::refs as refs_ops;
 use crate::ops::task_ops;
 use crate::tui::app::{App, DetailRegion, Mode, ReturnView, View, flatten_subtask_ids};
 use crate::tui::input::{multiline_selection_range, selection_cols_for_line};
@@ -89,6 +90,19 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
     let bright_style = Style::default().fg(app.theme.text_bright).bg(bg);
     let dim_style = Style::default().fg(app.theme.dim).bg(bg);
     let region_indicator_style = Style::default().fg(app.theme.highlight).bg(bg);
+    // A `ref:`/`spec:` path with no file behind it. `fr check` calls it an error;
+    // showing it here is what makes it findable without running check, and a
+    // path that has since moved is the common way one appears.
+    let path_style = |exists: bool| {
+        Style::default()
+            .fg(if exists {
+                app.theme.cyan
+            } else {
+                app.theme.red
+            })
+            .bg(bg)
+    };
+    let project_root = app.project.root.clone();
 
     // Search highlighting
     let search_re = app.active_search_re();
@@ -382,9 +396,9 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
         if is_active {
             body_active_line = Some(body_lines.len());
         }
-        let spec = task.metadata.iter().find_map(|m| {
+        let specs = collect_metadata_list(task, |m| {
             if let Metadata::Spec(s) = m {
-                Some(s.clone())
+                Some(s)
             } else {
                 None
             }
@@ -405,22 +419,29 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
             app.last_edit_available_width = aw;
             app.edit_h_scroll = hs;
             body_lines.push(Line::from(spans));
-        } else if let Some(spec_val) = &spec {
-            let mut spans: Vec<Span> = vec![
-                region_indicator(is_active, region_indicator_style, bg),
-                Span::styled("spec: ", dim_style),
-            ];
-            let cyan_style = Style::default().fg(app.theme.cyan).bg(bg);
-            push_highlighted_spans(
-                &mut spans,
-                spec_val,
-                cyan_style,
-                highlight_style,
-                search_re.as_ref(),
-            );
-            let wrapped = wrap_styled_spans(spans, width, 9, bg);
+        } else if !specs.is_empty() {
             let start = body_lines.len();
-            body_lines.extend(wrapped);
+            for (i, spec_val) in specs.iter().enumerate() {
+                let mut spans: Vec<Span> = vec![region_indicator(
+                    is_active && i == 0,
+                    region_indicator_style,
+                    bg,
+                )];
+                if i == 0 {
+                    spans.push(Span::styled("spec: ", dim_style));
+                } else {
+                    spans.push(Span::styled("      ", dim_style));
+                }
+                push_highlighted_spans(
+                    &mut spans,
+                    spec_val,
+                    path_style(refs_ops::exists(&project_root, spec_val)),
+                    highlight_style,
+                    search_re.as_ref(),
+                );
+                let wrapped = wrap_styled_spans(spans, width, 9, bg);
+                body_lines.extend(wrapped);
+            }
             if is_active {
                 body_active_line = Some(start);
             }
@@ -481,11 +502,10 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 } else {
                     spans.push(Span::styled("     ", dim_style));
                 }
-                let cyan_style = Style::default().fg(app.theme.cyan).bg(bg);
                 push_highlighted_spans(
                     &mut spans,
                     ref_path,
-                    cyan_style,
+                    path_style(refs_ops::exists(&project_root, ref_path)),
                     highlight_style,
                     search_re.as_ref(),
                 );
@@ -1775,5 +1795,64 @@ mod tests {
             render_detail_view(frame, &mut app, area);
         });
         assert_snapshot!(output);
+    }
+
+    /// The foreground colour of the first cell of `needle`. Snapshots record
+    /// text only, so a colour claim has to read the buffer itself.
+    fn fg_of(buf: &ratatui::buffer::Buffer, needle: &str) -> ratatui::style::Color {
+        let w = buf.area.width as usize;
+        for row in buf.content.chunks(w) {
+            let text: String = row.iter().map(|c| c.symbol()).collect();
+            if let Some(byte_at) = text.find(needle) {
+                let cell = text[..byte_at].chars().count();
+                return row[cell].style().fg.expect("cell has no fg");
+            }
+        }
+        panic!("{:?} not found in the rendered buffer", needle);
+    }
+
+    fn render_buffer(app: &mut App) -> ratatui::buffer::Buffer {
+        let backend = ratatui::backend::TestBackend::new(TERM_W, TERM_H);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render_detail_view(frame, app, area);
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    /// `fr check` calls a path with no file behind it an error. Showing it in the
+    /// error colour is what makes it findable without running check — a ref goes
+    /// stale when the file it names is moved, which happens far from this task.
+    #[test]
+    fn a_path_with_no_file_behind_it_is_shown_in_the_error_colour() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("doc")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("doc/real.md"), "x").unwrap();
+        std::fs::write(tmp.path().join("src/parser.rs"), "x").unwrap();
+
+        let md = "\
+# Test
+
+## Backlog
+
+- [ ] `T-1` A task
+  - spec: doc/real.md#anchor
+  - ref: src/parser.rs:807
+  - ref: doc/gone.md
+
+## Done
+";
+        let mut app = app_in_detail_view(md, "T-1");
+        app.project.root = tmp.path().to_path_buf();
+        let (cyan, red) = (app.theme.cyan, app.theme.red);
+
+        let buf = render_buffer(&mut app);
+        assert_eq!(fg_of(&buf, "doc/real.md#anchor"), cyan, "spec with anchor");
+        assert_eq!(fg_of(&buf, "src/parser.rs:807"), cyan, "ref with line");
+        assert_eq!(fg_of(&buf, "doc/gone.md"), red, "ref with no file");
     }
 }

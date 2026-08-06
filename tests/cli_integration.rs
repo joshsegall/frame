@@ -1042,24 +1042,263 @@ fn test_note_replace() {
     assert!(track.contains("Replacement note."));
 }
 
-#[test]
-fn test_ref() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    create_test_project(tmp.path());
+/// `doc/design.md`, `doc/spec.md` and `src/parser.rs`, for the ref/spec tests —
+/// a path must exist before frame will point at it.
+fn create_ref_targets(root: &Path) {
+    fs::create_dir_all(root.join("doc")).unwrap();
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("doc/design.md"), "# Design\n").unwrap();
+    fs::write(root.join("doc/spec.md"), "# Spec\n").unwrap();
+    fs::write(root.join("src/parser.rs"), "fn main() {}\n").unwrap();
+}
 
-    run_fr_ok(tmp.path(), &["ref", "M-001", "doc/design.md"]);
-    let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
-    assert!(track.contains("ref: doc/design.md"));
+/// `ref` and `spec` take the same actions and behave identically under each,
+/// so the cases below run against both. Only the metadata key differs.
+const PATH_FIELDS: [&str; 2] = ["ref", "spec"];
+
+#[test]
+fn test_path_field_add() {
+    for field in PATH_FIELDS {
+        let tmp = tempfile::TempDir::new().unwrap();
+        create_test_project(tmp.path());
+        create_ref_targets(tmp.path());
+
+        run_fr_ok(tmp.path(), &[field, "M-001", "add", "doc/design.md"]);
+        run_fr_ok(tmp.path(), &[field, "M-001", "add", "src/parser.rs"]);
+
+        let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+        assert!(
+            track.contains(&format!("{}: doc/design.md, src/parser.rs", field)),
+            "{} add did not append:\n{}",
+            field,
+            track
+        );
+    }
 }
 
 #[test]
-fn test_spec() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    create_test_project(tmp.path());
+fn test_path_field_add_is_idempotent() {
+    for field in PATH_FIELDS {
+        let tmp = tempfile::TempDir::new().unwrap();
+        create_test_project(tmp.path());
+        create_ref_targets(tmp.path());
 
-    run_fr_ok(tmp.path(), &["spec", "M-001", "doc/spec.md#section"]);
-    let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
-    assert!(track.contains("spec: doc/spec.md#section"));
+        run_fr_ok(tmp.path(), &[field, "M-001", "add", "doc/design.md"]);
+        let out = run_fr_ok(tmp.path(), &[field, "M-001", "add", "doc/design.md"]);
+        assert!(out.contains("unchanged"), "{}: {}", field, out);
+
+        let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+        assert_eq!(
+            track.matches("doc/design.md").count(),
+            1,
+            "{} duplicated a path",
+            field
+        );
+    }
+}
+
+#[test]
+fn test_path_field_set_replaces_the_list() {
+    for field in PATH_FIELDS {
+        let tmp = tempfile::TempDir::new().unwrap();
+        create_test_project(tmp.path());
+        create_ref_targets(tmp.path());
+
+        run_fr_ok(tmp.path(), &[field, "M-001", "add", "doc/design.md"]);
+        run_fr_ok(
+            tmp.path(),
+            &[
+                field,
+                "M-001",
+                "set",
+                "doc/spec.md#section",
+                "src/parser.rs",
+            ],
+        );
+
+        let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+        assert!(track.contains(&format!("{}: doc/spec.md#section, src/parser.rs", field)));
+        assert!(
+            !track.contains("doc/design.md"),
+            "{} set did not replace",
+            field
+        );
+    }
+}
+
+#[test]
+fn test_path_field_rm() {
+    for field in PATH_FIELDS {
+        let tmp = tempfile::TempDir::new().unwrap();
+        create_test_project(tmp.path());
+        create_ref_targets(tmp.path());
+
+        run_fr_ok(
+            tmp.path(),
+            &[field, "M-001", "add", "doc/design.md", "src/parser.rs"],
+        );
+        run_fr_ok(tmp.path(), &[field, "M-001", "rm", "doc/design.md"]);
+
+        let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+        assert!(track.contains(&format!("{}: src/parser.rs", field)));
+        assert!(!track.contains("doc/design.md"));
+    }
+}
+
+/// Removing the last path takes the metadata line with it.
+#[test]
+fn test_path_field_rm_last_removes_the_line() {
+    for field in PATH_FIELDS {
+        let tmp = tempfile::TempDir::new().unwrap();
+        create_test_project(tmp.path());
+        create_ref_targets(tmp.path());
+
+        run_fr_ok(tmp.path(), &[field, "M-001", "add", "doc/design.md"]);
+        run_fr_ok(tmp.path(), &[field, "M-001", "rm", "doc/design.md"]);
+
+        let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+        assert!(
+            !track.contains(&format!("{}:", field)),
+            "{} left an empty line:\n{}",
+            field,
+            track
+        );
+    }
+}
+
+/// `rm` never checks the filesystem: a path is most worth removing precisely
+/// when the file behind it is gone.
+#[test]
+fn test_path_field_rm_works_after_the_file_is_deleted() {
+    for field in PATH_FIELDS {
+        let tmp = tempfile::TempDir::new().unwrap();
+        create_test_project(tmp.path());
+        create_ref_targets(tmp.path());
+
+        run_fr_ok(tmp.path(), &[field, "M-001", "add", "doc/design.md"]);
+        fs::remove_file(tmp.path().join("doc/design.md")).unwrap();
+
+        run_fr_ok(tmp.path(), &[field, "M-001", "rm", "doc/design.md"]);
+        let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+        assert!(!track.contains("doc/design.md"));
+    }
+}
+
+#[test]
+fn test_path_field_rm_of_an_absent_path_says_so() {
+    for field in PATH_FIELDS {
+        let tmp = tempfile::TempDir::new().unwrap();
+        create_test_project(tmp.path());
+        create_ref_targets(tmp.path());
+
+        let out = run_fr_ok(tmp.path(), &[field, "M-001", "rm", "doc/design.md"]);
+        assert!(out.contains("unchanged"), "{}: {}", field, out);
+    }
+}
+
+#[test]
+fn test_path_field_unknown_action_is_refused() {
+    for field in PATH_FIELDS {
+        let tmp = tempfile::TempDir::new().unwrap();
+        create_test_project(tmp.path());
+        create_ref_targets(tmp.path());
+
+        let (_, stderr, ok) = run_fr(tmp.path(), &[field, "M-001", "append", "doc/design.md"]);
+        assert!(!ok, "{} accepted a bogus action", field);
+        assert!(stderr.contains("add, rm, set"), "{}", stderr);
+    }
+}
+
+/// An anchor and a line reference are part of the value, not part of the path —
+/// they say *where* in the file, and frame does not read the file to check.
+#[test]
+fn test_path_field_accepts_an_anchor_or_a_line_reference() {
+    for field in PATH_FIELDS {
+        let tmp = tempfile::TempDir::new().unwrap();
+        create_test_project(tmp.path());
+        create_ref_targets(tmp.path());
+
+        run_fr_ok(
+            tmp.path(),
+            &[
+                field,
+                "M-001",
+                "add",
+                "doc/design.md#rationale",
+                "src/parser.rs:807",
+                "src/parser.rs:807-820",
+            ],
+        );
+        let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+        assert!(track.contains(&format!(
+            "{}: doc/design.md#rationale, src/parser.rs:807, src/parser.rs:807-820",
+            field
+        )));
+
+        let (stdout, _, ok) = run_fr(tmp.path(), &["check"]);
+        assert!(ok, "check rejected a valid {}: {}", field, stdout);
+    }
+}
+
+#[test]
+fn test_path_field_refuses_a_missing_path() {
+    for field in PATH_FIELDS {
+        let tmp = tempfile::TempDir::new().unwrap();
+        create_test_project(tmp.path());
+        create_ref_targets(tmp.path());
+
+        let (_, stderr, ok) = run_fr(tmp.path(), &[field, "M-001", "add", "doc/typo.md"]);
+        assert!(!ok, "a missing path should exit non-zero");
+        assert!(stderr.contains("no such file: doc/typo.md"), "{}", stderr);
+        assert!(stderr.contains("--force"), "{}", stderr);
+
+        let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+        assert!(
+            !track.contains(&format!("{}:", field)),
+            "nothing should have been written"
+        );
+    }
+}
+
+/// All or nothing: one bad path in a list writes none of them, and every bad one
+/// is named so the fix is a single retry.
+#[test]
+fn test_path_field_names_every_missing_path_and_writes_none() {
+    for field in PATH_FIELDS {
+        let tmp = tempfile::TempDir::new().unwrap();
+        create_test_project(tmp.path());
+        create_ref_targets(tmp.path());
+
+        let (_, stderr, ok) = run_fr(
+            tmp.path(),
+            &[field, "M-001", "add", "doc/design.md", "a.md", "b.md"],
+        );
+        assert!(!ok);
+        assert!(
+            stderr.contains("a.md") && stderr.contains("b.md"),
+            "{}",
+            stderr
+        );
+
+        let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+        assert!(!track.contains(&format!("{}:", field)));
+    }
+}
+
+#[test]
+fn test_path_field_force_accepts_a_missing_path() {
+    for field in PATH_FIELDS {
+        let tmp = tempfile::TempDir::new().unwrap();
+        create_test_project(tmp.path());
+        create_ref_targets(tmp.path());
+
+        run_fr_ok(
+            tmp.path(),
+            &[field, "M-001", "add", "doc/not-yet.md", "--force"],
+        );
+        let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+        assert!(track.contains(&format!("{}: doc/not-yet.md", field)));
+    }
 }
 
 #[test]

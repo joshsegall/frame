@@ -55,10 +55,17 @@ here sort first in `fr ready --cc`.
   etc. `EFF-a14`, `EFF-14`, and `EFF-b14` are three distinct tasks.
 - **Tags** — `#cc`, `#cc-added`, `#bug`, `#needs-input`, `#research`, `#design`
 - **dep:** — IDs of blocking tasks
-- **spec:** — path to spec this task implements
-- **ref:** — paths to related files
+- **spec:** — paths to the docs this task implements
+- **ref:** — paths to the files it touches
 - **note:** — freeform text (can include code blocks)
 - **added:** / **resolved:** — dates (auto-set)
+
+`spec:` and `ref:` both hold **file paths relative to the project root**,
+comma-separated, each optionally carrying a location: `doc/spec.md#section`,
+`src/parser.rs:807`, `src/parser.rs:807-820`. Only the file is checked — the
+location is kept and never validated. `fr check` reports a path with no file
+behind it as an error, and `fr ref`/`fr spec` refuse to write one (pass
+`--force` for a file you are about to create).
 
 Subtasks nest up to 3 levels. Position in the backlog *is* priority —
 there are no priority fields.
@@ -129,7 +136,7 @@ fr state EFF-014 active
 ```bash
 fr state EFF-014.1 done
 fr note EFF-014 "Row unification needs special handling for polymorphic effects"
-fr ref EFF-014 src/effects/infer.rs
+fr ref EFF-014 add src/effects/infer.rs src/effects/solve.rs:142
 fr state EFF-014 done
 ```
 
@@ -251,8 +258,10 @@ the track ID is wrong.
 | `fr dep <id> add <dep-id>` | Add a dependency |
 | `fr dep <id> rm <dep-id>` | Remove a dependency |
 | `fr note <id> "text"` | Set task note |
-| `fr ref <id> <filepath>` | Add a file reference |
-| `fr spec <id> <path>` | Set spec reference (e.g., `doc/spec.md#section`) |
+| `fr ref <id> add <path>...` | Add file references (`src/x.rs`, `src/x.rs:807`) |
+| `fr ref <id> rm <path>...` | Remove file references |
+| `fr ref <id> set <path>...` | Replace the whole ref list |
+| `fr spec <id> add\|rm\|set <path>...` | Same three actions for `spec:` |
 | `fr title <id> "new title"` | Change task title |
 | `fr mv <id> --top` | Move task to top of its section |
 | `fr mv <id> --after <id>` | Move after another task |
@@ -412,7 +421,7 @@ fr sub INFRA-015 "Update error reporting to use spans"
 
 # 5. Work through subtasks
 fr state INFRA-015.1 done
-fr ref INFRA-015 src/hir/mod.rs
+fr ref INFRA-015 add src/hir/mod.rs
 
 fr state INFRA-015.2 done
 fr note INFRA-015 "Lowering pass now preserves source spans from AST"

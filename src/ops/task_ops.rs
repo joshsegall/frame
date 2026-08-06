@@ -204,17 +204,30 @@ pub fn add_subtask_after(
 
 /// Edit a task's title.
 pub fn edit_title(track: &mut Track, task_id: &str, new_title: String) -> Result<(), TaskError> {
-    let (parsed_title, new_tags) = parse_title_and_tags(&new_title);
     let task = find_task_mut_in_track(track, task_id)
         .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
-    task.title = parsed_title;
+    set_title(task, &new_title);
+    Ok(())
+}
+
+/// Set a task's title, splitting any trailing tags out of it. Returns whether
+/// the task changed — an unchanged title leaves it clean, and so leaves its
+/// source lines to be re-emitted verbatim.
+pub fn set_title(task: &mut Task, new_title: &str) -> bool {
+    let (parsed_title, new_tags) = parse_title_and_tags(new_title);
+    let mut tags = task.tags.clone();
     for tag in new_tags {
-        if !task.tags.contains(&tag) {
-            task.tags.push(tag);
+        if !tags.contains(&tag) {
+            tags.push(tag);
         }
     }
+    if parsed_title == task.title && tags == task.tags {
+        return false;
+    }
+    task.title = parsed_title;
+    task.tags = tags;
     task.mark_dirty();
-    Ok(())
+    true
 }
 
 /// "Delete" a task by marking it done and adding #wontdo tag.
@@ -311,9 +324,10 @@ pub fn remove_dep(track: &mut Track, task_id: &str, dep_id: &str) -> Result<(), 
 pub fn set_note(track: &mut Track, task_id: &str, note_text: String) -> Result<(), TaskError> {
     let task = find_task_mut_in_track(track, task_id)
         .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
-    remove_metadata(task, "note");
-    if !note_text.is_empty() {
-        task.metadata.push(Metadata::Note(note_text));
+    if note_text.is_empty() {
+        remove_metadata(task, "note");
+    } else {
+        set_metadata(task, Metadata::Note(note_text));
     }
     task.mark_dirty();
     Ok(())
@@ -330,36 +344,128 @@ pub fn append_note(track: &mut Track, task_id: &str, note_text: String) -> Resul
         Some(old) if !old.is_empty() => format!("{}\n\n{}", old, note_text),
         _ => note_text,
     };
-    remove_metadata(task, "note");
-    if !new_note.is_empty() {
-        task.metadata.push(Metadata::Note(new_note));
-    }
-    task.mark_dirty();
-    Ok(())
-}
-
-pub fn add_ref(track: &mut Track, task_id: &str, path: &str) -> Result<(), TaskError> {
-    let task = find_task_mut_in_track(track, task_id)
-        .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
-
-    if let Some(Metadata::Ref(refs)) = task.metadata.iter_mut().find(|m| m.key() == "ref") {
-        if !refs.contains(&path.to_string()) {
-            refs.push(path.to_string());
-            task.mark_dirty();
-        }
+    if new_note.is_empty() {
+        remove_metadata(task, "note");
     } else {
-        task.metadata.push(Metadata::Ref(vec![path.to_string()]));
-        task.mark_dirty();
+        set_metadata(task, Metadata::Note(new_note));
     }
+    task.mark_dirty();
     Ok(())
 }
 
-pub fn set_spec(track: &mut Track, task_id: &str, spec: String) -> Result<(), TaskError> {
+/// The two metadata keys that hold a list of file paths.
+///
+/// `ref:` and `spec:` mean different things — a spec is the document a task
+/// implements, a ref a file it touches — but they are written, parsed, resolved
+/// and edited identically, so every operation below is shared. Keeping them as
+/// separate code paths is what let them drift apart before: one stripped
+/// `#anchor` and the other did not, one appended from the CLI and the other
+/// replaced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathField {
+    Ref,
+    Spec,
+}
+
+impl PathField {
+    pub fn key(self) -> &'static str {
+        match self {
+            PathField::Ref => "ref",
+            PathField::Spec => "spec",
+        }
+    }
+
+    fn wrap(self, paths: Vec<String>) -> Metadata {
+        match self {
+            PathField::Ref => Metadata::Ref(paths),
+            PathField::Spec => Metadata::Spec(paths),
+        }
+    }
+}
+
+/// Every path the task carries under `field`, in order.
+pub fn paths_of(task: &Task, field: PathField) -> Vec<String> {
+    task.metadata
+        .iter()
+        .filter(|m| m.key() == field.key())
+        .flat_map(|m| match m {
+            Metadata::Ref(v) | Metadata::Spec(v) => v.clone(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+fn store_paths(task: &mut Task, field: PathField, paths: Vec<String>) {
+    if paths.is_empty() {
+        remove_metadata(task, field.key());
+    } else {
+        set_metadata(task, field.wrap(paths));
+    }
+    task.mark_dirty();
+}
+
+/// Append paths the task does not already carry. Returns the ones added.
+///
+/// Appending rather than replacing is what makes this safe to run concurrently:
+/// it does not need to read the current list first, so two writers adding
+/// different paths do not clobber each other.
+pub fn add_paths(
+    track: &mut Track,
+    task_id: &str,
+    field: PathField,
+    paths: &[String],
+) -> Result<Vec<String>, TaskError> {
     let task = find_task_mut_in_track(track, task_id)
         .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
-    remove_metadata(task, "spec");
-    task.metadata.push(Metadata::Spec(spec));
-    task.mark_dirty();
+    let mut current = paths_of(task, field);
+    let mut added = Vec::new();
+    for p in paths {
+        if !current.contains(p) {
+            current.push(p.clone());
+            added.push(p.clone());
+        }
+    }
+    if !added.is_empty() {
+        store_paths(task, field, current);
+    }
+    Ok(added)
+}
+
+/// Drop paths the task carries. Returns the ones removed.
+pub fn remove_paths(
+    track: &mut Track,
+    task_id: &str,
+    field: PathField,
+    paths: &[String],
+) -> Result<Vec<String>, TaskError> {
+    let task = find_task_mut_in_track(track, task_id)
+        .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
+    let current = paths_of(task, field);
+    let removed: Vec<String> = paths
+        .iter()
+        .filter(|p| current.contains(p))
+        .cloned()
+        .collect();
+    if !removed.is_empty() {
+        let kept: Vec<String> = current
+            .into_iter()
+            .filter(|p| !removed.contains(p))
+            .collect();
+        store_paths(task, field, kept);
+    }
+    Ok(removed)
+}
+
+/// Replace the whole list. An empty list removes the field.
+pub fn set_paths(
+    track: &mut Track,
+    task_id: &str,
+    field: PathField,
+    paths: Vec<String>,
+) -> Result<(), TaskError> {
+    let task = find_task_mut_in_track(track, task_id)
+        .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
+    store_paths(task, field, paths);
     Ok(())
 }
 
@@ -584,6 +690,38 @@ fn today_str() -> String {
 
 fn remove_metadata(task: &mut Task, key: &str) {
     task.metadata.retain(|m| m.key() != key);
+}
+
+/// Replace the task's entry for `meta`'s key **in place**, keeping its position
+/// in the metadata list; push it at the end only when the task has none.
+///
+/// The obvious spelling — `retain(|m| m.key() != key)` then `push` — silently
+/// relocates the field to the bottom of the list. On a task carrying a `note:`
+/// that is the visible difference between `- spec:` above the note and `- spec:`
+/// stranded under its block, so merely opening a field in the TUI and pressing
+/// Enter reordered the file. Position is not frame's to choose: the user wrote
+/// these lines in an order, and an edit to a field's *value* is not license to
+/// move it.
+///
+/// Any duplicate entries for the key beyond the first are dropped, which is the
+/// same normalization `remove_metadata` + `push` performed.
+pub fn set_metadata(task: &mut Task, meta: Metadata) {
+    let key = meta.key();
+    match task.metadata.iter().position(|m| m.key() == key) {
+        Some(idx) => {
+            task.metadata[idx] = meta;
+            let mut seen = false;
+            task.metadata.retain(|m| {
+                if m.key() != key {
+                    return true;
+                }
+                let first = !seen;
+                seen = true;
+                first
+            });
+        }
+        None => task.metadata.push(meta),
+    }
 }
 
 /// Scan a track for the highest ID number with the given prefix (e.g. "T-") in
@@ -1436,27 +1574,146 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_add_ref() {
-        let mut track = sample_track();
-        add_ref(&mut track, "T-001", "doc/design.md").unwrap();
-        let task = find_task_in_track(&track, "T-001").unwrap();
-        assert!(
-            task.metadata
-                .iter()
-                .any(|m| matches!(m, Metadata::Ref(r) if r.contains(&"doc/design.md".to_string())))
-        );
+    /// `ref:` and `spec:` take the same three actions and behave identically
+    /// under each, so every case runs against both.
+    const PATH_FIELDS: [PathField; 2] = [PathField::Ref, PathField::Spec];
+
+    fn paths_on(track: &Track, field: PathField) -> Vec<String> {
+        paths_of(find_task_in_track(track, "T-001").unwrap(), field)
     }
 
     #[test]
-    fn test_set_spec() {
+    fn add_paths_appends_and_reports_what_it_added() {
+        for field in PATH_FIELDS {
+            let mut track = sample_track();
+            let added = add_paths(&mut track, "T-001", field, &["doc/a.md".into()]).unwrap();
+            assert_eq!(added, vec!["doc/a.md".to_string()]);
+
+            let added = add_paths(&mut track, "T-001", field, &["doc/b.md".into()]).unwrap();
+            assert_eq!(added, vec!["doc/b.md".to_string()], "{:?}", field);
+            assert_eq!(paths_on(&track, field), ["doc/a.md", "doc/b.md"]);
+        }
+    }
+
+    /// Adding what is already there changes nothing and says so, which is what
+    /// makes a retried command safe.
+    #[test]
+    fn add_paths_is_idempotent() {
+        for field in PATH_FIELDS {
+            let mut track = sample_track();
+            add_paths(&mut track, "T-001", field, &["doc/a.md".into()]).unwrap();
+            find_task_mut_in_track(&mut track, "T-001").unwrap().dirty = false;
+
+            let added = add_paths(&mut track, "T-001", field, &["doc/a.md".into()]).unwrap();
+            assert!(added.is_empty(), "{:?}", field);
+            assert_eq!(paths_on(&track, field), ["doc/a.md"]);
+            assert!(
+                !find_task_in_track(&track, "T-001").unwrap().dirty,
+                "{:?} dirtied the task for a no-op add",
+                field
+            );
+        }
+    }
+
+    #[test]
+    fn remove_paths_drops_only_what_is_there() {
+        for field in PATH_FIELDS {
+            let mut track = sample_track();
+            add_paths(
+                &mut track,
+                "T-001",
+                field,
+                &["doc/a.md".into(), "doc/b.md".into()],
+            )
+            .unwrap();
+
+            let removed = remove_paths(
+                &mut track,
+                "T-001",
+                field,
+                &["doc/a.md".into(), "x.md".into()],
+            )
+            .unwrap();
+            assert_eq!(removed, vec!["doc/a.md".to_string()], "{:?}", field);
+            assert_eq!(paths_on(&track, field), ["doc/b.md"]);
+        }
+    }
+
+    /// Removing the last path takes the whole metadata line with it, rather than
+    /// leaving `- ref:` with nothing after the colon.
+    #[test]
+    fn removing_the_last_path_removes_the_field() {
+        for field in PATH_FIELDS {
+            let mut track = sample_track();
+            add_paths(&mut track, "T-001", field, &["doc/a.md".into()]).unwrap();
+            remove_paths(&mut track, "T-001", field, &["doc/a.md".into()]).unwrap();
+
+            let task = find_task_in_track(&track, "T-001").unwrap();
+            assert!(
+                !task.metadata.iter().any(|m| m.key() == field.key()),
+                "{:?} left an empty entry",
+                field
+            );
+        }
+    }
+
+    #[test]
+    fn set_paths_replaces_the_whole_list() {
+        for field in PATH_FIELDS {
+            let mut track = sample_track();
+            add_paths(&mut track, "T-001", field, &["doc/a.md".into()]).unwrap();
+            set_paths(
+                &mut track,
+                "T-001",
+                field,
+                vec!["doc/b.md#one".into(), "src/c.rs:42".into()],
+            )
+            .unwrap();
+            assert_eq!(paths_on(&track, field), ["doc/b.md#one", "src/c.rs:42"]);
+        }
+    }
+
+    /// Setting a field's value is not license to move its line. `remove` + `push`
+    /// relocated it to the end of the metadata, which on a task with a note put
+    /// it under the note block.
+    #[test]
+    fn setting_a_field_keeps_its_position() {
         let mut track = sample_track();
-        set_spec(&mut track, "T-001", "doc/spec.md#section".into()).unwrap();
+        let task = find_task_mut_in_track(&mut track, "T-001").unwrap();
+        task.metadata = vec![
+            Metadata::Spec(vec!["doc/old.md".into()]),
+            Metadata::Note("a note".into()),
+        ];
+
+        set_paths(
+            &mut track,
+            "T-001",
+            PathField::Spec,
+            vec!["doc/new.md".into()],
+        )
+        .unwrap();
+        set_note(&mut track, "T-001", "a different note".into()).unwrap();
+
         let task = find_task_in_track(&track, "T-001").unwrap();
-        assert!(
-            task.metadata
-                .iter()
-                .any(|m| matches!(m, Metadata::Spec(s) if s == "doc/spec.md#section"))
+        assert_eq!(task.metadata[0], Metadata::Spec(vec!["doc/new.md".into()]));
+        assert_eq!(task.metadata[1], Metadata::Note("a different note".into()));
+    }
+
+    #[test]
+    fn set_metadata_collapses_duplicate_keys_into_the_first() {
+        let mut task = Task::new(TaskState::Todo, None, "t".into());
+        task.metadata = vec![
+            Metadata::Ref(vec!["a.md".into()]),
+            Metadata::Note("n".into()),
+            Metadata::Ref(vec!["b.md".into()]),
+        ];
+        set_metadata(&mut task, Metadata::Ref(vec!["c.md".into()]));
+        assert_eq!(
+            task.metadata,
+            vec![
+                Metadata::Ref(vec!["c.md".into()]),
+                Metadata::Note("n".into()),
+            ]
         );
     }
 

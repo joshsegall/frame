@@ -19,12 +19,58 @@ All notable changes to frame will be documented in this file.
 - **`conflict:` task metadata**, written by `fr merge` and cleared by `fr merge --resolve`. Reported by `fr check` as an error and exposed as `conflict` in `--json` task output.
 
 ### Changed
+
+> **Breaking, in one place each — read these three if you script `fr` or parse its JSON:**
+> 1. `fr ref` and `fr spec` now require an action: `fr ref ID add|rm|set PATH...`. `fr ref ID PATH` and `fr spec ID PATH` no longer parse.
+> 2. `--json` `spec` is an array of strings, not a string.
+> 3. `fr ref` and `fr spec` exit non-zero on a path with no file behind it. Add `--force` to keep the old behaviour.
+>
+> Each is detailed below.
+
+- **BREAKING: `fr ref` and `fr spec` take an explicit action**, the same `add`/`rm` shape as `fr tag` and `fr dep`, plus `set`:
+
+  ```
+  fr ref EFF-014 add src/parser.rs:807      # was: fr ref EFF-014 src/parser.rs:807
+  fr ref EFF-014 rm src/parser.rs:807       # was: not possible
+  fr spec EFF-014 set doc/spec.md           # was: fr spec EFF-014 doc/spec.md
+  ```
+
+  The two commands used to disagree about what they did with the value: `fr ref` appended, `fr spec` replaced. Nothing in either command said so, and once both took several paths the difference stopped being a detail — `fr spec ID a.md` silently discarded a list the caller may not have known was there. Naming the action fixes that in the obvious way, and matches the two other list-valued fields, which have always worked this way.
+
+  It also fills a real gap: **there was no way to remove a ref from the CLI at all**. A stale one could only be cleared in the TUI or by hand-editing the file.
+
+  **Prefer `add`.** It needs no read of the current list, so two agents adding different paths to one task no longer clobber each other — under replace-everything semantics, each would have. It is idempotent: adding a path already present reports `unchanged` and writes nothing. `rm` of an absent path does the same. `set` is the deliberate destructive form, and `rm` alone skips the existence check, since a path is most worth removing exactly when the file behind it is gone.
+
+- **`ref:` and `spec:` resolve by one rule, and it understands where-in-the-file suffixes.** They hold the same kind of value — a path relative to the project root — but only `spec:` stripped a `#anchor` before looking on disk, so `doc/design.md#rationale` was a valid spec and a broken ref: the same string, the same file, two answers, from two copies of the rule that had drifted apart in `check` and in `clean`. Neither knew about `src/parser.rs:807` at all, which is how most refs to code get written, so every one of them was reported broken.
+
+  A path may now carry `#anchor`, `:line`, `:line-range` or `:line:col`, on either key. **Only the file is validated** — frame does not open the target, so an anchor whose heading moved and a line number gone stale are not errors. The literal path is tried before any suffix is stripped, so a filename genuinely containing `#` or `:` still resolves.
+
+- **BREAKING: `fr ref add|set` and `fr spec add|set` refuse a path with no file behind it**, naming every bad one and writing nothing — an exit code where there used to be none. `--force` writes it anyway, for the file you are about to create. `fr check` calls a broken ref an error, so accepting one silently was frame creating work for itself, and a typo is cheapest to fix at the moment it is typed. Both commands also take several paths at once now.
+
+- **The TUI detail view shows a ref or spec path with no file behind it in the error colour**, which makes a reference that went stale when its file moved visible without running `fr check`. Editing still accepts whatever you type.
+
+- **BREAKING: `spec:` accepts several paths, comma-separated, like `ref:`.** A task can have more than one spec worth pointing at, and there was no way to say so. `fr check` validates each path and reports them individually; the detail view lists them one per line.
+
+  **This changes `--json` output**: `spec` is now an array of strings, and absent rather than `null` when empty — the shape `refs` already had. A consumer reading `.spec` as a string needs `.spec[0]` or `.spec | join(", ")`. Existing files need no migration: a single-path `spec:` line parses into a one-element list and serializes back byte-identical.
+
+- **Ref and spec fields are comma-separated in the TUI editor**, matching the file format. Typing two paths by hand needs a comma between them; accepting an autocomplete suggestion inserts it for you. Whitespace is no longer a separator there, which is what stops a value containing spaces from being torn apart. Deps and tags are unaffected — an ID or a tag cannot contain a space, so their lenient splitting is still lossless.
+
 - **`fr check` exits non-zero when the project has errors.** It printed `✗ project has errors` and exited 0, so `fr check && git commit` committed anyway and a CI step had to grep stdout to find out. Warnings still exit 0 — the status answers "is this project sound", and gating on something frame is willing to live with would make the signal useless. `--json` agrees with its own `valid` field, and `--fix` follows the same rule on the state it leaves behind, including the "nothing to repair" case: most errors have no repair by design, so that is the common way a broken project leaves `--fix`.
 
 ### Added
 - **`fr check` reports archived task IDs left on a prefix their track no longer uses**, with a repair that puts them back on the current one. This is the damage the `fr track rename --prefix` fix below stops creating, but projects renamed before it still carry it on disk with nothing to say so. It is a warning, not an error: the archived tasks are readable and unique, and what makes it worth reporting is what happens if the abandoned prefix is ever given to another track — that track mints from its own files, cannot see this archive, and reissues numbers it already holds. The repair refuses outright if any ID would land on one that already exists, rather than half-renaming a file.
 
 ### Fixed
+- **Opening a field in the TUI detail view and closing it no longer rewrites the task.** Editing a field ran three separate conversions between the field and the flat string the editor holds — one to open it, one to confirm it, one for undo — and they disagreed about `ref:`. It was flattened with a space, split back on comma-*or*-whitespace, and undone by splitting on comma alone. Since the format's separator for `ref:` is the comma, a ref may contain spaces; one carrying a note about why it is the ref came apart into one ref per word, and the detail view then rendered a dozen lines where there had been two.
+
+  Pressing Enter without typing anything was enough to trigger it, and the same edit was **invisible to undo**: the check for "did the user change this" compared the before and after buffer *strings*, which were identical, while the field underneath had been rebuilt into something else. The save ran unconditionally; only the undo record was conditional. So the file changed, `u` did nothing, and the only copy of the original was in git.
+
+  There is now one projection (`tui::fields`), used by all three, with a property asserting the two halves are inverses on every value the format can represent. It answers "did anything change" from the parsed field rather than the buffer text, and that one answer gates both the write and the undo record — so a field that did not change is not written, and one that did is always undoable. A task whose lines are merely non-canonical keeps its own text for the same reason.
+
+- **An edited field stays where it was in the task.** Setting `spec:`, `note:`, `ref:` or `dep:` dropped the entry and pushed a new one, which moved it to the end of the metadata list — on a task with a note, from above the note block to below it. This applied to `fr spec` and `fr note` as well as the TUI. The value is replaced in place now; only a field the task did not have is appended.
+
+- **Undoing a ref or spec edit restores it exactly.** Undo parsed the recorded value with a grammar the editor never used, collapsing a multi-entry field into a single entry containing the joined text.
+
 - **`fr track rename --prefix` now renames archived task IDs.** It read the track's done-task archive as if it were a track file and walked its `## Section` headers, which an archive does not have — so it found nothing, renamed nothing and wrote nothing. The impact count read the same way, so the "N archived task IDs" line never printed either: the command reported plain success while leaving every archived ID on the old prefix. Those IDs then pointed at a prefix no track owned, which becomes a real collision the moment that prefix is given to another track. Both the preview and the rename go through the archive parser now, and the applied count is reported.
 
 - **Archives keep their line ending and everything written below their last task.** No archive writer had a line-ending policy, because archives had no model type to carry one: `fr clean`'s append kept the existing text raw and concatenated a new block built with LF, so appending to a CRLF archive produced a file with **both** endings — a state no later read can put right, since the ending is one flag per file. Every archive rewrite also reconstructed the file as header-plus-tasks, discarding the point the parser stopped at, so a note, a rule, or a comment below the last archived task was deleted by the next `fr fix` dedupe or `fr actor merge`. Appended tasks landed after that content, too, instead of with the other tasks.

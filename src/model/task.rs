@@ -45,10 +45,16 @@ impl TaskState {
 pub enum Metadata {
     /// `dep: EFF-003, INFRA-007`
     Dep(Vec<String>),
-    /// `ref: path/to/file`
+    /// `ref: path/to/file, other/file`
+    ///
+    /// Comma-separated, and **only** comma-separated: a ref may contain spaces.
+    /// See [`crate::tui::fields`] for what that costs the editor.
     Ref(Vec<String>),
-    /// `spec: path/to/spec#section`
-    Spec(String),
+    /// `spec: path/to/spec#section, other/spec.md`
+    ///
+    /// Same shape and same rule as [`Metadata::Ref`]; the two differ only in
+    /// what they mean, not in how they are written or parsed.
+    Spec(Vec<String>),
     /// `note:` followed by block text
     Note(String),
     /// `added: 2025-05-14`
@@ -237,7 +243,7 @@ mod tests {
     fn metadata_key_all_variants() {
         assert_eq!(Metadata::Dep(vec![]).key(), "dep");
         assert_eq!(Metadata::Ref(vec![]).key(), "ref");
-        assert_eq!(Metadata::Spec(String::new()).key(), "spec");
+        assert_eq!(Metadata::Spec(Vec::new()).key(), "spec");
         assert_eq!(Metadata::Note(String::new()).key(), "note");
         assert_eq!(Metadata::Added(String::new()).key(), "added");
         assert_eq!(Metadata::Resolved(String::new()).key(), "resolved");
