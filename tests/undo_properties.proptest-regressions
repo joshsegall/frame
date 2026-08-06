@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f9559bfd819684f28944aae9b53a6063b4f50f67932f26b4e6ac006008117c7c # shrinks to steps = [Step { action: InboxTriage, target: 0, text: 0 }]
+cc cdef7f4d13ac4048d1d1c86369908fc46848b8fa54a73160fe030681036a4230 # shrinks to steps = [Step { action: InboxEditTitle, target: 2, text: 0 }]
+cc a26c586cb670099900a4a99e34dffcd143b0962315fcdfb6143479aa57458faf # shrinks to steps = [Step { action: DeleteTask, target: 5, text: 0 }, Step { action: TrackArchive, target: 8, text: 0 }]
+cc 54e4acd48798c0c6e2b352ba5d4a6fe6e485c59ab85d72e0bdd69d0454b5f0a8 # shrinks to steps = [Step { action: CrossTrackMove, target: 27, text: 0 }, Step { action: TrackAdd, target: 0, text: 0 }, Step { action: TrackArchive, target: 16, text: 0 }]
+cc 8a78c79216287e68d204833284e019ea147705e65a0835e45744880e032489b3 # shrinks to steps = [Step { action: AddTask, target: 0, text: 0 }, Step { action: InsertAfter, target: 25, text: 0 }, Step { action: CrossTrackMove, target: 14, text: 0 }]

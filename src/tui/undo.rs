@@ -730,6 +730,20 @@ impl UndoStack {
         self.undo.is_empty()
     }
 
+    /// How many operations are waiting to be undone.
+    ///
+    /// Exists for `tests/undo_properties.rs`, which asserts that a keystroke
+    /// which changed the project recorded something to undo it with. `is_empty`
+    /// cannot answer that: the stack is already non-empty by the second step.
+    pub fn undo_depth(&self) -> usize {
+        self.undo.len()
+    }
+
+    /// How many operations are waiting to be redone.
+    pub fn redo_depth(&self) -> usize {
+        self.redo.len()
+    }
+
     /// Peek at the last operation on the redo stack (just pushed during undo)
     pub fn peek_last_redo(&self) -> Option<&Operation> {
         self.redo.last()

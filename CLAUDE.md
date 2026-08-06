@@ -100,6 +100,7 @@ Each answers a different question; a new test usually belongs in one of them rat
 | `parse_properties.rs` | P1–P6 on each **parse/serialize pair** (track, archive, inbox): no panic, content preserved, conserved against ground truth, converges, every line accounted for, line ending kept |
 | `conservation.rs` | P7 on **operation sequences**: does a random run of real ops lose a title, an ID, or a line frame does not own — and does every file it writes land settled? |
 | `damaged_corpus.rs` | does `fr check` report **exactly** the right findings for a known-damaged project, and repair exactly what it claims? |
+| `undo_properties.rs` | P9 on **TUI action sequences**: does undoing everything restore the project byte for byte, and redoing everything restore the result? |
 | `merge_simulation.rs` | do independent actors minting IDs concurrently ever collide? |
 | `parity.rs` | do human and `--json` output, and CLI and TUI, agree? |
 | `cli_integration.rs` | the CLI surface, including crash injection via `FRAME_FAIL_WRITE` |
