@@ -582,8 +582,17 @@ pub fn rename_track_prefix(
     Ok(result)
 }
 
-/// Rename task IDs in an archive file on disk. Reads the archive, renames matching
-/// IDs, writes it back. Returns the number of IDs renamed, or 0 if the file doesn't exist.
+/// Rename task IDs in a track's done-task archive on disk. Reads the archive,
+/// renames matching IDs, writes it back. Returns the number of IDs renamed, or 0
+/// if the file doesn't exist.
+///
+/// **An archive is not a track**, and this function is why that sentence keeps
+/// getting written down. It walked `TrackNode::Section` over a file that has no
+/// `## Section` headers, so it found nothing, renamed nothing and wrote nothing
+/// — and `prefix_rename_impact` counted the same way, so the "N archived task
+/// IDs" line never printed either. `fr track rename --prefix` reported success
+/// while leaving every archived id on the old prefix, pointing at a prefix no
+/// track owns, which is a collision waiting for that prefix to be reassigned.
 pub fn rename_archive_prefix(
     frame_dir: &Path,
     track_id: &str,
@@ -595,15 +604,10 @@ pub fn rename_archive_prefix(
         return Ok(0);
     }
     let content = fs::read_to_string(&archive_path).map_err(ProjectError::IoError)?;
-    let mut archive_track = crate::parse::parse_track(&content);
-    let mut count = 0;
-    for node in &mut archive_track.nodes {
-        if let TrackNode::Section { tasks, .. } = node {
-            count += rename_task_ids(tasks, old_prefix, new_prefix);
-        }
-    }
+    let mut archive = crate::parse::parse_archive(&content);
+    let count = rename_task_ids(&mut archive.tasks, old_prefix, new_prefix);
     if count > 0 {
-        let serialized = crate::parse::serialize_track(&archive_track);
+        let serialized = crate::parse::serialize_archive(&archive);
         crate::io::recovery::atomic_write(&archive_path, serialized.as_bytes())
             .map_err(ProjectError::IoError)?;
     }
@@ -717,18 +721,16 @@ pub fn prefix_rename_impact(
         }
     }
 
-    // Count archived tasks if archive file exists
+    // Count archived tasks if archive file exists. Read as an archive, not as a
+    // track: it has no `## Section` headers, so walking sections counted zero and
+    // the preview said nothing was archived under the old prefix.
     if let Some(archive_dir) = archive_dir {
         let archive_path = archive_dir.join(format!("{}.md", track_id));
         if archive_path.exists()
             && let Ok(content) = fs::read_to_string(&archive_path)
         {
-            let archive_track = crate::parse::parse_track(&content);
-            for node in &archive_track.nodes {
-                if let TrackNode::Section { tasks, .. } = node {
-                    impact.task_id_count += count_prefix_ids(tasks, old_prefix);
-                }
-            }
+            let archive = crate::parse::parse_archive(&content);
+            impact.task_id_count += count_prefix_ids(&archive.tasks, old_prefix);
         }
     }
 

@@ -2738,27 +2738,18 @@ fn cmd_track_rename(args: TrackRenameArgs) -> Result<(), Box<dyn std::error::Err
             new_prefix,
         )?;
 
-        // Check for archived tasks
+        // Check for archived tasks. `prefix_rename_impact` counts them itself
+        // when given the archive directory — this used to parse the archive as a
+        // *track* and hand it back in as one, which found no sections and so
+        // always reported zero archived ids.
         let archive_dir = project.frame_dir.join("archive");
-        let archive_id_count = {
-            let archive_path = archive_dir.join(format!("{}.md", effective_id));
-            if archive_path.exists() {
-                if let Ok(content) = std::fs::read_to_string(&archive_path) {
-                    let archive_track = crate::parse::parse_track(&content);
-                    track_ops::prefix_rename_impact(
-                        &[(effective_id.clone(), archive_track)],
-                        &effective_id,
-                        &old_prefix,
-                        None,
-                    )
-                    .task_id_count
-                } else {
-                    0
-                }
-            } else {
-                0
-            }
-        };
+        let archive_id_count = track_ops::prefix_rename_impact(
+            &[],
+            &effective_id,
+            &old_prefix,
+            Some(archive_dir.as_path()),
+        )
+        .task_id_count;
 
         println!("Renaming prefix {} → {}:", old_prefix, new_prefix);
         println!("  {} tasks in {}", result.tasks_renamed, effective_id);

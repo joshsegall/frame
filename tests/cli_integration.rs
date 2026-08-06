@@ -1651,6 +1651,46 @@ fn test_track_rename_prefix_yes() {
     assert!(config.contains("\"AUX\""));
 }
 
+/// A prefix rename has to reach the track's archive, or the archived tasks are
+/// left holding a prefix no track owns — invisible, and a collision the moment
+/// that prefix is handed to another track.
+///
+/// It did not. `rename_archive_prefix` walked `TrackNode::Section` in a file
+/// that has none, so it renamed nothing and wrote nothing; the impact count read
+/// the same way, so the "N archived task IDs" line never printed and the command
+/// reported plain success. Both the preview and the rename go through
+/// `parse_archive` now.
+#[test]
+fn test_track_rename_prefix_reaches_the_archive() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    fs::create_dir_all(tmp.path().join("frame/archive")).unwrap();
+    fs::write(
+        tmp.path().join("frame/archive/side.md"),
+        "# Archive — side\n\n- [x] `S-050` archived work\n  - resolved: 2025-06-01\n",
+    )
+    .unwrap();
+
+    let out = run_fr_ok(
+        tmp.path(),
+        &["track", "rename", "side", "--prefix", "AUX", "--yes"],
+    );
+    assert!(
+        out.contains("1 archived task ID"),
+        "the archived id should be counted and reported: {out}"
+    );
+
+    let archive = fs::read_to_string(tmp.path().join("frame/archive/side.md")).unwrap();
+    assert!(
+        archive.contains("`AUX-050`") && !archive.contains("`S-050`"),
+        "the archived id keeps the old prefix: {archive}"
+    );
+    assert!(
+        archive.starts_with("# Archive — side"),
+        "and the header is still the archive's own: {archive}"
+    );
+}
+
 #[test]
 fn test_track_rename_prefix_dry_run() {
     let tmp = tempfile::TempDir::new().unwrap();
