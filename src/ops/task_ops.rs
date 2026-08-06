@@ -843,6 +843,45 @@ fn for_each_task(tasks: &[Task], f: &mut dyn FnMut(&Task)) {
 
 /// Recursively renumber subtask IDs based on the new parent ID. New child
 /// segments carry `token` (`None` = null namespace).
+/// Every descendant id of `task`, in document order. Pairs with
+/// [`set_subtree_ids`].
+///
+/// [`renumber_subtasks`] assigns child numbers by *position*, which is right
+/// going forward — the subtree lands in a new namespace and is numbered from
+/// one — but it cannot be run backwards. A subtree numbered `.1 .3 .2` (which
+/// `-` produces, inserting a sibling in the middle) renumbers to `.1 .2 .3`,
+/// and renumbering that back positionally hands each task the *other* one's id.
+/// Recording the ids is the only way an inverse can put them back.
+pub fn subtree_ids(task: &Task) -> Vec<String> {
+    fn walk(tasks: &[Task], out: &mut Vec<String>) {
+        for sub in tasks {
+            out.push(sub.id.as_deref().unwrap_or_default().to_string());
+            walk(&sub.subtasks, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(&task.subtasks, &mut out);
+    out
+}
+
+/// Assign `ids` to the descendants of `task`, in the document order
+/// [`subtree_ids`] collected them. Descendants beyond the end of `ids` keep
+/// what they have.
+pub fn set_subtree_ids(task: &mut Task, ids: &[String]) {
+    fn walk(tasks: &mut [Task], ids: &[String], next: &mut usize) {
+        for sub in tasks {
+            if let Some(id) = ids.get(*next) {
+                sub.id = Some(id.clone().into());
+                sub.mark_dirty();
+            }
+            *next += 1;
+            walk(&mut sub.subtasks, ids, next);
+        }
+    }
+    let mut next = 0;
+    walk(&mut task.subtasks, ids, &mut next);
+}
+
 pub fn renumber_subtasks(task: &mut Task, parent_id: &str, token: Option<&Token>) {
     let parent = TaskId::parse(parent_id);
     for (i, sub) in task.subtasks.iter_mut().enumerate() {

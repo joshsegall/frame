@@ -736,7 +736,15 @@ pub(super) fn execute_cross_track_move(
     task.id = Some(new_id.clone());
     task.depth = 0;
     task.mark_dirty();
+    // Take the descendants' ids either side of the re-key, so undo can put the
+    // originals back rather than renumbering by position — which is not the
+    // inverse when the subtree was not numbered in order.
+    let old_subtree_ids = task_ops::subtree_ids(&task);
     task_ops::renumber_subtasks(&mut task, &new_id, token.as_ref());
+    let subtree_ids: Vec<(String, String)> = old_subtree_ids
+        .into_iter()
+        .zip(task_ops::subtree_ids(&task))
+        .collect();
 
     // Insert into the same section on the target (a subtask promotes into the
     // target Backlog), creating the section if the target lacks it.
@@ -788,6 +796,7 @@ pub(super) fn execute_cross_track_move(
         source_parent_id,
         old_depth,
         section,
+        subtree_ids,
     });
 
     // Target before source, under one lock — see doc/architecture.md,
@@ -952,7 +961,12 @@ pub(super) fn execute_bulk_cross_track_move(
         task.id = Some(new_id.clone());
         task.depth = 0;
         task.mark_dirty();
+        let old_subtree_ids = task_ops::subtree_ids(&task);
         task_ops::renumber_subtasks(&mut task, &new_id, token.as_ref());
+        let subtree_ids: Vec<(String, String)> = old_subtree_ids
+            .into_iter()
+            .zip(task_ops::subtree_ids(&task))
+            .collect();
 
         // Insert into target backlog
         let target_track = match app.find_track_mut(target_track_id) {
@@ -1004,6 +1018,7 @@ pub(super) fn execute_bulk_cross_track_move(
             old_depth: 0,
             // Bulk move collects only Backlog selections.
             section: SectionKind::Backlog,
+            subtree_ids,
         });
 
         new_ids.push(new_id.to_string());

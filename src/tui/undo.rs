@@ -599,6 +599,14 @@ pub enum Operation {
         /// Section a top-level task occupied (and returns to on undo). Ignored
         /// for subtask moves, which promote into the target Backlog.
         section: SectionKind,
+        /// `(old_id, new_id)` for every descendant, in document order.
+        ///
+        /// The move re-keys the whole subtree into the target's namespace by
+        /// *position*, and undo used to re-key it back the same way. That is
+        /// only the inverse when the original numbering was already sequential:
+        /// a subtree numbered `.1 .3 .2` came back with two of its tasks
+        /// wearing each other's ids. See [`task_ops::subtree_ids`].
+        subtree_ids: Vec<(String, String)>,
     },
     /// A task was reparented (moved to different parent/depth) with ID re-keying
     Reparent {
@@ -1000,6 +1008,7 @@ fn apply_inverse(
             source_parent_id,
             old_depth,
             section,
+            subtree_ids,
             ..
         } => {
             // Undo: remove task from target, rename back to old ID, insert into source.
@@ -1020,10 +1029,11 @@ fn apply_inverse(
             // Rename ID back
             task.id = Some(task_id_old.clone().into());
             task.mark_dirty();
-            // Undo restores the prior IDs, re-keying the subtree in the original
-            // id's namespace (its leaf token; null for a legacy id).
-            let old_parsed = crate::model::task_id::TaskId::parse(task_id_old);
-            task_ops::renumber_subtasks(&mut task, task_id_old, old_parsed.leaf_token());
+            // Undo restores the prior IDs — the recorded ones, not a fresh
+            // positional renumber, which is not this move's inverse when the
+            // subtree was not numbered in order.
+            let old_ids: Vec<String> = subtree_ids.iter().map(|(old, _)| old.clone()).collect();
+            task_ops::set_subtree_ids(&mut task, &old_ids);
 
             if let Some(parent_id) = source_parent_id {
                 // Was a subtask — restore depth and insert back as subtask
@@ -1444,6 +1454,7 @@ fn apply_forward(
             target_index,
             source_parent_id,
             section,
+            subtree_ids,
             ..
         } => {
             // Redo: remove from source, rename to new ID, insert into target
@@ -1475,10 +1486,12 @@ fn apply_forward(
                 task.depth = 0;
             }
             task.mark_dirty();
-            // Redo re-applies the moved id, re-keying the subtree in the mover's
-            // namespace (recovered from the new id's leaf token).
-            let new_parsed = crate::model::task_id::TaskId::parse(task_id_new);
-            task_ops::renumber_subtasks(&mut task, task_id_new, new_parsed.leaf_token());
+            // Redo re-applies the ids the move assigned. Positional renumbering
+            // happens to reproduce them, but only because the move numbered
+            // them positionally in the first place — replaying what was
+            // recorded says so, and stays right if that ever changes.
+            let new_ids: Vec<String> = subtree_ids.iter().map(|(_, new)| new.clone()).collect();
+            task_ops::set_subtree_ids(&mut task, &new_ids);
 
             // A subtask promotes into the target Backlog; a top-level task keeps
             // its section.
@@ -2142,6 +2155,63 @@ mod tests {
             .map(|s| s.id.as_deref().unwrap())
             .collect();
         assert_eq!(ids, vec!["T-001.1", "T-001.3", "T-001.2"]);
+    }
+
+    /// A cross-track move re-keys the subtree by position. Undoing it by
+    /// renumbering back the same way is only the inverse when the original
+    /// numbering was already sequential — and `-` produces one that is not.
+    /// `.1 .3 .2` came back as `.1 .2 .3`, so two tasks swapped ids: every
+    /// reference to either one now pointed at the other.
+    #[test]
+    fn cross_track_move_undo_restores_out_of_order_subtask_ids() {
+        let src = parse_track("# Src\n\n## Backlog\n\n## Done\n");
+        let tgt = parse_track("# Tgt\n\n## Backlog\n\n## Done\n");
+        let mut tracks = vec![("src".to_string(), src), ("tgt".to_string(), tgt)];
+
+        // The moved task, as it sits in the target after the move: renumbered
+        // `.1 .2` from an original `.1 .3`.
+        let mut moved = Task::new(TaskState::Todo, Some("T-100".into()), "Parent".into());
+        for (id, title) in [("T-100.1", "First"), ("T-100.2", "Second")] {
+            let mut sub = Task::new(TaskState::Todo, Some(id.into()), title.into());
+            sub.depth = 1;
+            moved.subtasks.push(sub);
+        }
+        tracks[1]
+            .1
+            .section_tasks_mut(SectionKind::Backlog)
+            .unwrap()
+            .push(moved);
+
+        let mut stack = UndoStack::new();
+        stack.push(Operation::CrossTrackMove {
+            source_track_id: "src".into(),
+            target_track_id: "tgt".into(),
+            task_id_old: "S-007".into(),
+            task_id_new: "T-100".into(),
+            source_index: 0,
+            target_index: 0,
+            source_parent_id: None,
+            old_depth: 0,
+            section: SectionKind::Backlog,
+            subtree_ids: vec![
+                ("S-007.1".into(), "T-100.1".into()),
+                ("S-007.3".into(), "T-100.2".into()),
+            ],
+        });
+        stack.undo(&mut tracks, None);
+
+        let back = task_ops::find_task_in_track(&tracks[0].1, "S-007").expect("task is back");
+        let ids: Vec<_> = back
+            .subtasks
+            .iter()
+            .map(|s| s.id.as_deref().unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["S-007.1", "S-007.3"],
+            "undo restores the ids the tasks had, not a fresh sequence"
+        );
+        assert_eq!(back.subtasks[1].title, "Second");
     }
 
     // -----------------------------------------------------------------------
@@ -2990,6 +3060,7 @@ mod tests {
             source_parent_id: None,
             old_depth: 0,
             section: SectionKind::Done,
+            subtree_ids: Vec::new(),
         });
 
         // Undo → back in src's Done under the old id; gone from tgt's Done.
