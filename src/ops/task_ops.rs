@@ -661,39 +661,7 @@ pub fn move_task_between_sections(
         dest.insert(0, task);
     }
 
-    separate_section(track, to);
-    separate_section(track, from);
-
     Some(source_index)
-}
-
-/// Keep one blank line after a section's tasks, so the next header does not end
-/// up welded to the last task line.
-///
-/// A section's trailing blank is part of its own node, so moving a task into a
-/// section that had none — an empty `## Done`, say — produced `- [x] task` with
-/// `## Parked` on the very next line. Cosmetic, but every section move made it,
-/// including the ones `fr clean` performs unasked, so files drifted into it
-/// without anyone editing them.
-///
-/// Only ever *adds* the separator, and only when the section has tasks: a
-/// section that already ends in blank lines keeps whatever spacing the author
-/// chose, and an empty one is left alone.
-fn separate_section(track: &mut Track, kind: SectionKind) {
-    for node in &mut track.nodes {
-        if let TrackNode::Section {
-            kind: k,
-            tasks,
-            trailing_lines,
-            ..
-        } = node
-            && *k == kind
-            && !tasks.is_empty()
-            && !trailing_lines.iter().any(|l| l.trim().is_empty())
-        {
-            trailing_lines.push(String::new());
-        }
-    }
 }
 
 /// Check if a task ID is a top-level task in the given section.
@@ -1937,6 +1905,38 @@ mod tests {
             SectionKind::Done,
         );
         assert_eq!(result, None);
+    }
+
+    /// Marking a task done moves it into `## Done`, the last section of a
+    /// canonical track — and must not leave a blank line behind it, because
+    /// there is nothing there for it to separate.
+    ///
+    /// It used to. The separator was added to the destination section
+    /// unconditionally, so *every* task ever marked done appended a blank row
+    /// at end of file. Once. Then the file round-tripped through the parser
+    /// unchanged, which is why nothing downstream ever reported it and why undo
+    /// could not take it back: no operation had recorded adding it.
+    #[test]
+    fn moving_into_the_last_section_leaves_no_blank_at_end_of_file() {
+        let source = "\
+# Test Track
+
+## Backlog
+
+- [ ] `T-001` First task
+
+## Done
+
+- [x] `T-000` Older
+";
+        let mut track = parse_track(source);
+        move_task_between_sections(&mut track, "T-001", SectionKind::Backlog, SectionKind::Done);
+
+        let out = crate::parse::serialize_track(&track);
+        assert!(
+            !out.ends_with("\n\n"),
+            "a track file ends with exactly one newline, got {out:?}"
+        );
     }
 
     #[test]
