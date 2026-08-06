@@ -15,6 +15,16 @@ use crate::parse::task_serializer::serialize_tasks;
 /// appending to a CRLF archive produced a file with both. Terminal newlines
 /// disagreed the same way: `clean` wrote none and the other writers added one,
 /// so which one you got depended on which command touched the file last.
+///
+/// **It deliberately does not mirror the track serializer's separator rule.**
+/// That one puts a blank between a section header and its first task, and can
+/// tell a bare `## Done` from a header sitting above stranded content because
+/// stranded content is anchored on the *task*, in `leading_lines`. An archive
+/// has no such split: `header` is *defined* as everything above the first task
+/// line, so a hand-written note directly above the tasks is indistinguishable
+/// from a heading with no blank under it, and a separator rule here would edit
+/// the note. `Archive::new` writes the blank, so an archive frame created never
+/// welds; one trimmed by hand keeps exactly what it says.
 pub fn serialize_archive(archive: &Archive) -> String {
     let mut lines = archive.header.clone();
     lines.extend(serialize_tasks(&archive.tasks, 0));
@@ -56,6 +66,25 @@ mod tests {
     #[test]
     fn an_empty_archive_serializes_to_nothing() {
         assert_eq!(serialize_archive(&parse_archive("")), "");
+    }
+
+    /// The archive keeps its header exactly as it found it, including a
+    /// heading with no blank under it — see the note on `serialize_archive`.
+    /// This is the case the track serializer *does* separate, recorded here so
+    /// the asymmetry is deliberate rather than an oversight someone later
+    /// "fixes" into rewriting hand-written headers.
+    #[test]
+    fn an_archive_heading_is_never_separated_from_its_tasks() {
+        let mut archive = parse_archive("# Archive \u{2014} main\n");
+        assert!(archive.tasks.is_empty());
+        archive.tasks = parse_archive("# A\n\n- [x] `M-1` t\n").tasks;
+        assert_eq!(
+            serialize_archive(&archive),
+            "# Archive \u{2014} main\n- [x] `M-1` t\n"
+        );
+
+        let stranded = "# Archive \u{2014} main\n  - resolved: 2025-05-14\n- [x] `M-1` t\n";
+        assert_eq!(serialize_archive(&parse_archive(stranded)), stranded);
     }
 
     /// A dirty task takes the canonical path; everything around it is still

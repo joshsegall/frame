@@ -20,15 +20,30 @@ pub fn serialize_track(track: &Track) -> String {
                 ..
             } => {
                 lines.extend(header_lines.iter().cloned());
-                // Deliberately *not* the mirror of the rule below. A section
-                // that ended the file has no blank under its header, and the
-                // first task moved into it comes out welded to `## Done`, which
-                // does look wrong. But a header can be followed immediately by
-                // stranded content the parser preserves verbatim
-                // (`a_stray_line_above_the_first_task_survives_a_write`), and a
-                // serializer that inserts a blank there rewrites a file nobody
-                // edited. The weld is cosmetic; that guarantee is not.
+
+                // The mirror of the rule below, on the other side of the tasks.
+                // A section that ended the file has no blank under its header —
+                // there was nothing to separate — so the first task moved into
+                // it came out welded to `## Done`.
+                //
+                // The condition is narrower than "the header is followed by
+                // something", and has to be. A header can also be followed
+                // immediately by *stranded content*, which the parser hangs on
+                // the first task's `leading_lines` and preserves verbatim
+                // (`a_stray_line_above_the_first_task_survives_a_write`).
+                // Pushing a blank in front of that would edit content, not
+                // layout. So the question is whether the first line this
+                // section emits is a task line, asked with [`task_indent`] —
+                // the parser's own test, and not `starts_with("- [")`, which
+                // also matches a markdown link bullet.
                 let task_lines = serialize_tasks(tasks, 0);
+                if header_lines.last().is_some_and(|l| !l.trim().is_empty())
+                    && task_lines
+                        .first()
+                        .is_some_and(|l| crate::parse::task_parser::task_indent(l).is_some())
+                {
+                    lines.push(String::new());
+                }
                 lines.extend(task_lines);
                 lines.extend(trailing_lines.iter().cloned());
 
@@ -83,6 +98,7 @@ pub fn serialize_track(track: &Track) -> String {
 mod tests {
     use super::*;
     use crate::model::SectionKind;
+    use crate::ops::task_ops::move_task_between_sections;
     use crate::parse::track_parser::parse_track;
 
     /// A section drained of its last task keeps *one* blank before the next
@@ -144,6 +160,30 @@ mod tests {
             serialize_track(&track),
             "# T\n\n## Backlog\n\n- [ ] `T-001` One\n\n## Done\n\n- [x] `T-000` Done\n"
         );
+    }
+
+    /// A section whose header has no blank under it — because it ended the
+    /// file, so there was nothing to separate — gets one when it gains a task,
+    /// rather than welding `- [x] task` to `## Done`.
+    #[test]
+    fn a_task_moved_under_a_bare_header_is_not_welded_to_it() {
+        let mut track = parse_track("# T\n\n## Backlog\n\n- [ ] `T-001` One\n\n## Done\n");
+        move_task_between_sections(&mut track, "T-001", SectionKind::Backlog, SectionKind::Done);
+        assert_eq!(
+            serialize_track(&track),
+            "# T\n\n## Backlog\n\n## Done\n\n- [ ] `T-001` One\n",
+            "the header keeps its blank line"
+        );
+    }
+
+    /// But a header may also sit directly above *stranded content*, which the
+    /// parser hangs on the first task's `leading_lines` and preserves verbatim.
+    /// The separator rule asks whether the first line emitted is a task line,
+    /// precisely so it does not push a blank in front of content like this.
+    #[test]
+    fn a_header_above_stranded_content_is_left_alone() {
+        let source = "## Backlog\n  - added: 2025-05-14\n- [ ] plain task\n";
+        assert_eq!(serialize_track(&parse_track(source)), source);
     }
 
     /// The last section gets neither: a separator before end-of-file separates

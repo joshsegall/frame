@@ -68,6 +68,18 @@
 //! So the comparison stands with nothing carved out of it. A future divergence
 //! gets a fix or a stated exemption; it does not get quietly excluded from the
 //! tree.
+//!
+//! ## What it cannot see
+//!
+//! Anything the forward path and the undo path agree on. A writer that formats
+//! something badly but *consistently* produces that formatting in `end`, again
+//! in `redone`, and undoes cleanly back to `start` — three passing comparisons
+//! and a wrong file. The blank line welded under a bare section header is
+//! exactly that shape, and it is pinned in `track_serializer.rs` instead.
+//!
+//! Which is the boundary of the whole suite, worth stating plainly: this asks
+//! whether undo is the inverse of what was done, not whether what was done was
+//! right.
 
 use std::fs;
 use std::path::Path;
@@ -157,6 +169,17 @@ side = \"S\"
     )
     .unwrap();
 
+    // `## Parked` is empty *and* bare — no blank under its header, because it
+    // has nothing to separate. Every section in `main.md` carries its blank, so
+    // without this one the suite would never drive an add, a move or an undo
+    // into a section shaped this way.
+    //
+    // It does not pin the separator rule itself, and the reason is worth
+    // knowing: a task welded to `## Parked` is welded in `end` *and* in
+    // `redone`, and undoing the move empties the section back to its bare
+    // header, so both comparisons pass. P9 sees where undo and the forward path
+    // disagree, not where they agree on something wrong. The weld is pinned in
+    // `track_serializer.rs`, where it can be stated directly.
     fs::write(
         frame.join("tracks/side.md"),
         "\
@@ -168,9 +191,6 @@ side = \"S\"
   - added: 2025-05-01
 
 ## Parked
-
-- [~] `S-010` Side parked
-  - added: 2025-04-11
 
 ## Done
 
