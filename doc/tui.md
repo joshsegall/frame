@@ -588,7 +588,11 @@ Filtering is case-insensitive substring matching. Word extraction depends on the
 
 **Ref and spec fields are comma-separated when you edit them**, matching the file format — accepting a completion inserts the `, ` for you. Splitting them on whitespace as well would make `doc/design notes.md` into two refs.
 
-A ref or spec path with **no file behind it renders in the error colour**, so a reference that went stale when its file moved is visible without running `fr check`. Editing still accepts anything you type; a location suffix (`#anchor`, `:807`, `:807-820`) is not validated.
+A ref or spec path **renders in the error colour when it will not do what it says** — there is no file behind it, or the file is one only this working copy can see: an absolute path, one that escapes the project root, or one git is ignoring. The first is the stale ref whose file moved; the others resolve here and nowhere else, which is exactly why nothing but the colour would ever tell you. `fr check` reports the same three, as one error and two warnings.
+
+**Editing still accepts anything you type.** The CLI refuses the last three outright, and the editor deliberately does not: there is no `--force` to offer, and discarding what you just typed is worse than storing it and colouring it. A location suffix (`#anchor`, `:807`, `:807-820`) is never validated.
+
+What the editor *does* do is **fold `.` and `..` away** on save, exactly as `fr ref add` stores them, so `./sub/../real.md` becomes `real.md` on both surfaces. That also makes the field's duplicate-collapsing work by file rather than by string: two spellings of one path entered together become one entry.
 
 `Tab` accepts the selected suggestion and stays in edit mode. `Enter` accepts and confirms the edit. `Esc` dismisses the dropdown but stays in edit mode.
 

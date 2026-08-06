@@ -17,7 +17,7 @@ use crate::tui::theme::Theme;
 use crate::tui::wrap;
 use crate::util::unicode;
 
-use super::helpers::{abbreviated_id, collect_metadata_list, state_symbol};
+use super::helpers::{abbreviated_id, collect_metadata_list, ref_and_spec_values, state_symbol};
 use super::push_highlighted_spans;
 
 /// Render the detail view for a single task
@@ -25,6 +25,17 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
     let (track_id, task_id) = match &app.view {
         View::Detail { track_id, task_id } => (track_id.clone(), task_id.clone()),
         _ => return,
+    };
+
+    // Resolved before `task` is borrowed for the rest of the function, because
+    // refreshing the cache needs `&mut app`. The extra lookup is a tree walk; the
+    // call it guards is a subprocess.
+    let ignored_refs: std::collections::HashSet<String> = {
+        let values = App::find_track_in_project(&app.project, &track_id)
+            .and_then(|t| task_ops::find_task_in_track(t, &task_id))
+            .map(ref_and_spec_values)
+            .unwrap_or_default();
+        app.ignored_ref_values(&values).clone()
     };
 
     let track = match App::find_track_in_project(&app.project, &track_id) {
@@ -90,19 +101,22 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
     let bright_style = Style::default().fg(app.theme.text_bright).bg(bg);
     let dim_style = Style::default().fg(app.theme.dim).bg(bg);
     let region_indicator_style = Style::default().fg(app.theme.highlight).bg(bg);
-    // A `ref:`/`spec:` path with no file behind it. `fr check` calls it an error;
-    // showing it here is what makes it findable without running check, and a
-    // path that has since moved is the common way one appears.
-    let path_style = |exists: bool| {
-        Style::default()
-            .fg(if exists {
-                app.theme.cyan
-            } else {
-                app.theme.red
-            })
-            .bg(bg)
-    };
     let project_root = app.project.root.clone();
+    // Red for a `ref:`/`spec:` value that will not do what it says — no file
+    // behind it, or a file only this working copy can see. `fr check` calls the
+    // first an error and the other two warnings; showing all three here is what
+    // makes them findable without running it, and it is the whole of the TUI's
+    // side of the rule. The editor does not refuse any of them: there is no
+    // `--force` to offer, and throwing away what someone just typed is worse
+    // than storing it and colouring it.
+    let cyan = app.theme.cyan;
+    let red = app.theme.red;
+    let path_style = |value: &str| {
+        let travels = refs_ops::containment(value).is_none()
+            && !ignored_refs.contains(value)
+            && refs_ops::exists(&project_root, value);
+        Style::default().fg(if travels { cyan } else { red }).bg(bg)
+    };
 
     // Search highlighting
     let search_re = app.active_search_re();
@@ -435,7 +449,7 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 push_highlighted_spans(
                     &mut spans,
                     spec_val,
-                    path_style(refs_ops::exists(&project_root, spec_val)),
+                    path_style(spec_val),
                     highlight_style,
                     search_re.as_ref(),
                 );
@@ -505,7 +519,7 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 push_highlighted_spans(
                     &mut spans,
                     ref_path,
-                    path_style(refs_ops::exists(&project_root, ref_path)),
+                    path_style(ref_path),
                     highlight_style,
                     search_re.as_ref(),
                 );
@@ -1854,5 +1868,46 @@ mod tests {
         assert_eq!(fg_of(&buf, "doc/real.md#anchor"), cyan, "spec with anchor");
         assert_eq!(fg_of(&buf, "src/parser.rs:807"), cyan, "ref with line");
         assert_eq!(fg_of(&buf, "doc/gone.md"), red, "ref with no file");
+    }
+
+    /// A path that leaves the project is red too. It is not broken — the file is
+    /// there — which is exactly why nothing else in the TUI would ever say so.
+    /// No git needed, so this runs everywhere.
+    ///
+    /// Only the escaping half is asserted here: an absolute path is a tempdir
+    /// path, which wraps at this terminal's width, and `fg_of` reads one row.
+    /// `refs::containment` and the `ref-absolute` corpus case cover that half.
+    #[test]
+    fn a_path_that_leaves_the_project_is_shown_in_the_error_colour() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("project");
+        std::fs::create_dir_all(root.join("doc")).unwrap();
+        std::fs::write(root.join("doc/real.md"), "x").unwrap();
+        // A real file, one level above the project root — so the only thing
+        // wrong with the ref is where it points.
+        std::fs::write(tmp.path().join("outside.md"), "x").unwrap();
+
+        let md = "\
+# Test
+
+## Backlog
+
+- [ ] `T-1` A task
+  - spec: doc/real.md
+  - ref: ../outside.md
+
+## Done
+";
+        let mut app = app_in_detail_view(md, "T-1");
+        app.project.root = root.clone();
+        let (cyan, red) = (app.theme.cyan, app.theme.red);
+        assert!(
+            root.join("../outside.md").exists(),
+            "the escaping path must resolve, or this test proves nothing"
+        );
+
+        let buf = render_buffer(&mut app);
+        assert_eq!(fg_of(&buf, "doc/real.md"), cyan, "a path that stays inside");
+        assert_eq!(fg_of(&buf, "../outside.md"), red, "escapes upward");
     }
 }

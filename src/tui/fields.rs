@@ -186,11 +186,22 @@ fn parse_ids(buffer: &str) -> Vec<String> {
 /// `ref:` and `spec:` paths, split on commas **only** — the separator the file
 /// format defines for them. Splitting on whitespace as well is what shattered a
 /// ref carrying a note about why it is the ref; see this module's header.
+///
+/// Each is folded to its normal form, exactly as `fr ref add` stores it, so both
+/// surfaces write one spelling per file. That also makes the dedup below a dedup
+/// by *file* rather than by string: `real.md` and `./real.md` typed into the same
+/// list collapse to one entry, which is what `add` does on the CLI side.
+///
+/// Folding is where the TUI's agreement with the CLI stops. The editor does not
+/// refuse a path that leaves the project or that git ignores — there is no
+/// `--force` to offer and no good answer for what to do with the text someone
+/// just typed — so `render::detail_view` paints those red and `fr check` reports
+/// them. `tests/parity.rs` carries that divergence as a stated one.
 fn parse_paths(buffer: &str) -> Vec<String> {
     dedup_preserve_order(
         buffer
             .split(',')
-            .map(|s| s.trim().to_string())
+            .map(crate::ops::refs::normalize)
             .filter(|s| !s.is_empty()),
     )
 }
@@ -381,6 +392,60 @@ mod tests {
         assert_eq!(
             task.metadata[0],
             Metadata::Ref(vec!["a.md".into(), "b.md".into()])
+        );
+    }
+
+    /// The editor stores the same spelling `fr ref add` does, so a path written
+    /// in one surface is the string the other one matches against.
+    #[test]
+    fn paths_are_stored_in_normal_form() {
+        for region in [DetailRegion::Refs, DetailRegion::Spec] {
+            let mut task = task_with(vec![]);
+            assert!(apply_buffer(
+                &mut task,
+                region,
+                "./sub/../real.md, ./doc/../design.md#why"
+            ));
+            let stored = match &task.metadata[0] {
+                Metadata::Ref(v) | Metadata::Spec(v) => v.clone(),
+                other => panic!("unexpected metadata: {other:?}"),
+            };
+            assert_eq!(stored, vec!["real.md", "design.md#why"], "{region:?}");
+        }
+    }
+
+    /// Folding makes the dedup a dedup by *file*, not by string — the same thing
+    /// `fr ref add` does when it declines to append a spelling it already holds.
+    #[test]
+    fn two_spellings_of_one_file_collapse() {
+        let mut task = task_with(vec![]);
+        assert!(apply_buffer(
+            &mut task,
+            DetailRegion::Refs,
+            "real.md, ./sub/../real.md, other.md"
+        ));
+        assert_eq!(
+            task.metadata[0],
+            Metadata::Ref(vec!["real.md".into(), "other.md".into()])
+        );
+    }
+
+    /// A name that merely contains `..` or a suffix is not a traversal.
+    #[test]
+    fn folding_leaves_ordinary_paths_alone() {
+        let mut task = task_with(vec![]);
+        assert!(apply_buffer(
+            &mut task,
+            DetailRegion::Refs,
+            "doc/..hidden.md, src/parser.rs:807-820, doc/issue#3.md"
+        ));
+        assert_eq!(
+            task.metadata[0],
+            Metadata::Ref(vec![
+                "doc/..hidden.md".into(),
+                "src/parser.rs:807-820".into(),
+                "doc/issue#3.md".into()
+            ])
         );
     }
 

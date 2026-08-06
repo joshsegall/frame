@@ -39,6 +39,20 @@ pub(super) fn collect_metadata_list(
     result
 }
 
+/// Every `spec:` and `ref:` value a task carries, in one list — what gets asked
+/// about as a batch, so it is gathered as one.
+pub(super) fn ref_and_spec_values(task: &Task) -> Vec<String> {
+    let mut out = collect_metadata_list(task, |m| match m {
+        Metadata::Spec(s) => Some(s),
+        _ => None,
+    });
+    out.extend(collect_metadata_list(task, |m| match m {
+        Metadata::Ref(r) => Some(r),
+        _ => None,
+    }));
+    out
+}
+
 /// Compute total display width of a slice of spans
 pub(super) fn spans_width(spans: &[Span]) -> usize {
     spans

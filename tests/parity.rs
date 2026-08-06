@@ -1120,6 +1120,49 @@ const SURFACE_CASES: &[SurfaceCase] = &[
         cli_refuses: true,
         known_divergence: None,
     },
+    // -- stated divergence ---------------------------------------------------
+    // The one place the two surfaces are deliberately not the same. `fr ref add`
+    // refuses a path that leaves the project; the detail-view editor stores it
+    // and paints it red, and `fr check` reports it as a warning.
+    //
+    // Not the `7071675` shape — that was two surfaces that each believed they
+    // agreed. This is a decision: refusing in the TUI needs a `--force`
+    // equivalent that does not exist, and discarding what someone just typed is
+    // worse than keeping it and saying it is wrong.
+    //
+    // Opened with `Enter` from the track view rather than via `Start::Detail`,
+    // which sets `app.view` directly and leaves `detail_state` unbuilt — `@` has
+    // no region to jump to then, and the case passes for the wrong reason.
+    SurfaceCase {
+        what: "add a ref that leaves the project",
+        cli: &["ref", "M-001", "add", "../outside.md"],
+        start: Start::Track("M-001"),
+        keys: &[
+            Enter,
+            Char('@'),
+            Char('.'),
+            Char('.'),
+            Char('/'),
+            Char('o'),
+            Char('u'),
+            Char('t'),
+            Char('s'),
+            Char('i'),
+            Char('d'),
+            Char('e'),
+            Char('.'),
+            Char('m'),
+            Char('d'),
+            Enter,
+        ],
+        cli_refuses: true,
+        known_divergence: Some(
+            "the CLI refuses a ref that leaves the project and writes nothing; \
+             the TUI stores it and renders it in the error colour, and `fr check` \
+             reports `ref_outside_project`. If these ever agree, the TUI started \
+             refusing — take this note off.",
+        ),
+    },
 ];
 
 /// Run `fr`, returning whether it succeeded rather than asserting it did.

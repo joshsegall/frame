@@ -1229,6 +1229,11 @@ pub struct App {
     pub last_save_at: Option<Instant>,
     /// Last-known mtime for each track file (keyed by track_id)
     pub track_mtimes: HashMap<String, SystemTime>,
+    /// `ref:`/`spec:` values git is ignoring, for whichever task the detail view
+    /// last drew. See [`App::ignored_ref_values`].
+    ref_ignored: HashSet<String>,
+    /// The value list `ref_ignored` was computed from.
+    ref_ignored_key: Vec<String>,
     /// Files whose in-memory content did not reach disk. Empty is the normal state.
     ///
     /// Every save serializes the whole file from current in-memory state, so a
@@ -1452,6 +1457,8 @@ impl App {
             conflict_text: None,
             last_save_at: None,
             track_mtimes,
+            ref_ignored: HashSet::new(),
+            ref_ignored_key: Vec::new(),
             unsaved: BTreeMap::new(),
             frame_unwritable: false,
             baselines: HashMap::new(),
@@ -2675,6 +2682,29 @@ impl App {
             Some(known) => disk_mtime > *known,
             None => true, // no recorded mtime — treat as changed
         }
+    }
+
+    /// Which of `values` git is ignoring, cached.
+    ///
+    /// The detail view paints a `ref:`/`spec:` path red when it will not travel,
+    /// and that question is asked **inside the render loop** — once per path per
+    /// frame. Existence is a `stat`, and containment is pure string work, so both
+    /// can be answered there directly. Git cannot: a `check-ignore` per path per
+    /// frame would put a subprocess spawn on every keystroke.
+    ///
+    /// So the answer is computed once and kept until the values change. Keying on
+    /// the values themselves rather than on the task means an edit, a reload or a
+    /// move to another task all invalidate it without anyone having to remember
+    /// to — the comparison is a handful of short strings, far cheaper than the
+    /// call it guards.
+    pub fn ignored_ref_values(&mut self, values: &[String]) -> &HashSet<String> {
+        if self.ref_ignored_key != values {
+            self.ref_ignored = crate::ops::refs::ignored(&self.project.root, values)
+                .into_iter()
+                .collect();
+            self.ref_ignored_key = values.to_vec();
+        }
+        &self.ref_ignored
     }
 
     // ---- Saving -------------------------------------------------------
