@@ -2099,6 +2099,45 @@ fn reject_missing_paths(
     }
 }
 
+/// Refuse paths the project cannot point at, naming every one and why.
+///
+/// Separate from [`reject_missing_paths`] and checked *before* it, because these
+/// are the opposite failure: the file is there, and that is exactly what makes
+/// the ref look fine until someone else clones the project. Reporting
+/// `no such file` for `../typo.md` would name the lesser of its two problems.
+fn reject_uncontained_paths(
+    paths: &[String],
+    force: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if force {
+        return Ok(());
+    }
+    let bad: Vec<(&String, refs::PathRejection)> = paths
+        .iter()
+        .filter_map(|p| refs::containment(p).map(|r| (p, r)))
+        .collect();
+    match bad.len() {
+        0 => Ok(()),
+        1 => Err(format!(
+            "{} {}\n  (pass --force to add it anyway)",
+            bad[0].0,
+            bad[0].1.reason()
+        )
+        .into()),
+        _ => {
+            let list = bad
+                .iter()
+                .map(|(p, r)| format!("\n  {} {}", p, r.reason()))
+                .collect::<String>();
+            Err(format!(
+                "these paths cannot be stored:{}\n  (pass --force to add them anyway)",
+                list
+            )
+            .into())
+        }
+    }
+}
+
 fn cmd_ref(args: PathFieldArgs) -> Result<(), Box<dyn std::error::Error>> {
     cmd_path_field(PathField::Ref, args)
 }
@@ -2118,9 +2157,12 @@ fn cmd_path_field(field: PathField, args: PathFieldArgs) -> Result<(), Box<dyn s
     let key = field.key();
     let (mut project, _lock) = lock_and_load()?;
 
-    // `rm` deliberately skips the existence check: a path is most worth removing
-    // precisely when the file behind it is gone.
+    // `rm` deliberately skips both checks: a path is most worth removing
+    // precisely when the file behind it is gone, and refusing to remove an
+    // uncontained ref would trap it in the file forever. `rm` still normalizes,
+    // so it reaches whichever spelling is stored.
     if matches!(args.action.as_str(), "add" | "set") {
+        reject_uncontained_paths(&args.paths, args.force)?;
         reject_missing_paths(&project.root, &args.paths, args.force)?;
     }
 

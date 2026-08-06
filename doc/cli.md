@@ -400,7 +400,20 @@ error: no such file: src/parsr.rs
 
 `fr check` reports a broken ref as an error, so the alternative is frame creating work for itself: the typo is cheapest to fix where it is typed. `--force` covers the case the check cannot tell apart — pointing at a file you are about to write.
 
-**`rm` never checks the filesystem**, since a path is most worth removing precisely when the file behind it is gone.
+**`add` and `set` also refuse a path that leaves the project** — one that escapes upward, or one named from the filesystem root:
+
+```
+$ fr ref EFF-014 add ../notes.md
+error: ../notes.md leaves the project root — nothing outside it travels with the project
+
+$ fr ref EFF-014 add /Users/me/proj/doc/design.md
+error: /Users/me/proj/doc/design.md is absolute — a ref is relative to the
+  project root, so this one means nothing on another machine
+```
+
+This is the opposite failure from a broken ref, and the reason it is worth refusing: the file *is* there, so nothing looks wrong until someone else clones the project. It is checked before the existence check, so `../typo.md` is reported as the escape it is rather than as a missing file. The test runs on the folded value, so `doc/../../outside.md` is caught too, while `doc/../src/parser.rs` — out of a subdirectory and back in — is fine. `--force` overrides this the same way it overrides the existence check.
+
+**`rm` never checks the filesystem**, since a path is most worth removing precisely when the file behind it is gone. It is never refused for leaving the project either: a ref already in a file is exactly what you need to be able to take out.
 
 #### One file, one entry
 

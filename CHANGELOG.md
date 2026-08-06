@@ -23,7 +23,7 @@ All notable changes to frame will be documented in this file.
 > **Breaking, in one place each — read these three if you script `fr` or parse its JSON:**
 > 1. `fr ref` and `fr spec` now require an action: `fr ref ID add|rm|set PATH...`. `fr ref ID PATH` and `fr spec ID PATH` no longer parse.
 > 2. `--json` `spec` is an array of strings, not a string.
-> 3. `fr ref` and `fr spec` exit non-zero on a path with no file behind it. Add `--force` to keep the old behaviour.
+> 3. `fr ref` and `fr spec` exit non-zero on a path with no file behind it, and on one that leaves the project root or is absolute. Add `--force` to keep the old behaviour.
 >
 > Each is detailed below.
 
@@ -46,6 +46,12 @@ All notable changes to frame will be documented in this file.
   A path may now carry `#anchor`, `:line`, `:line-range` or `:line:col`, on either key. **Only the file is validated** — frame does not open the target, so an anchor whose heading moved and a line number gone stale are not errors. The literal path is tried before any suffix is stripped, so a filename genuinely containing `#` or `:` still resolves.
 
 - **BREAKING: `fr ref add|set` and `fr spec add|set` refuse a path with no file behind it**, naming every bad one and writing nothing — an exit code where there used to be none. `--force` writes it anyway, for the file you are about to create. `fr check` calls a broken ref an error, so accepting one silently was frame creating work for itself, and a typo is cheapest to fix at the moment it is typed. Both commands also take several paths at once now.
+
+- **BREAKING: `fr ref add|set` and `fr spec add|set` refuse a path that leaves the project**, whether it escapes upward (`../outside.md`) or names the filesystem root (`/etc/hosts`). Help has always said paths are relative to the project root; nothing enforced it, so all of these were accepted and `fr check` then reported the project valid.
+
+  These are the opposite failure from a broken ref: the file *is* there, which is exactly what makes the reference look fine until someone else clones the project — where the absolute path names a different machine and whatever sat outside the root is not the same. So the refusal is checked before the existence check, and reports the greater of the two problems for a path like `../typo.md`. An absolute path pointing *into* the project is refused too: it still names this machine.
+
+  The check runs on the folded value, so `doc/../../outside.md` is caught as readily as a leading `..`, while a path that dips out of a subdirectory and comes back (`doc/../src/parser.rs`) is fine. `--force` writes it anyway — one flag, one meaning. `rm` is never refused, since an uncontained ref already in a file is exactly what someone needs to be able to take out.
 
 - **`ref:` and `spec:` paths are stored in normal form, and matched in it.** One file has many spellings — `real.md`, `./real.md`, `sub/../real.md` — and every one of them resolves, so a list could hold the same file twice while `rm` failed to find what was plainly there. Both went wrong in practice: with `./sub/../real.md` stored, `fr ref ID rm real.md` reported `unchanged (not present)`, and `fr ref ID add real.md` appended a second entry for the same file.
 

@@ -128,6 +128,57 @@ pub fn normalize(value: &str) -> String {
     }
 }
 
+/// Why a value cannot be stored, beyond the file not being there.
+///
+/// Each of these resolves perfectly well *here* — that is what makes them worth
+/// refusing rather than reporting broken. What they do not do is survive the
+/// trip to another clone, where the project lives at a different absolute path
+/// and whatever sits outside it is not the same.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathRejection {
+    /// An absolute path: `/etc/hosts`, or even the project's own files spelled
+    /// from the filesystem root.
+    Absolute,
+    /// Escapes the project root after folding: `../outside.md`.
+    Escapes,
+}
+
+impl PathRejection {
+    /// The clause a message puts after the path, in the shape "<path> …".
+    pub fn reason(self) -> &'static str {
+        match self {
+            PathRejection::Absolute => {
+                "is absolute — a ref is relative to the project root, so this one \
+                 means nothing on another machine"
+            }
+            PathRejection::Escapes => {
+                "leaves the project root — nothing outside it travels with the project"
+            }
+        }
+    }
+}
+
+/// Whether a value names something the project can actually point at, or `None`
+/// when it is fine.
+///
+/// Pure: no disk, no git, no `project_root` argument. A path that escapes does
+/// so by its own spelling, and asking the filesystem could only weaken the
+/// answer — `../outside.md` resolving to something real is the problem, not a
+/// mitigation.
+pub fn containment(value: &str) -> Option<PathRejection> {
+    let normalized = normalize(value);
+    if normalized.is_empty() {
+        return None; // Not a containment question; `exists` refuses it already.
+    }
+    if Path::new(&normalized).is_absolute() {
+        return Some(PathRejection::Absolute);
+    }
+    if normalized == ".." || normalized.starts_with("../") {
+        return Some(PathRejection::Escapes);
+    }
+    None
+}
+
 /// Whether two values name the same file, whatever spelling each uses.
 ///
 /// The suffix is part of the identity: `real.md` and `real.md:807` are different
@@ -271,6 +322,37 @@ mod tests {
         assert_eq!(normalize("doc/..hidden.md"), "doc/..hidden.md");
         assert_eq!(normalize("doc/a..b.md"), "doc/a..b.md");
         assert_eq!(normalize("...md"), "...md");
+    }
+
+    #[test]
+    fn containment_refuses_what_will_not_travel() {
+        assert_eq!(containment("../outside.md"), Some(PathRejection::Escapes));
+        assert_eq!(containment("a/../../b.md"), Some(PathRejection::Escapes));
+        assert_eq!(containment(".."), Some(PathRejection::Escapes));
+        assert_eq!(containment("/etc/hosts"), Some(PathRejection::Absolute));
+        assert_eq!(
+            containment("/etc/../etc/hosts"),
+            Some(PathRejection::Absolute)
+        );
+        // Absolute *into* the project is still absolute: it names this machine.
+        assert_eq!(
+            containment("/Users/x/proj/doc/design.md"),
+            Some(PathRejection::Absolute)
+        );
+    }
+
+    /// A path that dips out and comes back stays inside, and the awkward
+    /// spellings that fold to something contained are fine.
+    #[test]
+    fn containment_allows_everything_that_stays_inside() {
+        assert_eq!(containment("doc/design.md"), None);
+        assert_eq!(containment("./sub/../real.md"), None);
+        assert_eq!(containment("doc/../src/parser.rs:807"), None);
+        assert_eq!(containment("."), None);
+        assert_eq!(containment("doc/..hidden.md"), None);
+        // Empty is not a containment question — `exists` refuses it on its own,
+        // and answering here would give it two different error messages.
+        assert_eq!(containment(""), None);
     }
 
     #[test]

@@ -1510,6 +1510,151 @@ fn test_path_field_force_accepts_a_missing_path() {
     }
 }
 
+/// A file outside the project, and a file named from the filesystem root. Both
+/// resolve here and neither survives a clone, which is why they are refused
+/// rather than reported broken.
+#[test]
+fn test_path_field_refuses_a_path_outside_the_project() {
+    for field in PATH_FIELDS {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("project");
+        fs::create_dir_all(&root).unwrap();
+        create_test_project(&root);
+        create_ref_targets(&root);
+        // A real file, one level up from the project root.
+        fs::write(tmp.path().join("outside.md"), "outside\n").unwrap();
+        let inside_absolute = root.join("doc/design.md").to_string_lossy().into_owned();
+
+        for (path, expected) in [
+            ("../outside.md", "leaves the project root"),
+            ("/etc/hosts", "is absolute"),
+            // Absolute and pointing *into* the project is still absolute.
+            (inside_absolute.as_str(), "is absolute"),
+        ] {
+            let (_, stderr, ok) = run_fr(&root, &[field, "M-001", "add", path]);
+            assert!(!ok, "{} accepted {}", field, path);
+            assert!(
+                stderr.contains(path) && stderr.contains(expected),
+                "{} on {}: {}",
+                field,
+                path,
+                stderr
+            );
+        }
+
+        let track = fs::read_to_string(root.join("frame/tracks/main.md")).unwrap();
+        assert!(
+            !track.contains(&format!("{}:", field)),
+            "nothing should have been written:\n{}",
+            track
+        );
+    }
+}
+
+/// The check runs on the folded value, so an escape assembled out of `..`
+/// segments is caught just as a leading one is.
+#[test]
+fn test_path_field_refuses_an_escape_that_only_appears_after_folding() {
+    for field in PATH_FIELDS {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("project");
+        fs::create_dir_all(&root).unwrap();
+        create_test_project(&root);
+        create_ref_targets(&root);
+        fs::write(tmp.path().join("outside.md"), "outside\n").unwrap();
+
+        let (_, stderr, ok) = run_fr(&root, &[field, "M-001", "add", "doc/../../outside.md"]);
+        assert!(!ok, "{} accepted a folded escape", field);
+        assert!(stderr.contains("leaves the project root"), "{}", stderr);
+
+        // A path that dips out of a subdirectory and comes back is fine.
+        run_fr_ok(&root, &[field, "M-001", "add", "doc/../src/parser.rs"]);
+        let track = fs::read_to_string(root.join("frame/tracks/main.md")).unwrap();
+        assert!(
+            track.contains(&format!("{}: src/parser.rs", field)),
+            "{}",
+            track
+        );
+    }
+}
+
+/// Every offender is named with its own reason, and nothing is written.
+#[test]
+fn test_path_field_names_every_uncontained_path() {
+    for field in PATH_FIELDS {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("project");
+        fs::create_dir_all(&root).unwrap();
+        create_test_project(&root);
+        create_ref_targets(&root);
+        fs::write(tmp.path().join("outside.md"), "outside\n").unwrap();
+
+        let (_, stderr, ok) = run_fr(
+            &root,
+            &[
+                field,
+                "M-001",
+                "add",
+                "doc/design.md",
+                "../outside.md",
+                "/etc/hosts",
+            ],
+        );
+        assert!(!ok);
+        assert!(
+            stderr.contains("../outside.md") && stderr.contains("/etc/hosts"),
+            "{}",
+            stderr
+        );
+        assert!(stderr.contains("--force"), "{}", stderr);
+
+        let track = fs::read_to_string(root.join("frame/tracks/main.md")).unwrap();
+        assert!(!track.contains(&format!("{}:", field)));
+    }
+}
+
+/// `--force` is one flag with one meaning: write it anyway.
+#[test]
+fn test_path_field_force_accepts_an_uncontained_path() {
+    for field in PATH_FIELDS {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("project");
+        fs::create_dir_all(&root).unwrap();
+        create_test_project(&root);
+        create_ref_targets(&root);
+        fs::write(tmp.path().join("outside.md"), "outside\n").unwrap();
+
+        run_fr_ok(&root, &[field, "M-001", "add", "../outside.md", "--force"]);
+        let track = fs::read_to_string(root.join("frame/tracks/main.md")).unwrap();
+        assert!(
+            track.contains(&format!("{}: ../outside.md", field)),
+            "{}",
+            track
+        );
+    }
+}
+
+/// `rm` is never refused. An uncontained ref already in a file is exactly what
+/// someone needs to be able to take out.
+#[test]
+fn test_path_field_rm_removes_an_uncontained_path() {
+    for field in PATH_FIELDS {
+        let tmp = tempfile::TempDir::new().unwrap();
+        create_test_project(tmp.path());
+        create_ref_targets(tmp.path());
+        store_raw_path_value(tmp.path(), field, "../outside.md, /etc/hosts");
+
+        run_fr_ok(tmp.path(), &[field, "M-001", "rm", "../outside.md"]);
+        let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+        assert!(!track.contains("outside.md"), "{}", track);
+        assert!(track.contains("/etc/hosts"), "{}", track);
+
+        run_fr_ok(tmp.path(), &[field, "M-001", "rm", "/etc/hosts"]);
+        let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+        assert!(!track.contains(&format!("{}:", field)), "{}", track);
+    }
+}
+
 #[test]
 fn test_title() {
     let tmp = tempfile::TempDir::new().unwrap();
