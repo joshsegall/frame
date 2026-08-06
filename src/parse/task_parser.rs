@@ -19,6 +19,12 @@ pub fn parse_tasks(
     // Lines seen at this level that belong to no task yet. They are handed to
     // the next task as its `leading_lines`; see the loop's `else` arm.
     let mut pending: Vec<String> = Vec::new();
+    // Blanks seen since the last held non-blank line, held separately until it
+    // is known whether more content follows. A blank *between* two held lines is
+    // content — it keeps two stranded paragraphs from being glued together — but
+    // a blank at either end of the run separates the run from a task and belongs
+    // to neither. See `take_leading`.
+    let mut pending_blanks: Vec<String> = Vec::new();
     let mut pending_start = start_idx;
 
     while idx < lines.len() {
@@ -28,7 +34,7 @@ pub fn parse_tasks(
         if let Some(task_indent) = task_indent(line) {
             if task_indent == indent {
                 let (mut task, next_idx) = parse_single_task(lines, idx, indent, depth);
-                task.leading_lines = std::mem::take(&mut pending);
+                task.leading_lines = take_leading(&mut pending, &mut pending_blanks);
                 tasks.push(task);
                 idx = next_idx;
             } else if task_indent < indent {
@@ -49,7 +55,7 @@ pub fn parse_tasks(
                 // so a rewrite re-emits it somewhere that parses back the same
                 // way. Over-deep nesting is flattened rather than dropped.
                 let (mut task, next_idx) = parse_single_task(lines, idx, task_indent, depth);
-                task.leading_lines = std::mem::take(&mut pending);
+                task.leading_lines = take_leading(&mut pending, &mut pending_blanks);
                 tasks.push(task);
                 idx = next_idx;
             }
@@ -74,15 +80,16 @@ pub fn parse_tasks(
             if (line.trim().is_empty() || count_indent(line) > indent)
                 && has_more_tasks_at_indent(lines, idx + 1, indent)
             {
+                if pending.is_empty() && pending_blanks.is_empty() {
+                    pending_start = idx;
+                }
                 if !line.trim().is_empty() {
-                    if pending.is_empty() {
-                        pending_start = idx;
-                    }
+                    // Any blanks held since the last content line turn out to be
+                    // interior after all, so they go in ahead of this line.
+                    pending.append(&mut pending_blanks);
                     pending.push(line.clone());
-                } else if !pending.is_empty() {
-                    // A blank inside a stranded run: keep it, so two stranded
-                    // paragraphs don't get glued together.
-                    pending.push(String::new());
+                } else {
+                    pending_blanks.push(String::new());
                 }
                 idx += 1;
                 continue;
@@ -101,6 +108,28 @@ pub fn parse_tasks(
     }
 
     (tasks, idx)
+}
+
+/// Hand the held lines to the task that follows them, dropping the blanks that
+/// separated the two.
+///
+/// `pending_blanks` holds only blanks with no content after them yet, so a task
+/// arriving is what settles them: they separate the stranded run from this task
+/// and belong to neither. `parse_single_task` already draws that line for the
+/// same shape at the other anchor (its `run`/`blanks` split), and the two
+/// anchors have to agree — which one claims a given stranded line depends only
+/// on that line's indent, so a blank must not survive at one anchor and die at
+/// the other.
+///
+/// They did not agree, and the file paid for it twice. A stranded line indented
+/// past a task's metadata goes to `trailing_lines` on the task above, which
+/// stops at a blank; the line after that blank goes to `leading_lines` on the
+/// task below, which used to keep it. So one write emitted the blank and the
+/// next dropped it — the same edit changing the file two different ways, which
+/// is a diff nobody asked for and a good place for a one-line deletion to hide.
+fn take_leading(pending: &mut Vec<String>, pending_blanks: &mut Vec<String>) -> Vec<String> {
+    pending_blanks.clear();
+    std::mem::take(pending)
 }
 
 /// Parse a single task and all its metadata and subtasks.

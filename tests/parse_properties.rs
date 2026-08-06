@@ -1442,3 +1442,33 @@ fn a_stray_line_above_the_first_task_survives_a_write() {
     assert_eq!(serialize_track(&parse_track(source)), source);
     assert!(canon_track(source).contains("- added: 2025-05-14"));
 }
+
+/// Stranded content has two anchors — `trailing_lines` on the task above for a
+/// line indented past that task's metadata, `leading_lines` on the task below
+/// for anything else — and both are reachable from one run of stranded lines.
+/// The blank separating the run from the task below it must die at both, or the
+/// file changes on two successive writes: the first emitted the blank, the
+/// second re-read the run under the *other* anchor and dropped it.
+///
+/// Shrunk out of P6 by proptest, twice: fixing the first shape (blank directly
+/// above the task) surfaced the second (blank between two held lines that
+/// different anchors claim). Nothing was ever lost here — this is the
+/// convergence claim, not conservation.
+#[test]
+fn a_stranded_run_settles_in_one_write() {
+    for source in [
+        "## Backlog\n- [ ] plain task\n\n    ```\n\n- [ ] plain task\n",
+        "## Backlog\n- [ ] plain task\n\n    ```\n\n  - added: 2025-05-14\n- [ ] plain task\n",
+    ] {
+        let once = serialize_track(&parse_track(source));
+        assert_eq!(
+            once,
+            serialize_track(&parse_track(&once)),
+            "a second write changed the file again: {source:?}"
+        );
+        assert!(
+            once.contains("```"),
+            "the stranded line itself must survive: {once:?}"
+        );
+    }
+}
