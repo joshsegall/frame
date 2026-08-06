@@ -502,14 +502,12 @@ pub fn apply(project: &mut Project, plan: &[Repair]) -> FixResult {
 /// verbatim: the file is byte-identical apart from the removed blocks.
 ///
 /// **An archive is not a track.** `fr clean` writes `# Archive — <track>` and
-/// then bare task lines, with no `## Section` header
-/// (`clean.rs`'s archive append), and both other readers —
-/// [`crate::io::project_io::load_archives`] and the mint scan in
-/// [`crate::ops::ids`] — skip to the first task line and parse from there. This
-/// reads them the same way. Walking `TrackNode::Section` instead, as this did
-/// until `tests/damaged_corpus.rs` ran it against an archive `fr clean` had
-/// actually produced, finds nothing in a real archive: the repair reported
-/// "no longer appears in the archives" and silently changed nothing.
+/// then bare task lines, with no `## Section` header, which is why the format
+/// has [`parse_archive`](crate::parse::parse_archive) of its own. Walking
+/// `TrackNode::Section` instead, as this did until `tests/damaged_corpus.rs` ran
+/// it against an archive `fr clean` had actually produced, finds nothing in a
+/// real archive: the repair reported "no longer appears in the archives" and
+/// silently changed nothing.
 fn dedupe_archived(frame_dir: &Path, task_id: &str, archives: &[String]) -> Result<(), String> {
     let mut seen = false;
 
@@ -518,28 +516,20 @@ fn dedupe_archived(frame_dir: &Path, task_id: &str, archives: &[String]) -> Resu
         let content = std::fs::read_to_string(&path)
             .map_err(|e| format!("could not read {}: {e}", path.display()))?;
 
-        let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
-        let start = lines
-            .iter()
-            .position(|l| l.starts_with("- ["))
-            .unwrap_or(lines.len());
-        let (tasks, _) = crate::parse::parse_tasks(&lines, start, 0, 0);
+        let mut archive = crate::parse::parse_archive(&content);
 
         let mut removed = Vec::new();
-        let kept: Vec<Task> = tasks
-            .into_iter()
-            .filter(|task| {
-                if task.id.as_deref() != Some(task_id) {
-                    return true;
-                }
-                if !seen {
-                    seen = true;
-                    return true;
-                }
-                removed.push(task.clone());
-                false
-            })
-            .collect();
+        archive.tasks.retain(|task| {
+            if task.id.as_deref() != Some(task_id) {
+                return true;
+            }
+            if !seen {
+                seen = true;
+                return true;
+            }
+            removed.push(task.clone());
+            false
+        });
 
         if removed.is_empty() {
             continue;
@@ -561,14 +551,10 @@ fn dedupe_archived(frame_dir: &Path, task_id: &str, archives: &[String]) -> Resu
             );
         }
 
-        // Everything above the first task line is header — the `# Archive` title
-        // and any blank line under it — and is carried verbatim.
-        let mut out = lines[..start].join("\n");
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(&crate::parse::serialize_tasks(&kept, 0).join("\n"));
-        out.push('\n');
+        // The header, anything below the last task, and the file's line ending
+        // are the serializer's job now — this used to assemble the file by hand
+        // and dropped the last two.
+        let out = crate::parse::serialize_archive(&archive);
         crate::io::recovery::atomic_write(&path, out.as_bytes())
             .map_err(|e| format!("could not write {}: {e}", path.display()))?;
     }

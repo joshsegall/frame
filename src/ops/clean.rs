@@ -4,6 +4,7 @@ use std::path::Path;
 use chrono::Local;
 
 use crate::io::actors::IdScope;
+use crate::model::archive::Archive;
 use crate::model::project::Project;
 use crate::model::task::{Metadata, Task, TaskState};
 use crate::model::task_id::{TaskId, Token};
@@ -1023,19 +1024,25 @@ fn archive_done_tasks(project: &mut Project, result: &mut CleanResult) {
             );
         }
 
-        let archive_content =
-            crate::parse::serialize_tasks(&fresh.iter().copied().cloned().collect::<Vec<_>>(), 0)
-                .join("\n");
-
         // Nothing new to append (every task was already archived): skip the
         // write, but still extract below — leaving them in Done would make every
         // future clean retry the same no-op.
-        if !archive_content.is_empty() {
-            let new_content = if existing.is_empty() {
-                format!("# Archive — {}\n\n{}", track_id, archive_content)
+        if !fresh.is_empty() {
+            // Appending used to be string concatenation onto the raw existing
+            // text, which is how a CRLF archive ended up with LF blocks glued
+            // under CRLF ones — a file with both, that no later reader could put
+            // right. Going through the pair means the file is rebuilt with its
+            // own line ending, and the new tasks land after the last archived
+            // task rather than after anything written below them.
+            let mut archive = if existing.is_empty() {
+                Archive::new(track_id)
             } else {
-                format!("{}\n{}", existing.trim_end(), archive_content)
+                crate::parse::parse_archive(&existing)
             };
+            archive
+                .tasks
+                .extend(fresh.iter().map(|task| (*task).clone()));
+            let new_content = crate::parse::serialize_archive(&archive);
 
             // Write archive — if this fails, leave tasks in place
             if crate::io::recovery::atomic_write(&archive_path, new_content.as_bytes()).is_err() {
@@ -1793,6 +1800,76 @@ mod tests {
         let log = std::fs::read_to_string(root.join("frame/.recovery.log")).unwrap();
         assert!(log.contains("M-001"), "recovery log should hold it:\n{log}");
         assert!(log.contains("already in archive/main.md"), "{log}");
+    }
+
+    /// Appending must not change the file's line ending, and must not write past
+    /// content already at the bottom of it.
+    ///
+    /// The append used to be string concatenation onto the raw existing text, so
+    /// a CRLF archive got LF blocks glued under CRLF ones — one file with both
+    /// endings, which no reader can put right afterwards because `LineEnding` is
+    /// per file. The same concatenation put new tasks after *everything*,
+    /// including a note somebody left at the end, and the next rewrite of the
+    /// file then dropped that note as unparseable content.
+    #[test]
+    fn test_archive_append_keeps_the_line_ending_and_the_tail() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("frame/archive")).unwrap();
+
+        std::fs::write(
+            root.join("frame/archive/main.md"),
+            "# Archive \u{2014} main\r\n\r\n- [x] `M-001` First\r\n  - resolved: 2025-05-01\r\n\r\n<!-- 2025 notes -->\r\n",
+        )
+        .unwrap();
+
+        let track = parse_track(
+            "\
+# Main
+
+## Backlog
+
+## Done
+
+- [x] `M-002` Second
+  - added: 2025-01-02
+  - resolved: 2025-05-02
+- [x] `M-003` Third
+  - added: 2025-01-03
+  - resolved: 2025-05-03
+",
+        );
+
+        let mut config = make_config(vec![("main", "M")]);
+        config.clean.done_threshold = 1;
+        config.clean.done_retain = 0;
+
+        let mut project = Project {
+            root: root.to_path_buf(),
+            frame_dir: root.join("frame"),
+            config,
+            tracks: vec![("main".to_string(), track)],
+            inbox: None,
+        };
+
+        clean_project(&mut project, IdScope::Mint(None));
+
+        let bytes = std::fs::read(root.join("frame/archive/main.md")).unwrap();
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert!(text.contains("`M-002`"), "the append happened:\n{text}");
+        assert_eq!(
+            bytes.iter().filter(|b| **b == b'\n').count(),
+            text.matches("\r\n").count(),
+            "the file gained a bare LF — it now mixes endings:\n{text:?}"
+        );
+        assert!(
+            text.contains("<!-- 2025 notes -->"),
+            "content at the bottom was dropped:\n{text}"
+        );
+        assert!(
+            text.find("`M-002`") < text.find("<!-- 2025 notes -->"),
+            "the new task should land with the other tasks, above the tail:\n{text}"
+        );
     }
 
     /// Every task already archived: nothing to append, but Done still drains.

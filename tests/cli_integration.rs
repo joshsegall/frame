@@ -3327,6 +3327,8 @@ const DUPLICATED_ARCHIVE: &str = "\
   - resolved: 2026-01-01
 - [x] `M-901` Archived once
   - resolved: 2026-01-02
+
+<!-- kept by hand -->
 ";
 
 /// A repair that deletes must not run without consent. With stdin closed the
@@ -3371,6 +3373,14 @@ fn test_check_fix_yes_dedupes_archive_and_logs_recovery() {
     assert!(
         after.starts_with("# Archive — main"),
         "the archive header is carried verbatim: {after}"
+    );
+    // And so is anything below the last task. The rewrite was header-plus-tasks,
+    // built from the index the reader started at, and discarded the index the
+    // parser stopped at — so a note at the bottom of an archive was in neither
+    // piece and this repair deleted it.
+    assert!(
+        after.contains("<!-- kept by hand -->"),
+        "content below the last task was dropped: {after}"
     );
 
     // What was removed is recoverable, not gone.

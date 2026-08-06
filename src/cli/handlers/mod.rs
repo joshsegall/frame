@@ -3343,9 +3343,9 @@ fn whole_track_archive_files(frame_dir: &std::path::Path) -> Vec<PathBuf> {
 
 fn cmd_actor_merge(args: ActorMergeArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     use crate::io::recovery::atomic_write;
+    use crate::model::archive::Archive;
     use crate::model::task_id::{TaskId, actor_namespace};
     use crate::ops::actor_merge::ProseHit;
-    use crate::parse::{parse_tasks, serialize_tasks};
 
     let mut project = load_project_cwd()?;
     let frame_dir = project.frame_dir.clone();
@@ -3391,20 +3391,14 @@ fn cmd_actor_merge(args: ActorMergeArgs, json: bool) -> Result<(), Box<dyn std::
     }
     // Two different shapes live under `frame/archive/`, and reading one as the
     // other loses data. A done-task archive is a `# Archive — <track>` header
-    // followed by a bare task list (no `## Section` headers), so it parses and
-    // serializes as a task list with its header carried verbatim.
-    let mut archives: Vec<(PathBuf, Vec<String>, Vec<Task>)> = Vec::new();
+    // followed by a bare task list (no `## Section` headers), which is what
+    // `parse_archive` is for.
+    let mut archives: Vec<(PathBuf, Archive)> = Vec::new();
     for path in done_archive_files(&frame_dir) {
         let content = std::fs::read_to_string(&path)?;
-        let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
-        let start = lines
-            .iter()
-            .position(|l| l.starts_with("- ["))
-            .unwrap_or(lines.len());
-        let header = lines[..start].to_vec();
-        let (tasks, _) = parse_tasks(&lines, start, 0, 0);
-        actor_merge::collect_ids(&tasks, &mut all_ids);
-        archives.push((path, header, tasks));
+        let archive = crate::parse::parse_archive(&content);
+        actor_merge::collect_ids(&archive.tasks, &mut all_ids);
+        archives.push((path, archive));
     }
     // An archived whole-track file under `_tracks/` still *is* a track — `fr
     // track archive` moved it there intact, sections and all. Read as a bare
@@ -3451,9 +3445,14 @@ fn cmd_actor_merge(args: ActorMergeArgs, json: bool) -> Result<(), Box<dyn std::
         }
     }
     let mut changed_archives: Vec<usize> = Vec::new();
-    for (i, (path, _header, tasks)) in archives.iter_mut().enumerate() {
+    for (i, (path, archive)) in archives.iter_mut().enumerate() {
         let mut local: Vec<ProseHit> = Vec::new();
-        let changed = actor_merge::apply_map_to_tasks(tasks, &map, args.rewrite_notes, &mut local);
+        let changed = actor_merge::apply_map_to_tasks(
+            &mut archive.tasks,
+            &map,
+            args.rewrite_notes,
+            &mut local,
+        );
         let label = format!(
             "archive:{}",
             path.file_name().and_then(|s| s.to_str()).unwrap_or("")
@@ -3504,14 +3503,8 @@ fn cmd_actor_merge(args: ActorMergeArgs, json: bool) -> Result<(), Box<dyn std::
             save_track(&project, tid)?;
         }
         for &i in &changed_archives {
-            let (path, header, tasks) = &archives[i];
-            let body = serialize_tasks(tasks, 0).join("\n");
-            let content = if header.is_empty() {
-                format!("{}\n", body)
-            } else {
-                format!("{}\n{}\n", header.join("\n"), body)
-            };
-            atomic_write(path, content.as_bytes())?;
+            let (path, archive) = &archives[i];
+            atomic_write(path, crate::parse::serialize_archive(archive).as_bytes())?;
         }
         for &i in &changed_track_archives {
             let (path, track) = &track_archives[i];
