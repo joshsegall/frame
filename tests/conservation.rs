@@ -38,12 +38,21 @@
 //!
 //! # Licensed removal
 //!
-//! Two operations are allowed to take something away, and the harness tracks
-//! what: `Delete` removes one task's subtree, and `EditTitle` retires the old
-//! title. Everything else must conserve. Cross-track moves are deliberately
-//! **not** in the op set — they re-mint the task's ID by design, so ID
-//! conservation would need a rename map, and `tests/merge_simulation.rs`
-//! already owns namespace behaviour.
+//! Three operations are allowed to take something away, and the harness tracks
+//! what: `Delete` removes one task's subtree, `EditTitle` retires the old title,
+//! and `RenamePrefix` retires every ID under the old prefix — live and archived
+//! alike, which is the point of having it here. Everything else must conserve.
+//! Cross-track moves are deliberately **not** in the op set — they re-mint the
+//! task's ID by design, so ID conservation would need a rename map, and
+//! `tests/merge_simulation.rs` already owns namespace behaviour.
+//!
+//! # Three file shapes, three pairs
+//!
+//! Claim 4 used to skip `frame/archive/` entirely, on the grounds that archives
+//! were appended to rather than round-tripped. That was true, and it was the
+//! problem: the append was string concatenation, so it could leave a file mixing
+//! line endings and no property was watching. Done-task archives now settle
+//! under the archive pair, `archive/_tracks/` under the track pair.
 //!
 //! # In-process, against the real ops layer
 //!
@@ -62,8 +71,9 @@ use frame::model::task::{Task, TaskState};
 use frame::model::track::{Track, TrackNode};
 use frame::ops::ids::Mint;
 use frame::ops::task_ops::{self, InsertPosition};
+use frame::ops::track_ops;
 use frame::ops::{check, clean, fix, inbox_ops};
-use frame::parse::{parse_track, serialize_track};
+use frame::parse::{parse_archive, parse_track, serialize_archive, serialize_track};
 use proptest::prelude::*;
 
 // ---------------------------------------------------------------------------
@@ -304,6 +314,7 @@ enum Op {
     Triage { item: usize, track: usize },
     Clean,
     CheckFix,
+    RenamePrefix { track: usize },
 }
 
 fn arb_title() -> impl Strategy<Value = String> {
@@ -340,6 +351,7 @@ fn arb_op() -> impl Strategy<Value = Op> {
         2 => (0usize..4, 0usize..2).prop_map(|(item, track)| Op::Triage { item, track }),
         3 => Just(Op::Clean),
         2 => Just(Op::CheckFix),
+        1 => (0usize..2).prop_map(|track| Op::RenamePrefix { track }),
     ]
 }
 
@@ -503,6 +515,63 @@ fn apply_op(project: &mut Project, op: &Op) -> Licensed {
             let plan = fix::plan(&check::check_project(project));
             fix::apply(project, &plan);
         }
+        // The one op that rewrites an archive without going through `clean`, and
+        // the path where the archive half silently did nothing at all: it read
+        // the archive as a track, found no `## Section` headers, and wrote
+        // nothing while reporting success.
+        //
+        // Renaming a prefix retires every id under the old one, live and
+        // archived alike, so all of them are licensed. What still has to hold is
+        // that no *title* moves, and — the reason this op is here — that the
+        // archive it rewrites lands settled.
+        Op::RenamePrefix { track } => {
+            let idx = track % project.tracks.len();
+            let track_id = project.tracks[idx].0.clone();
+            let Some(old_prefix) = project.config.ids.prefixes.get(&track_id).cloned() else {
+                return licensed;
+            };
+            let new_prefix = format!("{old_prefix}X");
+
+            for task in tasks_of(&project.tracks[idx].1) {
+                if let Some(id) = &task.id {
+                    licensed.ids.insert(id.to_string());
+                }
+            }
+            let archive_path = frame_dir.join("archive").join(format!("{track_id}.md"));
+            if let Ok(text) = std::fs::read_to_string(&archive_path) {
+                for task in parse_archive(&text).tasks {
+                    let mut flat = Vec::new();
+                    walk(&task, &mut flat);
+                    for t in flat {
+                        if let Some(id) = &t.id {
+                            licensed.ids.insert(id.to_string());
+                        }
+                    }
+                }
+            }
+
+            let mut tracks = std::mem::take(&mut project.tracks);
+            let renamed = track_ops::rename_track_prefix(
+                &mut project.config,
+                &mut tracks,
+                &track_id,
+                &old_prefix,
+                &new_prefix,
+            );
+            project.tracks = tracks;
+            if renamed.is_ok() {
+                let _ = track_ops::rename_archive_prefix(
+                    &frame_dir,
+                    &track_id,
+                    &old_prefix,
+                    &new_prefix,
+                );
+                // The config carries the prefix map, so it has to land too or the
+                // next step in the sequence mints under a prefix the files no
+                // longer use.
+                let _ = frame::io::config_io::write_config_from_struct(&frame_dir, &project.config);
+            }
+        }
     }
 
     save_all(project);
@@ -518,12 +587,19 @@ fn apply_op(project: &mut Project, op: &Op) -> Licensed {
 /// diff nobody asked for on the next unrelated command.
 fn assert_settled(frame_dir: &Path, step: usize, op: &Op) -> Result<(), TestCaseError> {
     for (path, text) in all_markdown(frame_dir) {
-        // Archives are appended to, not round-tripped, and `_tracks/` holds
-        // whole files moved verbatim. Both are checked for content below.
-        if path.components().any(|c| c.as_os_str() == "archive") {
-            continue;
-        }
-        let rewritten = serialize_track(&parse_track(&text));
+        // Three shapes live under `frame/`, and each settles under its own pair.
+        // A done-task archive used to be exempt from this check entirely, on the
+        // grounds that it was appended to rather than round-tripped — which was
+        // true, and was the problem: the append was string concatenation, so it
+        // could and did leave a file mixing line endings. `archive/_tracks/`
+        // holds whole track files, moved there intact, so they settle as tracks.
+        let is_archive = path.components().any(|c| c.as_os_str() == "archive");
+        let is_whole_track = path.components().any(|c| c.as_os_str() == "_tracks");
+        let rewritten = if is_archive && !is_whole_track {
+            serialize_archive(&parse_archive(&text))
+        } else {
+            serialize_track(&parse_track(&text))
+        };
         if rewritten != text {
             return Err(TestCaseError::fail(format!(
                 "step {step} ({op:?}) left {} unsettled\nwrote:     {text:?}\nrewrites to: {rewritten:?}",

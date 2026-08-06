@@ -76,8 +76,13 @@
 use std::fs;
 use std::path::PathBuf;
 
-use frame::model::{Inbox, InboxItem, Metadata, SectionKind, Task, TaskState, Track, TrackNode};
-use frame::parse::{LineEnding, parse_inbox, parse_track, serialize_inbox, serialize_track};
+use frame::model::{
+    Archive, Inbox, InboxItem, Metadata, SectionKind, Task, TaskState, Track, TrackNode,
+};
+use frame::parse::{
+    LineEnding, parse_archive, parse_inbox, parse_track, serialize_archive, serialize_inbox,
+    serialize_track,
+};
 use proptest::prelude::*;
 
 // ---------------------------------------------------------------------------
@@ -194,6 +199,33 @@ fn stranded_lines(track: &Track) -> Vec<String> {
     out
 }
 
+/// Every archived task, flattened. An archive has no sections, so unlike
+/// `task_identities` there is nothing to tag them with — the id and title are the
+/// whole identity.
+fn archive_identities(archive: &Archive) -> Vec<(Option<String>, String)> {
+    fn walk(tasks: &[Task], out: &mut Vec<(Option<String>, String)>) {
+        for task in tasks {
+            out.push((task.id.as_deref().map(str::to_string), task.title.clone()));
+            walk(&task.subtasks, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(&archive.tasks, &mut out);
+    out
+}
+
+fn archive_metadata(archive: &Archive) -> Vec<Metadata> {
+    fn walk(tasks: &[Task], out: &mut Vec<Metadata>) {
+        for task in tasks {
+            out.extend(task.metadata.iter().cloned());
+            walk(&task.subtasks, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(&archive.tasks, &mut out);
+    out
+}
+
 /// The semantic content of an inbox item, minus source tracking.
 #[derive(Debug, PartialEq, Eq)]
 struct ItemShape {
@@ -255,6 +287,14 @@ fn canon_inbox(source: &str) -> String {
     let (mut inbox, _) = parse_inbox(source);
     dirty_inbox(&mut inbox);
     serialize_inbox(&inbox)
+}
+
+fn canon_archive(source: &str) -> String {
+    let mut archive = parse_archive(source);
+    for task in &mut archive.tasks {
+        dirty_task(task);
+    }
+    serialize_archive(&archive)
 }
 
 /// How many rewrites P4 allows before the text must stop changing.
@@ -658,6 +698,33 @@ fn arb_track_model() -> impl Strategy<Value = Track> {
         })
 }
 
+/// A well-formed archive: the heading `fr clean` writes, a flat task list, and
+/// sometimes a line below it that frame does not understand.
+///
+/// The tail is only generated when there are tasks. With none, there is no first
+/// task line to split on, so the whole file is header by definition and the
+/// header/tail split would differ from the model while the *text* is identical —
+/// which is what P3 compares, so nothing is lost by keeping the generator honest
+/// about it.
+fn arb_archive_model() -> impl Strategy<Value = Archive> {
+    (
+        prop::collection::vec(arb_task_tree(), 0..4),
+        prop::option::of(prop::sample::select(
+            ["<!-- archived 2025 -->", "---", "see also: notes.md"].as_slice(),
+        )),
+        arb_eol(),
+    )
+        .prop_map(|(tasks, tail, eol)| Archive {
+            header: vec!["# Archive — generated".to_string(), String::new()],
+            trailing: match tail {
+                Some(line) if !tasks.is_empty() => vec![String::new(), line.to_string()],
+                _ => Vec::new(),
+            },
+            tasks,
+            eol,
+        })
+}
+
 fn arb_inbox_model() -> impl Strategy<Value = Inbox> {
     (
         prop::collection::vec(
@@ -716,6 +783,12 @@ proptest! {
     fn p1_track_parse_never_panics(source in arb_soup()) {
         let track = parse_track(&source);
         let _ = serialize_track(&track);
+    }
+
+    #[test]
+    fn p1_archive_parse_never_panics(source in arb_soup()) {
+        let archive = parse_archive(&source);
+        let _ = serialize_archive(&archive);
     }
 
     #[test]
@@ -806,6 +879,55 @@ proptest! {
         }
     }
 
+    /// The same claim for the archive pair. The corpus is the track fixtures,
+    /// mutated: an archive is a task list with a heading over it, so every task
+    /// shape a track file can hold, an archive can hold too.
+    #[test]
+    fn p2_archive_canonical_rewrite_preserves_content(
+        which in 0usize..64,
+        idx in 0usize..512,
+        mutation in arb_mutation(),
+    ) {
+        let corpus = fixture_sources();
+        let source = &corpus[which % corpus.len()];
+        let damaged = mutate(source, idx, &mutation);
+
+        let before = parse_archive(&damaged);
+        let rewritten = canon_archive(&damaged);
+        let after = parse_archive(&rewritten);
+
+        let after_tasks = archive_identities(&after);
+        for task in archive_identities(&before) {
+            prop_assert!(
+                after_tasks.contains(&task),
+                "archived task lost by the rewrite: {:?}\nsurvivors: {:?}",
+                task,
+                after_tasks
+            );
+        }
+
+        let after_meta = archive_metadata(&after);
+        for meta in archive_metadata(&before) {
+            prop_assert!(
+                after_meta.contains(&meta),
+                "metadata lost by the rewrite: {:?}\nsurvivors: {:?}",
+                meta,
+                after_meta
+            );
+        }
+
+        // The header and the tail are the archive's own two carried-text fields,
+        // and the rewrite has no licence to touch either.
+        for line in before.header.iter().chain(before.trailing.iter()) {
+            prop_assert!(
+                line.trim().is_empty() || rewritten.lines().any(|l| l == line),
+                "carried line lost by the rewrite: {:?}\nrewritten: {:?}",
+                line,
+                rewritten
+            );
+        }
+    }
+
     #[test]
     fn p2_inbox_canonical_rewrite_preserves_content(
         which in 0usize..64,
@@ -874,6 +996,24 @@ proptest! {
 
         prop_assert_eq!(inbox_shape(&model), inbox_shape(&parsed));
     }
+
+    /// Ground truth for the archive: every task the model holds comes back, with
+    /// its metadata and its nesting, and so does the line ending.
+    ///
+    /// The text is compared rather than the header/tail fields. Where the split
+    /// falls is a reading of the file — an archive with no tasks is all header —
+    /// and two readings that produce the same bytes have lost nothing, which is
+    /// the claim that matters.
+    #[test]
+    fn p3_archive_model_survives_a_round_trip(model in arb_archive_model()) {
+        let text = serialize_archive(&model);
+        let parsed = parse_archive(&text);
+
+        prop_assert_eq!(archive_identities(&model), archive_identities(&parsed));
+        prop_assert_eq!(archive_metadata(&model), archive_metadata(&parsed));
+        prop_assert_eq!(model.eol, parsed.eol);
+        prop_assert_eq!(&text, &serialize_archive(&parsed));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -894,6 +1034,15 @@ proptest! {
     #[test]
     fn p4_track_rewrites_converge(source in arb_soup()) {
         if let Err((last, next)) = settle(&source, canon_track) {
+            return Err(TestCaseError::fail(format!(
+                "never settled in {MAX_REWRITES_TO_SETTLE} rewrites\nlast: {last:?}\nnext: {next:?}"
+            )));
+        }
+    }
+
+    #[test]
+    fn p4_archive_rewrites_converge(source in arb_soup()) {
+        if let Err((last, next)) = settle(&source, canon_archive) {
             return Err(TestCaseError::fail(format!(
                 "never settled in {MAX_REWRITES_TO_SETTLE} rewrites\nlast: {last:?}\nnext: {next:?}"
             )));
@@ -969,6 +1118,31 @@ proptest! {
         prop_assert_eq!(nonblank_lines(&source), nonblank_lines(&written));
     }
 
+    /// The same, for the archive pair — and the property the archive format most
+    /// needed. Its writers rebuilt the file from a start index and a task list,
+    /// so a line below the last task belonged to neither piece and every rewrite
+    /// deleted it. Nothing else here can see that: the tasks all survive, so P2
+    /// and P3 pass, and the line is gone after one write so P4 converges.
+    #[test]
+    fn p5_an_archive_write_keeps_every_line(source in arb_soup()) {
+        let written = serialize_archive(&parse_archive(&source));
+        prop_assert_eq!(nonblank_lines(&source), nonblank_lines(&written));
+    }
+
+    #[test]
+    fn p5_an_archive_write_keeps_every_line_in_a_damaged_fixture(
+        which in 0usize..64,
+        idx in 0usize..512,
+        mutation in arb_mutation(),
+    ) {
+        let corpus = fixture_sources();
+        let source = &corpus[which % corpus.len()];
+        let damaged = mutate(source, idx, &mutation);
+
+        let written = serialize_archive(&parse_archive(&damaged));
+        prop_assert_eq!(nonblank_lines(&damaged), nonblank_lines(&written));
+    }
+
     /// Same property against damaged real fixtures, which is where the shapes
     /// that trip it actually come from: a half-finished hand edit, a merge that
     /// left a line at the wrong indent, a metadata key that lost its colon.
@@ -1030,12 +1204,32 @@ proptest! {
         );
     }
 
+    /// Archives had no `LineEnding` at all, because they had no model type to
+    /// carry one — so a CRLF archive was rewritten LF by whichever command
+    /// touched it, and `fr clean`'s append produced a file holding both.
+    #[test]
+    fn p6_an_archive_write_keeps_the_line_ending(source in arb_soup()) {
+        let written = serialize_archive(&parse_archive(&source));
+        prop_assert_eq!(
+            LineEnding::detect(&source),
+            LineEnding::detect(&written),
+            "source: {:?}\nwritten: {:?}", source, written
+        );
+    }
+
     /// And it survives repeated writes — a fixpoint, not a one-step accident.
     /// The churn this prevents is precisely a file that never settles.
     #[test]
     fn p6_the_line_ending_is_a_fixpoint(source in arb_soup()) {
         let once = serialize_track(&parse_track(&source));
         let twice = serialize_track(&parse_track(&once));
+        prop_assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn p6_the_archive_line_ending_is_a_fixpoint(source in arb_soup()) {
+        let once = serialize_archive(&parse_archive(&source));
+        let twice = serialize_archive(&parse_archive(&once));
         prop_assert_eq!(once, twice);
     }
 }
