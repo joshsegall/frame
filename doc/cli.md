@@ -172,7 +172,9 @@ It flags **ID collisions involving an archive**, which nothing else catches — 
 - a **live task holding an archived task's ID**: the number was reissued after the original was archived (possible before the [ID frontier](architecture.md#id-frontier-durable-mint) became durable). Renumber the live task by hand.
 - **one ID appearing more than once inside the archives**, with no live task involved: the same task's history was written twice, not a number handed out twice. Delete the extra copies. This came from an archive append that wasn't idempotent (now fixed), so it only appears on pre-existing data or a hand-edited archive.
 
-Both are warnings rather than errors: there is no automatic repair, and they fire on data that predates the fixes. It also reports an **unreadable ID frontier store** (the next mint resets it and falls back to scanning, which can't see another worktree's uncommitted tasks) and a leftover `frame-ids.toml.bak`, which means the frontier *was* reset at some point and numbers minted in that window may have been reissued. Deleting the `.bak` clears that one.
+It also flags **archived IDs left on a prefix their track no longer uses**. `fr track rename --prefix` used to rename only the live tasks — it read the archive as a track file, found no `## Section` headers, and wrote nothing while reporting success — so a project renamed before that still holds archived IDs under the old prefix. It is a warning because nothing is wrong yet: those tasks are readable and their IDs unique. What it is one step away from is not: the abandoned prefix is not reserved, so giving it to another track hands that track a namespace whose numbers are already spent in a file its mint scan never looks at. `--fix` renames them onto the current prefix, and refuses if any would land on an ID that already exists.
+
+The two collision findings above are warnings rather than errors for a different reason: there is no automatic repair, and they fire on data that predates the fixes. It also reports an **unreadable ID frontier store** (the next mint resets it and falls back to scanning, which can't see another worktree's uncommitted tasks) and a leftover `frame-ids.toml.bak`, which means the frontier *was* reset at some point and numbers minted in that window may have been reissued. Deleting the `.bak` clears that one.
 
 It flags **working-copy-local frame files leaking into git** — `frame/.state.json`, `frame/.lock`, `frame/.recovery.log`, `frame/.actor`, `frame/.inflight`, and (for projects outside git, where the frontier store is working-copy-local) `frame/.ids.toml` and `frame/.ids.lock`. Committing these leaks machine-local state into shared history; the append-only recovery log also conflicts on every merge that touches it.
 
@@ -205,7 +207,7 @@ fr check --fix [--dry-run] [--yes]
 
 Applies the repairs check would otherwise only describe. Bare `fr check` never writes — the repair path is only reached with `--fix`.
 
-The plan is exactly what check reported: one warning in, at most one repair out. Seven findings are repairable:
+The plan is exactly what check reported: one warning in, at most one repair out. Eight findings are repairable:
 
 | Finding | Repair | Deletes? |
 |---|---|---|
@@ -215,6 +217,9 @@ The plan is exactly what check reported: one warning in, at most one repair out.
 | leftover `frame-ids.toml.bak` | delete the stale backup | **yes** |
 | interrupted operation recovery declined | clear the `.inflight` marker | **yes** |
 | subtask ID that doesn't extend its parent's | renumber it under that parent | **yes** |
+| archived IDs on a prefix the track dropped | rename them onto the current prefix | **yes** |
+
+**Archived IDs on a dead prefix** are renamed onto the one the track uses now, which is what the prefix rename should have done in the first place. It counts as deleting for the same reason the subtask renumber does: the old IDs stop existing. If any ID would collide with one that already exists — live or archived — the whole file is skipped and the warning stays, naming the ID that blocked it, because a half-rename would leave one archive holding two prefixes with nothing recording which tasks moved.
 
 A **subtask whose ID escaped its parent** — `M-020` nested under `M-003` — gets the next free child number under the parent it actually sits below, in the namespace its own ID already carries rather than yours. Its descendants are rekeyed with it and every `dep:` pointing at the old IDs follows. It counts as deleting because the old ID stops existing anywhere in the project, and frame cannot rewrite a reference you kept somewhere else. Renumbering a reissued *top-level* ID is not repairable for a related but different reason: there, two legitimate holders exist and which one moves is your call.
 
@@ -492,6 +497,8 @@ fr track rename ID [--name NAME] [--new-id NEW_ID] [--prefix PREFIX] [--dry-run]
 | `-y`, `--yes` | Auto-confirm prefix rename |
 
 At least one of `--name`, `--new-id`, or `--prefix` is required. Flags can be combined.
+
+`--prefix` rewrites the track's **archived** task IDs too, and reports how many. It used to rewrite only the live ones — it read the archive as a track file, found no `## Section` headers, and wrote nothing while printing success — so archives renamed before this carry the old prefix still. `fr check` reports that state and `--fix` repairs it.
 
 ## Maintenance
 
