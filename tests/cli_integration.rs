@@ -3712,6 +3712,57 @@ fn test_actor_merge_converges_when_the_registry_write_is_cut() {
     );
 }
 
+/// Two different shapes live under `frame/archive/`, and `fr actor merge` read
+/// both as the bare task list only one of them is. An archived *whole track*
+/// still has its `## Section` headers, so the task-list reader stopped at the
+/// first header below the tasks and the rewrite dropped everything under it — a
+/// `## Done` section with completed tasks in it, deleted by a command that only
+/// claimed to renumber ids. The ids down there were missing from the census the
+/// remap's collision-freedom rests on, too, so they stayed in a namespace the
+/// same command then retired.
+#[test]
+fn test_actor_merge_keeps_every_section_of_an_archived_track() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    run_fr_ok(tmp.path(), &["init", "--name", "p", "--track", "a", "A"]);
+    run_fr_ok(tmp.path(), &["track", "new", "side", "Side"]);
+
+    run_fr_ok(tmp.path(), &["actor", "set", "x"]);
+    let open = run_fr_ok(tmp.path(), &["add", "side", "still open"])
+        .trim()
+        .to_string();
+    let done = run_fr_ok(tmp.path(), &["add", "side", "already finished"])
+        .trim()
+        .to_string();
+    run_fr_ok(tmp.path(), &["state", &done, "done"]);
+    run_fr_ok(tmp.path(), &["track", "archive", "side"]);
+
+    let archived = tmp.path().join("frame/archive/_tracks/side.md");
+    let before = fs::read_to_string(&archived).unwrap();
+    assert!(
+        before.contains("## Done") && before.contains("already finished"),
+        "fixture should have a populated Done section below the Backlog: {before}"
+    );
+
+    run_fr_ok(tmp.path(), &["actor", "set", "y"]);
+    run_fr_ok(tmp.path(), &["actor", "merge", "x", "--into", "y"]);
+
+    let after = fs::read_to_string(&archived).unwrap();
+    assert!(
+        after.contains("## Done") && after.contains("already finished"),
+        "the Done section and its tasks must survive a merge: {after}"
+    );
+    assert!(
+        after.contains("## Parked"),
+        "so must the empty section between them: {after}"
+    );
+    // And both ids moved — the one below the section header was invisible to the
+    // id census, so it used to survive in a namespace that had just been retired.
+    assert!(
+        !after.contains(&open) && !after.contains(&done),
+        "every id should have left the merged-away namespace: {after}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // In-flight marker and automatic recovery
 // ---------------------------------------------------------------------------

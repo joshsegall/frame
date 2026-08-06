@@ -3314,25 +3314,31 @@ fn thin_frontier_notice(reg: &actors::ActorRegistry) {
     }
 }
 
-/// Every id-bearing markdown file under `frame/archive/` (per-track archives and
-/// archived whole-track files under `_tracks/`).
-fn archive_md_files(frame_dir: &std::path::Path) -> Vec<PathBuf> {
+/// The `.md` files directly under `dir`, sorted. A missing directory is empty.
+fn md_files_in(dir: &std::path::Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    let archive_dir = frame_dir.join("archive");
-    let push_md_dir = |dir: &std::path::Path, out: &mut Vec<PathBuf>| {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md") {
-                    out.push(path);
-                }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md") {
+                out.push(path);
             }
         }
-    };
-    push_md_dir(&archive_dir, &mut out);
-    push_md_dir(&archive_dir.join("_tracks"), &mut out);
+    }
     out.sort();
     out
+}
+
+/// Done-task archives: `frame/archive/<track>.md`, an `# Archive — <track>`
+/// header over a bare task list.
+fn done_archive_files(frame_dir: &std::path::Path) -> Vec<PathBuf> {
+    md_files_in(&frame_dir.join("archive"))
+}
+
+/// Archived whole-track files: `frame/archive/_tracks/<track>.md`, moved there
+/// intact by `fr track archive`, so they still parse as tracks.
+fn whole_track_archive_files(frame_dir: &std::path::Path) -> Vec<PathBuf> {
+    md_files_in(&frame_dir.join("archive").join("_tracks"))
 }
 
 fn cmd_actor_merge(args: ActorMergeArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
@@ -3383,13 +3389,13 @@ fn cmd_actor_merge(args: ActorMergeArgs, json: bool) -> Result<(), Box<dyn std::
     for (_, track) in &project.tracks {
         actor_merge::collect_ids_in_track(track, &mut all_ids);
     }
-    // Archive files are a `# Archive — <track>` header followed by a bare task
-    // list (no `## Section` headers), so they parse/serialize as task lists, not
-    // tracks. Keep the header verbatim and round-trip only the tasks.
-    let archive_paths = archive_md_files(&frame_dir);
+    // Two different shapes live under `frame/archive/`, and reading one as the
+    // other loses data. A done-task archive is a `# Archive — <track>` header
+    // followed by a bare task list (no `## Section` headers), so it parses and
+    // serializes as a task list with its header carried verbatim.
     let mut archives: Vec<(PathBuf, Vec<String>, Vec<Task>)> = Vec::new();
-    for path in &archive_paths {
-        let content = std::fs::read_to_string(path)?;
+    for path in done_archive_files(&frame_dir) {
+        let content = std::fs::read_to_string(&path)?;
         let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
         let start = lines
             .iter()
@@ -3398,7 +3404,20 @@ fn cmd_actor_merge(args: ActorMergeArgs, json: bool) -> Result<(), Box<dyn std::
         let header = lines[..start].to_vec();
         let (tasks, _) = parse_tasks(&lines, start, 0, 0);
         actor_merge::collect_ids(&tasks, &mut all_ids);
-        archives.push((path.clone(), header, tasks));
+        archives.push((path, header, tasks));
+    }
+    // An archived whole-track file under `_tracks/` still *is* a track — `fr
+    // track archive` moved it there intact, sections and all. Read as a bare
+    // task list it stops at the first `## Section` header after the tasks, and
+    // the rewrite below would drop every section under that: this deleted a
+    // whole `## Done` section, completed tasks included, and left the ids in it
+    // out of the census that makes the remap collision-free.
+    let mut track_archives: Vec<(PathBuf, Track)> = Vec::new();
+    for path in whole_track_archive_files(&frame_dir) {
+        let content = std::fs::read_to_string(&path)?;
+        let track = crate::parse::parse_track(&content);
+        actor_merge::collect_ids_in_track(&track, &mut all_ids);
+        track_archives.push((path, track));
     }
 
     let into_tok = actor_namespace(&args.into);
@@ -3446,6 +3465,21 @@ fn cmd_actor_merge(args: ActorMergeArgs, json: bool) -> Result<(), Box<dyn std::
             hits.push((label.clone(), h));
         }
     }
+    let mut changed_track_archives: Vec<usize> = Vec::new();
+    for (i, (path, track)) in track_archives.iter_mut().enumerate() {
+        let mut local: Vec<ProseHit> = Vec::new();
+        let changed = actor_merge::apply_map_to_track(track, &map, args.rewrite_notes, &mut local);
+        let label = format!(
+            "archive:_tracks/{}",
+            path.file_name().and_then(|s| s.to_str()).unwrap_or("")
+        );
+        if changed {
+            changed_track_archives.push(i);
+        }
+        for h in local {
+            hits.push((label.clone(), h));
+        }
+    }
 
     // Persist, unless this is a dry run.
     if !args.dry_run {
@@ -3478,6 +3512,10 @@ fn cmd_actor_merge(args: ActorMergeArgs, json: bool) -> Result<(), Box<dyn std::
                 format!("{}\n{}\n", header.join("\n"), body)
             };
             atomic_write(path, content.as_bytes())?;
+        }
+        for &i in &changed_track_archives {
+            let (path, track) = &track_archives[i];
+            atomic_write(path, crate::parse::serialize_track(track).as_bytes())?;
         }
         for tok in &retire {
             reg.retire(tok, &actors::today())?;
