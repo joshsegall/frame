@@ -619,6 +619,10 @@ pub(super) fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo
                                     &file,
                                 );
                             }
+                            // Out of `tracks/` is out of the project — see
+                            // `confirm_archive_track`. Anything still holding it
+                            // in memory writes the file back.
+                            app.project.tracks.retain(|(id, _)| id != &tid);
                             rebuild_active_track_ids(app);
                             save_config(app);
                         }
@@ -747,6 +751,10 @@ pub(super) fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo
                                     &file,
                                 );
                             }
+                            // Out of `tracks/` is out of the project — see
+                            // `confirm_archive_track`. Anything still holding it
+                            // in memory writes the file back.
+                            app.project.tracks.retain(|(id, _)| id != &tid);
                             rebuild_active_track_ids(app);
                             save_config(app);
                         } else {

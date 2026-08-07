@@ -3,7 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::model::SectionKind;
 use crate::ops::task_ops::{self};
 
-use crate::tui::app::{App, Mode, PendingMove};
+use crate::tui::app::{App, Mode, PendingMove, SaveTarget};
 use crate::tui::undo::Operation;
 
 use super::*;
@@ -93,7 +93,22 @@ pub(super) fn confirm_archive_track(app: &mut App, track_id: &str) {
     // change, and another `fr` that read the project between them would see a
     // track that is archived in the config and still in `tracks/` — or write
     // back the copy it had loaded and undo the move.
+    let mut archived = false;
     let done = app.with_project_lock(|app| {
+        // Whatever this track is still holding belongs in the copy being
+        // archived, so it has to reach disk before the file moves. If it
+        // cannot — the usual reason being that a save already failed and it is
+        // waiting in `unsaved` — then archiving would move a stale file and
+        // take the newer version out of reach with it, since the in-memory copy
+        // goes away below.
+        app.save_track_logged(track_id);
+        if app
+            .unsaved
+            .contains_key(&SaveTarget::Track(track_id.to_string()))
+        {
+            return;
+        }
+
         if let Some(tc) = app
             .project
             .config
@@ -132,10 +147,28 @@ pub(super) fn confirm_archive_track(app: &mut App, track_id: &str) {
         if let Some(marker) = marker {
             marker.commit();
         }
+        archived = true;
     });
     if !done {
         return;
     }
+    if !archived {
+        app.status_message = Some(format!(
+            "could not archive \"{track_name}\": its latest edits are not on disk yet"
+        ));
+        app.status_is_error = true;
+        return;
+    }
+
+    // Out of `tracks/` means out of the project, exactly as a restart would
+    // have it: `load_project` does not load an archived track. Left in memory it
+    // is still reachable — by a jump to one of its tasks, by the tracks view,
+    // by an undo — and *anything* that saves it writes `tracks/<file>`, which
+    // recreates the file the archive just moved. P8 found that in three
+    // keystrokes with no second writer involved: archive, move a task, and
+    // every id in the track exists twice, in two files, both looking
+    // authoritative.
+    app.project.tracks.retain(|(id, _)| id != track_id);
 
     rebuild_active_track_ids(app);
 
@@ -242,6 +275,59 @@ mod lock_tests {
         confirm_archive_track(&mut app, "a");
         assert!(!track_path.exists() && archived.exists(), "the file moved");
         assert_eq!(app.project.config.tracks[0].state, "archived");
+    }
+
+    /// Out of `tracks/` is out of the project: `load_project` would not load an
+    /// archived track after a restart, and a session that keeps one in memory
+    /// leaves it reachable — by a jump to one of its tasks, by the tracks view,
+    /// by an undo — where *anything* that saves it writes `tracks/<file>` and
+    /// recreates the file the archive just moved. P8 found that in three
+    /// keystrokes and no second writer: archive, move a task, and every id in
+    /// the track exists twice, in two files.
+    #[test]
+    fn an_archived_track_leaves_the_project() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        let live = app.project.frame_dir.join("tracks/a.md");
+
+        confirm_archive_track(&mut app, "a");
+
+        assert!(!live.exists(), "the file moved to the archive");
+        assert!(
+            app.project.tracks.iter().all(|(id, _)| id != "a"),
+            "and the track is no longer part of the loaded project"
+        );
+        assert!(
+            !app.jump_to_task("A-001"),
+            "so nothing can navigate back into it and write the file again"
+        );
+    }
+
+    /// An edit that has not reached disk belongs in the copy being archived.
+    /// The archive moves the *file*, so without flushing first it moves the
+    /// stale one and the newer version goes out of reach with the in-memory
+    /// track.
+    #[test]
+    fn archiving_carries_an_unsaved_edit_into_the_archive() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        let archived = app.project.frame_dir.join("archive/_tracks/a.md");
+
+        let tasks = app
+            .find_track_mut("a")
+            .unwrap()
+            .section_tasks_mut(SectionKind::Backlog)
+            .unwrap();
+        tasks[0].title = "Edited but not yet saved".into();
+        tasks[0].dirty = true;
+
+        confirm_archive_track(&mut app, "a");
+
+        let text = std::fs::read_to_string(&archived).expect("the archived file exists");
+        assert!(
+            text.contains("Edited but not yet saved"),
+            "the archived copy is the latest one:\n{text}"
+        );
     }
 
     /// The same for delete, where the stakes are higher: the file it unlinks is

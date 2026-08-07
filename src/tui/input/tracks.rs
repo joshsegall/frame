@@ -119,11 +119,38 @@ pub(super) fn tracks_prepend(app: &mut App) {
 }
 
 /// Enter EDIT mode to rename the track under the cursor
+///
+/// An archived track cannot be renamed, and the reason is that renaming one
+/// writes its file. The name lives in `project.toml` *and* in the track's own
+/// `# Title` header, so a rename saves the track — to `tracks/<file>`, which is
+/// not where an archived track lives. Archived in this session, that recreated
+/// the file the archive had just moved to `archive/_tracks/`, leaving every
+/// task in the project twice; archived in an earlier one, `load_project` never
+/// loaded the track, so the save failed with "track not found" and left an
+/// unsaved entry nothing could ever clear.
+///
+/// Frozen is what the CLI already means by archived — `fr track rename
+/// --prefix` skips archived tracks for the same reason — so this says so
+/// instead of inventing a way to rewrite a file under `archive/`.
 pub(super) fn tracks_edit_name(app: &mut App) {
     let track_id = match tracks_cursor_track_id(app) {
         Some(id) => id,
         None => return,
     };
+    if app
+        .project
+        .config
+        .tracks
+        .iter()
+        .any(|t| t.id == track_id && t.state == "archived")
+    {
+        app.status_message = Some(format!(
+            "\"{}\" is archived — unarchive it to rename it",
+            app.track_name(&track_id)
+        ));
+        app.status_is_error = true;
+        return;
+    }
     let current_name = app.track_name(&track_id).to_string();
     let cursor_pos = current_name.len();
     app.edit_buffer = current_name.clone();
@@ -444,5 +471,54 @@ pub(super) fn update_track_header(app: &mut App, track_id: &str, new_name: &str)
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::app::app_on_disk;
+
+    /// Found by P8 in two keystrokes and no second writer at all: archive a
+    /// track, then rename it, and every task in the project exists twice — once
+    /// in `archive/_tracks/` where the archive put it, and once in `tracks/`
+    /// where the rename's save wrote it back from memory.
+    #[test]
+    fn an_archived_track_cannot_be_renamed_back_into_existence() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        let live = app.project.frame_dir.join("tracks/a.md");
+
+        super::super::confirm::confirm_archive_track(&mut app, "a");
+        assert!(!live.exists(), "archiving moved the file");
+
+        // The cursor lands on the archived track: they sort last, and it is the
+        // only one left.
+        app.tracks_cursor = 0;
+        tracks_edit_name(&mut app);
+
+        assert_ne!(
+            app.mode,
+            crate::tui::app::Mode::Edit,
+            "the rename must not have opened"
+        );
+        assert!(
+            !live.exists(),
+            "and nothing may have recreated the archived track's file"
+        );
+    }
+
+    /// The refusal is about *archived*, not about any track the user cannot see
+    /// in the active list. A shelved track is still loaded and still lives in
+    /// `tracks/`, so renaming it is ordinary.
+    #[test]
+    fn a_shelved_track_can_still_be_renamed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        app.project.config.tracks[0].state = "shelved".into();
+        app.tracks_cursor = 0;
+
+        tracks_edit_name(&mut app);
+        assert_eq!(app.mode, crate::tui::app::Mode::Edit);
     }
 }
