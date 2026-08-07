@@ -32,7 +32,7 @@ pub struct AgentConfig {
     pub cc_only: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrackConfig {
     pub id: String,
     pub name: String,

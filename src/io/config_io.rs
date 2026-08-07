@@ -83,6 +83,141 @@ pub fn add_track_to_config(doc: &mut toml_edit::DocumentMut, track: &TrackConfig
     }
 }
 
+/// Overwrite one field of a track's entry, leaving the rest of the row alone.
+///
+/// The named-field helpers above each rewrite one key; this is the same move
+/// with the key as data, which is what a field-by-field merge needs
+/// ([`crate::ops::reconcile::reconcile_config`]) — it decides per field which
+/// side won, and cannot enumerate them at the call site.
+pub fn set_track_field(doc: &mut toml_edit::DocumentMut, track_id: &str, field: &str, value: &str) {
+    if let Some(tracks) = doc
+        .get_mut("tracks")
+        .and_then(|t| t.as_array_of_tables_mut())
+    {
+        for table in tracks.iter_mut() {
+            if table.get("id").and_then(|v| v.as_str()) == Some(track_id) {
+                table[field] = toml_edit::value(value);
+                break;
+            }
+        }
+    }
+}
+
+/// Insert a track's entry at a position rather than at the end.
+///
+/// [`add_track_to_config`] appends, which is right for `fr track new` and wrong
+/// for the TUI, where `p`/`-` place a new track among the active ones. Indices
+/// past the end append.
+pub fn insert_track_in_config(doc: &mut toml_edit::DocumentMut, track: &TrackConfig, index: usize) {
+    add_track_to_config(doc, track);
+    if let Some(tracks) = doc
+        .get_mut("tracks")
+        .and_then(|t| t.as_array_of_tables_mut())
+    {
+        let last = tracks.len().saturating_sub(1);
+        if index < last {
+            let mut tables: Vec<toml_edit::Table> = tracks.iter().cloned().collect();
+            let table = tables.remove(last);
+            tables.insert(index, table);
+            rebuild_tracks(tracks, tables);
+        }
+    }
+}
+
+/// Reorder the `[[tracks]]` entries to match `order`, matching on id.
+///
+/// Entries are moved whole, so each row's own comments travel with it. An id in
+/// the document that `order` does not mention keeps its position relative to the
+/// other unmentioned ones, at the end — that is how a track another process
+/// added survives a reorder we computed without knowing about it.
+pub fn set_track_order(doc: &mut toml_edit::DocumentMut, order: &[String]) {
+    let Some(tracks) = doc
+        .get_mut("tracks")
+        .and_then(|t| t.as_array_of_tables_mut())
+    else {
+        return;
+    };
+    let mut pool: Vec<toml_edit::Table> = tracks.iter().cloned().collect();
+    let mut ordered: Vec<toml_edit::Table> = Vec::with_capacity(pool.len());
+    for id in order {
+        if let Some(pos) = pool
+            .iter()
+            .position(|t| t.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
+        {
+            ordered.push(pool.remove(pos));
+        }
+    }
+    ordered.extend(pool);
+    rebuild_tracks(tracks, ordered);
+}
+
+/// Replace the array's entries, keeping whatever comment block precedes the
+/// first one where it is.
+///
+/// A prefix comment on the first `[[tracks]]` entry introduces the *section* at
+/// least as often as it describes that entry — it is what the shipped template
+/// produces, since the template's Tracks banner has no entry of its own to
+/// attach to. So the leading decor stays pinned to the first position and every
+/// other entry keeps its own. Rows below the first carry their comments with
+/// them, which is the reading that matters for anything a user wrote by hand.
+fn rebuild_tracks(tracks: &mut toml_edit::ArrayOfTables, mut tables: Vec<toml_edit::Table>) {
+    let was_first = tracks
+        .iter()
+        .next()
+        .and_then(|t| t.get("id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let now_first = tables
+        .first()
+        .and_then(|t| t.get("id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    // A straight swap of the two prefixes: the new first entry takes the
+    // banner, and the entry it displaced takes what the new one was carrying.
+    // Nothing is dropped either way, and it is one rule rather than a guess
+    // about which comment means what.
+    if let (Some(was_first), Some(now_first)) = (&was_first, &now_first)
+        && was_first != now_first
+    {
+        let displaced = tables
+            .first()
+            .and_then(|t| t.decor().prefix().cloned())
+            .unwrap_or_else(|| toml_edit::RawString::from(""));
+        let banner = tracks
+            .iter()
+            .next()
+            .and_then(|t| t.decor().prefix().cloned())
+            .unwrap_or_else(|| toml_edit::RawString::from(""));
+        if let Some(first) = tables.first_mut() {
+            first.decor_mut().set_prefix(banner);
+        }
+        if let Some(moved) = tables
+            .iter_mut()
+            .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(was_first.as_str()))
+        {
+            moved.decor_mut().set_prefix(displaced);
+        }
+    }
+
+    // A table carries where in the document it is rendered, and that is what
+    // decides the output — reordering the array alone moves nothing. So the
+    // positions the entries currently occupy are collected and handed back out
+    // in the new order, which keeps the block of `[[tracks]]` entries exactly
+    // where it was in the file and only changes who sits in each slot.
+    let mut slots: Vec<usize> = tracks.iter().filter_map(|t| t.position()).collect();
+    slots.sort_unstable();
+    for (table, slot) in tables.iter_mut().zip(slots) {
+        table.set_position(slot);
+    }
+
+    let mut rebuilt = toml_edit::ArrayOfTables::new();
+    for table in tables {
+        rebuilt.push(table);
+    }
+    *tracks = rebuilt;
+}
+
 /// Set an ID prefix for a track in the config document
 pub fn set_prefix(doc: &mut toml_edit::DocumentMut, track_id: &str, prefix: &str) {
     if !doc.contains_key("ids") {
@@ -418,6 +553,81 @@ name = "test"
         let mut doc: toml_edit::DocumentMut = config_text.parse().unwrap();
         // Should not panic
         clear_tag_color(&mut doc, "bug");
+    }
+
+    const BANNERED: &str = r#"[project]
+name = "test"
+
+# Tracks
+# ------
+# Each entry defines a workstream.
+
+[[tracks]]
+id = "api"
+name = "API"
+state = "active"
+file = "tracks/api.md"
+
+# the one nobody uses
+[[tracks]]
+id = "ui"
+name = "UI"
+state = "active"
+file = "tracks/ui.md"
+"#;
+
+    fn track_ids(text: &str) -> Vec<String> {
+        let config: ProjectConfig = toml::from_str(text).unwrap();
+        config.tracks.into_iter().map(|t| t.id).collect()
+    }
+
+    /// Reordering moves rows, not the section they live in — and a comment
+    /// written above a specific entry goes with that entry.
+    #[test]
+    fn test_set_track_order_moves_rows_and_their_comments() {
+        let mut doc: toml_edit::DocumentMut = BANNERED.parse().unwrap();
+        set_track_order(&mut doc, &["ui".to_string(), "api".to_string()]);
+        let result = doc.to_string();
+
+        assert_eq!(track_ids(&result), vec!["ui", "api"]);
+        // The banner introduces the section, so it stays at the top of it.
+        let banner = result.find("# Tracks").unwrap();
+        let first_row = result.find("[[tracks]]").unwrap();
+        assert!(banner < first_row);
+        // The per-row comment travelled with the row it describes.
+        let comment = result.find("# the one nobody uses").unwrap();
+        let api_row = result.find(r#"id = "api""#).unwrap();
+        assert!(comment < api_row);
+        // Nothing else moved.
+        assert!(result.starts_with("[project]"));
+    }
+
+    #[test]
+    fn test_insert_track_in_config_places_rather_than_appends() {
+        let mut doc: toml_edit::DocumentMut = BANNERED.parse().unwrap();
+        insert_track_in_config(
+            &mut doc,
+            &TrackConfig {
+                id: "docs".to_string(),
+                name: "Docs".to_string(),
+                state: "active".to_string(),
+                file: "tracks/docs.md".to_string(),
+            },
+            1,
+        );
+        let result = doc.to_string();
+        assert_eq!(track_ids(&result), vec!["api", "docs", "ui"]);
+        assert!(result.contains("# Tracks"));
+    }
+
+    #[test]
+    fn test_set_track_field_leaves_the_rest_of_the_row() {
+        let mut doc: toml_edit::DocumentMut = BANNERED.parse().unwrap();
+        set_track_field(&mut doc, "ui", "state", "shelved");
+        let config: ProjectConfig = toml::from_str(&doc.to_string()).unwrap();
+        assert_eq!(config.tracks[1].state, "shelved");
+        assert_eq!(config.tracks[1].name, "UI");
+        assert_eq!(config.tracks[0].state, "active");
     }
 
     /// Struct-based serialization (toml::to_string_pretty) must preserve

@@ -57,6 +57,9 @@
 
 use std::collections::HashMap;
 
+use indexmap::IndexMap;
+
+use crate::model::config::{ProjectConfig, TrackConfig};
 use crate::model::inbox::{Inbox, InboxItem};
 use crate::model::task::Task;
 use crate::model::track::{SectionKind, Track, TrackNode};
@@ -372,6 +375,408 @@ pub fn reconcile_inbox(base: &Inbox, ours: &Inbox, theirs: &Inbox) -> Reconciled
         },
         took_theirs,
         deleted,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The config
+
+/// A config entry the merge could not honour on both sides.
+#[derive(Debug, Clone)]
+pub struct ConfigConflict {
+    /// What it is about, phrased for a human: `track "api"`, `prefix "api"`.
+    pub key: String,
+    pub reason: ConfigConflictReason,
+    /// The version that did not survive into the file, for the recovery log.
+    pub set_aside: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigConflictReason {
+    /// Both sides changed the same entry, differently.
+    BothEdited,
+    /// Both sides added the same key with different content.
+    BothAdded,
+    /// We removed it; they changed it. Our removal stands — the TUI unlinks or
+    /// archives the file under the lock as part of the same operation, so a row
+    /// kept alive here would point at nothing.
+    RemovedAndEdited,
+    /// We changed it; they removed it. **Theirs stands and ours is the version
+    /// set aside** — the opposite of [`ConflictReason::EditedAndDeleted`] for a
+    /// track, because re-adding the row would resurrect a reference to a file
+    /// they have already moved or deleted.
+    EditedAndRemoved,
+}
+
+impl ConfigConflictReason {
+    pub fn slug(self) -> &'static str {
+        match self {
+            ConfigConflictReason::BothEdited => "both-edited",
+            ConfigConflictReason::BothAdded => "both-added",
+            ConfigConflictReason::RemovedAndEdited => "removed-and-edited",
+            ConfigConflictReason::EditedAndRemoved => "edited-and-removed",
+        }
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            ConfigConflictReason::BothEdited => "both sides changed it differently; kept ours",
+            ConfigConflictReason::BothAdded => "both sides added it; kept ours",
+            ConfigConflictReason::RemovedAndEdited => "we removed it, they changed it; kept ours",
+            ConfigConflictReason::EditedAndRemoved => {
+                "we changed it, they removed it; kept the version on disk"
+            }
+        }
+    }
+
+    /// Whether *our* change is the one that did not survive.
+    ///
+    /// The status line has to say so in a different voice: a merge that took
+    /// their work as well as ours is news, but a keystroke that did not do what
+    /// it looked like it did is not something to report in the same breath.
+    pub fn ours_lost(self) -> bool {
+        matches!(self, ConfigConflictReason::EditedAndRemoved)
+    }
+}
+
+/// The result of merging the config.
+#[derive(Debug, Default)]
+pub struct ReconciledConfig {
+    pub conflicts: Vec<ConfigConflict>,
+    /// Entries whose version came from the other writer.
+    pub took_theirs: usize,
+}
+
+impl ReconciledConfig {
+    /// The conflicts where our own edit is what was dropped.
+    pub fn rejected(&self) -> impl Iterator<Item = &ConfigConflict> {
+        self.conflicts.iter().filter(|c| c.reason.ours_lost())
+    }
+}
+
+/// Merge our config changes into the document that is on disk.
+///
+/// # Why this one edits a document rather than returning a value
+///
+/// The other two merges build a merged `Track` or `Inbox` and hand it back. This
+/// one applies our `base → ours` delta onto **their** `toml_edit` document, in
+/// place, and the caller writes that document.
+///
+/// The reason is that `project.toml` is a file a person writes and reads. The
+/// shipped template is 107 lines of which 56 are comments explaining what the
+/// settings do, and `ProjectConfig` models none of that — nor any key a future
+/// frame adds, nor any key a user invents. Serializing a merged struct would
+/// produce a correct config and destroy the file. Editing the document keeps
+/// every comment, every unmodelled key, and every formatting choice, and the
+/// merged struct comes back out by re-parsing what was written.
+///
+/// # What it covers, and why that is all
+///
+/// The TUI can change exactly four regions: `tracks`, `ids.prefixes`,
+/// `agent.cc_focus`, and `ui.tag_colors`. No delta is computed for anything
+/// else, so `project.name`, `clean`, `recovery` and the rest of `ui` are
+/// whatever is on disk. That is not the merge cutting corners — it is the merge
+/// being honest about who writes what.
+///
+/// # The base
+///
+/// `base` is the config as it was on disk when we last agreed with it: what the
+/// session loaded, or what it last wrote. The delta from there to `ours` is
+/// exactly the operation the user just performed, which is what makes this
+/// possible without rewriting every call site to edit a document directly.
+pub fn reconcile_config(
+    base: &ProjectConfig,
+    ours: &ProjectConfig,
+    theirs: &ProjectConfig,
+    doc: &mut toml_edit::DocumentMut,
+) -> ReconciledConfig {
+    let mut out = ReconciledConfig::default();
+
+    reconcile_track_entries(base, ours, theirs, doc, &mut out);
+
+    reconcile_string_map(
+        "prefix",
+        &base.ids.prefixes,
+        &ours.ids.prefixes,
+        &theirs.ids.prefixes,
+        doc,
+        crate::io::config_io::set_prefix,
+        crate::io::config_io::remove_prefix,
+        &mut out,
+    );
+
+    reconcile_string_map(
+        "tag colour",
+        &base.ui.tag_colors,
+        &ours.ui.tag_colors,
+        &theirs.ui.tag_colors,
+        doc,
+        crate::io::config_io::set_tag_color,
+        crate::io::config_io::clear_tag_color,
+        &mut out,
+    );
+
+    reconcile_cc_focus(base, ours, theirs, doc, &mut out);
+
+    out
+}
+
+/// `[[tracks]]`, matched on id.
+fn reconcile_track_entries(
+    base: &ProjectConfig,
+    ours: &ProjectConfig,
+    theirs: &ProjectConfig,
+    doc: &mut toml_edit::DocumentMut,
+    out: &mut ReconciledConfig,
+) {
+    let by_id = |c: &ProjectConfig| -> HashMap<String, TrackConfig> {
+        c.tracks.iter().map(|t| (t.id.clone(), t.clone())).collect()
+    };
+    let (bi, oi, ti) = (by_id(base), by_id(ours), by_id(theirs));
+
+    for id in union_keys(
+        ours.tracks.iter().map(|t| &t.id),
+        base.tracks.iter().map(|t| &t.id),
+        theirs.tracks.iter().map(|t| &t.id),
+    ) {
+        let (b, o, t) = (bi.get(&id), oi.get(&id), ti.get(&id));
+        match (b, o) {
+            // We added it.
+            (None, Some(o)) => match t {
+                None => {
+                    let index = ours.tracks.iter().position(|t| t.id == id).unwrap_or(0);
+                    crate::io::config_io::insert_track_in_config(doc, o, index);
+                }
+                Some(t) if t == o => {}
+                Some(t) => {
+                    out.conflicts.push(ConfigConflict {
+                        key: format!("track {id:?}"),
+                        reason: ConfigConflictReason::BothAdded,
+                        set_aside: fragment(t),
+                    });
+                    apply_track_fields(doc, &id, o);
+                }
+            },
+            // We removed it.
+            (Some(b), None) => match t {
+                None => {}
+                Some(t) => {
+                    if t != b {
+                        out.conflicts.push(ConfigConflict {
+                            key: format!("track {id:?}"),
+                            reason: ConfigConflictReason::RemovedAndEdited,
+                            set_aside: fragment(t),
+                        });
+                    }
+                    crate::io::config_io::remove_track_from_config(doc, &id);
+                }
+            },
+            // It was there before and it is there now.
+            (Some(b), Some(o)) => {
+                if o == b {
+                    // We did not touch it, so whatever they did stands.
+                    match t {
+                        None => out.took_theirs += 1,
+                        Some(t) if t != b => out.took_theirs += 1,
+                        Some(_) => {}
+                    }
+                    continue;
+                }
+                let Some(t) = t else {
+                    out.conflicts.push(ConfigConflict {
+                        key: format!("track {id:?}"),
+                        reason: ConfigConflictReason::EditedAndRemoved,
+                        set_aside: fragment(o),
+                    });
+                    continue;
+                };
+                for (field, bv, ov, tv) in [
+                    ("name", &b.name, &o.name, &t.name),
+                    ("state", &b.state, &o.state, &t.state),
+                    ("file", &b.file, &o.file, &t.file),
+                ] {
+                    if ov == bv {
+                        if tv != bv {
+                            out.took_theirs += 1;
+                        }
+                        continue;
+                    }
+                    if tv == ov {
+                        continue;
+                    }
+                    if tv != bv {
+                        out.conflicts.push(ConfigConflict {
+                            key: format!("track {id:?} {field}"),
+                            reason: ConfigConflictReason::BothEdited,
+                            set_aside: format!("{field} = {tv:?}"),
+                        });
+                    }
+                    crate::io::config_io::set_track_field(doc, &id, field, ov);
+                }
+            }
+            // Only they have it.
+            (None, None) => out.took_theirs += 1,
+        }
+    }
+
+    if we_reordered(base, ours) {
+        let mut order: Vec<String> = ours.tracks.iter().map(|t| t.id.clone()).collect();
+        for t in &theirs.tracks {
+            if !oi.contains_key(&t.id) && !bi.contains_key(&t.id) {
+                order.push(t.id.clone());
+            }
+        }
+        crate::io::config_io::set_track_order(doc, &order);
+    }
+}
+
+/// Whether our side moved a track, as opposed to merely adding one at the end.
+///
+/// Asked separately from the per-entry merge because a reorder has to be
+/// applied to the whole array at once, and because *not* asking would mean a
+/// shelve in the TUI silently undoing another process's `fr track mv`: rewriting
+/// the order unconditionally would push our stale sequence over theirs.
+fn we_reordered(base: &ProjectConfig, ours: &ProjectConfig) -> bool {
+    let base_ids: Vec<&String> = base.tracks.iter().map(|t| &t.id).collect();
+    let common_in_base: Vec<&String> = base_ids
+        .iter()
+        .copied()
+        .filter(|id| ours.tracks.iter().any(|t| &t.id == *id))
+        .collect();
+    let common_in_ours: Vec<&String> = ours
+        .tracks
+        .iter()
+        .map(|t| &t.id)
+        .filter(|id| base_ids.contains(id))
+        .collect();
+    if common_in_base != common_in_ours {
+        return true;
+    }
+    // An addition anywhere but the end is a placement, and placement is
+    // ordering — `p`/`-` in the TUI put a new track among the active ones.
+    ours.tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| !base_ids.contains(&&t.id))
+        .any(|(i, _)| i + 1 < ours.tracks.len())
+}
+
+/// `[ids.prefixes]` and `[ui.tag_colors]`: a flat map of strings, keyed by name.
+#[allow(clippy::too_many_arguments)]
+fn reconcile_string_map(
+    label: &str,
+    base: &IndexMap<String, String>,
+    ours: &IndexMap<String, String>,
+    theirs: &IndexMap<String, String>,
+    doc: &mut toml_edit::DocumentMut,
+    set: fn(&mut toml_edit::DocumentMut, &str, &str),
+    clear: fn(&mut toml_edit::DocumentMut, &str),
+    out: &mut ReconciledConfig,
+) {
+    for key in union_keys(ours.keys(), base.keys(), theirs.keys()) {
+        let (b, o, t) = (base.get(&key), ours.get(&key), theirs.get(&key));
+        if o == b {
+            if t != b {
+                out.took_theirs += 1;
+            }
+            continue;
+        }
+        if t == o {
+            continue;
+        }
+        if t != b {
+            let (reason, set_aside) = match (o, t) {
+                (Some(o), None) => (ConfigConflictReason::EditedAndRemoved, o.clone()),
+                (None, Some(t)) => (ConfigConflictReason::RemovedAndEdited, t.clone()),
+                (Some(_), Some(t)) if b.is_none() => (ConfigConflictReason::BothAdded, t.clone()),
+                (_, t) => (
+                    ConfigConflictReason::BothEdited,
+                    t.cloned().unwrap_or_default(),
+                ),
+            };
+            let ours_lost = reason.ours_lost();
+            out.conflicts.push(ConfigConflict {
+                key: format!("{label} {key:?}"),
+                reason,
+                set_aside,
+            });
+            // Their removal stands, so there is nothing to write.
+            if ours_lost {
+                continue;
+            }
+        }
+        match o {
+            Some(v) => set(doc, &key, v),
+            None => clear(doc, &key),
+        }
+    }
+}
+
+/// `agent.cc_focus`: one scalar, and the only one either side can point at a
+/// track that no longer exists.
+fn reconcile_cc_focus(
+    base: &ProjectConfig,
+    ours: &ProjectConfig,
+    theirs: &ProjectConfig,
+    doc: &mut toml_edit::DocumentMut,
+    out: &mut ReconciledConfig,
+) {
+    let (b, o, t) = (
+        base.agent.cc_focus.as_deref(),
+        ours.agent.cc_focus.as_deref(),
+        theirs.agent.cc_focus.as_deref(),
+    );
+    if o == b {
+        if t != b {
+            out.took_theirs += 1;
+        }
+        return;
+    }
+    if t == o {
+        return;
+    }
+    if t != b {
+        out.conflicts.push(ConfigConflict {
+            key: "cc_focus".to_string(),
+            reason: ConfigConflictReason::BothEdited,
+            set_aside: format!("cc_focus = {:?}", t.unwrap_or("")),
+        });
+    }
+    match o {
+        Some(v) => crate::io::config_io::set_cc_focus(doc, v),
+        None => crate::io::config_io::clear_cc_focus(doc),
+    }
+}
+
+/// Every key any of the three sides has, ours first so the walk is
+/// deterministic and reads in the order the user's own file does.
+fn union_keys<'a>(
+    ours: impl Iterator<Item = &'a String>,
+    base: impl Iterator<Item = &'a String>,
+    theirs: impl Iterator<Item = &'a String>,
+) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for key in ours.chain(base).chain(theirs) {
+        if !seen.contains(key) {
+            seen.push(key.clone());
+        }
+    }
+    seen
+}
+
+/// A track entry as TOML, for the recovery log.
+fn fragment(t: &TrackConfig) -> String {
+    format!(
+        "[[tracks]]\nid = {:?}\nname = {:?}\nstate = {:?}\nfile = {:?}",
+        t.id, t.name, t.state, t.file
+    )
+}
+
+/// Write every field of a track's row, for the case where the row exists on
+/// both sides but with content only ours should keep.
+fn apply_track_fields(doc: &mut toml_edit::DocumentMut, id: &str, t: &TrackConfig) {
+    for (field, value) in [("name", &t.name), ("state", &t.state), ("file", &t.file)] {
+        crate::io::config_io::set_track_field(doc, id, field, value);
     }
 }
 
@@ -1089,5 +1494,281 @@ mod tests {
 
         let r = reconcile_track(&base, &ours, &theirs);
         assert!(serialize_track(&r.track).contains("Ours only"));
+    }
+
+    // -----------------------------------------------------------------------
+    // The config
+
+    mod config {
+        use super::*;
+
+        const CFG: &str = r#"# Frame project configuration
+
+[project]
+name = "test"
+
+[agent]
+cc_focus = ""                # which track `fr ready --cc` looks at
+
+# Tracks
+# ------
+# Each entry defines a workstream.
+
+[[tracks]]
+id = "api"
+name = "API"
+state = "active"
+file = "tracks/api.md"
+
+[[tracks]]
+id = "ui"
+name = "UI"
+state = "active"
+file = "tracks/ui.md"
+
+[ids.prefixes]
+api = "API"
+ui = "UI"
+"#;
+
+        fn cfg(text: &str) -> (ProjectConfig, toml_edit::DocumentMut) {
+            (toml::from_str(text).unwrap(), text.parse().unwrap())
+        }
+
+        /// Merge `ours` (as TOML) into `theirs` (as TOML) over `base`, and
+        /// return what the document says afterwards, both ways.
+        fn merge(
+            base: &str,
+            ours: &str,
+            theirs: &str,
+        ) -> (ReconciledConfig, String, ProjectConfig) {
+            let (base, _) = cfg(base);
+            let (ours, _) = cfg(ours);
+            let (theirs, mut doc) = cfg(theirs);
+            let r = reconcile_config(&base, &ours, &theirs, &mut doc);
+            let text = doc.to_string();
+            let parsed = toml::from_str(&text).unwrap();
+            (r, text, parsed)
+        }
+
+        fn ids(c: &ProjectConfig) -> Vec<&str> {
+            c.tracks.iter().map(|t| t.id.as_str()).collect()
+        }
+
+        fn with_track(text: &str, id: &str, name: &str) -> String {
+            format!(
+                "{text}\n[[tracks]]\nid = {id:?}\nname = {name:?}\nstate = \"active\"\nfile = \"tracks/{id}.md\"\n"
+            )
+        }
+
+        /// D1, at the merge. A track another process added while we were not
+        /// looking survives our unrelated config write, and comes back out of
+        /// the document so the session can adopt it.
+        #[test]
+        fn a_track_only_they_added_survives_our_write() {
+            let theirs = with_track(CFG, "docs", "Docs");
+            let ours = CFG.replace(r#"name = "UI""#, r#"name = "Interface""#);
+            let (r, _, merged) = merge(CFG, &ours, &theirs);
+
+            assert_eq!(ids(&merged), vec!["api", "ui", "docs"]);
+            assert_eq!(merged.tracks[1].name, "Interface");
+            assert_eq!(r.took_theirs, 1);
+            assert!(r.conflicts.is_empty());
+        }
+
+        /// D2. The file is a document a person reads, and a merge is not a
+        /// licence to rewrite it.
+        #[test]
+        fn comments_and_unmodelled_keys_survive_a_merge() {
+            let base = format!("{CFG}\n[experimental]\nnot_in_the_struct = true\n");
+            let ours = with_track(&base, "docs", "Docs");
+            let (_, text, _) = merge(&base, &ours, &base);
+
+            assert!(text.contains("# Frame project configuration"));
+            assert!(text.contains("# Each entry defines a workstream."));
+            assert!(text.contains("# which track `fr ready --cc` looks at"));
+            assert!(text.contains("not_in_the_struct = true"));
+            assert!(text.contains(r#"id = "docs""#));
+        }
+
+        #[test]
+        fn our_add_and_our_removal_both_apply() {
+            let ours = with_track(CFG, "docs", "Docs").replace(
+                "[[tracks]]\nid = \"ui\"\nname = \"UI\"\nstate = \"active\"\nfile = \"tracks/ui.md\"\n",
+                "",
+            );
+            let (r, _, merged) = merge(CFG, &ours, CFG);
+            assert_eq!(ids(&merged), vec!["api", "docs"]);
+            assert!(r.conflicts.is_empty());
+        }
+
+        /// Ours wins, reversed from the first draft of the design: by the time
+        /// the merge runs, `tracks/docs.md` is ours, and a row that disagreed
+        /// with the file would be the worst of both.
+        #[test]
+        fn both_added_the_same_id_keeps_ours() {
+            let ours = with_track(CFG, "docs", "Our Docs");
+            let theirs = with_track(CFG, "docs", "Their Docs");
+            let (r, _, merged) = merge(CFG, &ours, &theirs);
+
+            assert_eq!(merged.tracks[2].name, "Our Docs");
+            assert_eq!(r.conflicts.len(), 1);
+            assert_eq!(r.conflicts[0].reason, ConfigConflictReason::BothAdded);
+            assert!(r.conflicts[0].set_aside.contains("Their Docs"));
+            assert_eq!(r.rejected().count(), 0);
+        }
+
+        /// The one case where our edit is the loser, and the one the status
+        /// line has to report differently.
+        #[test]
+        fn we_renamed_a_track_they_removed_and_ours_is_the_loser() {
+            let ours = CFG.replace(r#"name = "UI""#, r#"name = "Interface""#);
+            let theirs = CFG.replace(
+                "[[tracks]]\nid = \"ui\"\nname = \"UI\"\nstate = \"active\"\nfile = \"tracks/ui.md\"\n",
+                "",
+            );
+            let (r, _, merged) = merge(CFG, &ours, &theirs);
+
+            assert_eq!(ids(&merged), vec!["api"]);
+            assert_eq!(r.rejected().count(), 1);
+            assert_eq!(
+                r.conflicts[0].reason,
+                ConfigConflictReason::EditedAndRemoved
+            );
+            assert!(r.conflicts[0].set_aside.contains("Interface"));
+        }
+
+        /// We removed it under the lock, having archived or unlinked its file
+        /// in the same operation. A row kept alive here points at nothing.
+        #[test]
+        fn we_removed_a_track_they_edited_and_the_removal_stands() {
+            let ours = CFG.replace(
+                "[[tracks]]\nid = \"ui\"\nname = \"UI\"\nstate = \"active\"\nfile = \"tracks/ui.md\"\n",
+                "",
+            );
+            let theirs = CFG.replace(r#"name = "UI""#, r#"name = "Theirs""#);
+            let (r, _, merged) = merge(CFG, &ours, &theirs);
+
+            assert_eq!(ids(&merged), vec!["api"]);
+            assert_eq!(
+                r.conflicts[0].reason,
+                ConfigConflictReason::RemovedAndEdited
+            );
+            assert!(r.conflicts[0].set_aside.contains("Theirs"));
+            assert_eq!(r.rejected().count(), 0);
+        }
+
+        /// The point of merging field by field rather than row by row.
+        #[test]
+        fn we_renamed_and_they_shelved_the_same_track() {
+            let ours = CFG.replace(r#"name = "UI""#, r#"name = "Interface""#);
+            let theirs = CFG.replace(
+                "id = \"ui\"\nname = \"UI\"\nstate = \"active\"",
+                "id = \"ui\"\nname = \"UI\"\nstate = \"shelved\"",
+            );
+            let (r, _, merged) = merge(CFG, &ours, &theirs);
+
+            assert_eq!(merged.tracks[1].name, "Interface");
+            assert_eq!(merged.tracks[1].state, "shelved");
+            assert!(r.conflicts.is_empty());
+            assert_eq!(r.took_theirs, 1);
+        }
+
+        #[test]
+        fn both_renamed_the_same_track_keeps_ours() {
+            let ours = CFG.replace(r#"name = "UI""#, r#"name = "Ours""#);
+            let theirs = CFG.replace(r#"name = "UI""#, r#"name = "Theirs""#);
+            let (r, _, merged) = merge(CFG, &ours, &theirs);
+
+            assert_eq!(merged.tracks[1].name, "Ours");
+            assert_eq!(r.conflicts[0].reason, ConfigConflictReason::BothEdited);
+            assert!(r.conflicts[0].set_aside.contains("Theirs"));
+        }
+
+        #[test]
+        fn a_reorder_we_made_is_applied_and_their_new_track_is_kept() {
+            let ours = CFG
+                .replace(
+                    "[[tracks]]\nid = \"api\"\nname = \"API\"\nstate = \"active\"\nfile = \"tracks/api.md\"\n\n",
+                    "",
+                )
+                .replace(
+                    "[ids.prefixes]",
+                    "[[tracks]]\nid = \"api\"\nname = \"API\"\nstate = \"active\"\nfile = \"tracks/api.md\"\n\n[ids.prefixes]",
+                );
+            assert_eq!(ids(&cfg(&ours).0), vec!["ui", "api"]);
+
+            let theirs = with_track(CFG, "docs", "Docs");
+            let (_, _, merged) = merge(CFG, &ours, &theirs);
+            assert_eq!(ids(&merged), vec!["ui", "api", "docs"]);
+        }
+
+        /// A shelve in the TUI must not silently undo another process's
+        /// `fr track mv` — which is what rewriting the order unconditionally
+        /// would do, since our sequence is the stale one.
+        #[test]
+        fn a_reorder_only_they_made_is_left_alone() {
+            let ours = CFG.replace(
+                r#"state = "active"
+file = "tracks/ui.md""#,
+                r#"state = "shelved"
+file = "tracks/ui.md""#,
+            );
+            let theirs = CFG
+                .replace(
+                    "[[tracks]]\nid = \"api\"\nname = \"API\"\nstate = \"active\"\nfile = \"tracks/api.md\"\n\n",
+                    "",
+                )
+                .replace(
+                    "[ids.prefixes]",
+                    "[[tracks]]\nid = \"api\"\nname = \"API\"\nstate = \"active\"\nfile = \"tracks/api.md\"\n\n[ids.prefixes]",
+                );
+            let (_, _, merged) = merge(CFG, &ours, &theirs);
+
+            assert_eq!(ids(&merged), vec!["ui", "api"]);
+            assert_eq!(merged.tracks[0].state, "shelved");
+        }
+
+        #[test]
+        fn prefixes_merge_by_key() {
+            let ours = CFG.replace("api = \"API\"", "api = \"AP\"");
+            let theirs = format!("{CFG}docs = \"DOC\"\n");
+            let (r, _, merged) = merge(CFG, &ours, &theirs);
+
+            assert_eq!(merged.ids.prefixes.get("api").unwrap(), "AP");
+            assert_eq!(merged.ids.prefixes.get("docs").unwrap(), "DOC");
+            assert!(r.conflicts.is_empty());
+        }
+
+        #[test]
+        fn a_tag_colour_only_they_set_survives() {
+            let theirs = format!("{CFG}\n[ui.tag_colors]\nbug = \"#FF4444\"\n");
+            let ours = CFG.replace(r#"name = "UI""#, r#"name = "Interface""#);
+            let (_, _, merged) = merge(CFG, &ours, &theirs);
+
+            assert_eq!(merged.ui.tag_colors.get("bug").unwrap(), "#FF4444");
+            assert_eq!(merged.tracks[1].name, "Interface");
+        }
+
+        #[test]
+        fn cc_focus_is_ours_when_we_changed_it_and_theirs_when_we_did_not() {
+            let ours = CFG.replace(r#"cc_focus = """#, r#"cc_focus = "api""#);
+            let (_, _, merged) = merge(CFG, &ours, CFG);
+            assert_eq!(merged.agent.cc_focus.as_deref(), Some("api"));
+
+            let theirs = CFG.replace(r#"cc_focus = """#, r#"cc_focus = "ui""#);
+            let (r, _, merged) = merge(CFG, CFG, &theirs);
+            assert_eq!(merged.agent.cc_focus.as_deref(), Some("ui"));
+            assert_eq!(r.took_theirs, 1);
+        }
+
+        /// Nobody wrote anything: the document must come back byte for byte.
+        #[test]
+        fn an_empty_delta_changes_nothing() {
+            let (r, text, _) = merge(CFG, CFG, CFG);
+            assert_eq!(text, CFG);
+            assert_eq!(r.took_theirs, 0);
+            assert!(r.conflicts.is_empty());
+        }
     }
 }
