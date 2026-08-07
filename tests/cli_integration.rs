@@ -6557,3 +6557,104 @@ fn a_cut_unarchive_is_completed_by_the_next_write_command() {
     let (check, _, ok) = run_fr(root, &["check"]);
     assert!(ok, "and the project is sound again: {check}");
 }
+
+// ---------------------------------------------------------------------------
+// The other direction: a real `fr` writes, and a TUI session saves over it
+//
+// The pair above covers the CLI side, which is the side `ed273b2` fixed. These
+// cover the TUI side, and they exist because `tests/concurrency.rs` — the
+// property that found the defect — *models* the CLI writer rather than
+// spawning it. The model mirrors `lock_and_load` so that TUI keystrokes can run
+// between the CLI's load and its write, which a subprocess cannot be paused to
+// allow. Its stated risk is that a real `fr` might not write what the model
+// writes; these two spend a process each to close that gap on the one case that
+// matters.
+//
+// No reload happens in between, deliberately. Relying on the watcher having
+// delivered the event first is exactly what made an asynchronous notification
+// load-bearing for correctness: the gap between the other process writing and
+// the event loop polling is sub-millisecond, and the watcher can fail to start
+// at all.
+// ---------------------------------------------------------------------------
+
+/// Load a project the way the TUI does, with no watcher attached.
+fn tui_session(root: &Path) -> frame::tui::app::App {
+    let project = frame::io::project_io::load_project(root).expect("project loads");
+    frame::tui::app::App::new(project)
+}
+
+#[test]
+fn a_tui_save_does_not_erase_a_task_a_real_fr_just_added() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    create_test_project(root);
+    let track = root.join("frame/tracks/main.md");
+
+    // The session has the project open.
+    let mut app = tui_session(root);
+
+    // An agent runs `fr add` in another terminal.
+    let out = Command::new(fr_bin())
+        .args(["add", "main", "Added by a real fr"])
+        .current_dir(root)
+        .env("XDG_CONFIG_HOME", root.join(".xdg-config"))
+        .output()
+        .expect("failed to run fr");
+    assert!(out.status.success(), "fr add failed: {out:?}");
+
+    // The user presses a key before the watcher delivers anything.
+    let tasks = app
+        .find_track_mut("main")
+        .unwrap()
+        .section_tasks_mut(frame::model::SectionKind::Backlog)
+        .unwrap();
+    tasks[0].title = "Edited in the TUI".into();
+    tasks[0].dirty = true;
+    app.save_track_logged("main");
+
+    let body = fs::read_to_string(&track).unwrap();
+    assert!(
+        body.contains("Added by a real fr"),
+        "the other process's task was erased by the TUI's save:\n{body}"
+    );
+    assert!(
+        body.contains("Edited in the TUI"),
+        "the TUI's own edit did not land:\n{body}"
+    );
+}
+
+#[test]
+fn a_tui_save_does_not_erase_a_capture_a_real_fr_just_made() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    create_test_project(root);
+    let inbox = root.join("frame/inbox.md");
+
+    let mut app = tui_session(root);
+
+    let out = Command::new(fr_bin())
+        .args(["inbox", "Captured by a real fr"])
+        .current_dir(root)
+        .env("XDG_CONFIG_HOME", root.join(".xdg-config"))
+        .output()
+        .expect("failed to run fr");
+    assert!(out.status.success(), "fr inbox failed: {out:?}");
+
+    frame::ops::inbox_ops::add_inbox_item(
+        app.project.inbox.as_mut().unwrap(),
+        "Captured in the TUI".into(),
+        Vec::new(),
+        None,
+    );
+    app.save_inbox_logged();
+
+    let body = fs::read_to_string(&inbox).unwrap();
+    assert!(
+        body.contains("Captured by a real fr"),
+        "the other process's capture was erased by the TUI's save:\n{body}"
+    );
+    assert!(
+        body.contains("Captured in the TUI"),
+        "the TUI's own capture did not land:\n{body}"
+    );
+}
