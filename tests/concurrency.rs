@@ -3,8 +3,8 @@
 //! > For a settled project, and any interleaving of a TUI session and a CLI
 //! > writer whose edits touch **disjoint tasks**, at quiesce: every title
 //! > either writer acknowledged writing is somewhere under `frame/`, every
-//! > track the CLI created is still one the project holds, no ID appears
-//! > twice, and every file is settled.
+//! > track the CLI created or archived is still in the state it left it in,
+//! > no ID appears twice, and every file is settled.
 //!
 //! # The gap this closes
 //!
@@ -69,14 +69,33 @@
 //! that arc's pins are unit and `App`-level. **A property that cannot see a
 //! defect in its own subject matter is worth extending, not working around.**
 //!
-//! So C5: *every track the CLI created inside its window is still configured,
-//! with its file where the row says it is.* The second half is not pedantry —
+//! So C5: *every track the CLI created or archived is still in the state the
+//! CLI left it in, with its content where that state says it should be.*
+//!
+//! Both halves of that earn their place. **State, not mere existence**: a row
+//! flipped back to `active` by a stale config write loses the track as surely
+//! as a deleted row would, because its file is in `archive/_tracks/` and
+//! `load_project` looks under `tracks/`. **Content where the state says**:
 //! `load_project` skips a configured track whose file is missing, so a row
-//! pointing at nothing loses the track just as completely as a deleted row.
+//! pointing at nothing loses the track just as completely — and an archived
+//! row still *names* `tracks/<id>.md` while its file has moved, so the state is
+//! what decides where to look.
 //!
 //! The oracle reads `project.toml` **off disk**, never `app.project.config`:
 //! the in-memory config is the thing under test, and asking it whether the
 //! project still holds a track is asking the defendant.
+//!
+//! `TrackArchive` is the second write shape and the reason the claim is about
+//! state rather than existence: it is a config edit *and* a file move, in that
+//! order, which is what `cmd_track_state_change` does and what the `.inflight`
+//! marker exists to make recoverable. The commit here does both or claims
+//! nothing; injecting a crash between them is `cli_integration.rs`'s job.
+//!
+//! **How often this actually fires, stated rather than assumed**: across 96
+//! generated cases, roughly 20 create a track and 3–5 go on to archive one. The
+//! archive needs a create before it in the same schedule, so it is the rarer
+//! shape by construction. That is real coverage accumulating across runs, not
+//! coverage on every run, and it is worth knowing which of the two it is.
 //!
 //! # Why the TUI is steered off the CLI's tracks
 //!
@@ -85,9 +104,12 @@
 //! or out of the active set, so a run where the TUI archives a track the CLI
 //! just created makes C5 **ambiguous** rather than false — "the row is gone and
 //! that is correct" is exactly the answer no oracle can distinguish from a lost
-//! update. [`steer`] therefore excludes CLI-created tracks from every
-//! track-surface step, as it already excludes CLI-owned tasks from task-surface
-//! ones.
+//! update. [`steer`] therefore excludes every track the CLI has acted on from
+//! every track-surface step, as it already excludes CLI-owned tasks from
+//! task-surface ones.
+//!
+//! It cuts the other way too: the CLI only ever archives a track it created
+//! itself, never one out of the fixture, for the same reason.
 //!
 //! # Acknowledgement, precisely
 //!
@@ -228,6 +250,9 @@ enum CliOp {
     Capture,
     /// `fr track new` — a whole new track: a file, a config row and a prefix.
     TrackNew,
+    /// `fr track archive` — a config row edit *and* a file move, on a track
+    /// this actor created. Two writes, in that order, as the command does them.
+    TrackArchive { which: usize },
 }
 
 fn arb_event() -> impl Strategy<Value = Event> {
@@ -241,7 +266,8 @@ fn arb_event() -> impl Strategy<Value = Event> {
             2 => (0usize..2).prop_map(|track| CliOp::AddTask { track }),
             1 => (0usize..8).prop_map(|which| CliOp::EditOwned { which }),
             1 => Just(CliOp::Capture),
-            1 => Just(CliOp::TrackNew),
+            2 => Just(CliOp::TrackNew),
+            2 => (0usize..4).prop_map(|which| CliOp::TrackArchive { which }),
         ].prop_map(Event::CliOp),
         3 => Just(Event::CliCommit),
         5 => Just(Event::Watch),
@@ -288,9 +314,14 @@ struct Window {
     pending: Vec<Claim>,
     /// Titles this window retired, dropped from the claims on the same terms.
     retired: Vec<String>,
-    /// Track ids this window created, promoted to claims on the same terms as
-    /// titles: only once the commit completes without error.
-    pending_tracks: Vec<String>,
+    /// Tracks this window created or restated, as (id, the state it left them
+    /// in). Promoted to claims on the same terms as titles: only once the
+    /// commit completes without error.
+    pending_tracks: Vec<(String, String)>,
+    /// Track files the commit owes a move to `archive/_tracks/`, recorded when
+    /// the row was archived and performed *after* the config is written —
+    /// `cmd_track_state_change`'s order.
+    pending_archive_files: Vec<(String, String)>,
 }
 
 /// A title the CLI wrote, and where it put it.
@@ -309,9 +340,14 @@ struct Cli {
     claims: Vec<Claim>,
     /// Ids of tasks this actor owns, so the TUI can be steered away from them.
     owned_ids: Vec<String>,
-    /// Track ids this actor created and believes are configured. C5's
+    /// Tracks this actor has acted on, and the state it left each in. C5's
     /// left-hand side, and what the TUI is steered off at the track level.
-    tracks_created: Vec<String>,
+    ///
+    /// The claim is *the state I left it in*, not merely *it still exists*:
+    /// a row flipped back to `active` by a stale config write loses the track
+    /// as surely as a deleted row, since its file is in `archive/_tracks/` and
+    /// `load_project` looks for it under `tracks/`.
+    tracks_claimed: BTreeMap<String, String>,
     /// Distinguishes every generated title, so a lost one is unambiguous.
     seq: usize,
 }
@@ -324,7 +360,7 @@ impl Cli {
             window: None,
             claims: Vec::new(),
             owned_ids: Vec::new(),
-            tracks_created: Vec::new(),
+            tracks_claimed: BTreeMap::new(),
             seq: 0,
         }
     }
@@ -376,6 +412,7 @@ impl Cli {
             pending: Vec::new(),
             retired: Vec::new(),
             pending_tracks: Vec::new(),
+            pending_archive_files: Vec::new(),
         });
     }
 
@@ -383,7 +420,7 @@ impl Cli {
         let title = match op {
             CliOp::AddTask { .. } | CliOp::Capture => Some(self.next_title()),
             CliOp::EditOwned { .. } => Some(self.next_title()),
-            CliOp::TrackNew => None,
+            CliOp::TrackNew | CliOp::TrackArchive { .. } => None,
         };
         let track_id = match op {
             CliOp::TrackNew => {
@@ -392,6 +429,7 @@ impl Cli {
             }
             _ => None,
         };
+        let claimed: Vec<String> = self.tracks_claimed.keys().cloned().collect();
         let owned = self.owned_ids.clone();
         let Some(window) = self.window.as_mut() else {
             return;
@@ -494,7 +532,63 @@ impl Cli {
                 };
                 window.project.tracks.push((track_id.clone(), track));
                 window.dirty_config = true;
-                window.pending_tracks.push(track_id);
+                window.pending_tracks.push((track_id, "active".to_string()));
+            }
+
+            CliOp::TrackArchive { which } => {
+                // Only a track this actor created, and only one still active.
+                // Archiving anything else would be acting on a track the TUI is
+                // also entitled to touch, which is what `steer` exists to keep
+                // out of the oracle.
+                //
+                // Tracks this window created count too, alongside ones earlier
+                // windows committed. Requiring a *previous* window made the op
+                // fire in none of 96 runs — it needed a create, a commit, a new
+                // window and then an archive, all in one schedule — so the arm
+                // was dead code that read like coverage.
+                let candidates: Vec<String> = window
+                    .project
+                    .config
+                    .tracks
+                    .iter()
+                    .filter(|tc| {
+                        tc.state == "active"
+                            && (claimed.contains(&tc.id)
+                                || window.pending_tracks.iter().any(|(id, _)| id == &tc.id))
+                    })
+                    .map(|tc| tc.id.clone())
+                    .collect();
+                if candidates.is_empty() {
+                    return;
+                }
+                let track_id = candidates[which % candidates.len()].clone();
+                let Some(file) = window
+                    .project
+                    .config
+                    .tracks
+                    .iter()
+                    .find(|tc| tc.id == track_id)
+                    .map(|tc| tc.file.clone())
+                else {
+                    return;
+                };
+                if frame::ops::track_ops::archive_track(
+                    &mut window.doc,
+                    &mut window.project.config,
+                    &track_id,
+                )
+                .is_err()
+                {
+                    return;
+                }
+                // Out of `tracks/` is out of the project, on this side too.
+                window.project.tracks.retain(|(id, _)| id != &track_id);
+                window.dirty_tracks.remove(&track_id);
+                window.dirty_config = true;
+                window
+                    .pending_tracks
+                    .push((track_id.clone(), "archived".to_string()));
+                window.pending_archive_files.push((track_id, file));
             }
         }
     }
@@ -540,6 +634,18 @@ impl Cli {
         {
             ok = false;
         }
+        // The file move comes after the config write, which is the order
+        // `cmd_track_state_change` uses and the order the `.inflight` marker
+        // exists to make recoverable. Interrupted between the two is a real
+        // state and `cli_integration.rs` owns injecting it; here the commit
+        // either does both or claims nothing.
+        for (track_id, file) in &window.pending_archive_files {
+            if frame::ops::track_ops::archive_track_file(&window.project.frame_dir, track_id, file)
+                .is_err()
+            {
+                ok = false;
+            }
+        }
         drop(window.lock);
 
         if !ok {
@@ -556,7 +662,9 @@ impl Cli {
             }
             self.claims.push(claim);
         }
-        self.tracks_created.extend(window.pending_tracks);
+        for (track_id, state) in window.pending_tracks {
+            self.tracks_claimed.insert(track_id, state);
+        }
     }
 
     /// Titles the CLI owns that live in the inbox, so a TUI step is not aimed
@@ -637,7 +745,7 @@ fn steer(app: &App, step: &Step, cli: &Cli) -> Option<Step> {
                 .tracks
                 .iter()
                 .enumerate()
-                .filter(|(_, tc)| !cli.tracks_created.contains(&tc.id))
+                .filter(|(_, tc)| !cli.tracks_claimed.contains_key(&tc.id))
                 .map(|(i, _)| i)
                 .collect();
             if allowed.is_empty() {
@@ -709,7 +817,8 @@ struct Verdict {
     duplicate_ids: Vec<String>,
     unsettled: Option<String>,
     still_unsaved: Vec<String>,
-    /// C5: tracks the CLI created that the project no longer holds.
+    /// C5: tracks the CLI created or archived that are no longer in the state
+    /// it left them in, or whose content is not where that state says.
     unconfigured_tracks: Vec<String>,
 }
 
@@ -757,17 +866,30 @@ fn judge(app: &App, frame_dir: &Path, cli: &Cli) -> Verdict {
     // deleted row would take them.
     let unconfigured_tracks = match frame::io::config_io::read_config(frame_dir) {
         Ok((config, _)) => cli
-            .tracks_created
+            .tracks_claimed
             .iter()
-            .filter(|id| match config.tracks.iter().find(|tc| &&tc.id == id) {
-                None => true,
-                Some(tc) => !frame_dir.join(&tc.file).exists(),
+            .filter(|(id, expected)| {
+                let Some(tc) = config.tracks.iter().find(|tc| &tc.id == *id) else {
+                    return true; // the row is gone
+                };
+                if &&tc.state != expected {
+                    return true; // not the state the CLI left it in
+                }
+                // And the content is where that state says it is. An archived
+                // track's file lives in `archive/_tracks/` while its row still
+                // names `tracks/<id>.md`, so the state decides where to look.
+                let path = if tc.state == "archived" {
+                    frame_dir.join("archive/_tracks").join(format!("{id}.md"))
+                } else {
+                    frame_dir.join(&tc.file)
+                };
+                !path.exists()
             })
-            .cloned()
+            .map(|(id, _)| id.clone())
             .collect(),
         // An unreadable config is a total loss of every track, not a reason to
         // report none: reading it is what `load_project` does first.
-        Err(_) => cli.tracks_created.clone(),
+        Err(_) => cli.tracks_claimed.keys().cloned().collect(),
     };
 
     let mut seen = BTreeSet::new();
@@ -858,7 +980,7 @@ proptest! {
         );
         prop_assert!(
             verdict.unconfigured_tracks.is_empty(),
-            "the CLI created these tracks and the project no longer holds them: {:?}\nschedule: {schedule:?}",
+            "the CLI left these tracks in a state the project no longer has: {:?}\nschedule: {schedule:?}",
             verdict.unconfigured_tracks
         );
         prop_assert!(
