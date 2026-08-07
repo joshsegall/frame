@@ -1779,6 +1779,16 @@ mod tests {
         std::fs::write(&inbox_path, "# Inbox\n\n- Look into the parser\n").unwrap();
         app.project.inbox =
             Some(crate::parse::parse_inbox("# Inbox\n\n- Look into the parser\n").0);
+        // Memory and the file were both set by hand above, so the session's
+        // ancestor has to be moved with them. A save compares the file against
+        // this to decide whether another process has written; left pointing at
+        // the inbox `app_on_disk` built, it would read the item below as a
+        // concurrent capture and merge it back in, and this test would fail for
+        // a reason with nothing to do with redo.
+        app.baselines.insert(
+            crate::tui::app::SaveTarget::Inbox,
+            "# Inbox\n\n- Look into the parser\n".to_string(),
+        );
 
         // The state a triage leaves behind: item gone, task in the track.
         let item = app.project.inbox.as_mut().unwrap().items.remove(0);
@@ -1809,6 +1819,7 @@ mod tests {
         );
 
         perform_redo(&mut app);
+        eprintln!("UNSAVED: {:?}", app.unsaved.keys().collect::<Vec<_>>());
         let on_disk = std::fs::read_to_string(&inbox_path).unwrap();
         assert!(
             !on_disk.contains("Look into the parser"),

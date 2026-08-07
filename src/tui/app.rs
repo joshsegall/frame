@@ -1532,15 +1532,38 @@ impl App {
 
         // What was just loaded is, by definition, what is on disk — the common
         // ancestor for any merge that becomes necessary later in the session.
-        for (id, track) in &app.project.tracks {
-            app.baselines.insert(
-                SaveTarget::Track(id.clone()),
-                crate::parse::serialize_track(track),
-            );
+        //
+        // The file's own bytes where they can be read, not a re-serialization
+        // of what was parsed out of them. For a settled file the two are the
+        // same; for one that merely round-trips they are not, because a clean
+        // record is emitted from its `source_text` verbatim. Since a save
+        // compares this against the file to decide whether anyone else has
+        // written, seeding it with the file itself is what keeps a
+        // hand-formatted project from reading as a concurrent write on its
+        // first save.
+        for tc in &app.project.config.tracks {
+            let text = std::fs::read_to_string(app.project.frame_dir.join(&tc.file))
+                .ok()
+                .or_else(|| {
+                    Self::find_track_in_project(&app.project, &tc.id)
+                        .map(crate::parse::serialize_track)
+                });
+            if let Some(text) = text {
+                app.baselines.insert(SaveTarget::Track(tc.id.clone()), text);
+            }
         }
-        if let Some(inbox) = app.project.inbox.as_ref() {
-            app.baselines
-                .insert(SaveTarget::Inbox, crate::parse::serialize_inbox(inbox));
+        if app.project.inbox.is_some() {
+            let text = std::fs::read_to_string(app.project.frame_dir.join("inbox.md"))
+                .ok()
+                .or_else(|| {
+                    app.project
+                        .inbox
+                        .as_ref()
+                        .map(crate::parse::serialize_inbox)
+                });
+            if let Some(text) = text {
+                app.baselines.insert(SaveTarget::Inbox, text);
+            }
         }
 
         app
@@ -2731,8 +2754,53 @@ impl App {
     // multi-file operation can hold one lock across all of them. `FileLock` is
     // not re-entrant, so an inner write that re-acquired would deadlock.
 
+    /// Fold in whatever another writer put in this file since it and memory
+    /// last agreed. **Assumes the project lock is held**, immediately before
+    /// the file is overwritten.
+    ///
+    /// This is what keeps a save from erasing a concurrent write. A track file
+    /// is rewritten *whole*, so a save from state loaded before someone else's
+    /// write erases it — with no error, no recovery entry, and no way for the
+    /// other process to know. The TUI was relying on the file watcher to have
+    /// reloaded first, which made an asynchronous notification load-bearing for
+    /// correctness: the gap between another `fr` writing and the event loop
+    /// polling is sub-millisecond and entirely ordinary, and
+    /// `FrameWatcher::start` can fail outright and leave the TUI running
+    /// without one. Checking here under the lock demotes the watcher to what it
+    /// should be — a freshness feature.
+    ///
+    /// This is `ed273b2`'s answer, in the form the TUI can use it. The CLI
+    /// closed the same window by reading *after* taking the lock
+    /// (`lock_and_load`); a session holding state across many writes cannot
+    /// re-read, so it compares against the ancestor instead and merges.
+    ///
+    /// **Absorbing rather than refusing** matches what a reload already does
+    /// with the same machinery. It means a keystroke can quietly pull in
+    /// another process's edits, which is the cost; refusing would leave the
+    /// file unwritten and route it to `unsaved`, where the retry would face the
+    /// same question a moment later with the user now waiting on it.
+    ///
+    /// With no ancestor there is nothing to merge against, and the file is
+    /// written as before — the same floor as before this existed. That is only
+    /// reachable for a file created mid-session, since [`Self::new`] seeds a
+    /// baseline for everything it loads.
+    fn absorb_external_change(&mut self, target: &SaveTarget, path: &std::path::Path) {
+        let Ok(disk) = std::fs::read_to_string(path) else {
+            return;
+        };
+        match self.baselines.get(target) {
+            // Byte-identical to what we last agreed on: nobody else has written.
+            Some(baseline) if *baseline == disk => return,
+            None => return,
+            Some(_) => {}
+        }
+        self.preserve_unreplaced(target, path);
+    }
+
     /// Write the inbox. **Assumes the project lock is held.**
     fn save_inbox_locked(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let path = self.project.frame_dir.join("inbox.md");
+        self.absorb_external_change(&SaveTarget::Inbox, &path);
         let inbox = self.project.inbox.as_ref().ok_or("no inbox loaded")?;
         project_io::save_inbox(&self.project.frame_dir, inbox)?;
         self.last_save_at = Some(Instant::now());
@@ -2746,6 +2814,8 @@ impl App {
             .track_file(track_id)
             .ok_or("track not found")?
             .to_string();
+        let path = self.project.frame_dir.join(&file);
+        self.absorb_external_change(&SaveTarget::Track(track_id.to_string()), &path);
         let track =
             Self::find_track_in_project(&self.project, track_id).ok_or("track not found")?;
         project_io::save_track(&self.project.frame_dir, &file, track)?;
@@ -3137,14 +3207,18 @@ impl App {
         }
     }
 
-    /// Merge an external change into an unsaved file instead of replacing it.
+    /// Merge an external change into our copy instead of one side replacing the
+    /// other.
     ///
-    /// Reached when a file changed externally while our copy had not reached
-    /// disk. Both sides then hold content that exists nowhere else, so the
-    /// unconditional replace this method exists to prevent silently destroyed
-    /// work the user could see on screen. The lock timeout makes the collision
-    /// likely rather than exotic: a save that failed because another `fr` held
-    /// the lock is followed by exactly that process writing the file.
+    /// Two callers, one question. [`Self::reload_changed_files`] reaches it when
+    /// a file changed externally while our copy had not reached disk;
+    /// [`Self::absorb_external_change`] reaches it under the lock when we are
+    /// about to overwrite a file someone else has written since. Either way
+    /// both sides hold content that exists nowhere else, and whichever
+    /// unconditional write would follow destroys work someone could see on
+    /// screen. The lock timeout makes the collision likely rather than exotic: a
+    /// save that failed because another `fr` held the lock is followed by
+    /// exactly that process writing the file.
     ///
     /// Neither side is a safe default. With several sessions on one project, an
     /// agent's write is as real as a human's and the agent cannot tell it was
@@ -3157,18 +3231,33 @@ impl App {
     /// covers the whole file — the same floor as before the merge existed.
     ///
     /// The mtime is deliberately *not* updated. `track_changed_on_disk` reads it
-    /// to decide whether memory and disk have diverged, and after this they have.
+    /// to decide whether memory and disk have diverged, and after this they
+    /// have — on the save path the write that follows sets it, which is correct
+    /// there because memory and disk then agree.
     fn preserve_unreplaced(&mut self, target: &SaveTarget, path: &std::path::Path) {
         let Ok(text) = std::fs::read_to_string(path) else {
             return;
         };
+        self.merge_external(target, &text, path);
 
+        // Their version has now been dealt with, whichever way it went, so it
+        // is what memory and disk last agreed on. Leaving the old ancestor in
+        // place would make the *next* merge see the same external change again
+        // — and see it as a conflict, because by then our copy contains it too.
+        // A reload merge followed by the save at the end of
+        // `reload_changed_files` is exactly that sequence.
+        self.baselines.insert(target.clone(), text);
+    }
+
+    /// The merge itself. Split out so [`Self::preserve_unreplaced`] can advance
+    /// the ancestor afterwards on every path through it.
+    fn merge_external(&mut self, target: &SaveTarget, text: &str, path: &std::path::Path) {
         if let SaveTarget::Track(track_id) = target
             && let Some(base_text) = self.baselines.get(target).cloned()
             && let Some(ours) = Self::find_track_in_project(&self.project, track_id)
         {
             let base = parse_track(&base_text);
-            let theirs = parse_track(&text);
+            let theirs = parse_track(text);
             let result = crate::ops::reconcile::reconcile_track(&base, ours, &theirs);
 
             for conflict in &result.conflicts {
@@ -3202,7 +3291,7 @@ impl App {
             && let Some(ours) = self.project.inbox.as_ref()
         {
             let (base, _) = parse_inbox(&base_text);
-            let (theirs, _) = parse_inbox(&text);
+            let (theirs, _) = parse_inbox(text);
             let result = crate::ops::reconcile::reconcile_inbox(&base, ours, &theirs);
 
             // Nothing to log: the inbox merge never sets a side's content aside.
@@ -3225,15 +3314,15 @@ impl App {
                     target.label()
                 ),
                 fields: vec![("Path".to_string(), path.display().to_string())],
-                body: text,
+                body: text.to_string(),
             },
         );
     }
 
-    /// Tell the user their unsaved file absorbed someone else's changes.
+    /// Tell the user their copy absorbed someone else's changes.
     fn announce_merge(&mut self, target: &SaveTarget, changed: usize) {
         self.status_message = Some(format!(
-            "Merged {} external change{} into unsaved {}",
+            "Merged {} external change{} into {}",
             changed,
             if changed == 1 { "" } else { "s" },
             target.label()
@@ -3292,6 +3381,10 @@ impl App {
                         );
                     }
                     self.project.inbox = Some(inbox);
+                    // Our copy is now theirs, so theirs is the ancestor. Without
+                    // this the next save reads its own reload as somebody
+                    // else's write and merges against a superseded baseline.
+                    self.baselines.insert(SaveTarget::Inbox, text);
                 }
                 continue;
             }
@@ -3347,8 +3440,10 @@ impl App {
                     entry.1 = new_track;
                 }
                 if let Ok(mtime) = std::fs::metadata(path).and_then(|m| m.modified()) {
-                    self.track_mtimes.insert(track_id, mtime);
+                    self.track_mtimes.insert(track_id.clone(), mtime);
                 }
+                // As above: our copy is now theirs, so theirs is the ancestor.
+                self.baselines.insert(target, text);
             }
         }
 
@@ -6002,6 +6097,138 @@ mod tests {
                 .unwrap()
                 .contains("Edited while contended"),
             "the edit reaches disk without the user doing anything"
+        );
+    }
+
+    /// The headline of P8, as a fixed case: a save must not erase a write the
+    /// watcher has not delivered yet.
+    ///
+    /// The gap is sub-millisecond and entirely ordinary — another `fr` writes,
+    /// and a keystroke lands before the event loop polls its notification. A
+    /// track file is rewritten whole, so without the check in
+    /// `absorb_external_change` the save writes memory loaded before that write
+    /// and the other process's task is gone, with no error and no recovery
+    /// entry.
+    ///
+    /// Deliberately *no* reload between the two: relying on one is what made an
+    /// asynchronous notification load-bearing for correctness.
+    #[test]
+    fn a_save_does_not_erase_a_concurrent_write_to_the_same_track() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        let path = app.project.frame_dir.join("tracks/a.md");
+
+        // Another process adds a task and writes the file.
+        std::fs::write(
+            &path,
+            "# A\n\n## Backlog\n\n- [ ] `A-001` One\n- [ ] `A-002` Added by another process\n\n## Done\n",
+        )
+        .unwrap();
+
+        // We know nothing about it, and edit a different task.
+        let tasks = app
+            .find_track_mut("a")
+            .unwrap()
+            .section_tasks_mut(SectionKind::Backlog)
+            .unwrap();
+        tasks[0].title = "One, edited here".into();
+        tasks[0].dirty = true;
+        app.save_track_logged("a");
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains("Added by another process"),
+            "the other process's task was erased by our save:\n{after}"
+        );
+        assert!(
+            after.contains("One, edited here"),
+            "our own edit did not land:\n{after}"
+        );
+    }
+
+    /// Absorbing someone else's version makes it the ancestor.
+    ///
+    /// Otherwise the next save meets the same external change a second time —
+    /// and by then our copy contains it, so the three-way merge reads it as a
+    /// task *both* sides edited, keeps ours, and files theirs in the recovery
+    /// log as a conflict nobody was ever in dispute over.
+    /// A reload is the route that needs it: a save fixes its own ancestor
+    /// afterwards (`record_baseline` runs on what it just wrote), but a reload
+    /// merge writes nothing, so without the advance the ancestor stays behind
+    /// and the next save meets the same change again.
+    #[test]
+    fn an_absorbed_change_is_not_absorbed_twice() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        let path = app.project.frame_dir.join("tracks/a.md");
+
+        // Our edit has not reached disk, so the reload merges rather than
+        // replaces.
+        let tasks = app
+            .find_track_mut("a")
+            .unwrap()
+            .section_tasks_mut(SectionKind::Backlog)
+            .unwrap();
+        tasks[0].title = "One, edited here".into();
+        tasks[0].source_text = Some(vec!["- [ ] `A-001` One, edited here".to_string()]);
+        app.record_save_failure(SaveTarget::Track("a".into()), &"lock timeout".to_string());
+
+        std::fs::write(
+            &path,
+            "# A\n\n## Backlog\n\n- [ ] `A-001` One\n- [ ] `A-002` Theirs\n\n## Done\n",
+        )
+        .unwrap();
+        app.reload_changed_files(std::slice::from_ref(&path));
+
+        // The merged result now goes to disk. Their task is in our copy by this
+        // point, so a second merge against the old ancestor would call it a
+        // task both sides edited.
+        app.retry_unsaved_saves(true);
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains("Theirs"),
+            "their task is still there:\n{after}"
+        );
+        assert!(
+            after.contains("One, edited here"),
+            "and so is ours:\n{after}"
+        );
+
+        let log = crate::io::recovery::recovery_log_path(&app.project.frame_dir);
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            !text.contains("concurrent edit"),
+            "nothing was in dispute, so nothing should have been set aside: {text}"
+        );
+    }
+
+    /// The same claim for the inbox, which merges on content rather than task
+    /// identity and so takes a different arm of `preserve_unreplaced`.
+    #[test]
+    fn a_save_does_not_erase_a_concurrent_write_to_the_inbox() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        let path = app.project.frame_dir.join("inbox.md");
+
+        std::fs::write(&path, "# Inbox\n\n- captured by another process\n").unwrap();
+
+        crate::ops::inbox_ops::add_inbox_item(
+            app.project.inbox.as_mut().unwrap(),
+            "captured here".into(),
+            Vec::new(),
+            None,
+        );
+        app.save_inbox_logged();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains("captured by another process"),
+            "the other process's item was erased by our save:\n{after}"
+        );
+        assert!(
+            after.contains("captured here"),
+            "our own item did not land:\n{after}"
         );
     }
 
