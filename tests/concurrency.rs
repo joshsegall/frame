@@ -365,6 +365,14 @@ impl Cli {
                     let old_title = old.title.clone();
                     if task_ops::edit_title(track, &id, title.clone()).is_ok() {
                         window.dirty_tracks.insert(track_id.clone());
+                        // A title this same window was going to claim, edited
+                        // again before the commit, never reaches disk at all —
+                        // the second edit overwrote it in memory. Claiming it
+                        // would have the oracle accuse the other writer of
+                        // losing something nobody ever wrote. Only titles from
+                        // *earlier* windows are retired against `claims`;
+                        // this one has to come back out of `pending`.
+                        window.pending.retain(|c| c.title != old_title);
                         window.retired.push(old_title);
                         window.pending.push(Claim {
                             title,
