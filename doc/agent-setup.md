@@ -149,15 +149,17 @@ It registers frame's merge driver, so git merges track files by task identity in
 
 **Why it matters more for agents than for people.** An agent session tends to make many small, well-formed changes through `fr note` / `fr done` / `fr add`, then rebase onto a moved base. `fr done` relocates a task between sections, and a line-based merge reads that as a delete plus an add — so the conflict lands in a track file, and "keep both sides" produces a duplicated task with one ID. It reads plausibly enough to be committed.
 
-**If a merge does stop**, the file is still valid frame markdown and there are no `<<<<<<<` markers in it — that is deliberate, so `fr show` and `fr check` keep working. The conflicted task carries a `conflict:` line and the other side's version is in the recovery log:
+**If a merge does stop**, the file is still valid frame markdown and there are no `<<<<<<<` markers in it — that is deliberate, so `fr show` and `fr check` keep working. The conflicted task carries a `conflict:` line and the other side's version goes to the recovery log:
 
 ```bash
-fr check                       # names the task
-fr recovery                    # shows their version
-fr note EFF-014 "..."          # apply whatever is missing
-fr merge --resolve EFF-014     # clear the marker
+fr check                          # names the task, and says whether their version is here
+fr recovery --for EFF-014         # shows their version
+fr note EFF-014 "..."             # apply whatever is missing
+fr merge --resolve EFF-014        # clear the marker
 git add frame/tracks/main.md
 ```
+
+**The marker travels; the recovery log does not.** The `conflict:` line is committed, so it reaches every clone and every worktree. The recovery log is working-copy-local, so a marker that arrived by `git pull` — or by switching to another worktree — points at an entry that working copy never had. `fr check` checks before it claims: when the entry is not here it says so and sends you to version control for the other side, rather than to a log that cannot answer.
 
 **Never hand-splice a conflict region in a track file.** If markers ever do reach one — a clone without the driver, or a path `.gitattributes` doesn't cover — do not repair it by editing line ranges. Take one side whole (`git checkout --ours` / `--theirs`) and re-run the `fr` commands, then run `fr git setup` so it cannot happen again.
 

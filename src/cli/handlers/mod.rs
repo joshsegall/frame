@@ -1300,10 +1300,24 @@ fn cmd_check(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
                         track_id,
                         task_id,
                         detail,
+                        evidence,
                     } => {
+                        // Only point at the recovery log when the entry is
+                        // actually here. The marker is committed and travels;
+                        // the log is working-copy-local and does not.
+                        let where_theirs = if *evidence {
+                            format!(
+                                "their version is in the recovery log (`fr recovery --for {task_id}`)"
+                            )
+                        } else {
+                            "their version is NOT in this working copy's recovery log — the merge ran \
+                             in another working copy, or the log was pruned; recover it from version \
+                             control before clearing the marker"
+                                .to_string()
+                        };
                         println!(
-                            "  [{}] {} has an unresolved merge conflict ({}) — their version is in the recovery log (`fr recovery`); apply what is missing, then clear it with `fr merge --resolve {}`",
-                            track_id, task_id, detail, task_id
+                            "  [{}] {} has an unresolved merge conflict ({}) — {}; apply what is missing, then clear it with `fr merge --resolve {}`",
+                            track_id, task_id, detail, where_theirs, task_id
                         );
                     }
                     check::CheckError::BrokenSpec {

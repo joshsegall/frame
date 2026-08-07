@@ -3055,6 +3055,172 @@ fn write_numbered_log(root: &Path, count: usize) {
     fs::write(root.join("frame/.recovery.log"), content).unwrap();
 }
 
+// ---------------------------------------------------------------------------
+// `fr check` verifies the recovery-log pointer before printing it
+//
+// The `conflict:` marker is written into the track file and committed, so it
+// travels to every clone and every worktree. The recovery log holding the other
+// side is working-copy-local and does not. So a marker can perfectly well
+// arrive somewhere the entry never will, and telling the reader "their version
+// is in the recovery log" then sends them looking for something that is not
+// there — which is exactly what happened.
+// ---------------------------------------------------------------------------
+
+/// Put a `conflict:` marker on M-001, stamped `2026-08-06T06:18:30Z`.
+fn mark_conflicted(root: &Path) {
+    let path = root.join("frame/tracks/main.md");
+    let before = fs::read_to_string(&path).unwrap();
+    let after = before.replace(
+        "- [ ] `M-001` First task #core\n",
+        "- [ ] `M-001` First task #core\n  - conflict: both-edited 2026-08-06T06:18:30Z\n",
+    );
+    assert_ne!(before, after, "fixture shape changed");
+    fs::write(&path, after).unwrap();
+}
+
+/// A log holding one conflict entry stamped to match `mark_conflicted`.
+fn write_matching_conflict_entry(root: &Path) {
+    fs::write(
+        root.join("frame/.recovery.log"),
+        "\
+<!-- frame recovery log — append-only error recovery data
+     Safe to delete if empty or stale. -->
+
+---
+## 2026-08-06T06:18:30Z — conflict: merge conflict on #M-001 in tracks/main.md — kept our version
+
+Reason: both sides edited it differently; kept ours
+
+```text
+- [ ] `M-001` Their version of the first task
+```
+
+---
+",
+    )
+    .unwrap();
+}
+
+#[test]
+fn check_points_at_the_recovery_entry_when_it_is_actually_here() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    mark_conflicted(tmp.path());
+    write_matching_conflict_entry(tmp.path());
+
+    let (out, _, ok) = run_fr(tmp.path(), &["check"]);
+    assert!(!ok, "an unresolved conflict is still an error");
+    assert!(
+        out.contains("their version is in the recovery log (`fr recovery --for M-001`)"),
+        "the pointer should name the lookup that finds it:\n{out}"
+    );
+}
+
+#[test]
+fn check_says_so_when_the_recovery_entry_is_not_here() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    mark_conflicted(tmp.path());
+    // No recovery log at all: the marker came from someone else's merge.
+
+    let (out, _, ok) = run_fr(tmp.path(), &["check"]);
+    assert!(!ok, "an unresolved conflict is still an error");
+    assert!(
+        out.contains("NOT in this working copy's recovery log"),
+        "a pointer frame cannot honour must not be printed as fact:\n{out}"
+    );
+    assert!(
+        out.contains("recover it from version control"),
+        "and the reader needs somewhere else to go:\n{out}"
+    );
+    assert!(
+        !out.contains("their version is in the recovery log"),
+        "the two messages must not both appear:\n{out}"
+    );
+}
+
+/// A pruned log is the same situation as a foreign one: the entry is gone, and
+/// the message has to stop claiming otherwise.
+#[test]
+fn check_stops_pointing_at_the_log_once_the_entry_is_pruned() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    mark_conflicted(tmp.path());
+    write_matching_conflict_entry(tmp.path());
+
+    let (before, _, _) = run_fr(tmp.path(), &["check"]);
+    assert!(
+        before.contains("their version is in the recovery log"),
+        "{before}"
+    );
+
+    run_fr_ok(tmp.path(), &["recovery", "prune", "--all"]);
+
+    let (after, _, _) = run_fr(tmp.path(), &["check"]);
+    assert!(
+        after.contains("NOT in this working copy's recovery log"),
+        "after a prune the entry is gone and the message must say so:\n{after}"
+    );
+}
+
+#[test]
+fn check_json_reports_whether_the_conflict_evidence_is_here() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    mark_conflicted(tmp.path());
+
+    let (out, _, _) = run_fr(tmp.path(), &["check", "--json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+    let conflict = parsed["errors"]
+        .as_array()
+        .expect("errors array")
+        .iter()
+        .find(|e| e["type"] == "unresolved_merge_conflict")
+        .expect("the conflict error");
+    assert_eq!(conflict["evidence"], serde_json::json!(false));
+
+    write_matching_conflict_entry(tmp.path());
+    let (out, _, _) = run_fr(tmp.path(), &["check", "--json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+    let conflict = parsed["errors"]
+        .as_array()
+        .expect("errors array")
+        .iter()
+        .find(|e| e["type"] == "unresolved_merge_conflict")
+        .expect("the conflict error");
+    assert_eq!(conflict["evidence"], serde_json::json!(true));
+}
+
+/// The fallback path: an entry whose timestamp no longer matches the marker
+/// (a hand edit, a rewritten log) still counts when its content names the task.
+#[test]
+fn check_finds_the_evidence_by_task_id_when_the_timestamp_does_not_match() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    mark_conflicted(tmp.path());
+    fs::write(
+        tmp.path().join("frame/.recovery.log"),
+        "\
+<!-- frame recovery log -->
+
+---
+## 2026-08-06T09:99:99Z — conflict: merge conflict on #M-001 in tracks/main.md — kept our version
+
+Reason: both sides edited it differently; kept ours
+
+---
+"
+        .replace("09:99:99", "09:41:02"),
+    )
+    .unwrap();
+
+    let (out, _, _) = run_fr(tmp.path(), &["check"]);
+    assert!(
+        out.contains("their version is in the recovery log"),
+        "an entry naming the task counts even when the stamp moved:\n{out}"
+    );
+}
+
 #[test]
 fn recovery_says_how_many_entries_it_is_hiding() {
     let tmp = tempfile::TempDir::new().unwrap();

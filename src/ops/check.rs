@@ -61,8 +61,16 @@ pub enum CheckError {
     ///
     /// **No `--fix`.** Which side should win is exactly the judgment a machine
     /// cannot make; the same reasoning as `IdReissuedAfterArchive`. Their
-    /// version is in the recovery log — apply what is missing with `fr note` /
+    /// version goes to the recovery log — apply what is missing with `fr note` /
     /// `fr state`, then clear the marker with `fr merge --resolve <ID>`.
+    ///
+    /// **Whether the log actually holds it is checked, not assumed.** The marker
+    /// is written into the track file and is committed, so it travels to every
+    /// clone; the recovery log is working-copy-local and does not. A marker
+    /// pulled from someone else's merge therefore points at an entry this
+    /// working copy has never seen, and telling the reader to go read it sends
+    /// them looking for something that is not there. `evidence` records what a
+    /// lookup found, so the message can say which case this is.
     #[serde(rename = "unresolved_merge_conflict")]
     UnresolvedMergeConflict {
         track_id: String,
@@ -70,6 +78,8 @@ pub enum CheckError {
         /// The marker's payload: a reason slug and the timestamp of the recovery
         /// entry holding the other version.
         detail: String,
+        /// Whether a recovery entry matching this marker was found here.
+        evidence: bool,
     },
     /// `project.toml` lists a track whose file is not where it says it is.
     ///
@@ -484,6 +494,9 @@ pub fn check_project(project: &Project) -> CheckResult {
         check_inbox(inbox, &mut result);
     }
 
+    // Does the recovery log actually hold the other side of each conflict?
+    resolve_conflict_evidence(&project.frame_dir, &mut result);
+
     // Recovery log summary
     if let Some(summary) = crate::io::recovery::recovery_summary(&project.frame_dir) {
         let oldest_str = summary
@@ -523,6 +536,59 @@ fn check_track(
 /// `parent` is the task this one is nested under, or `None` at top level — the
 /// subtask-ID rule is the one check that a task cannot be judged against alone.
 #[allow(clippy::too_many_arguments)]
+/// Fill in `evidence` on every unresolved-conflict error by looking the entry up.
+///
+/// The lookup is the marker's own timestamp first — `doc/format.md` documents
+/// it as identifying the recovery entry, and it is exact — falling back to the
+/// task ID, which catches an entry whose timestamp was rewritten by a prune or
+/// a hand edit but whose content still names the task.
+///
+/// Reading the log once for all markers rather than once per marker: a project
+/// recovering from a large rebase can carry a dozen, and the log is the one file
+/// here that is unbounded in size.
+fn resolve_conflict_evidence(frame_dir: &Path, result: &mut CheckResult) {
+    let markers: Vec<(String, String)> = result
+        .errors
+        .iter()
+        .filter_map(|e| match e {
+            CheckError::UnresolvedMergeConflict {
+                task_id, detail, ..
+            } => Some((task_id.clone(), detail.clone())),
+            _ => None,
+        })
+        .collect();
+    if markers.is_empty() {
+        return;
+    }
+
+    let entries = crate::io::recovery::read_recovery_entries(frame_dir, None, None);
+    let found: std::collections::HashSet<String> = markers
+        .into_iter()
+        .filter(|(task_id, detail)| {
+            // The marker reads `<reason-slug> <timestamp>`; the stamp is last.
+            let stamp = detail.split_whitespace().next_back().unwrap_or_default();
+            entries.iter().any(|entry| {
+                let by_stamp = !stamp.is_empty()
+                    && entry
+                        .timestamp
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                        == stamp;
+                by_stamp || crate::io::recovery::entry_names(entry, task_id)
+            })
+        })
+        .map(|(task_id, _)| task_id)
+        .collect();
+
+    for error in &mut result.errors {
+        if let CheckError::UnresolvedMergeConflict {
+            task_id, evidence, ..
+        } = error
+        {
+            *evidence = found.contains(task_id);
+        }
+    }
+}
+
 fn check_task(
     task: &Task,
     parent: Option<&Task>,
@@ -552,6 +618,9 @@ fn check_task(
             track_id: track_id.to_string(),
             task_id: task_id.to_string(),
             detail,
+            // Resolved in one pass at the end, by `resolve_conflict_evidence` —
+            // reading the log once beats reading it per marker.
+            evidence: false,
         });
     }
 

@@ -326,7 +326,7 @@ pub fn read_recovery_listing(
             .map(|dt| dt.with_timezone(&Utc));
         entries.retain(|e| match stamp {
             Some(ts) => e.timestamp == ts,
-            None => entry_mentions(e, needle),
+            None => entry_names(e, needle),
         });
     }
 
@@ -350,7 +350,7 @@ pub fn read_recovery_listing(
 /// boundary character too, which means `BAC-204` does not match `BAC-204.1`
 /// either: a lookup driven by a conflict marker names one exact task, and a
 /// prefix match would bury it under its own subtree.
-fn entry_mentions(entry: &RecoveryEntry, id: &str) -> bool {
+pub fn entry_names(entry: &RecoveryEntry, id: &str) -> bool {
     if id.is_empty() {
         return false;
     }

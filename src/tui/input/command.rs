@@ -716,9 +716,17 @@ pub(super) fn palette_check_project(app: &mut App) {
                     track_id,
                     task_id,
                     detail,
+                    evidence,
                 } => format!(
-                    "  [{}] {} has an unresolved merge conflict ({})",
-                    track_id, task_id, detail
+                    "  [{}] {} has an unresolved merge conflict ({}){}",
+                    track_id,
+                    task_id,
+                    detail,
+                    if *evidence {
+                        ""
+                    } else {
+                        " — their version is not in this working copy's recovery log"
+                    }
                 ),
             };
             lines.push(Line::from(Span::styled(msg, red)));

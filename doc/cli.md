@@ -233,6 +233,8 @@ Everything else check reports is left alone, because it has no repair that is sa
 
 An **unresolved merge conflict** — a task still carrying the `conflict:` line `fr merge` left on it — is reported as an *error* with no repair, for the same reason a reissued ID is: which side should win is the judgment the merge could not make. See [`fr merge`](#fr-merge).
 
+The message says where the other side actually is, having looked. The marker is committed and travels to every clone; the recovery log holding the discarded version is working-copy-local and does not. When the entry is here you get `fr recovery --for <ID>`; when it is not — a marker pulled from someone else's merge, or a pruned log — the message says so and sends you to version control instead. The `--json` form carries the same answer as `evidence`.
+
 **Confirmation.** Repairs that delete prompt once before anything is written; `--yes` skips the prompt. Declining cancels the whole run, additive repairs included — a run applies its entire plan or none of it. With stdin closed (CI, an agent) the prompt reads nothing, which is not `y`, so the run cancels: pass `--yes` to mean it. Removed archive copies go to the [recovery log](#fr-recovery) before deletion, so a duplicate that was hand-edited after the first write is recoverable.
 
 `--dry-run` prints the plan and writes nothing. Repairs are idempotent — a second `--fix` reports `nothing to repair`. `--json` reports `planned`, `applied`, `skipped`, and the `remaining` check result, re-read from disk after the write.
