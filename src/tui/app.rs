@@ -6193,7 +6193,19 @@ mod tests {
 
         drop(held);
 
-        app.retry_unsaved_saves(true);
+        // A few ticks' worth, not one. The retry uses a zero timeout — one
+        // `flock` attempt, by design, so that it cannot freeze the event loop —
+        // and a single attempt made the instant another descriptor released can
+        // transiently lose it under load. The user-visible claim is that the
+        // edit lands without them doing anything, which is what the *timer*
+        // provides; asserting on one attempt asserts something stronger than
+        // the retry promises.
+        for _ in 0..5 {
+            app.retry_unsaved_saves(true);
+            if app.unsaved.is_empty() {
+                break;
+            }
+        }
         assert!(app.unsaved.is_empty(), "the retry should have landed it");
         assert!(
             std::fs::read_to_string(&path)

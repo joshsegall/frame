@@ -1,4 +1,4 @@
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -8,12 +8,7 @@ use std::time::{Duration, Instant};
 /// and CLI processes.
 pub struct FileLock {
     _file: File,
-    path: PathBuf,
-    /// Whether releasing the lock also unlinks the lock file. Safe for the
-    /// project lock, whose file is only ever locked in place; **not** safe for a
-    /// lock guarding a file that gets replaced by `rename(2)` — see
-    /// [`FileLock::acquire_at`].
-    remove_on_drop: bool,
+    _path: PathBuf,
 }
 
 /// Error type for lock operations
@@ -34,25 +29,36 @@ impl FileLock {
     /// Acquire an advisory lock on the frame directory.
     /// Blocks up to `timeout` waiting for the lock.
     pub fn acquire(frame_dir: &Path, timeout: Duration) -> Result<Self, LockError> {
-        Self::lock_file(frame_dir.join(".lock"), timeout, true)
+        Self::lock_file(frame_dir.join(".lock"), timeout)
     }
 
-    /// Acquire an advisory lock on an arbitrary path, leaving the lock file in
-    /// place when the lock is released.
+    /// Acquire an advisory lock on an arbitrary path.
     ///
-    /// A lock guarding a file that is replaced by `rename(2)` **must** use a
-    /// dedicated lock file locked this way. Unlinking it would let a waiter
-    /// inherit the lock on an unlinked inode while a newcomer creates a fresh
-    /// file and locks that — two writers, one "lock".
+    /// Used where the *guarded* file is replaced by `rename(2)` and so cannot
+    /// be locked in place — the id frontier and the recovery log.
     pub fn acquire_at(lock_path: &Path, timeout: Duration) -> Result<Self, LockError> {
-        Self::lock_file(lock_path.to_path_buf(), timeout, false)
+        Self::lock_file(lock_path.to_path_buf(), timeout)
     }
 
-    fn lock_file(
-        lock_path: PathBuf,
-        timeout: Duration,
-        remove_on_drop: bool,
-    ) -> Result<Self, LockError> {
+    /// A lock file is **never unlinked**, and that is not tidiness lost.
+    ///
+    /// `flock` is on the open file description, not on the path. Removing the
+    /// file on release leaves any waiter holding a descriptor on an unlinked
+    /// inode — it goes on to win the lock on a file that no longer has a name —
+    /// while the next process to ask finds nothing at the path, creates a fresh
+    /// file, and locks that. Two writers, one "lock", and precisely when there
+    /// is contention to serialize.
+    ///
+    /// The project lock used to unlink and the other two did not, on the
+    /// grounds that only a `rename(2)`-replaced file was exposed. The race
+    /// needs no rename: a release with a waiter is enough, which is the
+    /// ordinary shape of contention.
+    ///
+    /// What is left behind is an empty `frame/.lock`. It is in
+    /// `LOCAL_ONLY_FRAME_FILES`, covered by the `frame/.*` ignore, and carries
+    /// no state — its presence never means "locked", so there is no stale lock
+    /// to clear.
+    fn lock_file(lock_path: PathBuf, timeout: Duration) -> Result<Self, LockError> {
         let timeout = capped(timeout);
         let file = OpenOptions::new()
             .create(true)
@@ -70,8 +76,7 @@ impl FileLock {
                 Ok(()) => {
                     return Ok(FileLock {
                         _file: file,
-                        path: lock_path,
-                        remove_on_drop,
+                        _path: lock_path,
                     });
                 }
                 Err(_) if start.elapsed() < timeout => {
@@ -139,16 +144,6 @@ fn capped(timeout: Duration) -> Duration {
     timeout
 }
 
-impl Drop for FileLock {
-    fn drop(&mut self) {
-        // Lock is released automatically when the file is dropped (flock semantics)
-        // Optionally clean up the lock file
-        if self.remove_on_drop {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
-}
-
 /// Try to acquire an exclusive flock on the file (non-blocking)
 #[cfg(unix)]
 fn try_lock(file: &File) -> Result<(), std::io::Error> {
@@ -177,7 +172,7 @@ mod tests {
     fn test_acquire_and_release_lock() {
         let tmp = TempDir::new().unwrap();
         let frame_dir = tmp.path().join("frame");
-        fs::create_dir_all(&frame_dir).unwrap();
+        std::fs::create_dir_all(&frame_dir).unwrap();
 
         let lock = FileLock::acquire_default(&frame_dir);
         assert!(lock.is_ok());
@@ -190,11 +185,44 @@ mod tests {
         assert!(lock2.is_ok());
     }
 
+    /// The unlink race, as a case. A lock file that is removed on release
+    /// leaves a waiter holding a descriptor on an unlinked inode, which it goes
+    /// on to lock, while the next process finds nothing at the path and locks a
+    /// fresh file it creates — two writers, one "lock", exactly when there is
+    /// contention to serialize. Needs no rename of the guarded file: a release
+    /// with a waiter is enough.
+    #[test]
+    fn releasing_the_lock_does_not_let_two_writers_hold_it() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+
+        // A holds it. B opens the same file and starts waiting on it.
+        let a = FileLock::acquire_default(&frame_dir).unwrap();
+        let dir = frame_dir.clone();
+        let waiter = std::thread::spawn(move || FileLock::acquire(&dir, Duration::from_secs(5)));
+        std::thread::sleep(Duration::from_millis(100));
+
+        // A releases. If that unlinked the file, B is now holding a lock on an
+        // inode with no name.
+        drop(a);
+        let b = waiter.join().unwrap().expect("the waiter gets the lock");
+
+        // C asks for the lock while B holds it. It must not get it.
+        let c = FileLock::acquire(&frame_dir, Duration::from_millis(50));
+        assert!(
+            c.is_err(),
+            "two writers hold the project lock at once: the waiter inherited an \
+             unlinked inode and the newcomer created and locked a fresh file"
+        );
+        drop(b);
+    }
+
     #[test]
     fn test_lock_contention() {
         let tmp = TempDir::new().unwrap();
         let frame_dir = tmp.path().join("frame");
-        fs::create_dir_all(&frame_dir).unwrap();
+        std::fs::create_dir_all(&frame_dir).unwrap();
 
         // Acquire first lock
         let _lock1 = FileLock::acquire_default(&frame_dir).unwrap();
