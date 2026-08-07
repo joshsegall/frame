@@ -67,14 +67,18 @@ use std::path::Path;
 use frame::io::actors::IdScope;
 use frame::io::project_io;
 use frame::model::project::Project;
-use frame::model::task::{Task, TaskState};
-use frame::model::track::{Track, TrackNode};
+use frame::model::task::TaskState;
 use frame::ops::ids::Mint;
 use frame::ops::task_ops::{self, InsertPosition};
 use frame::ops::track_ops;
 use frame::ops::{check, clean, fix, inbox_ops};
-use frame::parse::{parse_archive, parse_track, serialize_archive, serialize_track};
+use frame::parse::parse_archive;
 use proptest::prelude::*;
+
+#[path = "support/tree_checks.rs"]
+mod tree_checks;
+
+use tree_checks::{all_text, present, tasks_of, unsettled, walk};
 
 // ---------------------------------------------------------------------------
 // The base project
@@ -187,116 +191,10 @@ const UNOWNED_LINES: &[&str] = &[
     "content indented past its metadata",
 ];
 
-/// Every `.md` under `frame/`, so conservation is judged across tracks and
-/// archives together — a task moving into the archive is not a loss.
-fn all_markdown(frame_dir: &Path) -> Vec<(std::path::PathBuf, String)> {
-    let mut out = Vec::new();
-    let mut stack = vec![frame_dir.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.extension().is_some_and(|e| e == "md")
-                && let Ok(text) = std::fs::read_to_string(&path)
-            {
-                out.push((path, text));
-            }
-        }
-    }
-    out.sort();
-    out
-}
-
-fn walk<'a>(task: &'a Task, out: &mut Vec<&'a Task>) {
-    out.push(task);
-    for sub in &task.subtasks {
-        walk(sub, out);
-    }
-}
-
-fn tasks_of(track: &Track) -> Vec<&Task> {
-    let mut out = Vec::new();
-    for node in &track.nodes {
-        if let TrackNode::Section { tasks, .. } = node {
-            for task in tasks {
-                walk(task, &mut out);
-            }
-        }
-    }
-    out
-}
-
-/// Titles and IDs present anywhere under `frame/`.
-///
-/// Tracks and archives are read differently because they *are* different: an
-/// archive file is a flat task list under a `# Archive — <id>` heading, with no
-/// `## Section` headers, so walking sections finds nothing in one. That is what
-/// `project_io::load_archives` is for, and using it here means the harness
-/// agrees with the code under test about where an archived task lives rather
-/// than inventing a second reading of the format.
-fn present(frame_dir: &Path) -> (BTreeSet<String>, BTreeSet<String>) {
-    let mut titles = BTreeSet::new();
-    let mut ids = BTreeSet::new();
-    let mut record = |task: &Task| {
-        if !task.title.trim().is_empty() {
-            titles.insert(task.title.clone());
-        }
-        if let Some(id) = &task.id {
-            ids.insert(id.to_string());
-        }
-    };
-
-    for (path, text) in all_markdown(frame_dir) {
-        if path.components().any(|c| c.as_os_str() == "archive") {
-            continue;
-        }
-        let track = parse_track(&text);
-        for task in tasks_of(&track) {
-            record(task);
-        }
-    }
-
-    for (_, tasks) in project_io::load_archives(frame_dir).unwrap_or_default() {
-        let mut flat = Vec::new();
-        for task in &tasks {
-            walk(task, &mut flat);
-        }
-        for task in flat {
-            record(task);
-        }
-    }
-
-    // `archive/_tracks/` holds whole archived track files, which `load_archives`
-    // skips. They are still part of the project's content.
-    let whole = frame_dir.join("archive").join("_tracks");
-    if let Ok(entries) = std::fs::read_dir(&whole) {
-        for entry in entries.flatten() {
-            if entry.path().extension().is_some_and(|e| e == "md")
-                && let Ok(text) = std::fs::read_to_string(entry.path())
-            {
-                let track = parse_track(&text);
-                for task in tasks_of(&track) {
-                    record(task);
-                }
-            }
-        }
-    }
-
-    (titles, ids)
-}
-
-/// The whole of `frame/`'s markdown, for substring checks on unowned lines.
-fn all_text(frame_dir: &Path) -> String {
-    all_markdown(frame_dir)
-        .into_iter()
-        .map(|(_, t)| t)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
+// Reading the tree — `all_markdown`, `present`, `all_text`, `tasks_of`, `walk`
+// and `unsettled` — lives in `tests/support/tree_checks.rs`, shared with P8
+// (`concurrency.rs`). Three file shapes settle under three different pairs, and
+// getting that wrong under-counts silently; the module docs there say why.
 
 // ---------------------------------------------------------------------------
 // Operations
@@ -585,29 +483,18 @@ fn apply_op(project: &mut Project, op: &Op) -> Licensed {
 /// Assert every file frame just wrote is a fixpoint of the parse/serialize
 /// pair. An operation that leaves a file one rewrite from settling produces a
 /// diff nobody asked for on the next unrelated command.
+///
+/// A done-task archive used to be exempt from this check entirely, on the
+/// grounds that it was appended to rather than round-tripped — which was true,
+/// and was the problem: the append was string concatenation, so it could and
+/// did leave a file mixing line endings.
 fn assert_settled(frame_dir: &Path, step: usize, op: &Op) -> Result<(), TestCaseError> {
-    for (path, text) in all_markdown(frame_dir) {
-        // Three shapes live under `frame/`, and each settles under its own pair.
-        // A done-task archive used to be exempt from this check entirely, on the
-        // grounds that it was appended to rather than round-tripped — which was
-        // true, and was the problem: the append was string concatenation, so it
-        // could and did leave a file mixing line endings. `archive/_tracks/`
-        // holds whole track files, moved there intact, so they settle as tracks.
-        let is_archive = path.components().any(|c| c.as_os_str() == "archive");
-        let is_whole_track = path.components().any(|c| c.as_os_str() == "_tracks");
-        let rewritten = if is_archive && !is_whole_track {
-            serialize_archive(&parse_archive(&text))
-        } else {
-            serialize_track(&parse_track(&text))
-        };
-        if rewritten != text {
-            return Err(TestCaseError::fail(format!(
-                "step {step} ({op:?}) left {} unsettled\nwrote:     {text:?}\nrewrites to: {rewritten:?}",
-                path.display()
-            )));
-        }
+    match unsettled(frame_dir) {
+        Some(detail) => Err(TestCaseError::fail(format!(
+            "step {step} ({op:?}): {detail}"
+        ))),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 proptest! {
