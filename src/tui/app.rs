@@ -3274,6 +3274,38 @@ impl App {
         }
     }
 
+    /// Whether a track id is already taken **on disk**, rather than in the
+    /// snapshot this session loaded.
+    ///
+    /// Creating a track writes `tracks/<id>.md` unconditionally, and the
+    /// duplicate check in front of it asked `self.project.config` — a snapshot
+    /// that can be hours old. So a track another process created in the
+    /// meantime was not merely missed: its file was overwritten with an empty
+    /// template, and every task in it destroyed. The config merge cannot undo
+    /// that, because by the time it runs the file is already gone.
+    ///
+    /// **An operation that writes a file has to validate against disk, not
+    /// against memory.** Refusing is right here and wrong on the save path:
+    /// nothing has been written yet, and the user is standing at the prompt
+    /// that asked for the name.
+    ///
+    /// Called with the project lock held, so the answer cannot go stale between
+    /// asking and writing.
+    ///
+    /// A file with no config row counts. Frame will not load it, but it is
+    /// somebody's content, and creating this track would land on top of it.
+    pub fn track_id_taken_on_disk(&self, track_id: &str) -> bool {
+        let configured = crate::io::config_io::read_config(&self.project.frame_dir)
+            .map(|(config, _)| config.tracks.iter().any(|t| t.id == track_id))
+            .unwrap_or(false);
+        configured
+            || self
+                .project
+                .frame_dir
+                .join(format!("tracks/{track_id}.md"))
+                .exists()
+    }
+
     /// Rebuild the active-track list from the config, keeping the cursor in
     /// range.
     pub fn rebuild_active_track_ids(&mut self) {
@@ -6682,6 +6714,57 @@ a = "A"
         assert!(
             app.baselines.contains_key(&SaveTarget::Track("b".into())),
             "an adopted track needs an ancestor like any other"
+        );
+    }
+
+    /// The worst of the three: creating a track wrote `tracks/<id>.md`
+    /// unconditionally, having checked for a duplicate id against a snapshot
+    /// taken when the session started. A track another process created since
+    /// was not merely missed — its file was replaced with an empty template and
+    /// every task in it destroyed, before any config merge could have a say.
+    #[test]
+    fn creating_a_track_does_not_overwrite_one_that_appeared_on_disk() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        let mut app = config_project(root, COMMENTED_CONFIG);
+        let theirs = root.join("frame/tracks/b.md");
+
+        // Another process runs `fr track new b` and puts work in it.
+        std::fs::write(
+            &theirs,
+            "# B\n\n## Backlog\n\n- [ ] `B-001` Do not lose me\n\n## Done\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("frame/project.toml"),
+            format!(
+                "{COMMENTED_CONFIG}\n[[tracks]]\nid = \"b\"\nname = \"B\"\n\
+                 state = \"active\"\nfile = \"tracks/b.md\"\n"
+            ),
+        )
+        .unwrap();
+
+        // We know nothing about it and create a track that lands on the same id.
+        app.mode = Mode::Edit;
+        app.edit_target = Some(EditTarget::NewTrackName);
+        app.edit_buffer = "B".into();
+        crate::tui::input::handle_key(
+            &mut app,
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+        );
+
+        let after = std::fs::read_to_string(&theirs).unwrap();
+        assert!(
+            after.contains("Do not lose me"),
+            "their track file was overwritten with an empty template:\n{after}"
+        );
+        assert!(
+            app.status_is_error,
+            "the refusal has to be visible: {:?}",
+            app.status_message
         );
     }
 

@@ -646,6 +646,19 @@ pub(super) fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo
                             save_config(app);
                         } else {
                             // Re-create the track under the name the user gave it.
+                            //
+                            // Unless something is there now: this writes the
+                            // file unconditionally, and between the undo that
+                            // removed it and this redo another process may have
+                            // created a track under the same id. Redoing over it
+                            // would destroy a file this session never wrote.
+                            if app.track_id_taken_on_disk(&tid) {
+                                app.status_message = Some(format!(
+                                    "track \"{tid}\" exists on disk now — not redoing over it"
+                                ));
+                                app.status_is_error = true;
+                                return;
+                            }
                             let name = track_name.clone();
                             let tc = crate::model::TrackConfig {
                                 id: tid.clone(),
@@ -687,6 +700,17 @@ pub(super) fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo
                             // Restore the file as it was. Only when it could not be
                             // read at delete time is there nothing to put back, and
                             // a minimal shell is then the best available answer.
+                            //
+                            // Not over something, though: another process may
+                            // have created a track under this id since the
+                            // delete, and putting ours back would overwrite it.
+                            if app.track_id_taken_on_disk(&tid) {
+                                app.status_message = Some(format!(
+                                    "track \"{tid}\" exists on disk now — not restoring over it"
+                                ));
+                                app.status_is_error = true;
+                                return;
+                            }
                             let tc = crate::model::TrackConfig {
                                 id: tid.clone(),
                                 name: track_name.clone(),

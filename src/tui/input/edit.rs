@@ -1445,7 +1445,9 @@ pub(super) fn confirm_edit(app: &mut App) {
                 app.status_message = Some("invalid track name".to_string());
                 return;
             }
-            // Check for ID collision
+            // Check for ID collision. This one is against the session's
+            // snapshot and so is only the fast answer — the authoritative one
+            // is `track_id_taken_on_disk`, asked below under the lock.
             if app.project.config.tracks.iter().any(|tc| tc.id == track_id) {
                 app.status_message = Some(format!("track \"{}\" already exists", name));
                 return;
@@ -1469,7 +1471,19 @@ pub(super) fn confirm_edit(app: &mut App) {
             // track that will not load. One lock, or neither.
             let track_path = app.project.frame_dir.join(&tc.file);
             let mut insert_config_idx = 0;
+            let mut refused = false;
             let done = app.with_project_lock(|app| {
+                // The check above asked a snapshot taken when the session
+                // started. Ask disk, now that the lock makes the answer stable:
+                // the write below is unconditional, so a track another process
+                // created since would be overwritten with an empty template.
+                if app.track_id_taken_on_disk(&track_id) {
+                    refused = true;
+                    app.status_message = Some(format!("track \"{}\" already exists on disk", name));
+                    app.status_is_error = true;
+                    return;
+                }
+
                 // Write track file
                 let track_content = format!("# {}\n\n## Backlog\n\n## Done\n", name);
                 let _ = crate::io::recovery::atomic_write(&track_path, track_content.as_bytes());
@@ -1501,7 +1515,10 @@ pub(super) fn confirm_edit(app: &mut App) {
                     .insert(track_id.clone(), prefix.clone());
                 save_config(app);
             });
-            if !done {
+            if !done || refused {
+                // Nothing was written either way, so the placement the user
+                // asked for has nothing left to apply to.
+                app.new_track_insert_pos = None;
                 return;
             }
 
