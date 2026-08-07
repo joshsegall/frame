@@ -9,3 +9,4 @@ cc 88998033c164be453cdd2b3b2d2431cbdb6f447676a192cefccf1f906298f3ee # shrinks to
 cc 7b6830218a6e4ce77e4e9235684fb7fb3ceaf53ddaaabf7d7e79afb9dfc8a2e2 # shrinks to schedule = [CliBegin, Tui(Step { action: Indent, target: 46, text: 0 }), CliCommit, Tui(Step { action: TrackArchive, target: 0, text: 0 })]
 cc d38c96843d63d741622fc3388560cc8869c3ba1e8352dc92bf2d3ccae44761e9 # shrinks to schedule = [CliBegin, CliOp(AddTask { track: 0 }), CliCommit, CliBegin, CliOp(EditOwned { which: 0 }), CliOp(EditOwned { which: 0 })]
 cc bf3b6c942f8edb2a14a34b3d678db6e0cbfb4655f286992a6508545e5aee9c30 # shrinks to schedule = [CliBegin, CliOp(AddTask { track: 0 }), CliCommit, CliBegin, Tui(Step { action: EditTitle, target: 0, text: 0 }), CliOp(EditOwned { which: 0 }), Tui(Step { action: SetDone, target: 0, text: 0 })]
+cc 13d03aa4429023fa92bf7911389ca8ed9b95d95761c778d288ea63a0a830d237 # shrinks to schedule = [CliBegin, Tui(Step { action: TrackShelve, target: 0, text: 0 }), CliOp(TrackNew)]

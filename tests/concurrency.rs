@@ -2,8 +2,9 @@
 //!
 //! > For a settled project, and any interleaving of a TUI session and a CLI
 //! > writer whose edits touch **disjoint tasks**, at quiesce: every title
-//! > either writer acknowledged writing is somewhere under `frame/`, no ID
-//! > appears twice, and every file is settled.
+//! > either writer acknowledged writing is somewhere under `frame/`, every
+//! > track the CLI created is still one the project holds, no ID appears
+//! > twice, and every file is settled.
 //!
 //! # The gap this closes
 //!
@@ -53,6 +54,40 @@
 //! A looser property that allows overlap and accepts the recovery-log escape
 //! hatch is a reasonable follow-up. It is deliberately not first: it would find
 //! the same defects with a weaker signal.
+//!
+//! # Why C5 exists, and why counting titles was not enough
+//!
+//! C1 asks whether a title is **somewhere under `frame/`**. That is the right
+//! question for a task and the wrong one for a track, because a track dropped
+//! from `project.toml` leaves `tracks/<id>.md` sitting there with every title
+//! in it. C1 is satisfied; the track and all its tasks have left the project.
+//!
+//! That is not hypothetical — it is the defect the config arc fixed. The TUI
+//! held a `ProjectConfig` parsed at startup and wrote the whole file back from
+//! it, so a `fr track new` from another process was erased by the next TUI
+//! track operation. This suite ran throughout and saw nothing, which is why
+//! that arc's pins are unit and `App`-level. **A property that cannot see a
+//! defect in its own subject matter is worth extending, not working around.**
+//!
+//! So C5: *every track the CLI created inside its window is still configured,
+//! with its file where the row says it is.* The second half is not pedantry —
+//! `load_project` skips a configured track whose file is missing, so a row
+//! pointing at nothing loses the track just as completely as a deleted row.
+//!
+//! The oracle reads `project.toml` **off disk**, never `app.project.config`:
+//! the in-memory config is the thing under test, and asking it whether the
+//! project still holds a track is asking the defendant.
+//!
+//! # Why the TUI is steered off the CLI's tracks
+//!
+//! The same argument as disjoint tasks, one level up. `TrackArchive` and
+//! `TrackShelve` are legitimate operations that take a track out of `tracks/`
+//! or out of the active set, so a run where the TUI archives a track the CLI
+//! just created makes C5 **ambiguous** rather than false — "the row is gone and
+//! that is correct" is exactly the answer no oracle can distinguish from a lost
+//! update. [`steer`] therefore excludes CLI-created tracks from every
+//! track-surface step, as it already excludes CLI-owned tasks from task-surface
+//! ones.
 //!
 //! # Acknowledgement, precisely
 //!
@@ -116,6 +151,20 @@
 //! suite built to interleave two processes found its way to bugs one process
 //! could hit, because *generating* sequences over the whole action set is doing
 //! work independently of what the sequences were generated for.
+//!
+//! Three more since, each from a seed now pinned in the regressions file:
+//!
+//! 5. A title superseded inside one lock window was promoted to a claim the CLI
+//!    had never written — a flaw in this suite's own oracle, not the product
+//!    (`12250db`).
+//! 6. `reorder_tracks` was not its own inverse across an inactive row, so
+//!    moving a track past an archived one and undoing left the order wrong
+//!    (`2ee3ba6`). Pre-existing, and P9's to state; P8 reached it first.
+//! 7. A handler that took a changed file as ours updated the mtime but not the
+//!    ancestor, so the *next* merge read the other writer's task as one both
+//!    sides had added and discarded their newer version to the recovery log
+//!    (`8f5f3ab`). The headline defect's shape, on the paths where a merge is
+//!    avoided rather than run.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -177,6 +226,8 @@ enum CliOp {
     EditOwned { which: usize },
     /// `fr capture` — a new inbox item.
     Capture,
+    /// `fr track new` — a whole new track: a file, a config row and a prefix.
+    TrackNew,
 }
 
 fn arb_event() -> impl Strategy<Value = Event> {
@@ -190,6 +241,7 @@ fn arb_event() -> impl Strategy<Value = Event> {
             2 => (0usize..2).prop_map(|track| CliOp::AddTask { track }),
             1 => (0usize..8).prop_map(|which| CliOp::EditOwned { which }),
             1 => Just(CliOp::Capture),
+            1 => Just(CliOp::TrackNew),
         ].prop_map(Event::CliOp),
         3 => Just(Event::CliCommit),
         5 => Just(Event::Watch),
@@ -220,6 +272,13 @@ fn arb_tui_step() -> impl Strategy<Value = Step> {
 struct Window {
     lock: FileLock,
     project: Project,
+    /// The config document, read under the lock alongside the project, exactly
+    /// as every config-writing handler does. Held so a `TrackNew` can edit it
+    /// and the commit can write it.
+    doc: toml_edit::DocumentMut,
+    /// Whether this window touched the config, so the commit writes it only
+    /// when a command would have.
+    dirty_config: bool,
     /// Which tracks this window changed, so the commit writes those and only
     /// those — as a command does.
     dirty_tracks: BTreeSet<String>,
@@ -229,6 +288,9 @@ struct Window {
     pending: Vec<Claim>,
     /// Titles this window retired, dropped from the claims on the same terms.
     retired: Vec<String>,
+    /// Track ids this window created, promoted to claims on the same terms as
+    /// titles: only once the commit completes without error.
+    pending_tracks: Vec<String>,
 }
 
 /// A title the CLI wrote, and where it put it.
@@ -247,6 +309,9 @@ struct Cli {
     claims: Vec<Claim>,
     /// Ids of tasks this actor owns, so the TUI can be steered away from them.
     owned_ids: Vec<String>,
+    /// Track ids this actor created and believes are configured. C5's
+    /// left-hand side, and what the TUI is steered off at the track level.
+    tracks_created: Vec<String>,
     /// Distinguishes every generated title, so a lost one is unambiguous.
     seq: usize,
 }
@@ -259,6 +324,7 @@ impl Cli {
             window: None,
             claims: Vec::new(),
             owned_ids: Vec::new(),
+            tracks_created: Vec::new(),
             seq: 0,
         }
     }
@@ -295,13 +361,21 @@ impl Cli {
             };
             project = reloaded;
         }
+        // Under the lock, like the project itself. Every config-writing
+        // handler does exactly this: `lock_and_load`, then `read_config`.
+        let Ok((_, doc)) = frame::io::config_io::read_config(&self.frame_dir) else {
+            return;
+        };
         self.window = Some(Window {
             lock,
             project,
+            doc,
+            dirty_config: false,
             dirty_tracks: BTreeSet::new(),
             dirty_inbox: false,
             pending: Vec::new(),
             retired: Vec::new(),
+            pending_tracks: Vec::new(),
         });
     }
 
@@ -309,6 +383,14 @@ impl Cli {
         let title = match op {
             CliOp::AddTask { .. } | CliOp::Capture => Some(self.next_title()),
             CliOp::EditOwned { .. } => Some(self.next_title()),
+            CliOp::TrackNew => None,
+        };
+        let track_id = match op {
+            CliOp::TrackNew => {
+                self.seq += 1;
+                Some(format!("clitrack{}", self.seq))
+            }
+            _ => None,
         };
         let owned = self.owned_ids.clone();
         let Some(window) = self.window.as_mut() else {
@@ -395,6 +477,25 @@ impl Cli {
                     task_id: None,
                 });
             }
+
+            CliOp::TrackNew => {
+                let track_id = track_id.unwrap();
+                // The real thing, and the same call `cmd_track_new` makes.
+                // `new_track` writes `tracks/<id>.md` itself and edits the
+                // document; the row reaches disk when the window commits.
+                let Ok(track) = frame::ops::track_ops::new_track(
+                    &frame_dir,
+                    &mut window.doc,
+                    &mut window.project.config,
+                    &track_id,
+                    &format!("CLI Track {track_id}"),
+                ) else {
+                    return;
+                };
+                window.project.tracks.push((track_id.clone(), track));
+                window.dirty_config = true;
+                window.pending_tracks.push(track_id);
+            }
         }
     }
 
@@ -430,6 +531,15 @@ impl Cli {
         {
             ok = false;
         }
+        // The config last, which is the order `cmd_track_new` writes in: the
+        // track file already exists by the time its row does. The reverse
+        // would leave a row naming a file that is not there, and
+        // `load_project` drops such a track silently.
+        if window.dirty_config
+            && frame::io::config_io::write_config(&window.project.frame_dir, &window.doc).is_err()
+        {
+            ok = false;
+        }
         drop(window.lock);
 
         if !ok {
@@ -446,6 +556,7 @@ impl Cli {
             }
             self.claims.push(claim);
         }
+        self.tracks_created.extend(window.pending_tracks);
     }
 
     /// Titles the CLI owns that live in the inbox, so a TUI step is not aimed
@@ -513,7 +624,27 @@ fn steer(app: &App, step: &Step, cli: &Cli) -> Option<Step> {
             }
             step.target = allowed[step.target % allowed.len()];
         }
-        tui_steps::Surface::Tracks => {}
+        tui_steps::Surface::Tracks => {
+            // The same disjointness rule, one level up. `TrackArchive` and
+            // `TrackShelve` are legitimate TUI operations that take a track out
+            // of `tracks/` or out of the active set — so a run where the TUI
+            // archives a track the CLI just created makes C5 *ambiguous*, not
+            // false, exactly as two writers on one task make C1 ambiguous.
+            // Steering keeps every failure a real one.
+            let allowed: Vec<usize> = app
+                .project
+                .config
+                .tracks
+                .iter()
+                .enumerate()
+                .filter(|(_, tc)| !cli.tracks_created.contains(&tc.id))
+                .map(|(i, _)| i)
+                .collect();
+            if allowed.is_empty() {
+                return None;
+            }
+            step.target = allowed[step.target % allowed.len()];
+        }
     }
     Some(step)
 }
@@ -578,6 +709,8 @@ struct Verdict {
     duplicate_ids: Vec<String>,
     unsettled: Option<String>,
     still_unsaved: Vec<String>,
+    /// C5: tracks the CLI created that the project no longer holds.
+    unconfigured_tracks: Vec<String>,
 }
 
 fn judge(app: &App, frame_dir: &Path, cli: &Cli) -> Verdict {
@@ -614,6 +747,29 @@ fn judge(app: &App, frame_dir: &Path, cli: &Cli) -> Verdict {
         .filter(|t| !titles.contains(t) && !text.contains(t))
         .collect();
 
+    // C5, read off disk rather than out of `app.project.config` — the
+    // in-memory config is the thing under test, and asking it whether the
+    // project still holds a track would be asking the defendant.
+    //
+    // A row whose file is missing counts as gone, and that is not pedantry:
+    // `load_project` skips a configured track whose file is absent, so the
+    // track and every task in it leave the project just as completely as a
+    // deleted row would take them.
+    let unconfigured_tracks = match frame::io::config_io::read_config(frame_dir) {
+        Ok((config, _)) => cli
+            .tracks_created
+            .iter()
+            .filter(|id| match config.tracks.iter().find(|tc| &&tc.id == id) {
+                None => true,
+                Some(tc) => !frame_dir.join(&tc.file).exists(),
+            })
+            .cloned()
+            .collect(),
+        // An unreadable config is a total loss of every track, not a reason to
+        // report none: reading it is what `load_project` does first.
+        Err(_) => cli.tracks_created.clone(),
+    };
+
     let mut seen = BTreeSet::new();
     let mut duplicate_ids = Vec::new();
     for id in id_tally(frame_dir) {
@@ -628,6 +784,7 @@ fn judge(app: &App, frame_dir: &Path, cli: &Cli) -> Verdict {
         duplicate_ids,
         unsettled: unsettled(frame_dir),
         still_unsaved: app.unsaved.keys().map(|t| t.label().to_string()).collect(),
+        unconfigured_tracks,
     }
 }
 
@@ -698,6 +855,11 @@ proptest! {
             verdict.lost_by_cli.is_empty(),
             "the CLI wrote these and they are gone: {:?}\nschedule: {schedule:?}",
             verdict.lost_by_cli
+        );
+        prop_assert!(
+            verdict.unconfigured_tracks.is_empty(),
+            "the CLI created these tracks and the project no longer holds them: {:?}\nschedule: {schedule:?}",
+            verdict.unconfigured_tracks
         );
         prop_assert!(
             verdict.lost_by_tui.is_empty(),
