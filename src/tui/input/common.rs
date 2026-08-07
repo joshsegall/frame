@@ -1,7 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashSet;
 
-use crate::io::config_io;
 use crate::model::SectionKind;
 use crate::model::task::Metadata;
 use crate::ops::task_ops::{self};
@@ -514,257 +513,270 @@ pub(super) fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo
             } else {
                 app.undo_stack.peek_last_undo().cloned()
             };
-            match op {
-                Some(Operation::TrackMove {
-                    old_index,
-                    new_index,
-                    ..
-                }) => {
-                    let target_index = if is_undo { old_index } else { new_index };
-                    let _ = crate::ops::track_ops::reorder_tracks(
-                        &mut app.project.config,
-                        track_id,
-                        target_index,
-                    );
-                    rebuild_active_track_ids(app);
-                    save_config(app);
-                }
-                Some(Operation::TrackCcFocus {
-                    old_focus,
-                    new_focus,
-                }) => {
-                    let target = if is_undo { old_focus } else { new_focus };
-                    app.project.config.agent.cc_focus = target;
-                    save_config(app);
-                }
-                Some(Operation::TrackNameEdit {
-                    track_id: tid,
-                    old_name,
-                    new_name,
-                }) => {
-                    let target_name = if is_undo { &old_name } else { &new_name };
-                    if let Some(tc) = app.project.config.tracks.iter_mut().find(|t| t.id == tid) {
-                        tc.name = target_name.clone();
-                    }
-                    save_config(app);
-                    // Update track file header
-                    update_track_header(app, &tid, target_name);
-                    app.save_track_logged(&tid);
-                }
-                Some(Operation::TrackShelve {
-                    track_id: tid,
-                    was_active,
-                }) => {
-                    // Undo: restore original state; Redo: re-apply toggle
-                    let new_state = if is_undo {
-                        if was_active { "active" } else { "shelved" }
-                    } else if was_active {
-                        "shelved"
-                    } else {
-                        "active"
-                    };
-                    if let Some(tc) = app.project.config.tracks.iter_mut().find(|t| t.id == tid) {
-                        tc.state = new_state.to_string();
-                    }
-                    rebuild_active_track_ids(app);
-                    save_config(app);
-                }
-                Some(Operation::TrackArchive {
-                    track_id: tid,
-                    old_state,
-                }) => {
-                    if is_undo {
-                        // Restore from archived to old_state
-                        if let Some(tc) = app.project.config.tracks.iter_mut().find(|t| t.id == tid)
-                        {
-                            tc.state = old_state.clone();
-                        }
-                        // Restore track file from archive/_tracks/
-                        if let Some(file) = app.track_file(&tid).map(|f| f.to_string()) {
-                            let _ = crate::ops::track_ops::restore_track_file(
-                                &app.project.frame_dir,
-                                &tid,
-                                &file,
-                            );
-                        }
-                        rebuild_active_track_ids(app);
-                        save_config(app);
-                        // Reload track into memory
-                        if let Some(new_track) = app.read_track_from_disk(&tid) {
-                            if !app.project.tracks.iter().any(|(id, _)| id == &tid) {
-                                app.project.tracks.push((tid.clone(), new_track));
-                            } else {
-                                app.replace_track(&tid, new_track);
-                            }
-                        }
-                    } else {
-                        // Re-archive
-                        if let Some(tc) = app.project.config.tracks.iter_mut().find(|t| t.id == tid)
-                        {
-                            tc.state = "archived".to_string();
-                        }
-                        if let Some(file) = app.track_file(&tid).map(|f| f.to_string()) {
-                            let _ = crate::ops::track_ops::archive_track_file(
-                                &app.project.frame_dir,
-                                &tid,
-                                &file,
-                            );
-                        }
-                        rebuild_active_track_ids(app);
-                        save_config(app);
-                    }
-                }
-                Some(Operation::TrackAdd {
-                    track_id: tid,
-                    track_name,
-                    config_index,
-                    prefix,
-                }) => {
-                    if is_undo {
-                        // Remove the track
-                        let file = app.track_file(&tid).map(|f| f.to_string());
-                        if let Some(file) = &file {
-                            let _ = std::fs::remove_file(app.project.frame_dir.join(file));
-                        }
-                        app.project.config.tracks.retain(|t| t.id != tid);
-                        app.project.config.ids.prefixes.shift_remove(&tid);
-                        app.project.tracks.retain(|(id, _)| id != &tid);
-                        rebuild_active_track_ids(app);
-                        save_config(app);
-                    } else {
-                        // Re-create the track under the name the user gave it.
-                        let name = track_name.clone();
-                        let tc = crate::model::TrackConfig {
-                            id: tid.clone(),
-                            name: name.clone(),
-                            state: "active".to_string(),
-                            file: format!("tracks/{}.md", tid),
-                        };
-                        let track_content = format!("# {}\n\n## Backlog\n\n## Done\n", name);
-                        let track_path = app.project.frame_dir.join(&tc.file);
-                        let _ = crate::io::recovery::atomic_write(
-                            &track_path,
-                            track_content.as_bytes(),
+            // Every arm below writes `project.toml`, and half of them also
+            // create, unlink or move a track file. Undoing an archive is the
+            // same two-file change as archiving, so it takes the lock the same
+            // way — one lock for the whole reversal rather than one per file.
+            // Saves inside write under it; see `App::with_project_lock`.
+            app.with_project_lock(|app| {
+                match op {
+                    Some(Operation::TrackMove {
+                        old_index,
+                        new_index,
+                        ..
+                    }) => {
+                        let target_index = if is_undo { old_index } else { new_index };
+                        let _ = crate::ops::track_ops::reorder_tracks(
+                            &mut app.project.config,
+                            track_id,
+                            target_index,
                         );
-                        // Both recorded by the add. Re-deriving the prefix here
-                        // would ask the *current* prefix set a question only
-                        // the original set could answer, and appending would
-                        // put the track somewhere the add never put it.
-                        let idx = config_index.min(app.project.config.tracks.len());
-                        app.project.config.tracks.insert(idx, tc);
-                        app.project.config.ids.prefixes.insert(tid.clone(), prefix);
-                        if let Ok(text) = std::fs::read_to_string(&track_path) {
-                            let track = crate::parse::parse_track(&text);
-                            app.project.tracks.push((tid.clone(), track));
-                        }
                         rebuild_active_track_ids(app);
                         save_config(app);
                     }
-                }
-                Some(Operation::TrackDelete {
-                    track_id: tid,
-                    track_name,
-                    old_state,
-                    prefix,
-                    config_index,
-                    prefix_index,
-                    content,
-                }) => {
-                    if is_undo {
-                        // Restore the file as it was. Only when it could not be
-                        // read at delete time is there nothing to put back, and
-                        // a minimal shell is then the best available answer.
-                        let tc = crate::model::TrackConfig {
-                            id: tid.clone(),
-                            name: track_name.clone(),
-                            state: old_state.clone(),
-                            file: format!("tracks/{}.md", tid),
+                    Some(Operation::TrackCcFocus {
+                        old_focus,
+                        new_focus,
+                    }) => {
+                        let target = if is_undo { old_focus } else { new_focus };
+                        app.project.config.agent.cc_focus = target;
+                        save_config(app);
+                    }
+                    Some(Operation::TrackNameEdit {
+                        track_id: tid,
+                        old_name,
+                        new_name,
+                    }) => {
+                        let target_name = if is_undo { &old_name } else { &new_name };
+                        if let Some(tc) = app.project.config.tracks.iter_mut().find(|t| t.id == tid)
+                        {
+                            tc.name = target_name.clone();
+                        }
+                        save_config(app);
+                        // Update track file header
+                        update_track_header(app, &tid, target_name);
+                        app.save_track_logged(&tid);
+                    }
+                    Some(Operation::TrackShelve {
+                        track_id: tid,
+                        was_active,
+                    }) => {
+                        // Undo: restore original state; Redo: re-apply toggle
+                        let new_state = if is_undo {
+                            if was_active { "active" } else { "shelved" }
+                        } else if was_active {
+                            "shelved"
+                        } else {
+                            "active"
                         };
-                        let track_content = content.clone().unwrap_or_else(|| {
-                            format!("# {}\n\n## Backlog\n\n## Done\n", track_name)
-                        });
-                        let track_path = app.project.frame_dir.join(&tc.file);
-                        let _ = crate::io::recovery::atomic_write(
-                            &track_path,
-                            track_content.as_bytes(),
-                        );
-                        // Back where it was, in both lists. Pushing put a
-                        // deleted first track back as the last one — the file
-                        // was restored intact and the project still looked
-                        // rearranged.
-                        let idx = config_index.min(app.project.config.tracks.len());
-                        app.project.config.tracks.insert(idx, tc);
-                        if let Some(p) = &prefix {
-                            let pidx = prefix_index
-                                .unwrap_or(usize::MAX)
-                                .min(app.project.config.ids.prefixes.len());
-                            app.project.config.ids.prefixes.shift_insert(
-                                pidx,
-                                tid.clone(),
-                                p.clone(),
-                            );
+                        if let Some(tc) = app.project.config.tracks.iter_mut().find(|t| t.id == tid)
+                        {
+                            tc.state = new_state.to_string();
                         }
-                        if let Ok(text) = std::fs::read_to_string(&track_path) {
-                            let track = crate::parse::parse_track(&text);
-                            app.project.tracks.push((tid.clone(), track));
-                        }
-                        rebuild_active_track_ids(app);
-                        save_config(app);
-                    } else {
-                        // Re-delete the track
-                        let file = app.track_file(&tid).map(|f| f.to_string());
-                        if let Some(file) = &file {
-                            let _ = std::fs::remove_file(app.project.frame_dir.join(file));
-                        }
-                        app.project.config.tracks.retain(|t| t.id != tid);
-                        app.project.config.ids.prefixes.shift_remove(&tid);
-                        app.project.tracks.retain(|(id, _)| id != &tid);
                         rebuild_active_track_ids(app);
                         save_config(app);
                     }
-                }
-                Some(Operation::TrackUnarchive { track_id: tid }) => {
-                    if is_undo {
-                        // Re-archive the track
-                        if let Some(tc) = app.project.config.tracks.iter_mut().find(|t| t.id == tid)
-                        {
-                            tc.state = "archived".to_string();
-                        }
-                        if let Some(file) = app.track_file(&tid).map(|f| f.to_string()) {
-                            let _ = crate::ops::track_ops::archive_track_file(
-                                &app.project.frame_dir,
-                                &tid,
-                                &file,
-                            );
-                        }
-                        rebuild_active_track_ids(app);
-                        save_config(app);
-                    } else {
-                        // Re-unarchive the track
-                        if let Some(tc) = app.project.config.tracks.iter_mut().find(|t| t.id == tid)
-                        {
-                            tc.state = "active".to_string();
-                        }
-                        if let Some(file) = app.track_file(&tid).map(|f| f.to_string()) {
-                            let _ = crate::ops::track_ops::restore_track_file(
-                                &app.project.frame_dir,
-                                &tid,
-                                &file,
-                            );
-                        }
-                        if let Some(new_track) = app.read_track_from_disk(&tid) {
-                            if !app.project.tracks.iter().any(|(id, _)| id == &tid) {
-                                app.project.tracks.push((tid.clone(), new_track));
-                            } else {
-                                app.replace_track(&tid, new_track);
+                    Some(Operation::TrackArchive {
+                        track_id: tid,
+                        old_state,
+                    }) => {
+                        if is_undo {
+                            // Restore from archived to old_state
+                            if let Some(tc) =
+                                app.project.config.tracks.iter_mut().find(|t| t.id == tid)
+                            {
+                                tc.state = old_state.clone();
                             }
+                            // Restore track file from archive/_tracks/
+                            if let Some(file) = app.track_file(&tid).map(|f| f.to_string()) {
+                                let _ = crate::ops::track_ops::restore_track_file(
+                                    &app.project.frame_dir,
+                                    &tid,
+                                    &file,
+                                );
+                            }
+                            rebuild_active_track_ids(app);
+                            save_config(app);
+                            // Reload track into memory
+                            if let Some(new_track) = app.read_track_from_disk(&tid) {
+                                if !app.project.tracks.iter().any(|(id, _)| id == &tid) {
+                                    app.project.tracks.push((tid.clone(), new_track));
+                                } else {
+                                    app.replace_track(&tid, new_track);
+                                }
+                            }
+                        } else {
+                            // Re-archive
+                            if let Some(tc) =
+                                app.project.config.tracks.iter_mut().find(|t| t.id == tid)
+                            {
+                                tc.state = "archived".to_string();
+                            }
+                            if let Some(file) = app.track_file(&tid).map(|f| f.to_string()) {
+                                let _ = crate::ops::track_ops::archive_track_file(
+                                    &app.project.frame_dir,
+                                    &tid,
+                                    &file,
+                                );
+                            }
+                            rebuild_active_track_ids(app);
+                            save_config(app);
                         }
-                        rebuild_active_track_ids(app);
-                        save_config(app);
                     }
+                    Some(Operation::TrackAdd {
+                        track_id: tid,
+                        track_name,
+                        config_index,
+                        prefix,
+                    }) => {
+                        if is_undo {
+                            // Remove the track
+                            let file = app.track_file(&tid).map(|f| f.to_string());
+                            if let Some(file) = &file {
+                                let _ = std::fs::remove_file(app.project.frame_dir.join(file));
+                            }
+                            app.project.config.tracks.retain(|t| t.id != tid);
+                            app.project.config.ids.prefixes.shift_remove(&tid);
+                            app.project.tracks.retain(|(id, _)| id != &tid);
+                            rebuild_active_track_ids(app);
+                            save_config(app);
+                        } else {
+                            // Re-create the track under the name the user gave it.
+                            let name = track_name.clone();
+                            let tc = crate::model::TrackConfig {
+                                id: tid.clone(),
+                                name: name.clone(),
+                                state: "active".to_string(),
+                                file: format!("tracks/{}.md", tid),
+                            };
+                            let track_content = format!("# {}\n\n## Backlog\n\n## Done\n", name);
+                            let track_path = app.project.frame_dir.join(&tc.file);
+                            let _ = crate::io::recovery::atomic_write(
+                                &track_path,
+                                track_content.as_bytes(),
+                            );
+                            // Both recorded by the add. Re-deriving the prefix here
+                            // would ask the *current* prefix set a question only
+                            // the original set could answer, and appending would
+                            // put the track somewhere the add never put it.
+                            let idx = config_index.min(app.project.config.tracks.len());
+                            app.project.config.tracks.insert(idx, tc);
+                            app.project.config.ids.prefixes.insert(tid.clone(), prefix);
+                            if let Ok(text) = std::fs::read_to_string(&track_path) {
+                                let track = crate::parse::parse_track(&text);
+                                app.project.tracks.push((tid.clone(), track));
+                            }
+                            rebuild_active_track_ids(app);
+                            save_config(app);
+                        }
+                    }
+                    Some(Operation::TrackDelete {
+                        track_id: tid,
+                        track_name,
+                        old_state,
+                        prefix,
+                        config_index,
+                        prefix_index,
+                        content,
+                    }) => {
+                        if is_undo {
+                            // Restore the file as it was. Only when it could not be
+                            // read at delete time is there nothing to put back, and
+                            // a minimal shell is then the best available answer.
+                            let tc = crate::model::TrackConfig {
+                                id: tid.clone(),
+                                name: track_name.clone(),
+                                state: old_state.clone(),
+                                file: format!("tracks/{}.md", tid),
+                            };
+                            let track_content = content.clone().unwrap_or_else(|| {
+                                format!("# {}\n\n## Backlog\n\n## Done\n", track_name)
+                            });
+                            let track_path = app.project.frame_dir.join(&tc.file);
+                            let _ = crate::io::recovery::atomic_write(
+                                &track_path,
+                                track_content.as_bytes(),
+                            );
+                            // Back where it was, in both lists. Pushing put a
+                            // deleted first track back as the last one — the file
+                            // was restored intact and the project still looked
+                            // rearranged.
+                            let idx = config_index.min(app.project.config.tracks.len());
+                            app.project.config.tracks.insert(idx, tc);
+                            if let Some(p) = &prefix {
+                                let pidx = prefix_index
+                                    .unwrap_or(usize::MAX)
+                                    .min(app.project.config.ids.prefixes.len());
+                                app.project.config.ids.prefixes.shift_insert(
+                                    pidx,
+                                    tid.clone(),
+                                    p.clone(),
+                                );
+                            }
+                            if let Ok(text) = std::fs::read_to_string(&track_path) {
+                                let track = crate::parse::parse_track(&text);
+                                app.project.tracks.push((tid.clone(), track));
+                            }
+                            rebuild_active_track_ids(app);
+                            save_config(app);
+                        } else {
+                            // Re-delete the track
+                            let file = app.track_file(&tid).map(|f| f.to_string());
+                            if let Some(file) = &file {
+                                let _ = std::fs::remove_file(app.project.frame_dir.join(file));
+                            }
+                            app.project.config.tracks.retain(|t| t.id != tid);
+                            app.project.config.ids.prefixes.shift_remove(&tid);
+                            app.project.tracks.retain(|(id, _)| id != &tid);
+                            rebuild_active_track_ids(app);
+                            save_config(app);
+                        }
+                    }
+                    Some(Operation::TrackUnarchive { track_id: tid }) => {
+                        if is_undo {
+                            // Re-archive the track
+                            if let Some(tc) =
+                                app.project.config.tracks.iter_mut().find(|t| t.id == tid)
+                            {
+                                tc.state = "archived".to_string();
+                            }
+                            if let Some(file) = app.track_file(&tid).map(|f| f.to_string()) {
+                                let _ = crate::ops::track_ops::archive_track_file(
+                                    &app.project.frame_dir,
+                                    &tid,
+                                    &file,
+                                );
+                            }
+                            rebuild_active_track_ids(app);
+                            save_config(app);
+                        } else {
+                            // Re-unarchive the track
+                            if let Some(tc) =
+                                app.project.config.tracks.iter_mut().find(|t| t.id == tid)
+                            {
+                                tc.state = "active".to_string();
+                            }
+                            if let Some(file) = app.track_file(&tid).map(|f| f.to_string()) {
+                                let _ = crate::ops::track_ops::restore_track_file(
+                                    &app.project.frame_dir,
+                                    &tid,
+                                    &file,
+                                );
+                            }
+                            if let Some(new_track) = app.read_track_from_disk(&tid) {
+                                if !app.project.tracks.iter().any(|(id, _)| id == &tid) {
+                                    app.project.tracks.push((tid.clone(), new_track));
+                                } else {
+                                    app.replace_track(&tid, new_track);
+                                }
+                            }
+                            rebuild_active_track_ids(app);
+                            save_config(app);
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
-            }
+            });
         }
         UndoNavTarget::Inbox { .. } => {
             // Inbox operations: check if a track was also affected (triage undo)
@@ -1147,9 +1159,16 @@ pub(super) fn task_state_action(app: &mut App, action: StateAction) {
 // CC tag / CC focus
 
 /// Save the project config to project.toml.
+/// Write `project.toml` under the project lock, recording a failure rather
+/// than discarding it.
+///
+/// It used to write straight through with no lock and `let _ =` on the result,
+/// which is both halves of the same problem: another `fr` could be midway
+/// through a read-modify-write of the project, and a write that did not happen
+/// left memory and disk disagreeing with nothing recorded anywhere. Inside
+/// [`App::with_project_lock`] this writes under the lock already held.
 pub(super) fn save_config(app: &mut App) {
-    let _ = config_io::write_config_from_struct(&app.project.frame_dir, &app.project.config);
-    app.last_save_at = Some(std::time::Instant::now());
+    app.save_config_logged();
 }
 
 // ---------------------------------------------------------------------------

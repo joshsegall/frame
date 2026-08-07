@@ -1262,43 +1262,52 @@ pub(super) fn palette_unarchive_track(app: &mut App) {
 pub(super) fn confirm_unarchive_track(app: &mut App, track_id: &str) {
     let track_name = app.track_name(track_id).to_string();
 
-    // Set config state to "active"
-    if let Some(tc) = app
-        .project
-        .config
-        .tracks
-        .iter_mut()
-        .find(|t| t.id == track_id)
-    {
-        tc.state = "active".to_string();
-    }
-    // Config first, file second — so record the intent, as the CLI does. Cut in
-    // between, the config names a file that is not in `tracks/` and the track
-    // drops out of the project entirely; the next write command completes it.
-    let marker = app
-        .track_file(track_id)
-        .map(|f| f.to_string())
-        .and_then(|file| {
-            crate::io::inflight::InFlight::begin(
-                &app.project.frame_dir,
-                crate::io::inflight::Operation::TrackUnarchive {
-                    track_id: track_id.to_string(),
-                    file,
-                },
-                &format!("unarchive {track_id}"),
-            )
-            .ok()
-        });
+    // Config and file move under one lock, or neither — see
+    // `confirm_archive_track`.
+    let done = app.with_project_lock(|app| {
+        // Set config state to "active"
+        if let Some(tc) = app
+            .project
+            .config
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == track_id)
+        {
+            tc.state = "active".to_string();
+        }
+        // Config first, file second — so record the intent, as the CLI does.
+        // Cut in between, the config names a file that is not in `tracks/` and
+        // the track drops out of the project entirely; the next write command
+        // completes it.
+        let marker = app
+            .track_file(track_id)
+            .map(|f| f.to_string())
+            .and_then(|file| {
+                crate::io::inflight::InFlight::begin(
+                    &app.project.frame_dir,
+                    crate::io::inflight::Operation::TrackUnarchive {
+                        track_id: track_id.to_string(),
+                        file,
+                    },
+                    &format!("unarchive {track_id}"),
+                )
+                .ok()
+            });
 
-    save_config(app);
+        save_config(app);
 
-    // Restore track file from archive/_tracks/
-    if let Some(file) = app.track_file(track_id).map(|f| f.to_string()) {
-        let _ = crate::ops::track_ops::restore_track_file(&app.project.frame_dir, track_id, &file);
-    }
+        // Restore track file from archive/_tracks/
+        if let Some(file) = app.track_file(track_id).map(|f| f.to_string()) {
+            let _ =
+                crate::ops::track_ops::restore_track_file(&app.project.frame_dir, track_id, &file);
+        }
 
-    if let Some(marker) = marker {
-        marker.commit();
+        if let Some(marker) = marker {
+            marker.commit();
+        }
+    });
+    if !done {
+        return;
     }
 
     // Reload track into memory

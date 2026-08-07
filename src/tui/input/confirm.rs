@@ -89,43 +89,52 @@ pub(super) fn confirm_archive_track(app: &mut App, track_id: &str) {
         .map(|t| t.state.clone())
         .unwrap_or_default();
 
-    // Update config state to archived
-    if let Some(tc) = app
-        .project
-        .config
-        .tracks
-        .iter_mut()
-        .find(|t| t.id == track_id)
-    {
-        tc.state = "archived".to_string();
-    }
-    // Config first, file second, same as the CLI — and recorded the same way,
-    // so an interruption between them is completed by the next write command
-    // rather than left for `fr check` to report.
-    let marker = app
-        .track_file(track_id)
-        .map(|f| f.to_string())
-        .and_then(|file| {
-            crate::io::inflight::InFlight::begin(
-                &app.project.frame_dir,
-                crate::io::inflight::Operation::TrackArchive {
-                    track_id: track_id.to_string(),
-                    file,
-                },
-                &format!("archive {track_id}"),
-            )
-            .ok()
-        });
+    // Config and file move under one lock, or neither. Both halves are the same
+    // change, and another `fr` that read the project between them would see a
+    // track that is archived in the config and still in `tracks/` — or write
+    // back the copy it had loaded and undo the move.
+    let done = app.with_project_lock(|app| {
+        if let Some(tc) = app
+            .project
+            .config
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == track_id)
+        {
+            tc.state = "archived".to_string();
+        }
+        // Config first, file second, same as the CLI — and recorded the same
+        // way, so an interruption between them is completed by the next write
+        // command rather than left for `fr check` to report.
+        let marker = app
+            .track_file(track_id)
+            .map(|f| f.to_string())
+            .and_then(|file| {
+                crate::io::inflight::InFlight::begin(
+                    &app.project.frame_dir,
+                    crate::io::inflight::Operation::TrackArchive {
+                        track_id: track_id.to_string(),
+                        file,
+                    },
+                    &format!("archive {track_id}"),
+                )
+                .ok()
+            });
 
-    save_config(app);
+        save_config(app);
 
-    // Move track file to archive/_tracks/
-    if let Some(file) = app.track_file(track_id).map(|f| f.to_string()) {
-        let _ = crate::ops::track_ops::archive_track_file(&app.project.frame_dir, track_id, &file);
-    }
+        // Move track file to archive/_tracks/
+        if let Some(file) = app.track_file(track_id).map(|f| f.to_string()) {
+            let _ =
+                crate::ops::track_ops::archive_track_file(&app.project.frame_dir, track_id, &file);
+        }
 
-    if let Some(marker) = marker {
-        marker.commit();
+        if let Some(marker) = marker {
+            marker.commit();
+        }
+    });
+    if !done {
+        return;
     }
 
     rebuild_active_track_ids(app);
@@ -152,22 +161,30 @@ pub(super) fn confirm_delete_track(app: &mut App, track_id: &str) {
     let prefix = app.project.config.ids.prefixes.get(track_id).cloned();
     let prefix_index = app.project.config.ids.prefixes.get_index_of(track_id);
 
-    // Read the file before unlinking it, so undo has something to put back.
-    // This is the only copy: delete does not archive, and nothing here reaches
-    // the recovery log.
+    // Unlink and config rewrite under one lock, or neither — see
+    // `confirm_archive_track`. This one matters more: the file it removes is
+    // the only copy there is.
     let mut content = None;
-    if let Some(file) = app.track_file(track_id).map(|f| f.to_string()) {
-        let track_path = app.project.frame_dir.join(&file);
-        content = std::fs::read_to_string(&track_path).ok();
-        let _ = std::fs::remove_file(&track_path);
-    }
+    let done = app.with_project_lock(|app| {
+        // Read the file before unlinking it, so undo has something to put back.
+        // This is the only copy: delete does not archive, and nothing here
+        // reaches the recovery log.
+        if let Some(file) = app.track_file(track_id).map(|f| f.to_string()) {
+            let track_path = app.project.frame_dir.join(&file);
+            content = std::fs::read_to_string(&track_path).ok();
+            let _ = std::fs::remove_file(&track_path);
+        }
 
-    // Remove from config
-    app.project.config.tracks.retain(|t| t.id != track_id);
-    if prefix.is_some() {
-        app.project.config.ids.prefixes.shift_remove(track_id);
+        // Remove from config
+        app.project.config.tracks.retain(|t| t.id != track_id);
+        if prefix.is_some() {
+            app.project.config.ids.prefixes.shift_remove(track_id);
+        }
+        save_config(app);
+    });
+    if !done {
+        return;
     }
-    save_config(app);
 
     // Remove from in-memory tracks
     app.project.tracks.retain(|(id, _)| id != track_id);
@@ -185,6 +202,67 @@ pub(super) fn confirm_delete_track(app: &mut App, track_id: &str) {
     });
 
     app.status_message = Some(format!("deleted track \"{}\"", tc.name));
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+    use crate::io::lock::FileLock;
+    use crate::tui::app::app_on_disk;
+
+    /// Archiving a track is a `project.toml` write and a file move, and the TUI
+    /// did both with no lock at all — so another `fr` that had already read the
+    /// project could have the track moved out from under it and then write the
+    /// copy it loaded back into `tracks/`, leaving the same tasks in two files
+    /// and every id twice. P8 found it in three events.
+    ///
+    /// Contended, the right answer is to do nothing: there is no half of
+    /// "archive this track" worth keeping, and an operation that moves a file
+    /// has nothing the retry machinery could hold for a later attempt.
+    #[test]
+    fn archiving_a_track_does_nothing_while_another_process_holds_the_lock() {
+        crate::io::lock::cap_waits(std::time::Duration::from_millis(20));
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        let track_path = app.project.frame_dir.join("tracks/a.md");
+        let archived = app.project.frame_dir.join("archive/_tracks/a.md");
+
+        let held = FileLock::acquire_default(&app.project.frame_dir).unwrap();
+        confirm_archive_track(&mut app, "a");
+
+        assert!(track_path.exists(), "the track file must not have moved");
+        assert!(!archived.exists(), "and must not have been copied either");
+        assert_eq!(
+            app.project.config.tracks[0].state, "active",
+            "nor should the config have been changed in memory"
+        );
+
+        // And once the other writer is done, the same keystroke works.
+        drop(held);
+        confirm_archive_track(&mut app, "a");
+        assert!(!track_path.exists() && archived.exists(), "the file moved");
+        assert_eq!(app.project.config.tracks[0].state, "archived");
+    }
+
+    /// The same for delete, where the stakes are higher: the file it unlinks is
+    /// the only copy there is.
+    #[test]
+    fn deleting_a_track_does_nothing_while_another_process_holds_the_lock() {
+        crate::io::lock::cap_waits(std::time::Duration::from_millis(20));
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        let track_path = app.project.frame_dir.join("tracks/a.md");
+
+        let _held = FileLock::acquire_default(&app.project.frame_dir).unwrap();
+        confirm_delete_track(&mut app, "a");
+
+        assert!(track_path.exists(), "the only copy must still be there");
+        assert_eq!(
+            app.project.config.tracks.len(),
+            1,
+            "and the config must still list the track"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -1464,36 +1464,46 @@ pub(super) fn confirm_edit(app: &mut App) {
                 file: format!("tracks/{}.md", track_id),
             };
 
-            // Write track file
-            let track_content = format!("# {}\n\n## Backlog\n\n## Done\n", name);
+            // The file and the config entry are one change: a file with no
+            // config row is invisible to frame, and a row with no file is a
+            // track that will not load. One lock, or neither.
             let track_path = app.project.frame_dir.join(&tc.file);
-            let _ = crate::io::recovery::atomic_write(&track_path, track_content.as_bytes());
+            let mut insert_config_idx = 0;
+            let done = app.with_project_lock(|app| {
+                // Write track file
+                let track_content = format!("# {}\n\n## Backlog\n\n## Done\n", name);
+                let _ = crate::io::recovery::atomic_write(&track_path, track_content.as_bytes());
 
-            // Add to config — insert among active tracks at the stored position
-            // so that p/- placement is respected (a/= use active_count = end).
-            let insert_pos = app.new_track_insert_pos.take().unwrap_or(usize::MAX);
-            let active_indices: Vec<usize> = app
-                .project
-                .config
-                .tracks
-                .iter()
-                .enumerate()
-                .filter(|(_, t)| t.state == "active")
-                .map(|(i, _)| i)
-                .collect();
-            let insert_config_idx = if insert_pos < active_indices.len() {
-                active_indices[insert_pos]
-            } else {
-                // After last active track (or end if no active tracks)
-                active_indices.last().map_or(0, |&last| last + 1)
-            };
-            app.project.config.tracks.insert(insert_config_idx, tc);
-            app.project
-                .config
-                .ids
-                .prefixes
-                .insert(track_id.clone(), prefix.clone());
-            save_config(app);
+                // Add to config — insert among active tracks at the stored
+                // position so that p/- placement is respected (a/= use
+                // active_count = end).
+                let insert_pos = app.new_track_insert_pos.take().unwrap_or(usize::MAX);
+                let active_indices: Vec<usize> = app
+                    .project
+                    .config
+                    .tracks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, t)| t.state == "active")
+                    .map(|(i, _)| i)
+                    .collect();
+                insert_config_idx = if insert_pos < active_indices.len() {
+                    active_indices[insert_pos]
+                } else {
+                    // After last active track (or end if no active tracks)
+                    active_indices.last().map_or(0, |&last| last + 1)
+                };
+                app.project.config.tracks.insert(insert_config_idx, tc);
+                app.project
+                    .config
+                    .ids
+                    .prefixes
+                    .insert(track_id.clone(), prefix.clone());
+                save_config(app);
+            });
+            if !done {
+                return;
+            }
 
             // Load the new track into memory
             if let Ok(text) = std::fs::read_to_string(&track_path) {
@@ -1526,21 +1536,28 @@ pub(super) fn confirm_edit(app: &mut App) {
                 return;
             }
 
-            // Update config name
-            if let Some(tc) = app
-                .project
-                .config
-                .tracks
-                .iter_mut()
-                .find(|t| t.id == track_id)
-            {
-                tc.name = new_name.clone();
-            }
-            save_config(app);
+            // The name lives in two files — `project.toml` and the track's own
+            // `# Title` header — so both move under one lock.
+            let done = app.with_project_lock(|app| {
+                // Update config name
+                if let Some(tc) = app
+                    .project
+                    .config
+                    .tracks
+                    .iter_mut()
+                    .find(|t| t.id == track_id)
+                {
+                    tc.name = new_name.clone();
+                }
+                save_config(app);
 
-            // Update track file header (first line: "# Name")
-            update_track_header(app, &track_id, &new_name);
-            app.save_track_logged(&track_id);
+                // Update track file header (first line: "# Name")
+                update_track_header(app, &track_id, &new_name);
+                app.save_track_logged(&track_id);
+            });
+            if !done {
+                return;
+            }
 
             app.undo_stack.push(Operation::TrackNameEdit {
                 track_id: track_id.clone(),

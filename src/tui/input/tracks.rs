@@ -335,60 +335,66 @@ pub(super) fn execute_prefix_rename(app: &mut App) {
     let new_prefix = pr.new_prefix.clone();
     let track_id = pr.track_id.clone();
 
-    // Rename IDs in archive file (shared ops function)
-    let _ = crate::ops::track_ops::rename_archive_prefix(
-        &app.project.frame_dir,
-        &track_id,
-        &old_prefix,
-        &new_prefix,
-    );
+    // The widest change the TUI makes: an archive file, `project.toml`, the
+    // renamed track, and every other track carrying a `dep:` into it. All of it
+    // under one lock — a writer landing in the middle would see ids under two
+    // prefixes at once — or none of it.
+    app.with_project_lock(|app| {
+        // Rename IDs in archive file (shared ops function)
+        let _ = crate::ops::track_ops::rename_archive_prefix(
+            &app.project.frame_dir,
+            &track_id,
+            &old_prefix,
+            &new_prefix,
+        );
 
-    // Call the rename operation on in-memory tracks
-    let result = crate::ops::track_ops::rename_track_prefix(
-        &mut app.project.config,
-        &mut app.project.tracks,
-        &track_id,
-        &old_prefix,
-        &new_prefix,
-    );
+        // Call the rename operation on in-memory tracks
+        let result = crate::ops::track_ops::rename_track_prefix(
+            &mut app.project.config,
+            &mut app.project.tracks,
+            &track_id,
+            &old_prefix,
+            &new_prefix,
+        );
 
-    match result {
-        Ok(rename_result) => {
-            // Save config
-            save_config(app);
+        match result {
+            Ok(rename_result) => {
+                // Save config
+                save_config(app);
 
-            // Save the target track
-            app.save_track_logged(&track_id);
+                // Save the target track
+                app.save_track_logged(&track_id);
 
-            // Save all other affected tracks (those with updated dep references)
-            let affected_tracks: Vec<String> = app
-                .project
-                .tracks
-                .iter()
-                .filter(|(tid, track)| tid != &track_id && has_dirty_tasks(track))
-                .map(|(tid, _)| tid.clone())
-                .collect();
-            for tid in &affected_tracks {
-                app.save_track_logged(tid);
+                // Save all other affected tracks (those with updated dep references)
+                let affected_tracks: Vec<String> = app
+                    .project
+                    .tracks
+                    .iter()
+                    .filter(|(tid, track)| tid != &track_id && has_dirty_tasks(track))
+                    .map(|(tid, _)| tid.clone())
+                    .collect();
+                for tid in &affected_tracks {
+                    app.save_track_logged(tid);
+                }
+
+                // Push sync marker (no undo for prefix rename)
+                app.undo_stack.push_sync_marker();
+
+                app.status_message = Some(format!(
+                    "renamed {} \u{2192} {}: {} tasks, {} deps across {} tracks",
+                    old_prefix,
+                    new_prefix,
+                    rename_result.tasks_renamed,
+                    rename_result.deps_updated,
+                    rename_result.tracks_affected,
+                ));
             }
-
-            // Push sync marker (no undo for prefix rename)
-            app.undo_stack.push_sync_marker();
-
-            app.status_message = Some(format!(
-                "renamed {} \u{2192} {}: {} tasks, {} deps across {} tracks",
-                old_prefix,
-                new_prefix,
-                rename_result.tasks_renamed,
-                rename_result.deps_updated,
-                rename_result.tracks_affected,
-            ));
+            Err(e) => {
+                app.status_message = Some(format!("prefix rename failed: {}", e));
+                app.status_is_error = true;
+            }
         }
-        Err(e) => {
-            app.status_message = Some(format!("prefix rename failed: {}", e));
-            app.status_is_error = true;
-        }
-    }
+    });
 }
 
 /// Check if any task in a track has the dirty flag set

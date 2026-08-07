@@ -967,6 +967,10 @@ pub enum FlatItem {
 pub enum SaveTarget {
     Track(String),
     Inbox,
+    /// `project.toml`. Unlike the other two it is never merged — see
+    /// [`App::save_config_logged`] — but it fails, retries, is announced and is
+    /// rescued at exit on exactly the same terms.
+    Config,
 }
 
 /// What the exit dump managed to copy into `frame/.rescue/`, and what it did
@@ -999,6 +1003,7 @@ impl SaveTarget {
         match self {
             SaveTarget::Track(id) => format!("track {id}"),
             SaveTarget::Inbox => "inbox".to_string(),
+            SaveTarget::Config => "project config".to_string(),
         }
     }
 }
@@ -1252,6 +1257,13 @@ pub struct App {
     /// parsed only when a merge actually runs, so the ordinary case costs one
     /// `String` per track and no parse.
     pub baselines: HashMap<SaveTarget, String>,
+    /// True while [`App::with_project_lock`] is holding the project lock.
+    ///
+    /// `FileLock` is not re-entrant — it is an `flock` on a second open file
+    /// description, so a nested acquire blocks against this very session and
+    /// then times out. The saves inside a whole-project change read this and
+    /// write under the lock already held instead of trying to take their own.
+    lock_held: bool,
     /// Detail view state
     pub detail_state: Option<DetailState>,
     /// Stack of (track_id, task_id) for parent breadcrumbs when drilling into subtasks
@@ -1528,6 +1540,7 @@ impl App {
                 visible_columns: 3,
                 column_pins: Vec::new(),
             },
+            lock_held: false,
         };
 
         // What was just loaded is, by definition, what is on disk — the common
@@ -2846,6 +2859,8 @@ impl App {
                 .inbox
                 .as_ref()
                 .map(crate::parse::serialize_inbox),
+            // The config is never merged, so it has no ancestor to keep.
+            SaveTarget::Config => None,
         };
         if let Some(text) = text {
             self.baselines.insert(target, text);
@@ -2942,6 +2957,9 @@ impl App {
                     .inbox
                     .as_ref()
                     .map(|i| ("inbox.md".to_string(), crate::parse::serialize_inbox(i))),
+                SaveTarget::Config => toml::to_string_pretty(&self.project.config)
+                    .ok()
+                    .map(|text| ("project.toml".to_string(), text)),
             };
             // No in-memory copy to write is still a file with no rescue — the
             // old code skipped these silently, which is the same misreport.
@@ -3001,6 +3019,7 @@ impl App {
     fn display_name(&self, target: &SaveTarget) -> String {
         match target {
             SaveTarget::Inbox => "inbox.md".to_string(),
+            SaveTarget::Config => "project.toml".to_string(),
             SaveTarget::Track(id) => self
                 .track_file(id)
                 .and_then(|f| f.rsplit('/').next().map(str::to_string))
@@ -3080,6 +3099,7 @@ impl App {
                     self.save_track_locked(&id)
                 }
                 SaveTarget::Inbox => self.save_inbox_locked(),
+                SaveTarget::Config => self.save_config_locked(),
             };
             match result {
                 Ok(()) => self.clear_save_failure(&target),
@@ -3126,9 +3146,85 @@ impl App {
         }
     }
 
+    /// Write `project.toml`. **Assumes the project lock is held.**
+    fn save_config_locked(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        crate::io::config_io::write_config_from_struct(
+            &self.project.frame_dir,
+            &self.project.config,
+        )?;
+        self.last_save_at = Some(Instant::now());
+        Ok(())
+    }
+
+    /// Write `project.toml`, recording any failure.
+    ///
+    /// The config is not merged the way a track or the inbox is — there is no
+    /// three-way merge for TOML here, so under the lock it is last writer wins.
+    /// What the lock buys is that the write cannot land in the middle of
+    /// another process's read-modify-write, and that a config write paired with
+    /// a file move ([`Self::with_project_lock`]) is one step rather than two.
+    pub fn save_config_logged(&mut self) {
+        if self.lock_held {
+            match self.save_config_locked() {
+                Ok(()) => self.clear_save_failure(&SaveTarget::Config),
+                Err(e) => self.record_save_failure(SaveTarget::Config, &e),
+            }
+            return;
+        }
+        match FileLock::acquire_default(&self.project.frame_dir) {
+            Ok(_lock) => match self.save_config_locked() {
+                Ok(()) => self.clear_save_failure(&SaveTarget::Config),
+                Err(e) => self.record_save_failure(SaveTarget::Config, &e),
+            },
+            Err(e) => self.record_save_failure(SaveTarget::Config, &e),
+        }
+    }
+
+    /// Hold the project lock across a change that is not one file's worth.
+    ///
+    /// Archiving a track writes `project.toml` and moves the track file;
+    /// deleting one unlinks a file and rewrites the config; undoing either does
+    /// both in reverse. The TUI did all of that with **no lock at all**, so
+    /// another `fr` holding the lock — having already read the project it is
+    /// about to write back — could have a track archived out from under it and
+    /// then recreate the file it had loaded. P8 found exactly that: the same
+    /// tasks in `tracks/main.md` and `archive/_tracks/main.md`, every id twice.
+    ///
+    /// Returns false when the lock could not be taken, in which case `f` never
+    /// ran and nothing changed — for these operations that is the only safe
+    /// answer. There is no half of "archive this track" worth keeping, and
+    /// unlike a track save there is nothing for the retry machinery to hold: an
+    /// unlinked file cannot wait in memory for a later attempt.
+    ///
+    /// Saves inside `f` write under this lock rather than taking their own; see
+    /// [`Self::lock_held`].
+    pub fn with_project_lock(&mut self, f: impl FnOnce(&mut Self)) -> bool {
+        let lock = match FileLock::acquire_default(&self.project.frame_dir) {
+            Ok(lock) => lock,
+            Err(_) => {
+                self.status_message =
+                    Some("another frame process is writing — nothing was changed".into());
+                self.status_is_error = true;
+                return false;
+            }
+        };
+        self.lock_held = true;
+        f(self);
+        self.lock_held = false;
+        drop(lock);
+        true
+    }
+
     /// Save one track, recording any failure.
     pub fn save_track_logged(&mut self, track_id: &str) {
         let target = SaveTarget::Track(track_id.to_string());
+        if self.lock_held {
+            match self.save_track_locked(track_id) {
+                Ok(()) => self.clear_save_failure(&target),
+                Err(e) => self.record_save_failure(target, &e),
+            }
+            return;
+        }
         match FileLock::acquire_default(&self.project.frame_dir) {
             Ok(_lock) => match self.save_track_locked(track_id) {
                 Ok(()) => self.clear_save_failure(&target),
@@ -3140,6 +3236,13 @@ impl App {
 
     /// Save the inbox, recording any failure.
     pub fn save_inbox_logged(&mut self) {
+        if self.lock_held {
+            match self.save_inbox_locked() {
+                Ok(()) => self.clear_save_failure(&SaveTarget::Inbox),
+                Err(e) => self.record_save_failure(SaveTarget::Inbox, &e),
+            }
+            return;
+        }
         match FileLock::acquire_default(&self.project.frame_dir) {
             Ok(_lock) => match self.save_inbox_locked() {
                 Ok(()) => self.clear_save_failure(&SaveTarget::Inbox),
