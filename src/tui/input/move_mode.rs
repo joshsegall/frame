@@ -203,13 +203,10 @@ pub(super) fn handle_move(app: &mut App, key: KeyEvent) {
                                         );
 
                                         // Update dep references across all tracks
-                                        for (old_id, new_mapped_id) in &id_mappings {
-                                            task_ops::update_dep_references(
-                                                &mut app.project.tracks,
-                                                old_id,
-                                                new_mapped_id,
-                                            );
-                                        }
+                                        task_ops::apply_id_map_to_deps(
+                                            &mut app.project.tracks,
+                                            &id_mappings,
+                                        );
 
                                         app.save_track_logged(&track_id);
                                         // Save other tracks that may have had deps updated

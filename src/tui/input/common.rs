@@ -502,6 +502,20 @@ pub(super) fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo
                     }
                 }
             }
+            // Any track the reversal's dep rewrite touched, beyond the ones the
+            // arms above named. A cross-track move renames a task, so a third
+            // track holding a `dep:` on it is edited by the undo as surely as
+            // by the move — and the `CrossTrackMove` arm names only the source
+            // and the target, so that edit stayed in memory. The forward path
+            // has the same guard, for the same reason.
+            for (id, track) in &app.project.tracks {
+                if id != track_id
+                    && !extra_tracks.contains(id)
+                    && crate::ops::task_ops::track_has_dirty_task(track)
+                {
+                    extra_tracks.push(id.clone());
+                }
+            }
             for other in &extra_tracks {
                 app.save_track_logged(other);
             }

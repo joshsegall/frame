@@ -2472,19 +2472,27 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
             (right, left)
         };
 
-        let new_id = task_ops::move_task_to_track(
+        let moved = task_ops::move_task_to_track(
             source_track,
             target_track,
             &args.id,
             position,
             Mint::new(&frame_dir, target_track_id, &target_prefix, token.as_ref()),
-            &mut [], // dep references are rewritten across all tracks below
         )?;
+        let new_id = moved.new_root_id;
 
-        // Rewrite dep references to the moved task across ALL tracks (the same
-        // routine the TUI path uses), now that the source/target borrows have
-        // released. This also covers dependents in the source and target tracks.
-        task_ops::update_dep_references(&mut project.tracks, &args.id, &new_id);
+        // Rewrite dep references across ALL tracks, now that the source/target
+        // borrows have released — which is why the move hands the map back
+        // rather than doing this itself. This also covers dependents in the
+        // source and target tracks, and inside the moved subtree.
+        //
+        // **The whole map, not just the root.** A move renumbers every
+        // descendant too, so a dep on a moved subtask points at an id that no
+        // longer exists — including a dep from a sibling that travelled in the
+        // same subtree. `fr check` reports those and `fr check --fix` will not
+        // repair them, on the grounds that dropping a dep discards intent, so
+        // getting it right here is the only chance there is.
+        task_ops::apply_id_map_to_deps(&mut project.tracks, &moved.id_mappings);
 
         // **Target first, then source.** A cross-track move is two writes, and
         // whichever runs first decides what an interruption between them leaves

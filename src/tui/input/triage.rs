@@ -14,6 +14,36 @@ use crate::tui::undo::Operation;
 
 use super::*;
 
+/// Write out every track a cross-track move's dep rewrite touched, beyond the
+/// two the move itself wrote.
+///
+/// A move renames a task, so any track holding a `dep:` on it is edited too —
+/// and the TUI wrote only the source and the target. The rewrite lived in
+/// memory and reached disk only if something else happened to save that track
+/// later; on the next reload the dep pointed at the retired id and `fr check`
+/// called it dangling. The CLI has always done this (`cmd_mv`), and
+/// `task_ops::track_has_dirty_task` was written for it — its doc comment names
+/// this exact case. Only the TUI never called it.
+///
+/// Runs **after** the in-flight marker commits, for the CLI's stated reason:
+/// the move itself is already durable once source and target are written, so a
+/// failure here leaves a recoverable dangling dep rather than a half-moved
+/// task, and it has no business inside the two-file window.
+fn save_tracks_with_rewritten_deps(app: &mut App, already_saved: &[&str]) {
+    let touched: Vec<String> = app
+        .project
+        .tracks
+        .iter()
+        .filter(|(id, track)| {
+            !already_saved.contains(&id.as_str()) && task_ops::track_has_dirty_task(track)
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in &touched {
+        app.save_track_logged(id);
+    }
+}
+
 /// Add a new inbox item at the bottom and enter EDIT mode for its title.
 pub(super) fn inbox_add_item(app: &mut App) {
     let inbox = match &mut app.project.inbox {
@@ -782,8 +812,12 @@ pub(super) fn execute_cross_track_move(
         }
     };
 
-    // Update dep references across all tracks
-    task_ops::update_dep_references(&mut app.project.tracks, &old_id, &new_id);
+    // Update dep references across all tracks — the descendants too, not just
+    // the root. A dep on a moved subtask points at an id the re-key retired, and
+    // `fr check --fix` deliberately will not repair a dangling dep, so this is
+    // the only chance to keep it.
+    let id_map = task_ops::cross_track_id_map(&old_id, &new_id.to_string(), &subtree_ids);
+    task_ops::apply_id_map_to_deps(&mut app.project.tracks, &id_map);
 
     // Push undo operation
     app.undo_stack.push(Operation::CrossTrackMove {
@@ -825,6 +859,7 @@ pub(super) fn execute_cross_track_move(
     if let Some(marker) = marker {
         marker.commit();
     }
+    save_tracks_with_rewritten_deps(app, &[target_track_id, &source_track_id]);
 
     // Cursor management
     let was_detail = matches!(app.view, View::Detail { .. });
@@ -999,8 +1034,10 @@ pub(super) fn execute_bulk_cross_track_move(
             }
         };
 
-        // Update dep references across all tracks
-        task_ops::update_dep_references(&mut app.project.tracks, &old_id, &new_id);
+        // Update dep references across all tracks, descendants included — see
+        // the single-move path for why the root pair alone is not enough.
+        let id_map = task_ops::cross_track_id_map(&old_id, &new_id.to_string(), &subtree_ids);
+        task_ops::apply_id_map_to_deps(&mut app.project.tracks, &id_map);
 
         moved_pairs.push(crate::io::inflight::MovedTask {
             old_id: old_id.clone(),
@@ -1042,6 +1079,7 @@ pub(super) fn execute_bulk_cross_track_move(
         if let Some(marker) = marker {
             marker.commit();
         }
+        save_tracks_with_rewritten_deps(app, &[target_track_id, &source_track_id]);
 
         let count = ops.len();
         app.undo_stack.push(Operation::Bulk(ops));
@@ -1080,3 +1118,190 @@ pub(super) fn execute_bulk_cross_track_move(
 
 // ---------------------------------------------------------------------------
 // Confirm mode handler
+
+#[cfg(test)]
+mod cross_track_dep_tests {
+    use super::*;
+    use crate::model::config::{
+        CleanConfig, IdConfig, ProjectConfig, ProjectInfo, TrackConfig, UiConfig,
+    };
+    use crate::tui::app::{TriageState, TriageStep};
+
+    const SRC: &str =
+        "# Src\n\n## Backlog\n\n- [ ] `S-001` Parent\n  - [ ] `S-001.1` Child\n\n## Done\n";
+    const TGT: &str = "# Tgt\n\n## Backlog\n\n## Done\n";
+    const OTH: &str =
+        "# Oth\n\n## Backlog\n\n- [ ] `O-001` Dependent\n  - dep: S-001.1\n\n## Done\n";
+
+    /// Three tracks on disk: the move's source and target, and a third holding
+    /// the only dep — the one the move has to rewrite *and* write out.
+    fn app_with_three_tracks(dir: &std::path::Path) -> App {
+        let frame_dir = dir.join("frame");
+        std::fs::create_dir_all(frame_dir.join("tracks")).unwrap();
+        for (file, body) in [("src.md", SRC), ("tgt.md", TGT), ("oth.md", OTH)] {
+            std::fs::write(frame_dir.join("tracks").join(file), body).unwrap();
+        }
+        std::fs::write(frame_dir.join("inbox.md"), "# Inbox\n").unwrap();
+
+        let track_cfg = |id: &str, prefix: &str| TrackConfig {
+            id: id.into(),
+            name: prefix.into(),
+            state: "active".into(),
+            file: format!("tracks/{id}.md"),
+        };
+        let mut ids = IdConfig::default();
+        for (id, prefix) in [("src", "S"), ("tgt", "T"), ("oth", "O")] {
+            ids.prefixes.insert(id.to_string(), prefix.to_string());
+        }
+        let config = ProjectConfig {
+            project: ProjectInfo {
+                name: "deps".into(),
+            },
+            agent: Default::default(),
+            tracks: vec![
+                track_cfg("src", "S"),
+                track_cfg("tgt", "T"),
+                track_cfg("oth", "O"),
+            ],
+            clean: CleanConfig::default(),
+            ids,
+            ui: UiConfig::default(),
+            recovery: Default::default(),
+        };
+        let project = crate::model::project::Project {
+            root: dir.to_path_buf(),
+            frame_dir,
+            config,
+            tracks: vec![
+                ("src".into(), crate::parse::parse_track(SRC)),
+                ("tgt".into(), crate::parse::parse_track(TGT)),
+                ("oth".into(), crate::parse::parse_track(OTH)),
+            ],
+            inbox: Some(crate::parse::parse_inbox("# Inbox\n").0),
+        };
+        App::new(project)
+    }
+
+    fn begin_move(app: &mut App) {
+        app.triage_state = Some(TriageState {
+            source: TriageSource::CrossTrackMove {
+                source_track_id: "src".into(),
+                task_id: "S-001".into(),
+                section: SectionKind::Backlog,
+            },
+            step: TriageStep::SelectTrack,
+            popup_anchor: None,
+            position_cursor: 0,
+        });
+    }
+
+    /// The id the move minted for the child, read back rather than assumed —
+    /// this clone resolves an actor token, so the new ids carry it.
+    fn moved_child_id(app: &App) -> String {
+        let (_, tgt) = app
+            .project
+            .tracks
+            .iter()
+            .find(|(id, _)| id == "tgt")
+            .expect("target track");
+        let parent = tgt
+            .section_tasks(SectionKind::Backlog)
+            .first()
+            .expect("the moved parent");
+        parent.subtasks[0]
+            .id
+            .as_deref()
+            .expect("the moved child has an id")
+            .to_string()
+    }
+
+    /// The TUI's cross-track move, on the two counts it got wrong at once.
+    ///
+    /// **The dep is on a descendant**, so rewriting only the root rename left
+    /// it pointing at the retired `S-001.1`. **The dependent is in a third
+    /// track**, which the TUI never saved — it wrote source and target and
+    /// nothing else, so even the root rewrite stayed in memory and the next
+    /// reload turned it into a dangling dep. Reading the file off disk rather
+    /// than the in-memory track is what makes the second half of that visible.
+    #[test]
+    fn a_cross_track_move_rewrites_and_saves_a_third_tracks_dep() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_with_three_tracks(tmp.path());
+        let oth_path = app.project.frame_dir.join("tracks/oth.md");
+
+        begin_move(&mut app);
+        execute_cross_track_move(&mut app, "tgt", InsertPosition::Bottom);
+
+        let child = moved_child_id(&app);
+        assert!(child.starts_with("T-"), "the child was re-keyed: {child}");
+
+        let on_disk = std::fs::read_to_string(&oth_path).unwrap();
+        assert!(
+            on_disk.contains(&format!("dep: {child}")),
+            "the third track's dep must be rewritten *and reach disk*: {on_disk}"
+        );
+        assert!(
+            !on_disk.contains("S-001"),
+            "a retired id survived on disk: {on_disk}"
+        );
+    }
+
+    /// The bulk path is a separate loop over the same steps, and had the same
+    /// two holes. One selected task carries the subtree; the dep is on its
+    /// child and lives in the third track.
+    #[test]
+    fn a_bulk_cross_track_move_rewrites_and_saves_a_third_tracks_dep() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_with_three_tracks(tmp.path());
+        let oth_path = app.project.frame_dir.join("tracks/oth.md");
+
+        app.selection.insert("S-001".to_string());
+        app.triage_state = Some(TriageState {
+            source: TriageSource::BulkCrossTrackMove {
+                source_track_id: "src".into(),
+            },
+            step: TriageStep::SelectTrack,
+            popup_anchor: None,
+            position_cursor: 0,
+        });
+        execute_bulk_cross_track_move(&mut app, "tgt", InsertPosition::Bottom);
+
+        let child = moved_child_id(&app);
+        let on_disk = std::fs::read_to_string(&oth_path).unwrap();
+        assert!(
+            on_disk.contains(&format!("dep: {child}")),
+            "bulk move: the third track's dep must be rewritten and saved: {on_disk}"
+        );
+    }
+
+    /// Undo restores the dep in the third track too, and writes it back out.
+    /// The undo arm reversed only the root rename and saved only source and
+    /// target, so both halves of the forward fix need their counterpart here.
+    #[test]
+    fn undoing_a_cross_track_move_restores_a_third_tracks_dep() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_with_three_tracks(tmp.path());
+        let oth_path = app.project.frame_dir.join("tracks/oth.md");
+
+        begin_move(&mut app);
+        execute_cross_track_move(&mut app, "tgt", InsertPosition::Bottom);
+        let child = moved_child_id(&app);
+        assert!(
+            std::fs::read_to_string(&oth_path)
+                .unwrap()
+                .contains(&format!("dep: {child}"))
+        );
+
+        perform_undo(&mut app);
+
+        let on_disk = std::fs::read_to_string(&oth_path).unwrap();
+        assert!(
+            on_disk.contains("dep: S-001.1"),
+            "undo must put the dep back on disk: {on_disk}"
+        );
+        assert!(
+            !on_disk.contains(&child),
+            "the id the move assigned is gone again: {on_disk}"
+        );
+    }
+}

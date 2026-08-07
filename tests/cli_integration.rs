@@ -4249,6 +4249,99 @@ fn test_mv_cross_track_updates_dep_reference() {
     assert!(gamma.contains("`C-001`"), "gamma: {gamma}");
 }
 
+/// Give `A-005` a subtree, and point a dep at one of its children from each of
+/// the three places a dep can live relative to a cross-track move.
+fn create_subtree_dep_project(root: &Path) {
+    create_dep_project(root);
+    let frame_dir = root.join("frame");
+
+    // `A-001` is in the track the subtree leaves; `A-005.2` is a sibling that
+    // travels inside the subtree alongside the task it depends on.
+    fs::write(
+        frame_dir.join("tracks/alpha.md"),
+        "\
+# Alpha
+
+## Backlog
+
+- [ ] `A-001` Same-track dependent
+  - added: 2025-05-01
+  - dep: A-005.1
+- [ ] `A-005` Movable parent
+  - added: 2025-05-02
+  - [ ] `A-005.1` Movable child
+    - added: 2025-05-02
+  - [ ] `A-005.2` Movable sibling
+    - added: 2025-05-02
+    - dep: A-005.1
+
+## Done
+",
+    )
+    .unwrap();
+
+    fs::write(
+        frame_dir.join("tracks/beta.md"),
+        "\
+# Beta
+
+## Backlog
+
+- [ ] `B-001` Other-track dependent
+  - added: 2025-05-01
+  - dep: A-005.1
+
+## Done
+",
+    )
+    .unwrap();
+}
+
+/// A cross-track move renumbers the whole subtree, so a dep on a *descendant*
+/// has to follow it. It did not: the move rewrote the root rename and nothing
+/// else, and left three dangling deps behind — one per position a dep can hold.
+///
+/// The third is the one with no defence: `A-005.2` depends on its own sibling
+/// `A-005.1`, and both move together in the one operation.
+///
+/// End-to-end through `fr check` rather than by reading the files alone,
+/// because `check` is what reported the damage before and `fr check --fix`
+/// deliberately will not repair a dangling dep — dropping one discards intent.
+/// Getting it right during the move is the only chance there is.
+#[test]
+fn test_mv_cross_track_rewrites_deps_on_moved_descendants() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_subtree_dep_project(tmp.path());
+
+    // Nothing is dangling to begin with, or the check below proves nothing.
+    let (before, _, ok) = run_fr(tmp.path(), &["check"]);
+    assert!(ok, "fixture starts clean: {before}");
+    assert!(!before.contains("dangling dep"), "fixture: {before}");
+
+    let out = run_fr_ok(tmp.path(), &["mv", "A-005", "--track", "gamma"]);
+    assert!(out.contains("A-005 → C-001"), "out: {out}");
+
+    // 1. Another track.
+    let beta = fs::read_to_string(tmp.path().join("frame/tracks/beta.md")).unwrap();
+    assert!(beta.contains("dep: C-001.1"), "beta: {beta}");
+    // 2. The track the subtree left.
+    let alpha = fs::read_to_string(tmp.path().join("frame/tracks/alpha.md")).unwrap();
+    assert!(alpha.contains("dep: C-001.1"), "alpha: {alpha}");
+    // 3. Inside the moved subtree itself.
+    let gamma = fs::read_to_string(tmp.path().join("frame/tracks/gamma.md")).unwrap();
+    assert!(gamma.contains("`C-001.1`"), "gamma: {gamma}");
+    assert!(gamma.contains("dep: C-001.1"), "gamma: {gamma}");
+
+    assert!(
+        !alpha.contains("A-005") && !beta.contains("A-005") && !gamma.contains("A-005"),
+        "a retired id survived somewhere:\nalpha: {alpha}\nbeta: {beta}\ngamma: {gamma}"
+    );
+
+    let (after, _, ok) = run_fr(tmp.path(), &["check"]);
+    assert!(ok, "check should pass after the move: {after}");
+    assert!(!after.contains("dangling dep"), "after: {after}");
+}
+
 #[test]
 fn test_mv_cross_track_updates_dep_in_movers_namespace() {
     // The dependent is rewritten to the fully tokened new id when a tokened clone

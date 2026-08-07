@@ -1068,8 +1068,12 @@ fn apply_inverse(
                 source_tasks.insert(idx, task);
             }
 
-            // Update dep references back
-            task_ops::update_dep_references(tracks, task_id_new, task_id_old);
+            // Update dep references back — the whole map inverted, matching
+            // what the forward move rewrote. Reversing only the root would
+            // leave every dep on a moved descendant pointing at the id the
+            // move assigned, which undo has just taken away again.
+            let forward = task_ops::cross_track_id_map(task_id_old, task_id_new, subtree_ids);
+            task_ops::apply_id_map_to_deps(tracks, &task_ops::inverted_id_map(&forward));
             None // Both tracks saved by caller
         }
         Operation::Reparent {
@@ -1105,9 +1109,7 @@ fn apply_inverse(
             );
 
             // Reverse dep references across all tracks
-            for (old_id, new_id) in id_mappings {
-                task_ops::update_dep_references(tracks, new_id, old_id);
-            }
+            task_ops::apply_id_map_to_deps(tracks, &task_ops::inverted_id_map(id_mappings));
 
             Some(track_id.clone())
         }
@@ -1520,8 +1522,10 @@ fn apply_forward(
             let idx = (*target_index).min(target_tasks.len());
             target_tasks.insert(idx, task);
 
-            // Update dep references
-            task_ops::update_dep_references(tracks, task_id_old, task_id_new);
+            // Update dep references — the same whole map the forward move
+            // applied, root and descendants.
+            let forward = task_ops::cross_track_id_map(task_id_old, task_id_new, subtree_ids);
+            task_ops::apply_id_map_to_deps(tracks, &forward);
             None // Both tracks saved by caller
         }
         Operation::Reparent {
@@ -1568,9 +1572,7 @@ fn apply_forward(
             );
 
             // Update dep references forward
-            for (old_id, new_id) in id_mappings {
-                task_ops::update_dep_references(tracks, old_id, new_id);
-            }
+            task_ops::apply_id_map_to_deps(tracks, id_mappings);
 
             Some(track_id.clone())
         }
@@ -2226,6 +2228,86 @@ mod tests {
             "undo restores the ids the tasks had, not a fresh sequence"
         );
         assert_eq!(back.subtasks[1].title, "Second");
+    }
+
+    /// Undo and redo carry the *whole* rekey map, not just the root pair.
+    ///
+    /// The forward move rewrites every dep pointing into the moved subtree. An
+    /// undo that reverses only the root leaves each of those on the id the move
+    /// assigned — which undo has just taken away again — so a round trip that
+    /// is supposed to restore the project byte for byte instead manufactures a
+    /// dangling dep. A third track holds the dependent, so this also pins that
+    /// the rewrite reaches tracks the move itself never touched.
+    #[test]
+    fn cross_track_move_undo_and_redo_carry_deps_on_descendants() {
+        let src = parse_track(
+            "# Src\n\n## Backlog\n\n- [ ] `S-007` Parent\n  - [ ] `S-007.1` Child\n\n## Done\n",
+        );
+        let tgt = parse_track("# Tgt\n\n## Backlog\n\n## Done\n");
+        let other = parse_track(
+            "# Oth\n\n## Backlog\n\n- [ ] `O-001` Dependent\n  - dep: S-007.1\n\n## Done\n",
+        );
+        let mut tracks = vec![
+            ("src".to_string(), src),
+            ("tgt".to_string(), tgt),
+            ("oth".to_string(), other),
+        ];
+
+        let dep_of = |tracks: &Vec<(String, Track)>| -> String {
+            let task = task_ops::find_task_in_track(&tracks[2].1, "O-001").unwrap();
+            task.metadata
+                .iter()
+                .find_map(|m| match m {
+                    Metadata::Dep(d) => d.first().cloned(),
+                    _ => None,
+                })
+                .expect("O-001 has a dep")
+        };
+
+        // The forward move, as the TUI performs it.
+        let (mut task, _) = task_ops::remove_task_subtree(&mut tracks[0].1, "S-007").unwrap();
+        let subtree_ids: Vec<(String, String)> = task_ops::subtree_ids(&task)
+            .into_iter()
+            .zip(["T-100.1".to_string()])
+            .collect();
+        task.id = Some("T-100".into());
+        task_ops::set_subtree_ids(&mut task, &["T-100.1".to_string()]);
+        tracks[1]
+            .1
+            .section_tasks_mut(SectionKind::Backlog)
+            .unwrap()
+            .push(task);
+        let forward = task_ops::cross_track_id_map("S-007", "T-100", &subtree_ids);
+        task_ops::apply_id_map_to_deps(&mut tracks, &forward);
+        assert_eq!(dep_of(&tracks), "T-100.1", "the move rewrites the dep");
+
+        let mut stack = UndoStack::new();
+        stack.push(Operation::CrossTrackMove {
+            source_track_id: "src".into(),
+            target_track_id: "tgt".into(),
+            task_id_old: "S-007".into(),
+            task_id_new: "T-100".into(),
+            source_index: 0,
+            target_index: 0,
+            source_parent_id: None,
+            old_depth: 0,
+            section: SectionKind::Backlog,
+            subtree_ids,
+        });
+
+        stack.undo(&mut tracks, None);
+        assert_eq!(
+            dep_of(&tracks),
+            "S-007.1",
+            "undo puts the descendant's dep back"
+        );
+
+        stack.redo(&mut tracks, None);
+        assert_eq!(
+            dep_of(&tracks),
+            "T-100.1",
+            "redo re-applies it to the whole subtree"
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chrono::Local;
 
 use crate::model::task::{Metadata, Task, TaskState};
@@ -572,20 +574,36 @@ pub fn reconcile_task_section(
     Some((from, to))
 }
 
+/// What a cross-track move renamed, so the caller can rewrite what points at it.
+#[derive(Debug, Clone)]
+pub struct CrossTrackMoveResult {
+    /// The moved task's new id.
+    pub new_root_id: String,
+    /// Every `(old, new)` pair the move assigned, root first, then descendants
+    /// in document order. Feed it to [`apply_id_map_to_deps`].
+    pub id_mappings: Vec<(String, String)>,
+}
+
 /// Move a task to a different track. Reassigns the task ID using the target
-/// track's prefix. Updates dependency references across all provided tracks.
+/// track's prefix, **and every descendant's with it**.
 ///
 /// The task is located in whichever section holds it at top level (Backlog,
 /// Parked, or Done) and is inserted into the *same* section in the target, so a
 /// Done task keeps its completed state instead of silently reopening.
+///
+/// Dep rewriting is the caller's, and deliberately so: both source and target
+/// are borrowed mutably here, so the tracks that need rewriting — which include
+/// these two — cannot also be reached. It used to take an `all_tracks` slice for
+/// the purpose and its only caller passed an empty one, doing the rewrite itself
+/// once the borrows released. Returning the map says that outright instead of
+/// offering a parameter that cannot work.
 pub fn move_task_to_track(
     source_track: &mut Track,
     target_track: &mut Track,
     task_id: &str,
     position: InsertPosition,
     target_mint: Mint<'_>,
-    all_tracks_for_dep_update: &mut [(String, Track)],
-) -> Result<String, TaskError> {
+) -> Result<CrossTrackMoveResult, TaskError> {
     let token = target_mint.token();
     // Remove from whichever section holds the task at top level.
     let section = top_level_section(source_track, task_id)
@@ -606,12 +624,12 @@ pub fn move_task_to_track(
     // actors, who are invisible to the scan.
     let next_num = target_mint.next(target_track);
     let new_id = TaskId::with_number(target_mint.prefix(), next_num, token);
-    let old_id = task.id.clone();
-    task.id = Some(new_id.clone());
-    task.mark_dirty();
 
-    // Re-key the subtree into the mover's namespace too.
-    renumber_subtasks(&mut task, &new_id, token);
+    // Re-key the whole subtree into the mover's namespace, keeping what each
+    // descendant was called. `renumber_subtasks` does the same renaming and
+    // reports none of it, which is how a dep on a moved subtask came to be left
+    // pointing at an id the move had just retired.
+    let id_mappings = rekey_subtree(&mut task, new_id.as_str(), token);
 
     // Insert into the same section in the target, creating it if the target
     // track doesn't have it yet (e.g. moving a Done task into a track that has
@@ -622,12 +640,10 @@ pub fn move_task_to_track(
         .ok_or_else(|| TaskError::InvalidPosition("no such section in target".into()))?;
     insert_at(target_tasks, task, &position)?;
 
-    // Update dep references across all tracks
-    if let Some(old) = &old_id {
-        update_dep_references(all_tracks_for_dep_update, old, &new_id);
-    }
-
-    Ok(new_id.to_string())
+    Ok(CrossTrackMoveResult {
+        new_root_id: new_id.to_string(),
+        id_mappings,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -901,6 +917,100 @@ pub fn update_dep_references(tracks: &mut [(String, Track)], old_id: &str, new_i
             }
         }
     }
+}
+
+/// Rewrite every `dep:` reference across `tracks` according to `map`, in **one
+/// pass**.
+///
+/// An operation that renumbers a task renumbers its whole subtree, so what it
+/// has to offer here is a list of pairs, not a pair. Calling
+/// [`update_dep_references`] once per pair looks equivalent and is not: the
+/// second pass sees what the first one wrote, so a map containing `A → B` and
+/// `B → C` — in that order — carries a dep on `A` all the way to `C`. Matching
+/// once against the *pre-image* cannot chain, whatever order the pairs arrive
+/// in. Every caller that loops today is safe only because a freshly minted id
+/// never collides with the id it replaces, which is a property of the mint
+/// rather than of the rewrite, and not one this function should have to assume.
+///
+/// It is also the one pass over the project rather than N of them, which is why
+/// the cross-track move can afford to hand over its entire subtree.
+pub fn apply_id_map_to_deps(tracks: &mut [(String, Track)], map: &[(String, String)]) {
+    let lookup: HashMap<&str, &str> = map
+        .iter()
+        .map(|(old, new)| (old.as_str(), new.as_str()))
+        .collect();
+    if lookup.is_empty() {
+        return;
+    }
+    for (_, track) in tracks.iter_mut() {
+        apply_id_map_to_deps_in_track(track, &lookup);
+    }
+}
+
+/// [`apply_id_map_to_deps`] for a single track, for the callers holding one
+/// track mutably rather than the whole project.
+pub fn apply_id_map_to_deps_in_one_track(track: &mut Track, map: &[(String, String)]) {
+    let lookup: HashMap<&str, &str> = map
+        .iter()
+        .map(|(old, new)| (old.as_str(), new.as_str()))
+        .collect();
+    if lookup.is_empty() {
+        return;
+    }
+    apply_id_map_to_deps_in_track(track, &lookup);
+}
+
+fn apply_id_map_to_deps_in_track(track: &mut Track, lookup: &HashMap<&str, &str>) {
+    fn walk(tasks: &mut [Task], lookup: &HashMap<&str, &str>) {
+        for task in tasks.iter_mut() {
+            let mut changed = false;
+            for m in &mut task.metadata {
+                if let Metadata::Dep(deps) = m {
+                    for dep in deps.iter_mut() {
+                        if let Some(new) = lookup.get(dep.as_str()) {
+                            *dep = (*new).to_string();
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if changed {
+                task.mark_dirty();
+            }
+            walk(&mut task.subtasks, lookup);
+        }
+    }
+    for node in &mut track.nodes {
+        if let TrackNode::Section { tasks, .. } = node {
+            walk(tasks, lookup);
+        }
+    }
+}
+
+/// The inverse of a rekey map, for an undo arm putting the old ids back.
+pub fn inverted_id_map(map: &[(String, String)]) -> Vec<(String, String)> {
+    map.iter()
+        .map(|(old, new)| (new.clone(), old.clone()))
+        .collect()
+}
+
+/// The full rekey map of a cross-track move, assembled the way its undo record
+/// stores the pieces: the root pair, then every descendant pair.
+///
+/// The TUI records the root rename and the descendant renames separately —
+/// `task_id_old`/`task_id_new` and `subtree_ids` — because undo replays them
+/// through different primitives. A dep rewrite wants them as one list, and
+/// wants *all* of it: the root pair alone is what left every dep on a moved
+/// subtask dangling.
+pub fn cross_track_id_map(
+    old_root: &str,
+    new_root: &str,
+    subtree_ids: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut map = Vec::with_capacity(subtree_ids.len() + 1);
+    map.push((old_root.to_string(), new_root.to_string()));
+    map.extend(subtree_ids.iter().cloned());
+    map
 }
 
 /// True if any task (or subtask) in the track is marked dirty. Lets a caller
@@ -1241,12 +1351,11 @@ pub fn reparent_task(
     let section = actual_old_location.section;
     insert_task_subtree(track, task, new_parent_id, section, sibling_index)?;
 
-    // 9. Update dep references across all tracks
-    for (old_id, new_mapped_id) in &id_mappings {
-        update_dep_references(all_tracks, old_id, new_mapped_id);
-        // Also update within the current track (which may not be in all_tracks)
-        update_dep_references_in_track(track, old_id, new_mapped_id);
-    }
+    // 9. Update dep references across all tracks, and within the current track
+    // separately — it is borrowed here, so it may not be reachable in
+    // `all_tracks`.
+    apply_id_map_to_deps(all_tracks, &id_mappings);
+    apply_id_map_to_deps_in_one_track(track, &id_mappings);
 
     Ok(ReparentResult {
         new_root_id: new_id.to_string(),
@@ -2786,6 +2895,124 @@ mod tests {
 
     // --- Cross-track / reparent re-key into the mover's namespace (Phase 4) ---
 
+    /// A dep on a *descendant* of a moved task, in all three places one can be.
+    ///
+    /// The move renumbers the whole subtree but used to report only the root
+    /// rename, so every one of these was left pointing at an id the move had
+    /// just retired. `fr check` called all three dangling and `fr check --fix`
+    /// refuses to repair a dangling dep, so nothing downstream could recover
+    /// them.
+    ///
+    /// The third is the one that settles it: `EFF-001.2` depends on its own
+    /// sibling `EFF-001.1`, and both travel inside the same subtree in the same
+    /// operation. There is no ambiguity to hide behind — the dep and its target
+    /// moved together and it still broke.
+    #[test]
+    fn cross_track_move_rewrites_deps_on_moved_descendants() {
+        let mut source = parse_track(
+            "# Eff\n\n## Backlog\n\n\
+             - [ ] `EFF-001` Parent\n\
+             \x20 - [ ] `EFF-001.1` Child\n\
+             \x20 - [ ] `EFF-001.2` Sibling\n    - dep: EFF-001.1\n\
+             - [ ] `EFF-002` Same-track dependent\n  - dep: EFF-001.1\n\n## Done",
+        );
+        let mut target = parse_track(
+            "# Inf\n\n## Backlog\n\n- [ ] `INF-001` Other-track dependent\n  - dep: EFF-001.1\n\n## Done",
+        );
+
+        let moved = move_task_to_track(
+            &mut source,
+            &mut target,
+            "EFF-001",
+            InsertPosition::Bottom,
+            Mint::scan_only("INF", None),
+        )
+        .unwrap();
+        assert_eq!(moved.new_root_id, "INF-002");
+
+        // The caller applies the map across the project; here that is both
+        // tracks, which is exactly the three positions under test.
+        let mut all = vec![("eff".to_string(), source), ("inf".to_string(), target)];
+        apply_id_map_to_deps(&mut all, &moved.id_mappings);
+
+        let deps_of = |tracks: &[(String, Track)], id: &str| -> Vec<String> {
+            let task = tracks
+                .iter()
+                .find_map(|(_, t)| find_task_in_track(t, id))
+                .unwrap_or_else(|| panic!("{id} should exist"));
+            task_deps_for_test(task)
+        };
+
+        // 1. Another track.
+        assert_eq!(deps_of(&all, "INF-001"), vec!["INF-002.1".to_string()]);
+        // 2. The source track the subtree left behind.
+        assert_eq!(deps_of(&all, "EFF-002"), vec!["INF-002.1".to_string()]);
+        // 3. Inside the moved subtree itself — a sibling that travelled with it.
+        assert_eq!(deps_of(&all, "INF-002.2"), vec!["INF-002.1".to_string()]);
+    }
+
+    /// One pass, so a map cannot rewrite what an earlier pair of its own just
+    /// wrote. Looping `update_dep_references` over these pairs in order takes a
+    /// dep on `A-001` to `B-001` and then on to `C-001`.
+    #[test]
+    fn an_id_map_matches_the_pre_image_and_never_chains() {
+        let mut tracks = vec![(
+            "t".to_string(),
+            parse_track(
+                "# T\n\n## Backlog\n\n- [ ] `T-001` Dependent\n  - dep: A-001, B-001\n\n## Done",
+            ),
+        )];
+        apply_id_map_to_deps(
+            &mut tracks,
+            &[
+                ("A-001".to_string(), "B-001".to_string()),
+                ("B-001".to_string(), "C-001".to_string()),
+            ],
+        );
+        let task = find_task_in_track(&tracks[0].1, "T-001").unwrap();
+        assert_eq!(
+            task_deps_for_test(task),
+            vec!["B-001".to_string(), "C-001".to_string()],
+            "each dep is matched once, against what it was before the map ran"
+        );
+    }
+
+    #[test]
+    fn an_id_map_marks_only_the_tasks_it_changed() {
+        let mut tracks = vec![(
+            "t".to_string(),
+            parse_track(
+                "# T\n\n## Backlog\n\n- [ ] `T-001` Touched\n  - dep: OLD-001\n- [ ] `T-002` Untouched\n  - dep: KEEP-001\n\n## Done",
+            ),
+        )];
+        for (_, track) in tracks.iter_mut() {
+            for node in &mut track.nodes {
+                if let TrackNode::Section { tasks, .. } = node {
+                    for t in tasks.iter_mut() {
+                        t.dirty = false;
+                    }
+                }
+            }
+        }
+        apply_id_map_to_deps(
+            &mut tracks,
+            &[("OLD-001".to_string(), "NEW-001".to_string())],
+        );
+        assert!(find_task_in_track(&tracks[0].1, "T-001").unwrap().dirty);
+        assert!(!find_task_in_track(&tracks[0].1, "T-002").unwrap().dirty);
+    }
+
+    fn task_deps_for_test(task: &Task) -> Vec<String> {
+        task.metadata
+            .iter()
+            .filter_map(|m| match m {
+                Metadata::Dep(d) => Some(d.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
     #[test]
     fn test_cross_track_move_mints_in_movers_namespace() {
         // Actor c moves EFF-a14 (created by a) into INF, which already holds
@@ -2803,17 +3030,17 @@ mod tests {
             ),
         )];
 
-        let new_id = move_task_to_track(
+        let moved = move_task_to_track(
             &mut source,
             &mut target,
             "EFF-a14",
             InsertPosition::Bottom,
             Mint::scan_only("INF", Some(&ns("c"))),
-            &mut others,
         )
         .unwrap();
+        apply_id_map_to_deps(&mut others, &moved.id_mappings);
 
-        assert_eq!(new_id, "INF-c1");
+        assert_eq!(moved.new_root_id, "INF-c1");
         assert!(find_task_in_track(&source, "EFF-a14").is_none());
         assert!(find_task_in_track(&target, "INF-c1").is_some());
         // Dep rewritten to the new id everywhere it appears.
@@ -2834,17 +3061,26 @@ mod tests {
         );
         let mut target = parse_track("# Inf\n\n## Backlog\n\n## Done");
 
-        let new_id = move_task_to_track(
+        let result = move_task_to_track(
             &mut source,
             &mut target,
             "EFF-a14",
             InsertPosition::Bottom,
             Mint::scan_only("INF", Some(&ns("c"))),
-            &mut [],
         )
         .unwrap();
 
-        assert_eq!(new_id, "INF-c1");
+        assert_eq!(result.new_root_id, "INF-c1");
+        // Every rename the move made, root first, then descendants in document
+        // order — this is what a caller rewrites deps from.
+        assert_eq!(
+            result.id_mappings,
+            vec![
+                ("EFF-a14".to_string(), "INF-c1".to_string()),
+                ("EFF-a14.b1".to_string(), "INF-c1.c1".to_string()),
+                ("EFF-a14.b2".to_string(), "INF-c1.c2".to_string()),
+            ]
+        );
         let moved = find_task_in_track(&target, "INF-c1").unwrap();
         assert_eq!(moved.subtasks[0].id.as_deref(), Some("INF-c1.c1"));
         assert_eq!(moved.subtasks[1].id.as_deref(), Some("INF-c1.c2"));
@@ -2861,17 +3097,16 @@ mod tests {
         );
         let mut target = parse_track("# Inf\n\n## Backlog\n\n- [ ] `INF-b1` Existing\n\n## Done");
 
-        let new_id = move_task_to_track(
+        let result = move_task_to_track(
             &mut source,
             &mut target,
             "EFF-b8",
             InsertPosition::Bottom,
             Mint::scan_only("INF", Some(&ns("b"))),
-            &mut [],
         )
         .unwrap();
 
-        assert_eq!(new_id, "INF-b2");
+        assert_eq!(result.new_root_id, "INF-b2");
         assert!(find_task_in_track(&source, "EFF-b8").is_none());
         // Landed in the target's Done section (not the Backlog), still done.
         let moved = target
@@ -2891,17 +3126,16 @@ mod tests {
             parse_track("# Eff\n\n## Backlog\n\n## Parked\n\n- [~] `EFF-b3` Someday\n\n## Done");
         let mut target = parse_track("# Inf\n\n## Backlog\n\n## Done");
 
-        let new_id = move_task_to_track(
+        let result = move_task_to_track(
             &mut source,
             &mut target,
             "EFF-b3",
             InsertPosition::Bottom,
             Mint::scan_only("INF", Some(&ns("b"))),
-            &mut [],
         )
         .unwrap();
 
-        assert_eq!(new_id, "INF-b1");
+        assert_eq!(result.new_root_id, "INF-b1");
         let moved = target
             .section_tasks(SectionKind::Parked)
             .iter()

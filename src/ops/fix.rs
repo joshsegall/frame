@@ -757,9 +757,7 @@ fn apply_renumber_subtask(
     // otherwise become the very defect being repaired.
     let mappings = task_ops::rekey_subtree(task, new_id.as_str(), token.as_ref());
 
-    for (old, new) in &mappings {
-        task_ops::update_dep_references(&mut project.tracks, old, new);
-    }
+    task_ops::apply_id_map_to_deps(&mut project.tracks, &mappings);
 
     Ok(project
         .tracks
