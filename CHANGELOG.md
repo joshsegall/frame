@@ -5,6 +5,34 @@ All notable changes to frame will be documented in this file.
 ## Unreleased
 
 ### Added
+
+- **The recovery log is now shared by every git worktree of a clone**, at `<git-common-dir>/frame-recovery.log`. Outside git it stays at `frame/.recovery.log`, where there are no worktrees to coordinate with.
+
+  Two reasons, and the second is the sharper one. A per-worktree log is *invisible* from the worktree next door, so an entry written by one working tree reads as never written from another — that is a real diagnosis that happened, and it concluded frame had failed to record a discarded merge side that it had in fact recorded. And a per-worktree log is *ephemeral*: `git worktree remove` deletes gitignored files silently, with exit 0 and no prompt, so the log holding the only copy of something sits in a directory git will delete on request.
+
+  Same mechanism as the ID frontier and the shared actor token. Nothing under `.git/` can be committed, so this needs no `.gitignore` change.
+
+  **Every entry now carries `Origin:`**, the absolute frame directory it was written from — `Target: tracks/main.md` identifies nothing once one log serves several working copies. A log left in a working copy by an older frame is read alongside the shared one immediately and moved into it on the next write, merged by timestamp.
+
+- **`fr recovery` says how much it is hiding, and can find one entry.** A truncated listing ends with `showing 10 of 18 — see all with 'fr recovery --limit 18'`; a complete one still says nothing. `--for <ID>` shows only the entries naming one task, with no default limit, and also accepts the RFC 3339 timestamp a `conflict:` marker carries — which `doc/format.md` has always documented as identifying the entry, and which nothing until now could follow. `--here` narrows a shared log to the current working tree.
+
+- **`[recovery]` in `project.toml`** — `max_size` (default `"5MB"`, up from a hard-coded 1MB), `prune_age_days` (default 30, also the default cutoff for `fr recovery prune`), and `path` to override where the log lives. `FRAME_RECOVERY_LOG` overrides `path` for one machine.
+
+  Worth knowing what these do: **size triggers housekeeping, age decides what goes.** Outgrowing `max_size` is only what makes frame consider trimming, and nothing younger than `prune_age_days` is removed — so a log full of recent entries grows past its limit and loses nothing. To keep entries longer, raise `prune_age_days`, not `max_size`.
+
+- **`fr check` reports unclaimed rescue copies.** `frame/.rescue/` holds work the TUI could not save; the exit message named it once and nothing mentioned it again. A warning, with no `--fix`: moving a copy into place overwrites a live file that may be newer, and deleting it destroys the only copy of that work.
+
+### Changed
+
+- **`fr check` looks for the conflict evidence before pointing at it.** It used to tell every reader "their version is in the recovery log" for any task carrying a `conflict:` marker. The marker is committed and travels to every clone; the log does not — so a marker pulled from someone else's merge, or read after `fr recovery prune`, pointed at an entry that working copy never had. It now checks, and either names the lookup that retrieves it (`fr recovery --for <ID>`) or says plainly that the entry is not here and to recover the other side from version control. `--json` carries the answer as `evidence`.
+
+- **`fr merge` names the log it wrote to, by absolute path**, and warns loudly when it could not write one at all — the two are now mutually exclusive, so the reader is never sent to read something that was not written. It also locates the project from the file being merged rather than from the working directory, and declines to log into a project that does not hold that file: merging files kept elsewhere used to file the discarded side under whatever unrelated project sat above the current directory.
+
+- **`fr check`'s recovery-log summary names the log**, which is no longer a location the reader can assume.
+
+- **`--json` shape**: `unresolved_merge_conflict` gains `evidence`; the `recovery_log` info entry gains `path`.
+
+### Added
 - **`fr merge` — a version control merge driver for frame files.** Track files are generated artifacts whose structure carries meaning, and a line-based merge gets one case badly wrong: `fr done` *relocates* a task from `## Backlog` to `## Done`, which git reads as a deletion in one region plus an unrelated insertion. It conflicts, and resolving that by keeping both sides — the obvious move, and the right one when both sides genuinely appended — leaves two tasks holding one ID, one `[ ]` and one `[x]`, in a file that still looks plausible and that `fr show` disagrees with.
 
   Frame merges by **task identity** instead, reusing the same three-way merge the TUI already runs when a save collides with another process. The relocation stops being a conflict at all: it is one task whose section changed. Additions from both sides land, a change to a task the other side did not touch is taken, and subtasks merge independently of their parent. This is sound across branches because IDs cannot collide across them — actor tokens namespace mints per working copy, and the ID frontier is shared by every worktree of a clone.
