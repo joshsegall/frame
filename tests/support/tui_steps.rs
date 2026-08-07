@@ -507,7 +507,11 @@ pub fn apply_step(app: &mut App, step: &Step) -> bool {
             app.inbox_cursor = step.target % count;
         }
         Surface::Tracks => {
-            let count = app.project.config.tracks.len();
+            // Against the list the cursor actually indexes, not `config.tracks`.
+            // A row whose state is none of active/shelved/archived is not in the
+            // tracks view at all, so taking the modulo over the config would let
+            // the cursor point past the last row there is.
+            let count = app.tracks_view_order().len();
             if count == 0 {
                 return false;
             }

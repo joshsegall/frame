@@ -1626,6 +1626,55 @@ impl App {
             .unwrap_or(track_id)
     }
 
+    /// The tracks view's flat order: every active track, then every shelved
+    /// one, then every archived one, each group in `project.toml` order.
+    ///
+    /// **This is what `tracks_cursor` indexes**, and it is emphatically not
+    /// `config.tracks` order — those two coincide only while every track is
+    /// active, which is exactly long enough for a caller to convince itself
+    /// they are the same thing. Archiving one track shifts every row below it.
+    ///
+    /// It is public because the property suites drive the tracks view by
+    /// cursor index and have to name a track in the same coordinates the
+    /// action will resolve it in. `tests/concurrency.rs` steered P8 away from
+    /// the CLI's tracks by filtering `config.tracks` and indexing *that*, so a
+    /// schedule that archived a track first sent the next step one row past
+    /// where it meant to go — and shelved the one track the steering existed
+    /// to protect. The suite reported it as frame losing the CLI's track. One
+    /// list, asked rather than re-derived, is what stops that recurring.
+    ///
+    /// `render::tracks_view` walks the same three groups but keeps them apart:
+    /// it prints a heading between them, and an in-progress new-track edit
+    /// inserts a row that belongs to no track at all. It therefore builds its
+    /// own flat index and must keep agreeing with this — the grouping and its
+    /// order are the shared contract.
+    pub fn tracks_view_order(&self) -> Vec<&str> {
+        let mut ordered = Vec::with_capacity(self.project.config.tracks.len());
+        for want in ["active", "shelved", "archived"] {
+            for tc in &self.project.config.tracks {
+                if tc.state == want {
+                    ordered.push(tc.id.as_str());
+                }
+            }
+        }
+        ordered
+    }
+
+    /// The track at `tracks_cursor`, or `None` when the cursor is past the end.
+    pub fn track_at_tracks_cursor(&self) -> Option<&str> {
+        self.tracks_view_order().get(self.tracks_cursor).copied()
+    }
+
+    /// Where `track_id` sits in [`tracks_view_order`], for putting the cursor
+    /// back on a track after an operation moved it between groups.
+    ///
+    /// [`tracks_view_order`]: Self::tracks_view_order
+    pub fn tracks_view_position(&self, track_id: &str) -> Option<usize> {
+        self.tracks_view_order()
+            .iter()
+            .position(|id| *id == track_id)
+    }
+
     /// Count inbox items
     pub fn inbox_count(&self) -> usize {
         self.project

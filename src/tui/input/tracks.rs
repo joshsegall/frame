@@ -3,56 +3,18 @@ use crate::tui::undo::Operation;
 
 use super::*;
 
-/// Find the cursor position for a track ID in the tracks view (flat order: active, shelved, archived)
+/// Find the cursor position for a track ID in the tracks view.
+///
+/// Both this and [`tracks_cursor_track_id`] are thin wrappers over
+/// [`App::tracks_view_order`], which owns the flat order — see its docs for
+/// why that ordering lives in one place.
 pub(super) fn tracks_find_cursor_pos(app: &App, target_id: &str) -> Option<usize> {
-    let mut idx = 0;
-    for tc in &app.project.config.tracks {
-        if tc.state == "active" {
-            if tc.id == target_id {
-                return Some(idx);
-            }
-            idx += 1;
-        }
-    }
-    for tc in &app.project.config.tracks {
-        if tc.state == "shelved" {
-            if tc.id == target_id {
-                return Some(idx);
-            }
-            idx += 1;
-        }
-    }
-    for tc in &app.project.config.tracks {
-        if tc.state == "archived" {
-            if tc.id == target_id {
-                return Some(idx);
-            }
-            idx += 1;
-        }
-    }
-    None
+    app.tracks_view_position(target_id)
 }
 
 /// Map the tracks_cursor to the track ID at that position.
-/// The flat order is: active tracks, then shelved, then archived.
 pub(super) fn tracks_cursor_track_id(app: &App) -> Option<String> {
-    let mut ordered: Vec<&str> = Vec::new();
-    for tc in &app.project.config.tracks {
-        if tc.state == "active" {
-            ordered.push(&tc.id);
-        }
-    }
-    for tc in &app.project.config.tracks {
-        if tc.state == "shelved" {
-            ordered.push(&tc.id);
-        }
-    }
-    for tc in &app.project.config.tracks {
-        if tc.state == "archived" {
-            ordered.push(&tc.id);
-        }
-    }
-    ordered.get(app.tracks_cursor).map(|s| s.to_string())
+    app.track_at_tracks_cursor().map(|s| s.to_string())
 }
 
 // ---------------------------------------------------------------------------

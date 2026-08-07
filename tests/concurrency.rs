@@ -739,13 +739,22 @@ fn steer(app: &App, step: &Step, cli: &Cli) -> Option<Step> {
             // archives a track the CLI just created makes C5 *ambiguous*, not
             // false, exactly as two writers on one task make C1 ambiguous.
             // Steering keeps every failure a real one.
+            //
+            // **In the coordinates the action will resolve it in.** `target`
+            // becomes `tracks_cursor`, and that indexes `App::tracks_view_order`
+            // — active, then shelved, then archived — not `config.tracks`.
+            // Filtering `config.tracks` and indexing that got the right answer
+            // only while every track was active: once a step archived one, the
+            // row moved to the end and everything below it shifted up, so
+            // "index 1 among the unclaimed" pointed at the track after the one
+            // meant, which in the CI seed pinned below was the CLI's own.
+            // Steering aimed at `side` and shelved `clitrack1`, and C5 reported
+            // frame for it.
             let allowed: Vec<usize> = app
-                .project
-                .config
-                .tracks
+                .tracks_view_order()
                 .iter()
                 .enumerate()
-                .filter(|(_, tc)| !cli.tracks_claimed.contains_key(&tc.id))
+                .filter(|(_, id)| !cli.tracks_claimed.contains_key(**id))
                 .map(|(i, _)| i)
                 .collect();
             if allowed.is_empty() {
