@@ -1008,6 +1008,22 @@ impl SaveTarget {
     }
 }
 
+/// What is happening to a track's file as the track leaves memory.
+///
+/// The two differ in one thing: whether writing the file one last time helps or
+/// hurts. See [`App::release_track`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackExit {
+    /// The file is still ours and still in `tracks/` — this session is about to
+    /// archive it. Whatever the track is holding belongs in the copy that
+    /// moves, so it is flushed before it goes.
+    FlushFirst,
+    /// The file is gone, or is no longer ours to write: unlinked by the
+    /// operation in progress, or moved by somebody else. A flush here would
+    /// recreate in `tracks/` exactly what was just removed from it.
+    NoFlush,
+}
+
 /// A file whose in-memory content did not reach disk.
 ///
 /// Its presence in [`App::unsaved`] is what stops an external reload from
@@ -2755,6 +2771,80 @@ impl App {
         Some(track)
     }
 
+    /// A track is leaving `project.tracks`. The counterpart to
+    /// [`Self::adopt_track_from_disk`], and the one way out.
+    ///
+    /// **An `unsaved` entry names a file whose content this session still
+    /// holds.** That is what makes the retry meaningful, what `dump_unsaved`
+    /// copies at exit, and what stops a reload from overwriting the only copy
+    /// there is. A track dropped from memory with an entry outstanding satisfies
+    /// none of the three: the retry re-runs the same lookup and fails the same
+    /// way, the rescue has nothing to write, and — because `is_permanent`
+    /// matches "not found" — the timer never even tries. The indicator stays lit
+    /// for the rest of the session naming a file nobody can produce, and the
+    /// exit report marks it `[NO RESCUE COPY — this one is gone]`.
+    ///
+    /// Five sites drop a track and only two dealt with it. So the removal goes
+    /// through here instead, and the entry is resolved on the way out.
+    ///
+    /// The flush is [`TrackExit`]'s whole business, and it has to happen
+    /// *before* the file moves: `track_file` still resolves to `tracks/<id>.md`
+    /// for an archived row, so a flush afterwards writes the file back into the
+    /// directory the archive just took it out of — the duplicate that
+    /// `an_archived_track_leaves_the_project` exists to prevent, arrived at from
+    /// the other side.
+    /// The flush is unconditional, not gated on an `unsaved` entry: an entry
+    /// means a save was *tried* and failed, and a track whose latest edit was
+    /// never even attempted — a mutation still waiting for its save, a pending
+    /// move inside its grace period — differs from disk with nothing in the set
+    /// to say so. `confirm_archive_track` flushes on the same terms.
+    pub fn release_track(&mut self, track_id: &str, exit: TrackExit) {
+        if exit == TrackExit::FlushFirst {
+            self.save_track_logged(track_id);
+        }
+        self.abandon_unsaved_track(track_id);
+        self.project.tracks.retain(|(id, _)| id != track_id);
+    }
+
+    /// Take an outstanding save off the books because its content is about to
+    /// stop being reachable.
+    ///
+    /// The content goes where content that reached no other file goes. Not
+    /// `.rescue/`: that is a set of files meant to be moved back into place once
+    /// the cause is fixed, and a track that was just archived or deleted is not
+    /// one of them — putting `tracks/<id>.md` back is precisely what must not
+    /// happen. The recovery log is durable, clone-shared, and already the place
+    /// a merge files the version it could not keep.
+    fn abandon_unsaved_track(&mut self, track_id: &str) {
+        let target = SaveTarget::Track(track_id.to_string());
+        let Some(f) = self.unsaved.remove(&target) else {
+            return;
+        };
+        // Whatever is still in memory is the version that never landed. There
+        // may be none — the entry can outlive the track by one call — and the
+        // entry is still worth recording, because something was outstanding and
+        // nothing is going to satisfy it.
+        let body = Self::find_track_in_project(&self.project, track_id)
+            .map(crate::parse::serialize_track)
+            .unwrap_or_default();
+        crate::io::recovery::log_recovery(
+            &self.project.frame_dir,
+            crate::io::recovery::RecoveryEntry {
+                timestamp: chrono::Utc::now(),
+                category: crate::io::recovery::RecoveryCategory::Delete,
+                description: format!(
+                    "{} left the project with a save outstanding",
+                    target.label()
+                ),
+                fields: vec![
+                    ("Last error".to_string(), f.error),
+                    ("Attempts".to_string(), f.attempts.to_string()),
+                ],
+                body,
+            },
+        );
+    }
+
     /// Replace a track's in-memory data.
     ///
     /// The raw primitive, and it deliberately says nothing about the ancestor:
@@ -3129,9 +3219,15 @@ impl App {
     ///
     /// One acquisition covers every outstanding file, so a retry cannot be
     /// interleaved by another writer partway through.
-    pub fn retry_unsaved_saves(&mut self, force: bool) {
+    ///
+    /// Returns how many entries were *abandoned* rather than written — a file
+    /// whose content the session no longer holds, which no retry can produce.
+    /// [`Self::release_track`] is what keeps that from happening; this is the
+    /// backstop, and it is the difference between "saved everything" and "gave
+    /// up on something" in what the caller reports.
+    pub fn retry_unsaved_saves(&mut self, force: bool) -> usize {
         if self.unsaved.is_empty() {
-            return;
+            return 0;
         }
 
         let now = Instant::now();
@@ -3142,7 +3238,7 @@ impl App {
             .map(|(t, _)| t.clone())
             .collect();
         if due.is_empty() {
-            return;
+            return 0;
         }
 
         let Ok(lock) = FileLock::acquire(&self.project.frame_dir, Duration::from_millis(0)) else {
@@ -3154,10 +3250,15 @@ impl App {
                     f.next_retry_at = now + retry_delay(f.attempts);
                 }
             }
-            return;
+            return 0;
         };
 
+        let mut abandoned = 0;
         for target in due {
+            if self.nothing_to_save(&target) {
+                abandoned += 1;
+                continue;
+            }
             let result = match &target {
                 SaveTarget::Track(id) => {
                     let id = id.clone();
@@ -3173,6 +3274,7 @@ impl App {
         }
 
         drop(lock);
+        abandoned
     }
 
     /// Retry now, resetting every backoff — the `R` key and the palette action.
@@ -3191,12 +3293,20 @@ impl App {
             f.attempts = 0;
             f.next_retry_at = Instant::now();
         }
-        self.retry_unsaved_saves(true);
+        let abandoned = self.retry_unsaved_saves(true);
+        let saved = outstanding.saturating_sub(abandoned);
 
         if self.unsaved.is_empty() {
+            // Nothing written and nothing left: every entry named content this
+            // session no longer holds, and `nothing_to_save` has already said
+            // so, per file. Announcing a save here would be the one thing that
+            // did not happen.
+            if saved == 0 {
+                return;
+            }
             self.status_message = Some(format!(
-                "Saved {outstanding} outstanding file{}",
-                if outstanding == 1 { "" } else { "s" }
+                "Saved {saved} outstanding file{}",
+                if saved == 1 { "" } else { "s" }
             ));
             self.status_is_error = false;
         } else {
@@ -3298,9 +3408,17 @@ impl App {
             self.baselines.insert(SaveTarget::Track(id.clone()), text);
         }
 
-        // Tracks that went away. Flushing first is what keeps this out of the
-        // hole where an `unsaved` entry names a track no longer in memory and
-        // can never be cleared — `confirm_archive_track` does the same.
+        // Tracks that went away, out through the one door — see
+        // [`Self::release_track`], which is what keeps this out of the hole
+        // where an `unsaved` entry names a track no longer in memory and can
+        // never be cleared.
+        //
+        // **Without** a flush, which is what this used to do. A track is in
+        // `gone` because its row was removed or turned archived, and in either
+        // case `tracks/<file>` is no longer ours to write: the flush recreated
+        // the file another process had just deleted or moved. Whatever it was
+        // holding goes to the recovery log instead, which is where the content
+        // was headed anyway once the flush failed.
         let gone: Vec<String> = self
             .project
             .tracks
@@ -3309,10 +3427,7 @@ impl App {
             .filter(|id| !live.iter().any(|(l, _)| l == id))
             .collect();
         for id in gone {
-            if self.unsaved.contains_key(&SaveTarget::Track(id.clone())) {
-                self.save_track_logged(&id);
-            }
-            self.project.tracks.retain(|(t, _)| t != &id);
+            self.release_track(&id, TrackExit::NoFlush);
         }
 
         // `View::Track` is an index into `active_track_ids`, so a track
@@ -3484,9 +3599,58 @@ impl App {
         true
     }
 
+    /// Whether a save was asked for content this session does not hold — and if
+    /// so, say so and take any outstanding entry off the books.
+    ///
+    /// `save_track_locked` produces `"track not found"` from two different
+    /// lookups: no config row, and no in-memory track. Neither is a *failed
+    /// write*. Recording one as a save failure put an entry in `unsaved` that
+    /// nothing could ever clear — the retry re-runs the identical lookup, `R`
+    /// restates it, `is_permanent` matches "not found" so the timer skips it
+    /// entirely, and the exit report claims a rescue copy is missing for
+    /// something that was never there.
+    ///
+    /// It stays loud. A stray save is a bug, and the recovery entry is what
+    /// caught that class in the first place — 61 sites had thrown the error
+    /// away. It just does not go on the books, where it would sit forever.
+    fn nothing_to_save(&mut self, target: &SaveTarget) -> bool {
+        let SaveTarget::Track(track_id) = target else {
+            return false;
+        };
+        let track_id = track_id.clone();
+        if self.track_file(&track_id).is_some()
+            && Self::find_track_in_project(&self.project, &track_id).is_some()
+        {
+            return false;
+        }
+        let error = "the track is no longer in the project";
+        // One entry, not two: an outstanding save is reported by
+        // `abandon_unsaved_track`, along with whatever content it still had.
+        if self.unsaved.contains_key(target) {
+            self.abandon_unsaved_track(&track_id);
+        } else {
+            crate::io::recovery::log_recovery(
+                &self.project.frame_dir,
+                crate::io::recovery::RecoveryEntry {
+                    timestamp: chrono::Utc::now(),
+                    category: crate::io::recovery::RecoveryCategory::Write,
+                    description: format!("{} save failed", target.label()),
+                    fields: vec![("Error".to_string(), error.to_string())],
+                    body: String::new(),
+                },
+            );
+        }
+        self.status_message = Some(format!("Cannot save {}: {error}", target.label()));
+        self.status_is_error = true;
+        true
+    }
+
     /// Save one track, recording any failure.
     pub fn save_track_logged(&mut self, track_id: &str) {
         let target = SaveTarget::Track(track_id.to_string());
+        if self.nothing_to_save(&target) {
+            return;
+        }
         if self.lock_held {
             match self.save_track_locked(track_id) {
                 Ok(()) => self.clear_save_failure(&target),
@@ -3546,6 +3710,9 @@ impl App {
 
         for id in track_ids {
             let target = SaveTarget::Track(id.to_string());
+            if self.nothing_to_save(&target) {
+                continue;
+            }
             match self.save_track_locked(id) {
                 Ok(()) => self.clear_save_failure(&target),
                 Err(e) => self.record_save_failure(target, &e),
@@ -5893,6 +6060,78 @@ mod tests {
         let text = std::fs::read_to_string(&log).expect("a failure should be logged");
         assert!(text.contains("nonexistent"), "{text}");
         assert!(text.contains("save failed"), "{text}");
+
+        // Loud, but not on the books. There is no content behind this save, so
+        // no retry can produce one: the entry would sit in `unsaved` for the
+        // rest of the session, skipped by the timer because `is_permanent`
+        // matches "not found", restated by `R`, and reported at exit as a file
+        // whose rescue copy is missing.
+        assert!(
+            app.unsaved.is_empty(),
+            "nothing to save is not a failed save: {:?}",
+            app.unsaved.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// The other half: an entry that already exists when its track leaves.
+    /// Nothing can satisfy it, so it comes off the books — and the content it
+    /// was protecting goes to the recovery log on the way, which is the only
+    /// place it can still be read.
+    #[test]
+    fn a_track_leaving_takes_its_outstanding_save_with_it() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        add_unwritable_track(&mut app, "b");
+
+        // A save that cannot land, for a reason that is about the write.
+        app.save_track_logged("b");
+        assert!(
+            app.unsaved.contains_key(&SaveTarget::Track("b".into())),
+            "the failure is on the books to begin with"
+        );
+
+        app.release_track("b", TrackExit::FlushFirst);
+
+        assert!(
+            app.unsaved.is_empty(),
+            "and off them once the track is gone: {:?}",
+            app.unsaved.keys().collect::<Vec<_>>()
+        );
+        let log = crate::io::recovery::recovery_log_path(&app.project.frame_dir);
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            text.contains("left the project with a save outstanding"),
+            "{text}"
+        );
+        assert!(
+            text.contains("`B-001` One"),
+            "with the content that reached no other file: {text}"
+        );
+    }
+
+    /// `R` on a stuck entry. The retry is the backstop for an orphan that got
+    /// past `release_track`, and pressing it used to restate "track not found"
+    /// forever; it now clears the entry and does not claim to have saved
+    /// anything.
+    #[test]
+    fn forcing_a_retry_gives_up_on_a_save_with_nothing_behind_it() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+
+        app.record_save_failure(
+            SaveTarget::Track("gone".into()),
+            &"lock timeout".to_string(),
+        );
+        app.force_retry_unsaved();
+
+        assert!(app.unsaved.is_empty(), "the entry is gone, not restated");
+        assert!(
+            app.status_message
+                .as_deref()
+                .is_some_and(|m| m.contains("no longer in the project")),
+            "and says why rather than reporting a save: {:?}",
+            app.status_message
+        );
     }
 
     /// The bug this set exists for. A save fails, so the only copy of the edit
@@ -6066,18 +6305,36 @@ mod tests {
         );
     }
 
+    /// A track the project holds, whose file cannot be written: the parent
+    /// directory does not exist, so the save fails for a reason that is about
+    /// the *write* rather than about the track being missing.
+    fn add_unwritable_track(app: &mut App, id: &str) {
+        const TEXT: &str = "# B\n\n## Backlog\n\n- [ ] `B-001` One\n\n## Done\n";
+        app.project.config.tracks.push(crate::model::TrackConfig {
+            id: id.to_string(),
+            name: id.to_uppercase(),
+            state: "active".into(),
+            file: format!("tracks/nowhere/{id}.md"),
+        });
+        app.project
+            .tracks
+            .push((id.to_string(), crate::parse::parse_track(TEXT)));
+        app.rebuild_active_track_ids();
+    }
+
     /// One file failing in a batch must not mark the others unsaved — the badge
     /// and the exit report both read this set as "what is actually at risk".
     #[test]
     fn a_partial_batch_leaves_only_the_failed_file() {
         let tmp = tempfile::TempDir::new().unwrap();
         let mut app = app_on_disk(tmp.path());
+        add_unwritable_track(&mut app, "b");
 
-        app.save_batch_logged(&["a", "nonexistent"], true);
+        app.save_batch_logged(&["a", "b"], true);
 
         assert_eq!(
             app.unsaved.keys().collect::<Vec<_>>(),
-            vec![&SaveTarget::Track("nonexistent".into())],
+            vec![&SaveTarget::Track("b".into())],
             "only the write that failed is outstanding"
         );
     }

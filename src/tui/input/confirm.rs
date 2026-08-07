@@ -3,7 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::model::SectionKind;
 use crate::ops::task_ops::{self};
 
-use crate::tui::app::{App, Mode, PendingMove, SaveTarget};
+use crate::tui::app::{App, Mode, PendingMove, SaveTarget, TrackExit};
 use crate::tui::undo::Operation;
 
 use super::*;
@@ -168,7 +168,12 @@ pub(super) fn confirm_archive_track(app: &mut App, track_id: &str) {
     // keystrokes with no second writer involved: archive, move a task, and
     // every id in the track exists twice, in two files, both looking
     // authoritative.
-    app.project.tracks.retain(|(id, _)| id != track_id);
+    //
+    // No flush here: this one already flushed above, under the lock and before
+    // the file moved, which is the only point at which a flush is either
+    // possible or safe. By now `tracks/<file>` is gone and writing it would put
+    // it back.
+    app.release_track(track_id, TrackExit::NoFlush);
 
     rebuild_active_track_ids(app);
 
@@ -219,8 +224,11 @@ pub(super) fn confirm_delete_track(app: &mut App, track_id: &str) {
         return;
     }
 
-    // Remove from in-memory tracks
-    app.project.tracks.retain(|(id, _)| id != track_id);
+    // Remove from in-memory tracks. The file is already unlinked, so there is
+    // nothing to flush into; an edit that never reached it goes to the recovery
+    // log, which is also the only place it can now be read — the `content` the
+    // undo recorded came off disk and is the version *before* that edit.
+    app.release_track(track_id, TrackExit::NoFlush);
 
     rebuild_active_track_ids(app);
 

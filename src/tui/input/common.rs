@@ -7,7 +7,7 @@ use crate::ops::task_ops::{self};
 use crate::util::unicode;
 
 use crate::tui::app::{
-    App, DetailRegion, DetailState, FlatItem, Mode, PendingMove, RepeatableAction, View,
+    App, DetailRegion, DetailState, FlatItem, Mode, PendingMove, RepeatableAction, TrackExit, View,
     resolve_task_from_flat,
 };
 use crate::tui::undo::{Operation, UndoNavTarget};
@@ -600,7 +600,16 @@ pub(super) fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo
                             // Reload track into memory
                             app.adopt_track_from_disk(&tid);
                         } else {
-                            // Re-archive
+                            // Re-archive. Out of `tracks/` is out of the project
+                            // — see `confirm_archive_track`. Anything still
+                            // holding it in memory writes the file back.
+                            //
+                            // First, before the row turns archived and the file
+                            // moves: that is the only window in which an edit
+                            // that never reached disk can still be flushed into
+                            // the copy being archived, and after it a flush
+                            // would recreate `tracks/<file>` instead.
+                            app.release_track(&tid, TrackExit::FlushFirst);
                             if let Some(tc) =
                                 app.project.config.tracks.iter_mut().find(|t| t.id == tid)
                             {
@@ -613,10 +622,6 @@ pub(super) fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo
                                     &file,
                                 );
                             }
-                            // Out of `tracks/` is out of the project — see
-                            // `confirm_archive_track`. Anything still holding it
-                            // in memory writes the file back.
-                            app.project.tracks.retain(|(id, _)| id != &tid);
                             rebuild_active_track_ids(app);
                             save_config(app);
                         }
@@ -635,7 +640,9 @@ pub(super) fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo
                             }
                             app.project.config.tracks.retain(|t| t.id != tid);
                             app.project.config.ids.prefixes.shift_remove(&tid);
-                            app.project.tracks.retain(|(id, _)| id != &tid);
+                            // The file is already unlinked, so there is nothing
+                            // to flush into.
+                            app.release_track(&tid, TrackExit::NoFlush);
                             rebuild_active_track_ids(app);
                             save_config(app);
                         } else {
@@ -673,10 +680,14 @@ pub(super) fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo
                             let idx = config_index.min(app.project.config.tracks.len());
                             app.project.config.tracks.insert(idx, tc);
                             app.project.config.ids.prefixes.insert(tid.clone(), prefix);
-                            if let Ok(text) = std::fs::read_to_string(&track_path) {
-                                let track = crate::parse::parse_track(&text);
-                                app.project.tracks.push((tid.clone(), track));
-                            }
+                            // The one way to take a file as ours: it seeds the
+                            // ancestor and the mtime as well as pushing the
+                            // track. Reading and pushing by hand left
+                            // `App::baselines` with no entry for a file that had
+                            // just appeared, so the next save had nothing to
+                            // merge against and wrote straight over whatever
+                            // another process had put there.
+                            app.adopt_track_from_disk(&tid);
                             rebuild_active_track_ids(app);
                             save_config(app);
                         }
@@ -735,10 +746,12 @@ pub(super) fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo
                                     p.clone(),
                                 );
                             }
-                            if let Ok(text) = std::fs::read_to_string(&track_path) {
-                                let track = crate::parse::parse_track(&text);
-                                app.project.tracks.push((tid.clone(), track));
-                            }
+                            // As in the `TrackAdd` redo above, and with one more
+                            // thing to say for it here: a track deleted while
+                            // archived is not part of the project, and
+                            // `adopt_track_from_disk` declines to put it back in
+                            // memory where the hand-rolled push did.
+                            app.adopt_track_from_disk(&tid);
                             rebuild_active_track_ids(app);
                             save_config(app);
                         } else {
@@ -749,14 +762,23 @@ pub(super) fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo
                             }
                             app.project.config.tracks.retain(|t| t.id != tid);
                             app.project.config.ids.prefixes.shift_remove(&tid);
-                            app.project.tracks.retain(|(id, _)| id != &tid);
+                            // The file is already unlinked — nothing to flush.
+                            app.release_track(&tid, TrackExit::NoFlush);
                             rebuild_active_track_ids(app);
                             save_config(app);
                         }
                     }
                     Some(Operation::TrackUnarchive { track_id: tid }) => {
                         if is_undo {
-                            // Re-archive the track
+                            // Re-archive the track. Out of `tracks/` is out of
+                            // the project — see `confirm_archive_track`.
+                            // Anything still holding it in memory writes the
+                            // file back.
+                            //
+                            // First, and for the reason the `TrackArchive` arm
+                            // above gives: the flush has to reach the file
+                            // before the file moves.
+                            app.release_track(&tid, TrackExit::FlushFirst);
                             if let Some(tc) =
                                 app.project.config.tracks.iter_mut().find(|t| t.id == tid)
                             {
@@ -769,10 +791,6 @@ pub(super) fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo
                                     &file,
                                 );
                             }
-                            // Out of `tracks/` is out of the project — see
-                            // `confirm_archive_track`. Anything still holding it
-                            // in memory writes the file back.
-                            app.project.tracks.retain(|(id, _)| id != &tid);
                             rebuild_active_track_ids(app);
                             save_config(app);
                         } else {
@@ -1726,6 +1744,7 @@ pub(super) fn rebuild_active_track_ids(app: &mut App) {
 mod tests {
     use super::*;
     use crate::tui::app::app_on_disk;
+    use crate::tui::input::{command, confirm};
 
     fn track_text(app: &App) -> String {
         std::fs::read_to_string(app.project.frame_dir.join("tracks/a.md")).unwrap()
@@ -1852,6 +1871,113 @@ mod tests {
         assert!(
             !on_disk.contains("Look into the parser"),
             "and redo takes it away again, on disk and not only in memory: {on_disk:?}"
+        );
+    }
+
+    /// Undoing an unarchive re-archives the track, and it used to drop the
+    /// track from memory without flushing first — the one removal left that
+    /// did not. `confirm_archive_track` flushes and `App::adopt_config` flushes,
+    /// both deliberately, because an edit that has not reached disk belongs in
+    /// the copy being archived: the archive moves the *file*, so without the
+    /// flush it moves the stale one and the newer version goes out of reach
+    /// with the in-memory track.
+    ///
+    /// The edit is planted in memory the way `confirm_archive_track`'s own test
+    /// plants one: a mutation whose save has not happened yet is the ordinary
+    /// case, and it is exactly what the move leaves behind.
+    #[test]
+    fn undoing_an_unarchive_carries_an_unsaved_edit_into_the_archive() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        let archived = app.project.frame_dir.join("archive/_tracks/a.md");
+
+        confirm::confirm_archive_track(&mut app, "a");
+        command::confirm_unarchive_track(&mut app, "a");
+
+        let tasks = app
+            .find_track_mut("a")
+            .unwrap()
+            .section_tasks_mut(SectionKind::Backlog)
+            .unwrap();
+        tasks[0].title = "Edited but not yet saved".into();
+        tasks[0].dirty = true;
+
+        perform_undo(&mut app);
+
+        let text = std::fs::read_to_string(&archived).unwrap();
+        assert!(
+            text.contains("Edited but not yet saved"),
+            "the archived copy is the one the session was holding: {text:?}"
+        );
+        assert!(
+            !app.project.frame_dir.join("tracks/a.md").exists(),
+            "and the flush went in before the move, not into a recreated file"
+        );
+        assert!(
+            app.unsaved.is_empty(),
+            "nothing outstanding: an entry here would name a track no longer in \
+             memory, which no retry could ever satisfy"
+        );
+    }
+
+    /// The same arm on the redo side, and a live route rather than merely the
+    /// same code shape: an undo does not clear the redo stack, so archive,
+    /// undo, undo an edit in the restored track, redo, redo gets here with the
+    /// track holding something the file does not.
+    #[test]
+    fn redoing_an_archive_carries_an_unsaved_edit_into_the_archive() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        let archived = app.project.frame_dir.join("archive/_tracks/a.md");
+
+        confirm::confirm_archive_track(&mut app, "a");
+        perform_undo(&mut app);
+
+        let tasks = app
+            .find_track_mut("a")
+            .unwrap()
+            .section_tasks_mut(SectionKind::Backlog)
+            .unwrap();
+        tasks[0].title = "Edited but not yet saved".into();
+        tasks[0].dirty = true;
+
+        perform_redo(&mut app);
+
+        let text = std::fs::read_to_string(&archived).unwrap();
+        assert!(
+            text.contains("Edited but not yet saved"),
+            "the archived copy is the one the session was holding: {text:?}"
+        );
+        assert!(app.unsaved.is_empty(), "and nothing is left outstanding");
+    }
+
+    /// Undoing a delete writes the file back and takes it into memory, and it
+    /// did the second half by hand — read, parse, push — where
+    /// `adopt_track_from_disk` is documented as the one way to take a file as
+    /// ours *because* the halves keep coming apart. The recorded mtime is the
+    /// half this one dropped: left at the value from before the delete, the
+    /// watcher reads the file the undo just wrote as somebody else's change and
+    /// merges our own write back over us.
+    #[test]
+    fn undoing_a_delete_records_the_mtime_of_the_file_it_restores() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        let path = app.project.frame_dir.join("tracks/a.md");
+
+        confirm::confirm_delete_track(&mut app, "a");
+        perform_undo(&mut app);
+
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            app.baselines
+                .get(&crate::tui::app::SaveTarget::Track("a".into())),
+            Some(&on_disk),
+            "the ancestor is the file's own bytes, as `App::new` seeds it"
+        );
+        assert_eq!(
+            app.track_mtimes.get("a").copied(),
+            std::fs::metadata(&path).and_then(|m| m.modified()).ok(),
+            "and the mtime is the restored file's, not the deleted one's"
         );
     }
 }
