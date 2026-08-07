@@ -52,12 +52,39 @@ pub fn write_config_from_struct(
     Ok(())
 }
 
+/// Set a key's value, keeping whatever was written around the old one.
+///
+/// `toml_edit::value` builds a fresh value with default decor, and a value's
+/// decor is where its **trailing comment** lives. So the obvious
+/// `table["k"] = value(v)` silently deletes the explanation next to the setting
+/// it is changing — `cc_focus = ""  # track ID for 'fr ready --cc'` came back
+/// as a bare `cc_focus = ""`, and every state change on a track would have
+/// taken that row's comment the same way.
+///
+/// Every overwrite of an existing key here goes through this. Creating a key
+/// that was not there gets the default decor, which is correct: there is
+/// nothing to preserve.
+fn set_keeping_decor(table: &mut toml_edit::Table, key: &str, value: &str) {
+    let decor = table
+        .get(key)
+        .and_then(|item| item.as_value())
+        .map(|v| v.decor().clone());
+    table[key] = toml_edit::value(value);
+    if let Some(decor) = decor
+        && let Some(new) = table.get_mut(key).and_then(|item| item.as_value_mut())
+    {
+        *new.decor_mut() = decor;
+    }
+}
+
 /// Update the cc_focus field in the config document
 pub fn set_cc_focus(doc: &mut toml_edit::DocumentMut, track_id: &str) {
     if !doc.contains_key("agent") {
         doc["agent"] = toml_edit::Item::Table(toml_edit::Table::new());
     }
-    doc["agent"]["cc_focus"] = toml_edit::value(track_id);
+    if let Some(agent) = doc.get_mut("agent").and_then(|a| a.as_table_mut()) {
+        set_keeping_decor(agent, "cc_focus", track_id);
+    }
 }
 
 /// Clear the cc_focus field in the config document.
@@ -78,7 +105,7 @@ pub fn clear_cc_focus(doc: &mut toml_edit::DocumentMut) {
     if let Some(agent) = doc.get_mut("agent").and_then(|a| a.as_table_mut())
         && agent.contains_key("cc_focus")
     {
-        agent["cc_focus"] = toml_edit::value("");
+        set_keeping_decor(agent, "cc_focus", "");
     }
 }
 
@@ -111,7 +138,7 @@ pub fn set_track_field(doc: &mut toml_edit::DocumentMut, track_id: &str, field: 
     {
         for table in tracks.iter_mut() {
             if table.get("id").and_then(|v| v.as_str()) == Some(track_id) {
-                table[field] = toml_edit::value(value);
+                set_keeping_decor(table, field, value);
                 break;
             }
         }
@@ -216,7 +243,9 @@ pub fn set_prefix(doc: &mut toml_edit::DocumentMut, track_id: &str, prefix: &str
     if !ids.contains_key("prefixes") {
         ids["prefixes"] = toml_edit::Item::Table(toml_edit::Table::new());
     }
-    ids["prefixes"][track_id] = toml_edit::value(prefix);
+    if let Some(prefixes) = ids.get_mut("prefixes").and_then(|p| p.as_table_mut()) {
+        set_keeping_decor(prefixes, track_id, prefix);
+    }
 }
 
 /// Update a track's state in the config document
@@ -224,7 +253,7 @@ pub fn update_track_state(doc: &mut toml_edit::DocumentMut, track_id: &str, new_
     if let Some(tracks) = doc["tracks"].as_array_of_tables_mut() {
         for table in tracks.iter_mut() {
             if table.get("id").and_then(|v| v.as_str()) == Some(track_id) {
-                table["state"] = toml_edit::value(new_state);
+                set_keeping_decor(table, "state", new_state);
                 break;
             }
         }
@@ -252,7 +281,7 @@ pub fn update_track_name(doc: &mut toml_edit::DocumentMut, track_id: &str, new_n
     if let Some(tracks) = doc["tracks"].as_array_of_tables_mut() {
         for table in tracks.iter_mut() {
             if table.get("id").and_then(|v| v.as_str()) == Some(track_id) {
-                table["name"] = toml_edit::value(new_name);
+                set_keeping_decor(table, "name", new_name);
                 break;
             }
         }
@@ -264,8 +293,8 @@ pub fn update_track_id(doc: &mut toml_edit::DocumentMut, old_id: &str, new_id: &
     if let Some(tracks) = doc["tracks"].as_array_of_tables_mut() {
         for table in tracks.iter_mut() {
             if table.get("id").and_then(|v| v.as_str()) == Some(old_id) {
-                table["id"] = toml_edit::value(new_id);
-                table["file"] = toml_edit::value(format!("tracks/{}.md", new_id));
+                set_keeping_decor(table, "id", new_id);
+                set_keeping_decor(table, "file", &format!("tracks/{}.md", new_id));
                 break;
             }
         }
@@ -301,7 +330,9 @@ pub fn set_tag_color(doc: &mut toml_edit::DocumentMut, tag: &str, hex_color: &st
     if !ui.contains_key("tag_colors") {
         ui["tag_colors"] = toml_edit::Item::Table(toml_edit::Table::new());
     }
-    ui["tag_colors"][tag] = toml_edit::value(hex_color);
+    if let Some(tag_colors) = ui.get_mut("tag_colors").and_then(|t| t.as_table_mut()) {
+        set_keeping_decor(tag_colors, tag, hex_color);
+    }
 }
 
 /// Remove a tag color from [ui.tag_colors]
@@ -631,6 +662,47 @@ file = "tracks/ui.md"
         let result = doc.to_string();
         assert_eq!(track_ids(&result), vec!["api", "docs", "ui"]);
         assert!(result.contains("# Tracks"));
+    }
+
+    /// A setting's trailing comment explains the setting. Changing the value
+    /// must not take the explanation with it — which is what assigning through
+    /// `toml_edit::value` does, since a value's decor is where that comment
+    /// lives. Caught by smoke-testing `fr track cc-focus --clear` against the
+    /// shipped template, after the code claimed to have fixed it.
+    #[test]
+    fn test_setting_a_value_keeps_its_trailing_comment() {
+        let text = r#"[project]
+name = "test"
+
+[agent]
+cc_focus = "api"             # track ID for `fr ready --cc` (empty = none)
+cc_only = true
+
+[[tracks]]
+id = "api"
+name = "API"                 # the display name
+state = "active"
+file = "tracks/api.md"
+
+[ids.prefixes]
+api = "API"                  # task ids look like API-001
+"#;
+        let mut doc: toml_edit::DocumentMut = text.parse().unwrap();
+        clear_cc_focus(&mut doc);
+        update_track_state(&mut doc, "api", "shelved");
+        update_track_name(&mut doc, "api", "The API");
+        set_prefix(&mut doc, "api", "AP");
+        let result = doc.to_string();
+
+        assert!(result.contains("# track ID for `fr ready --cc` (empty = none)"));
+        assert!(result.contains("# the display name"));
+        assert!(result.contains("# task ids look like API-001"));
+        // And the values really did change.
+        let config: ProjectConfig = toml::from_str(&result).unwrap();
+        assert!(config.agent.cc_focus.is_none());
+        assert_eq!(config.tracks[0].state, "shelved");
+        assert_eq!(config.tracks[0].name, "The API");
+        assert_eq!(config.ids.prefixes.get("api").unwrap(), "AP");
     }
 
     #[test]
