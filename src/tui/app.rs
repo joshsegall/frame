@@ -2694,19 +2694,73 @@ impl App {
             .map(|(_, track)| track)
     }
 
-    /// Read and parse a single track file from disk, updating stored mtime.
-    pub fn read_track_from_disk(&mut self, track_id: &str) -> Option<Track> {
-        let file = self.track_file(track_id)?;
-        let path = self.project.frame_dir.join(file);
-        let meta = std::fs::metadata(&path).ok()?;
+    /// Take the version on disk as ours — memory, mtime **and ancestor**.
+    ///
+    /// A handler that finds the file changed underneath it (`mtime`) and decides
+    /// to keep what is there has *dealt with* that version, and the ancestor has
+    /// to move with it. Eleven sites did the first half — a `read_track_from_disk`
+    /// that updated only the mtime, then [`Self::replace_track`] — and left
+    /// `App::baselines` pointing at a version nobody holds any more. That read
+    /// helper is gone rather than left beside this one: its whole use was the
+    /// half-adoption, and a function that quietly does half the job is the trap
+    /// this is fixing.
+    ///
+    /// That is not a tidiness problem, it manufactures conflicts and loses the
+    /// other writer's work. Memory silently absorbs their task; the ancestor
+    /// still predates it; the next merge therefore sees a task **absent from the
+    /// ancestor and present on both sides**, which is exactly "both added it
+    /// differently" — so it keeps ours, and *their* newer version goes to the
+    /// recovery log as a conflict nobody was ever in dispute over. P8 found it:
+    /// a title the CLI had written and acknowledged came back as the version
+    /// before it. `doc/architecture.md` describes this failure precisely; these
+    /// sites simply did not follow the rule.
+    ///
+    /// The ancestor is the file's own **bytes**, for the reason [`Self::new`]
+    /// seeds it that way: a re-serialization differs for any file that merely
+    /// round-trips, and every difference reads as somebody else's write.
+    ///
+    /// Returns the parsed track, since several callers need to ask something of
+    /// it — is the parent still there, was the task deleted, does the title
+    /// differ — and every one of them keeps it in each branch regardless.
+    ///
+    /// A track that is configured but **not in memory** is added rather than
+    /// dropped on the floor, which is what un-archiving needs: the file has just
+    /// come back out of `archive/_tracks/` and the project is meant to hold it
+    /// again. An *archived* row is never added back, because out of `tracks/` is
+    /// out of the project — anything still holding it writes the file back
+    /// beside the archived copy.
+    pub fn adopt_track_from_disk(&mut self, track_id: &str) -> Option<Track> {
+        let file = self.track_file(track_id)?.to_string();
+        let archived = self
+            .project
+            .config
+            .tracks
+            .iter()
+            .any(|tc| tc.id == track_id && tc.state == "archived");
+        let path = self.project.frame_dir.join(&file);
         let text = std::fs::read_to_string(&path).ok()?;
-        if let Ok(mtime) = meta.modified() {
+        if let Ok(mtime) = std::fs::metadata(&path).and_then(|m| m.modified()) {
             self.track_mtimes.insert(track_id.to_string(), mtime);
         }
-        Some(parse_track(&text))
+        let track = parse_track(&text);
+        if self.project.tracks.iter().any(|(id, _)| id == track_id) {
+            self.replace_track(track_id, track.clone());
+        } else if !archived {
+            self.project
+                .tracks
+                .push((track_id.to_string(), track.clone()));
+        }
+        self.baselines
+            .insert(SaveTarget::Track(track_id.to_string()), text);
+        Some(track)
     }
 
     /// Replace a track's in-memory data.
+    ///
+    /// The raw primitive, and it deliberately says nothing about the ancestor:
+    /// [`Self::merge_external`] calls it with a **merged** track that no file
+    /// holds, where deriving an ancestor from it would be wrong. Taking what is
+    /// on disk goes through [`Self::adopt_track_from_disk`] instead.
     pub fn replace_track(&mut self, track_id: &str, new_track: Track) {
         if let Some(entry) = self
             .project
@@ -6585,6 +6639,70 @@ mod tests {
         assert!(
             !text.contains("concurrent edit"),
             "nothing was in dispute, so nothing should have been set aside: {text}"
+        );
+    }
+
+    /// Absorbing the file makes it the ancestor, or the *next* merge invents a
+    /// conflict and throws away the other writer's work.
+    ///
+    /// A handler that sees the file changed under it and keeps what is there has
+    /// dealt with that version. Leaving the ancestor behind means memory holds
+    /// their task while the ancestor does not — so when they write that same
+    /// task again, the merge sees it absent from the ancestor and present on
+    /// both sides, calls it "both added it differently", keeps ours, and files
+    /// *their newer version* in the recovery log. Their write is acknowledged
+    /// and gone, over a conflict that never existed.
+    ///
+    /// P8 found this as a title the CLI had written coming back as the version
+    /// before it (schedule pinned in `concurrency.proptest-regressions`).
+    #[test]
+    fn adopting_the_file_makes_it_the_ancestor() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        let path = app.project.frame_dir.join("tracks/a.md");
+
+        // We are holding an edit that has not reached disk.
+        let tasks = app
+            .find_track_mut("a")
+            .unwrap()
+            .section_tasks_mut(SectionKind::Backlog)
+            .unwrap();
+        tasks[0].title = "Ours, unsaved".into();
+        tasks[0].dirty = true;
+        app.record_save_failure(SaveTarget::Track("a".into()), &"lock timeout".to_string());
+
+        // Another process adds a task, and a handler notices via mtime and
+        // takes the file as ours.
+        std::fs::write(
+            &path,
+            "# A\n\n## Backlog\n\n- [ ] `A-001` One\n- [ ] `A-002` Theirs, first version\n\n## Done\n",
+        )
+        .unwrap();
+        app.adopt_track_from_disk("a");
+        assert_eq!(
+            app.baselines.get(&SaveTarget::Track("a".into())).unwrap(),
+            &std::fs::read_to_string(&path).unwrap(),
+            "adopting a file must make it the ancestor, bytes and all"
+        );
+
+        // They write the same task again. Nothing here is a conflict: we never
+        // touched A-002, we only copied it.
+        std::fs::write(
+            &path,
+            "# A\n\n## Backlog\n\n- [ ] `A-001` One\n- [ ] `A-002` Theirs, second version\n\n## Done\n",
+        )
+        .unwrap();
+        app.clear_save_failure(&SaveTarget::Track("a".into()));
+        app.save_track_logged("a");
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains("Theirs, second version"),
+            "their newer version was discarded as a conflict that never existed:\n{after}"
+        );
+        assert!(
+            !after.contains("Theirs, first version"),
+            "the version they had already replaced was resurrected:\n{after}"
         );
     }
 

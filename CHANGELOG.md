@@ -118,6 +118,8 @@ All notable changes to frame will be documented in this file.
 
 ### Fixed
 
+- **A concurrent edit is no longer discarded as a conflict that never happened.** When the TUI noticed a track file had changed underneath it and kept what was on disk, it did not record that version as the one memory and disk last agreed on. Memory then held the other writer's task while the common ancestor did not — so the next time they touched that same task, the merge read it as a task *both* sides had added differently, kept the TUI's copy, and filed their newer version in the recovery log. Their work was acknowledged, gone from the project, and the only trace was a log entry describing a dispute neither side was in.
+
 - **`fr track new` refuses to land on an orphaned track file.** It checked the id against `project.toml` but not the path it was about to write, so a `tracks/<id>.md` with no entry pointing at it — what an interrupted create leaves behind, or a hand-edited config that dropped a row — was replaced with an empty template, tasks and all. Frame does not load such a file, which is exactly why the config check could not see it.
 
 - **The TUI no longer overwrites a track another process created.** Creating a track wrote `tracks/<id>.md` unconditionally, having checked for a duplicate id against the config as it was when the session started. So a track created elsewhere since — by `fr track new`, by another TUI, by an agent — was replaced with an empty template and every task in it destroyed. The check now asks disk, under the lock, and the operation refuses. The same guard covers redoing a track add and undoing a track delete, which re-create a track file the same way.

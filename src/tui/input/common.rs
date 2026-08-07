@@ -598,13 +598,7 @@ pub(super) fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo
                             rebuild_active_track_ids(app);
                             save_config(app);
                             // Reload track into memory
-                            if let Some(new_track) = app.read_track_from_disk(&tid) {
-                                if !app.project.tracks.iter().any(|(id, _)| id == &tid) {
-                                    app.project.tracks.push((tid.clone(), new_track));
-                                } else {
-                                    app.replace_track(&tid, new_track);
-                                }
-                            }
+                            app.adopt_track_from_disk(&tid);
                         } else {
                             // Re-archive
                             if let Some(tc) =
@@ -795,13 +789,7 @@ pub(super) fn apply_nav_side_effects(app: &mut App, nav: &UndoNavTarget, is_undo
                                     &file,
                                 );
                             }
-                            if let Some(new_track) = app.read_track_from_disk(&tid) {
-                                if !app.project.tracks.iter().any(|(id, _)| id == &tid) {
-                                    app.project.tracks.push((tid.clone(), new_track));
-                                } else {
-                                    app.replace_track(&tid, new_track);
-                                }
-                            }
+                            app.adopt_track_from_disk(&tid);
                             rebuild_active_track_ids(app);
                             save_config(app);
                         }

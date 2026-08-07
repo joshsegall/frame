@@ -362,9 +362,7 @@ pub(super) fn handle_move(app: &mut App, key: KeyEvent) {
                         if app.track_changed_on_disk(&track_id) {
                             // File changed externally — reload from disk instead of
                             // restoring stale in-memory state
-                            if let Some(disk_track) = app.read_track_from_disk(&track_id) {
-                                app.replace_track(&track_id, disk_track);
-                            }
+                            app.adopt_track_from_disk(&track_id);
                             drain_pending_for_track(app, &track_id);
                         } else {
                             let track = match app.find_track_mut(&track_id) {
@@ -644,17 +642,15 @@ pub(super) fn restore_force_expanded(
 /// Returns false if move should be aborted.
 pub(super) fn check_move_external_changes(app: &mut App, track_id: &str, task_id: &str) -> bool {
     if app.track_changed_on_disk(track_id)
-        && let Some(disk_track) = app.read_track_from_disk(track_id)
+        && let Some(disk_track) = app.adopt_track_from_disk(track_id)
     {
         if task_ops::find_task_in_track(&disk_track, task_id).is_none() {
             app.conflict_text = Some(format!("Task {} was deleted externally", task_id));
             app.mode = Mode::Navigate;
             app.move_state = None;
-            app.replace_track(track_id, disk_track);
             drain_pending_for_track(app, track_id);
             return false;
         }
-        app.replace_track(track_id, disk_track);
         drain_pending_for_track(app, track_id);
     }
     true

@@ -1311,13 +1311,7 @@ pub(super) fn confirm_unarchive_track(app: &mut App, track_id: &str) {
     }
 
     // Reload track into memory
-    if let Some(new_track) = app.read_track_from_disk(track_id) {
-        if !app.project.tracks.iter().any(|(id, _)| id == track_id) {
-            app.project.tracks.push((track_id.to_string(), new_track));
-        } else {
-            app.replace_track(track_id, new_track);
-        }
-    }
+    app.adopt_track_from_disk(track_id);
 
     rebuild_active_track_ids(app);
 

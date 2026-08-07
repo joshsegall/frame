@@ -1110,9 +1110,7 @@ pub(super) fn confirm_edit(app: &mut App) {
                 if changed {
                     // Reload from disk — discards in-memory placeholder and picks up
                     // any external changes atomically
-                    if let Some(disk_track) = app.read_track_from_disk(&track_id) {
-                        app.replace_track(&track_id, disk_track);
-                    }
+                    app.adopt_track_from_disk(&track_id);
                 } else {
                     // No external changes — remove placeholder from memory and save
                     let track = match app.find_track_mut(&track_id) {
@@ -1134,18 +1132,16 @@ pub(super) fn confirm_edit(app: &mut App) {
             } else if changed {
                 // Non-empty title, file changed externally — merge
                 let prefix = app.track_prefix(&track_id).unwrap_or("").to_string();
-                if let Some(disk_track) = app.read_track_from_disk(&track_id) {
+                if let Some(disk_track) = app.adopt_track_from_disk(&track_id) {
                     // For subtasks: check if parent still exists on disk
                     if let Some(ref pid) = parent_id
                         && task_ops::find_task_in_track(&disk_track, pid).is_none()
                     {
                         app.conflict_text = Some(title);
-                        app.replace_track(&track_id, disk_track);
                         drain_pending_for_track(app, &track_id);
                         return;
                     }
-                    // Replace in-memory with disk version, then add our new task on top
-                    app.replace_track(&track_id, disk_track);
+                    // The disk version is ours now; our new task goes on top of it.
 
                     let token = match app.resolve_mint_namespace() {
                         Ok(t) => t,
@@ -1243,7 +1239,7 @@ pub(super) fn confirm_edit(app: &mut App) {
 
                 if changed {
                     // File changed externally — read from disk and check for conflict
-                    if let Some(disk_track) = app.read_track_from_disk(&track_id) {
+                    if let Some(disk_track) = app.adopt_track_from_disk(&track_id) {
                         let disk_task = task_ops::find_task_in_track(&disk_track, &task_id);
                         let is_conflict = match disk_task {
                             Some(dt) => dt.title != original_title,
@@ -1251,12 +1247,10 @@ pub(super) fn confirm_edit(app: &mut App) {
                         };
 
                         if is_conflict {
-                            // Don't save — reload from disk, show conflict popup
+                            // Don't save — keep the disk version, show conflict popup
                             app.conflict_text = Some(title);
-                            app.replace_track(&track_id, disk_track);
                         } else {
-                            // No conflict — merge: use disk version, apply edit, save
-                            app.replace_track(&track_id, disk_track);
+                            // No conflict — the disk version is ours; apply the edit
                             let track = match app.find_track_mut(&track_id) {
                                 Some(t) => t,
                                 None => return,
@@ -1736,9 +1730,7 @@ pub(super) fn cancel_edit(app: &mut App) {
             if app.track_changed_on_disk(&track_id) {
                 // File changed externally — reload from disk (discards our in-memory placeholder
                 // and picks up external changes atomically)
-                if let Some(disk_track) = app.read_track_from_disk(&track_id) {
-                    app.replace_track(&track_id, disk_track);
-                }
+                app.adopt_track_from_disk(&track_id);
                 drain_pending_for_track(app, &track_id);
             } else {
                 // No external changes — remove placeholder from memory and save
