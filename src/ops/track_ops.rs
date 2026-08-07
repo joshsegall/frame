@@ -13,6 +13,8 @@ pub enum TrackError {
     NotFound(String),
     #[error("track ID already exists: {0}")]
     AlreadyExists(String),
+    #[error("a track file already exists at {0} — it has no entry in project.toml")]
+    FileExists(String),
     #[error("invalid state transition: {0}")]
     InvalidTransition(String),
     #[error("invalid position: {0}")]
@@ -47,6 +49,21 @@ pub fn new_track(
     }
 
     let file_path = format!("tracks/{}.md", track_id);
+
+    // And for a file with no entry pointing at it. Frame will not load such a
+    // file, so the config check above cannot see it — but the write below is
+    // unconditional, and it is somebody's content. It is what an interrupted
+    // `fr track new` leaves behind, and what a hand-edited `project.toml` that
+    // dropped a row leaves behind, and in both cases the tasks are still in it.
+    //
+    // Refusing rather than adopting the file: adopting would mean inventing a
+    // config row for content this command never saw, under a name the caller
+    // chose for a *new* track. `fr check` reports the orphan and can say more
+    // about it than a create can.
+    if frame_dir.join(&file_path).exists() {
+        return Err(TrackError::FileExists(file_path));
+    }
+
     let track_config = TrackConfig {
         id: track_id.to_string(),
         name: name.to_string(),
@@ -167,8 +184,10 @@ pub fn reorder_tracks(
         ));
     }
 
-    // Collect indices of active tracks
-    let active_indices: Vec<usize> = config
+    // The config slots the active tracks occupy. Everything else — shelved and
+    // archived rows — stays exactly where it is, and the reorder permutes only
+    // who sits in these.
+    let slots: Vec<usize> = config
         .tracks
         .iter()
         .enumerate()
@@ -176,38 +195,35 @@ pub fn reorder_tracks(
         .map(|(i, _)| i)
         .collect();
 
-    if new_position >= active_indices.len() {
+    if new_position >= slots.len() {
         return Err(TrackError::InvalidPosition(format!(
             "position {} out of range (0..{})",
             new_position,
-            active_indices.len()
+            slots.len()
         )));
     }
 
-    // Remove from current position and reinsert at new position
-    let tc = config.tracks.remove(current_idx);
-
-    // Recalculate active indices after removal
-    let active_indices: Vec<usize> = config
-        .tracks
+    // Permuting fixed slots rather than removing from the array and reinserting
+    // is what makes this **its own inverse**, and that is the point rather than
+    // a nicety. Positions here are indices among *active* tracks, so with an
+    // inactive row sitting between two active ones, a remove-and-reinsert lets
+    // the moved track cross it — and the return trip cannot put it back, because
+    // "before the track now at active position 0" no longer names the slot it
+    // came from. Moving a track down past an archived one and undoing left the
+    // two active tracks swapped; P9 found it.
+    //
+    // Pinning the slots also reads better: reordering the tracks you can see
+    // should not shuffle an archived one you cannot.
+    let mut active: Vec<TrackConfig> = slots.iter().map(|&i| config.tracks[i].clone()).collect();
+    let current_position = slots
         .iter()
-        .enumerate()
-        .filter(|(_, t)| t.state == "active")
-        .map(|(i, _)| i)
-        .collect();
-
-    // Find the insertion index in the full list
-    let insert_idx = if new_position >= active_indices.len() {
-        // After the last active track
-        active_indices
-            .last()
-            .map(|&i| i + 1)
-            .unwrap_or(config.tracks.len())
-    } else {
-        active_indices[new_position]
-    };
-
-    config.tracks.insert(insert_idx, tc);
+        .position(|&i| i == current_idx)
+        .expect("the track was found active above");
+    let tc = active.remove(current_position);
+    active.insert(new_position, tc);
+    for (slot, tc) in slots.iter().zip(active) {
+        config.tracks[*slot] = tc;
+    }
     Ok(())
 }
 
@@ -865,6 +881,79 @@ file = "tracks/old.md"
         let (tmp, frame_dir, mut config, mut doc) = setup_test_project();
         let result = new_track(&frame_dir, &mut doc, &mut config, "main", "Main Again");
         assert!(result.is_err());
+        drop(tmp);
+    }
+
+    /// A track file with no entry pointing at it is invisible to the config
+    /// check, and the create writes its file unconditionally — so the tasks in
+    /// it would be replaced by an empty template. The TUI got this guard when
+    /// the same defect was fixed there; the CLI's check was id-only.
+    #[test]
+    fn test_new_track_refuses_to_land_on_an_orphaned_file() {
+        let (tmp, frame_dir, mut config, mut doc) = setup_test_project();
+        let orphan = frame_dir.join("tracks/feat.md");
+        fs::write(
+            &orphan,
+            "# Features\n\n## Backlog\n\n- [ ] `F-001` Do not lose me\n\n## Done\n",
+        )
+        .unwrap();
+
+        let result = new_track(&frame_dir, &mut doc, &mut config, "feat", "Features");
+
+        assert!(matches!(result, Err(TrackError::FileExists(_))));
+        assert!(
+            fs::read_to_string(&orphan)
+                .unwrap()
+                .contains("Do not lose me"),
+            "the orphaned track file was overwritten"
+        );
+        assert!(!config.tracks.iter().any(|t| t.id == "feat"));
+        drop(tmp);
+    }
+
+    /// Reordering is its own inverse, and it leaves inactive rows alone.
+    ///
+    /// Positions are indices among *active* tracks, so an archived row sitting
+    /// between two active ones used to be something the moved track could cross
+    /// — and the return trip could not put it back. P9 found the asymmetry as
+    /// "undo did not restore `project.toml`".
+    #[test]
+    fn test_reorder_is_its_own_inverse_across_an_inactive_track() {
+        let (tmp, _frame_dir, mut config, _doc) = setup_test_project();
+        // An inactive row *between* two active ones, which is the only shape
+        // where the two coordinate systems disagree.
+        config.tracks[1].state = "archived".to_string();
+        config.tracks.push(TrackConfig {
+            id: "feat".to_string(),
+            name: "Features".to_string(),
+            state: "active".to_string(),
+            file: "tracks/feat.md".to_string(),
+        });
+        let before: Vec<(String, String)> = config
+            .tracks
+            .iter()
+            .map(|t| (t.id.clone(), t.state.clone()))
+            .collect();
+        let first = config.tracks[0].id.clone();
+
+        reorder_tracks(&mut config, &first, 1).unwrap();
+        let moved: Vec<&str> = config.tracks.iter().map(|t| t.id.as_str()).collect();
+        assert_ne!(
+            moved,
+            before.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            "the move must actually move something"
+        );
+        // The archived row did not budge.
+        assert_eq!(config.tracks[1].id, before[1].0);
+        assert_eq!(config.tracks[1].state, "archived");
+
+        reorder_tracks(&mut config, &first, 0).unwrap();
+        let after: Vec<(String, String)> = config
+            .tracks
+            .iter()
+            .map(|t| (t.id.clone(), t.state.clone()))
+            .collect();
+        assert_eq!(after, before, "moving back must restore the order exactly");
         drop(tmp);
     }
 

@@ -118,6 +118,8 @@ All notable changes to frame will be documented in this file.
 
 ### Fixed
 
+- **`fr track new` refuses to land on an orphaned track file.** It checked the id against `project.toml` but not the path it was about to write, so a `tracks/<id>.md` with no entry pointing at it — what an interrupted create leaves behind, or a hand-edited config that dropped a row — was replaced with an empty template, tasks and all. Frame does not load such a file, which is exactly why the config check could not see it.
+
 - **The TUI no longer overwrites a track another process created.** Creating a track wrote `tracks/<id>.md` unconditionally, having checked for a duplicate id against the config as it was when the session started. So a track created elsewhere since — by `fr track new`, by another TUI, by an agent — was replaced with an empty template and every task in it destroyed. The check now asks disk, under the lock, and the operation refuses. The same guard covers redoing a track add and undoing a track delete, which re-create a track file the same way.
 
 - **The TUI no longer erases a concurrent change to `project.toml`.** It held the config parsed at startup and wrote the whole file back from it, so a track added by another process vanished from the config at the next track operation — its file left orphaned under `frame/`, with `fr check` reporting the wreckage after the fact. Config changes now merge the way tracks and the inbox already did: our edit is applied to the document on disk, under the lock. Track entries match on id and merge field by field, so a rename here and a shelve there both survive; a change that cannot be honoured is said so plainly and written to the recovery log.
