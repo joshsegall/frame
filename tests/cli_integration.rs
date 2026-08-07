@@ -521,9 +521,14 @@ fn test_track_cc_focus_clear() {
     let out = run_fr_ok(tmp.path(), &["track", "cc-focus", "--clear"]);
     assert!(out.contains("cleared"));
 
-    // Verify cc_focus is gone from config
+    // The key stays and is emptied, which is what the template documents as
+    // meaning none — removing it would take its trailing comment with it, and
+    // would make re-focusing re-add the key at the end of `[agent]`. What must
+    // be gone is the *focus*, not the line.
     let config_text = fs::read_to_string(tmp.path().join("frame/project.toml")).unwrap();
-    assert!(!config_text.contains("cc_focus"));
+    assert!(config_text.contains(r#"cc_focus = """#));
+    let config: frame::model::ProjectConfig = toml::from_str(&config_text).unwrap();
+    assert!(config.agent.cc_focus.is_none());
 
     // fr ready --cc should still work (no error)
     let _out = run_fr_ok(tmp.path(), &["ready", "--cc"]);

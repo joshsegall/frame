@@ -60,10 +60,25 @@ pub fn set_cc_focus(doc: &mut toml_edit::DocumentMut, track_id: &str) {
     doc["agent"]["cc_focus"] = toml_edit::value(track_id);
 }
 
-/// Clear the cc_focus field from the config document
+/// Clear the cc_focus field in the config document.
+///
+/// The key is emptied rather than removed, which is the file's own idiom: the
+/// shipped template writes `cc_focus = ""` and documents empty as meaning none,
+/// and [`crate::model::config::AgentConfig`] reads it back as `None`.
+///
+/// Removing it instead cost two things. The line's trailing comment went with
+/// it — the same loss this whole merge exists to prevent, in miniature. And
+/// setting focus again could only re-add the key at the *end* of `[agent]`,
+/// because a removed key takes its position with it, so focusing a track and
+/// undoing left `project.toml` reordered. P9 caught exactly that.
+///
+/// A key that is not there is left alone: clearing is not a reason to write a
+/// setting into a file that never mentioned it.
 pub fn clear_cc_focus(doc: &mut toml_edit::DocumentMut) {
-    if let Some(agent) = doc.get_mut("agent").and_then(|a| a.as_table_mut()) {
-        agent.remove("cc_focus");
+    if let Some(agent) = doc.get_mut("agent").and_then(|a| a.as_table_mut())
+        && agent.contains_key("cc_focus")
+    {
+        agent["cc_focus"] = toml_edit::value("");
     }
 }
 
@@ -151,54 +166,28 @@ pub fn set_track_order(doc: &mut toml_edit::DocumentMut, order: &[String]) {
     rebuild_tracks(tracks, ordered);
 }
 
-/// Replace the array's entries, keeping whatever comment block precedes the
-/// first one where it is.
+/// Replace the array's entries, each carrying its own comments with it.
 ///
-/// A prefix comment on the first `[[tracks]]` entry introduces the *section* at
-/// least as often as it describes that entry — it is what the shipped template
-/// produces, since the template's Tracks banner has no entry of its own to
-/// attach to. So the leading decor stays pinned to the first position and every
-/// other entry keeps its own. Rows below the first carry their comments with
-/// them, which is the reading that matters for anything a user wrote by hand.
-fn rebuild_tracks(tracks: &mut toml_edit::ArrayOfTables, mut tables: Vec<toml_edit::Table>) {
-    let was_first = tracks
-        .iter()
-        .next()
-        .and_then(|t| t.get("id"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let now_first = tables
-        .first()
-        .and_then(|t| t.get("id"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    // A straight swap of the two prefixes: the new first entry takes the
-    // banner, and the entry it displaced takes what the new one was carrying.
-    // Nothing is dropped either way, and it is one rule rather than a guess
-    // about which comment means what.
-    if let (Some(was_first), Some(now_first)) = (&was_first, &now_first)
-        && was_first != now_first
-    {
-        let displaced = tables
-            .first()
-            .and_then(|t| t.decor().prefix().cloned())
-            .unwrap_or_else(|| toml_edit::RawString::from(""));
-        let banner = tracks
-            .iter()
-            .next()
-            .and_then(|t| t.decor().prefix().cloned())
-            .unwrap_or_else(|| toml_edit::RawString::from(""));
-        if let Some(first) = tables.first_mut() {
-            first.decor_mut().set_prefix(banner);
-        }
-        if let Some(moved) = tables
-            .iter_mut()
-            .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(was_first.as_str()))
-        {
-            moved.decor_mut().set_prefix(displaced);
-        }
-    }
+/// **Decor travels with the row, and nothing is reassigned by position.** That
+/// costs something visible: a comment block sitting above the first
+/// `[[tracks]]` entry is as likely to introduce the *section* as to describe
+/// that row — the shipped template's Tracks banner is exactly that, having no
+/// entry of its own to attach to — so inserting a track at the top leaves the
+/// banner above the second row instead.
+///
+/// It was written the other way first, pinning that leading block to the first
+/// position and swapping the displaced one out. P9 rejected it, and was right
+/// to: a swap is only its own inverse when the *same* operation runs twice.
+/// Adding a track at position 0 and then undoing it is an insert followed by a
+/// removal, and the blank line the swap moved off the original first row never
+/// came back — `project.toml` did not survive undo byte for byte.
+///
+/// Attaching decor to rows is reversible under every operation here, insert,
+/// remove and reorder alike, because no rule has to run backwards for it to
+/// hold. A banner one row lower is cosmetic and self-correcting the moment the
+/// user moves it; an undo that does not restore the file is neither.
+fn rebuild_tracks(tracks: &mut toml_edit::ArrayOfTables, tables: Vec<toml_edit::Table>) {
+    let mut tables = tables;
 
     // A table carries where in the document it is rendered, and that is what
     // decides the output — reordering the array alone moves nothing. So the
@@ -581,8 +570,7 @@ file = "tracks/ui.md"
         config.tracks.into_iter().map(|t| t.id).collect()
     }
 
-    /// Reordering moves rows, not the section they live in — and a comment
-    /// written above a specific entry goes with that entry.
+    /// Reordering moves rows, and each row's comments go with it.
     #[test]
     fn test_set_track_order_moves_rows_and_their_comments() {
         let mut doc: toml_edit::DocumentMut = BANNERED.parse().unwrap();
@@ -590,16 +578,41 @@ file = "tracks/ui.md"
         let result = doc.to_string();
 
         assert_eq!(track_ids(&result), vec!["ui", "api"]);
-        // The banner introduces the section, so it stays at the top of it.
-        let banner = result.find("# Tracks").unwrap();
-        let first_row = result.find("[[tracks]]").unwrap();
-        assert!(banner < first_row);
-        // The per-row comment travelled with the row it describes.
+        // The comment written above `ui` travelled with `ui`, which is now
+        // first — so it now sits above the whole section.
         let comment = result.find("# the one nobody uses").unwrap();
+        let ui_row = result.find(r#"id = "ui""#).unwrap();
         let api_row = result.find(r#"id = "api""#).unwrap();
-        assert!(comment < api_row);
-        // Nothing else moved.
+        assert!(comment < ui_row && ui_row < api_row);
+        // Nothing outside the array moved.
         assert!(result.starts_with("[project]"));
+        assert!(result.contains("# Tracks"));
+    }
+
+    /// The property that decides how decor is handled: every operation here is
+    /// reversible, so an undo restores `project.toml` byte for byte. Pinning a
+    /// comment block to a *position* instead of to its row fails this — P9
+    /// found it, on an insert undone by a removal.
+    #[test]
+    fn test_track_edits_are_reversible_byte_for_byte() {
+        let mut doc: toml_edit::DocumentMut = BANNERED.parse().unwrap();
+        insert_track_in_config(
+            &mut doc,
+            &TrackConfig {
+                id: "docs".to_string(),
+                name: "Docs".to_string(),
+                state: "active".to_string(),
+                file: "tracks/docs.md".to_string(),
+            },
+            0,
+        );
+        remove_track_from_config(&mut doc, "docs");
+        assert_eq!(doc.to_string(), BANNERED, "insert then remove must restore");
+
+        let mut doc: toml_edit::DocumentMut = BANNERED.parse().unwrap();
+        set_track_order(&mut doc, &["ui".to_string(), "api".to_string()]);
+        set_track_order(&mut doc, &["api".to_string(), "ui".to_string()]);
+        assert_eq!(doc.to_string(), BANNERED, "a reorder undone must restore");
     }
 
     #[test]

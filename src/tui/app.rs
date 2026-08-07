@@ -1578,6 +1578,15 @@ impl App {
                 app.baselines.insert(SaveTarget::Inbox, text);
             }
         }
+        // The config has an ancestor for the same reason and on the same terms.
+        // There is no fallback to a re-serialization here: `ProjectConfig`
+        // models neither comments nor any key it does not know, so a
+        // re-serialization would be a *worse* ancestor than none at all — it
+        // would read as though the file had already lost everything the merge
+        // exists to keep.
+        if let Ok(text) = std::fs::read_to_string(app.project.frame_dir.join("project.toml")) {
+            app.baselines.insert(SaveTarget::Config, text);
+        }
 
         app
     }
@@ -2859,7 +2868,9 @@ impl App {
                 .inbox
                 .as_ref()
                 .map(crate::parse::serialize_inbox),
-            // The config is never merged, so it has no ancestor to keep.
+            // The config's ancestor is the document that was written, not a
+            // re-serialization of the struct — see `save_config_locked`, which
+            // records it there because that is where the text exists.
             SaveTarget::Config => None,
         };
         if let Some(text) = text {
@@ -3147,22 +3158,185 @@ impl App {
     }
 
     /// Write `project.toml`. **Assumes the project lock is held.**
+    ///
+    /// Our changes are applied to the document that is **on disk**, rather than
+    /// the file being replaced with a serialization of what is in memory. The
+    /// in-memory config is a snapshot taken at [`Self::new`], so overwriting
+    /// with it erased anything another process had done since — and
+    /// `toml::to_string_pretty` cannot emit a comment, so it also erased the
+    /// file's own documentation on every track operation, contended or not.
+    ///
+    /// The delta from the ancestor to memory is exactly the operation the user
+    /// just performed, which is what lets this stay on the save path instead of
+    /// every config mutation having to edit a document itself.
     fn save_config_locked(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        crate::io::config_io::write_config_from_struct(
-            &self.project.frame_dir,
-            &self.project.config,
-        )?;
+        let frame_dir = self.project.frame_dir.clone();
+
+        // No ancestor, or a file we cannot read or parse: there is nothing to
+        // merge against or into, and the floor is what this did before the
+        // merge existed.
+        let prepared = self
+            .baselines
+            .get(&SaveTarget::Config)
+            .and_then(|text| toml::from_str::<crate::model::ProjectConfig>(text).ok())
+            .zip(crate::io::config_io::read_config(&frame_dir).ok());
+
+        let Some((base, (theirs, mut doc))) = prepared else {
+            crate::io::config_io::write_config_from_struct(&frame_dir, &self.project.config)?;
+            self.last_save_at = Some(Instant::now());
+            self.frame_unwritable = false;
+            return Ok(());
+        };
+
+        let result =
+            crate::ops::reconcile::reconcile_config(&base, &self.project.config, &theirs, &mut doc);
+        crate::io::config_io::write_config(&frame_dir, &doc)?;
         self.last_save_at = Some(Instant::now());
+        self.frame_unwritable = false;
+
+        // The document is what landed, so it is what memory takes and what the
+        // next merge treats as the ancestor. Re-parsing it rather than tracking
+        // a merged struct alongside is what keeps the two from drifting.
+        let text = doc.to_string();
+        if let Ok(config) = toml::from_str::<crate::model::ProjectConfig>(&text) {
+            self.adopt_config(config);
+        }
+        self.baselines.insert(SaveTarget::Config, text);
+        self.report_config_merge(&result);
         Ok(())
+    }
+
+    /// Make the session agree with a config that has just been read or merged.
+    ///
+    /// This is what [`Self::reload_changed_files`] used to call "would need full
+    /// re-init" and skip. It is not a re-init: a re-init would throw away the
+    /// undo stack, every track's view state, and anything still sitting in
+    /// `unsaved` — the session's in-memory content is precisely what must
+    /// survive. Three narrow steps do the job instead.
+    fn adopt_config(&mut self, config: crate::model::ProjectConfig) {
+        let current = self.current_track_id().map(|s| s.to_string());
+        self.project.config = config;
+
+        let live: Vec<(String, String)> = self
+            .project
+            .config
+            .tracks
+            .iter()
+            .filter(|t| t.state != "archived")
+            .map(|t| (t.id.clone(), t.file.clone()))
+            .collect();
+
+        // Tracks that appeared. Loading someone else's track is a passive load
+        // and must not mint: `ensure_ids_and_dates` belongs to the reload path,
+        // which runs on its own schedule, not to a save.
+        for (id, file) in &live {
+            if self.project.tracks.iter().any(|(t, _)| t == id) {
+                continue;
+            }
+            let path = self.project.frame_dir.join(file);
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            if let Ok(mtime) = std::fs::metadata(&path).and_then(|m| m.modified()) {
+                self.track_mtimes.insert(id.clone(), mtime);
+            }
+            self.project.tracks.push((id.clone(), parse_track(&text)));
+            self.baselines.insert(SaveTarget::Track(id.clone()), text);
+        }
+
+        // Tracks that went away. Flushing first is what keeps this out of the
+        // hole where an `unsaved` entry names a track no longer in memory and
+        // can never be cleared — `confirm_archive_track` does the same.
+        let gone: Vec<String> = self
+            .project
+            .tracks
+            .iter()
+            .map(|(id, _)| id.clone())
+            .filter(|id| !live.iter().any(|(l, _)| l == id))
+            .collect();
+        for id in gone {
+            if self.unsaved.contains_key(&SaveTarget::Track(id.clone())) {
+                self.save_track_logged(&id);
+            }
+            self.project.tracks.retain(|(t, _)| t != &id);
+        }
+
+        // `View::Track` is an index into `active_track_ids`, so a track
+        // appearing or leaving moves everything after it. The id is what the
+        // user is looking at; the index is an implementation detail.
+        self.rebuild_active_track_ids();
+        if let Some(current) = current {
+            self.view = match self.active_track_ids.iter().position(|id| *id == current) {
+                Some(idx) => View::Track(idx),
+                None if self.active_track_ids.is_empty() => View::Tracks,
+                None => View::Track(0),
+            };
+        }
+    }
+
+    /// Rebuild the active-track list from the config, keeping the cursor in
+    /// range.
+    pub fn rebuild_active_track_ids(&mut self) {
+        self.active_track_ids = self
+            .project
+            .config
+            .tracks
+            .iter()
+            .filter(|t| t.state == "active")
+            .map(|t| t.id.clone())
+            .collect();
+
+        let total = self.project.config.tracks.len();
+        self.tracks_cursor = if total > 0 {
+            self.tracks_cursor.min(total - 1)
+        } else {
+            0
+        };
+    }
+
+    /// Tell the user, and the recovery log, what the config merge decided.
+    ///
+    /// A merge that took their work as well as ours is news. A merge that
+    /// dropped *our* change is not the same kind of news — the user's last
+    /// keystroke did not do what it looked like it did, and saying so in the
+    /// same voice as a background merge would bury it.
+    fn report_config_merge(&mut self, result: &crate::ops::reconcile::ReconciledConfig) {
+        for conflict in &result.conflicts {
+            crate::io::recovery::log_recovery(
+                &self.project.frame_dir,
+                crate::io::recovery::RecoveryEntry {
+                    timestamp: chrono::Utc::now(),
+                    category: crate::io::recovery::RecoveryCategory::Write,
+                    description: format!(
+                        "concurrent change to {} in project.toml — {}",
+                        conflict.key,
+                        conflict.reason.describe()
+                    ),
+                    fields: vec![("Reason".to_string(), conflict.reason.slug().to_string())],
+                    body: conflict.set_aside.clone(),
+                },
+            );
+        }
+
+        let rejected: Vec<&str> = result.rejected().map(|c| c.key.as_str()).collect();
+        if !rejected.is_empty() {
+            self.status_message = Some(format!(
+                "{} was removed by another process — kept the version on disk",
+                rejected.join(", ")
+            ));
+            self.status_is_error = true;
+        } else if result.took_theirs > 0 {
+            self.announce_merge(&SaveTarget::Config, result.took_theirs);
+        }
     }
 
     /// Write `project.toml`, recording any failure.
     ///
-    /// The config is not merged the way a track or the inbox is — there is no
-    /// three-way merge for TOML here, so under the lock it is last writer wins.
     /// What the lock buys is that the write cannot land in the middle of
-    /// another process's read-modify-write, and that a config write paired with
-    /// a file move ([`Self::with_project_lock`]) is one step rather than two.
+    /// another process's read-modify-write, that the read the merge is built on
+    /// cannot go stale between reading and writing, and that a config write
+    /// paired with a file move ([`Self::with_project_lock`]) is one step rather
+    /// than two.
     pub fn save_config_logged(&mut self) {
         if self.lock_held {
             match self.save_config_locked() {
@@ -3172,10 +3346,19 @@ impl App {
             return;
         }
         match FileLock::acquire_default(&self.project.frame_dir) {
-            Ok(_lock) => match self.save_config_locked() {
-                Ok(()) => self.clear_save_failure(&SaveTarget::Config),
-                Err(e) => self.record_save_failure(SaveTarget::Config, &e),
-            },
+            Ok(_lock) => {
+                // Held for the duration, so a save nested inside this one —
+                // `adopt_config` flushing a track that is about to leave —
+                // writes under it instead of blocking against our own
+                // descriptor. `FileLock` is not re-entrant.
+                self.lock_held = true;
+                let result = self.save_config_locked();
+                self.lock_held = false;
+                match result {
+                    Ok(()) => self.clear_save_failure(&SaveTarget::Config),
+                    Err(e) => self.record_save_failure(SaveTarget::Config, &e),
+                }
+            }
             Err(e) => self.record_save_failure(SaveTarget::Config, &e),
         }
     }
@@ -3432,6 +3615,54 @@ impl App {
         ));
     }
 
+    /// Take an external change to `project.toml`.
+    ///
+    /// The save path is what stops a concurrent config change being *erased*;
+    /// this is what makes the session notice one while it is happening, which
+    /// is the freshness half and follows the same rule as a track: if we are
+    /// holding a config change that has not reached disk, merge rather than
+    /// replace and leave the write to the retry; otherwise take theirs whole.
+    fn reload_config(&mut self, path: &std::path::Path) {
+        if self.unsaved.contains_key(&SaveTarget::Config) {
+            let prepared = self
+                .baselines
+                .get(&SaveTarget::Config)
+                .and_then(|text| toml::from_str::<crate::model::ProjectConfig>(text).ok())
+                .zip(crate::io::config_io::read_config(&self.project.frame_dir).ok());
+            let Some((base, (theirs, mut doc))) = prepared else {
+                return;
+            };
+            let result = crate::ops::reconcile::reconcile_config(
+                &base,
+                &self.project.config,
+                &theirs,
+                &mut doc,
+            );
+            if let Ok(config) = toml::from_str::<crate::model::ProjectConfig>(&doc.to_string()) {
+                self.adopt_config(config);
+            }
+            // Their version has been dealt with, so it is the ancestor now —
+            // the rule `preserve_unreplaced` follows, for the same reason. What
+            // is left to write is our contribution, and the retry will apply it
+            // to whatever is on disk by then.
+            if let Ok(text) = std::fs::read_to_string(path) {
+                self.baselines.insert(SaveTarget::Config, text);
+            }
+            self.report_config_merge(&result);
+            return;
+        }
+
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let Ok(config) = toml::from_str::<crate::model::ProjectConfig>(&text) else {
+            return;
+        };
+        self.adopt_config(config);
+        self.theme = Theme::from_config(&self.project.config.ui);
+        self.baselines.insert(SaveTarget::Config, text);
+    }
+
     /// Reload changed files from disk. Returns the edit target's task_id if it was externally modified.
     pub fn reload_changed_files(&mut self, paths: &[std::path::PathBuf]) -> Option<String> {
         let mut edited_task_conflict = None;
@@ -3493,7 +3724,7 @@ impl App {
             }
 
             if file_name == "project.toml" {
-                // Config changes — skip for now (would need full re-init)
+                self.reload_config(path);
                 continue;
             }
             if let Some((track_id, _track_file)) =
@@ -6200,11 +6431,18 @@ mod tests {
         // edit lands without them doing anything, which is what the *timer*
         // provides; asserting on one attempt asserts something stronger than
         // the retry promises.
-        for _ in 0..5 {
+        //
+        // And the attempts have to be **spaced**, which they were not: five
+        // tries in the same microsecond are one try as far as a transient loss
+        // is concerned, and this went flaky under a parallel `cargo test --lib`
+        // the moment the suite got busier. What makes good on a lost race is
+        // the timer, so the stand-in for it has to span real time too.
+        for _ in 0..10 {
             app.retry_unsaved_saves(true);
             if app.unsaved.is_empty() {
                 break;
             }
+            std::thread::sleep(Duration::from_millis(20));
         }
         assert!(app.unsaved.is_empty(), "the retry should have landed it");
         assert!(
@@ -6344,6 +6582,171 @@ mod tests {
         assert!(
             after.contains("captured here"),
             "our own item did not land:\n{after}"
+        );
+    }
+
+    /// A project with a `project.toml` that has something in it worth keeping.
+    fn config_project(root: &std::path::Path, config: &str) -> App {
+        let frame_dir = root.join("frame");
+        std::fs::create_dir_all(frame_dir.join("tracks")).unwrap();
+        std::fs::write(
+            frame_dir.join("tracks/a.md"),
+            "# A\n\n## Backlog\n\n- [ ] `A-001` One\n\n## Done\n",
+        )
+        .unwrap();
+        std::fs::write(frame_dir.join("inbox.md"), "# Inbox\n").unwrap();
+        std::fs::write(frame_dir.join("project.toml"), config).unwrap();
+        let project = crate::io::project_io::load_project(root).unwrap();
+        App::new(project)
+    }
+
+    const COMMENTED_CONFIG: &str = r#"# Frame project configuration
+# Docs: https://example.invalid/frame
+
+[project]
+name = "commented"
+
+# Tracks
+# ------
+# Each entry defines a workstream.
+
+[[tracks]]
+id = "a"
+name = "A"
+state = "active"
+file = "tracks/a.md"
+
+[ids.prefixes]
+a = "A"
+"#;
+
+    /// Both halves of the config defect, in one case.
+    ///
+    /// The TUI held a `ProjectConfig` parsed at startup and wrote the whole
+    /// file back from it, so a track another process added in the meantime was
+    /// erased — and since `toml::to_string_pretty` cannot emit a comment, so
+    /// was every line of documentation in the file, on every track operation.
+    ///
+    /// Deliberately *no* reload between their write and ours: making a save
+    /// depend on a notification having arrived first is the defect the P8 arc
+    /// was about.
+    #[test]
+    fn a_config_write_keeps_a_concurrent_track_and_the_files_comments() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        let mut app = config_project(root, COMMENTED_CONFIG);
+        let path = root.join("frame/project.toml");
+
+        // Another process runs `fr track new b`: a row, and a file beside it.
+        std::fs::write(
+            root.join("frame/tracks/b.md"),
+            "# B\n\n## Backlog\n\n- [ ] `B-001` Theirs\n\n## Done\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "{COMMENTED_CONFIG}\n[[tracks]]\nid = \"b\"\nname = \"B\"\n\
+                 state = \"active\"\nfile = \"tracks/b.md\"\n"
+            ),
+        )
+        .unwrap();
+
+        // We know nothing about it, and shelve the track we do know about.
+        app.project.config.tracks[0].state = "shelved".into();
+        app.save_config_logged();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains(r#"id = "b""#),
+            "their track was erased by our config write:\n{after}"
+        );
+        assert!(
+            after.contains("# Frame project configuration"),
+            "the file's own documentation was erased by our config write:\n{after}"
+        );
+        assert!(
+            after.contains("# Each entry defines a workstream."),
+            "a comment inside the tracks section did not survive:\n{after}"
+        );
+        assert!(
+            after.contains(r#"state = "shelved""#),
+            "our own change did not land:\n{after}"
+        );
+        assert!(app.unsaved.is_empty(), "the write should have succeeded");
+
+        // And the session took their track rather than merely leaving it on
+        // disk: it is in the config, in memory, and has a baseline of its own.
+        assert!(app.project.config.tracks.iter().any(|t| t.id == "b"));
+        assert!(app.project.tracks.iter().any(|(id, _)| id == "b"));
+        assert!(
+            app.baselines.contains_key(&SaveTarget::Track("b".into())),
+            "an adopted track needs an ancestor like any other"
+        );
+    }
+
+    /// The freshness half: the watcher delivers `project.toml` and the session
+    /// takes the change, rather than skipping the file as needing a re-init.
+    #[test]
+    fn a_reload_takes_an_external_config_change() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        let mut app = config_project(root, COMMENTED_CONFIG);
+        let path = root.join("frame/project.toml");
+
+        std::fs::write(
+            root.join("frame/tracks/b.md"),
+            "# B\n\n## Backlog\n\n## Done\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "{COMMENTED_CONFIG}\n[[tracks]]\nid = \"b\"\nname = \"B\"\n\
+                 state = \"active\"\nfile = \"tracks/b.md\"\n"
+            ),
+        )
+        .unwrap();
+
+        app.reload_changed_files(std::slice::from_ref(&path));
+
+        assert!(app.project.config.tracks.iter().any(|t| t.id == "b"));
+        assert!(app.active_track_ids.iter().any(|id| id == "b"));
+        assert!(app.project.tracks.iter().any(|(id, _)| id == "b"));
+    }
+
+    /// A track that leaves the config leaves memory too — and the view follows
+    /// the track the user was looking at rather than its index.
+    #[test]
+    fn adopting_a_config_that_dropped_a_track_moves_the_view_by_id() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        let two = format!(
+            "{COMMENTED_CONFIG}\n[[tracks]]\nid = \"b\"\nname = \"B\"\n\
+             state = \"active\"\nfile = \"tracks/b.md\"\n"
+        );
+        std::fs::create_dir_all(root.join("frame/tracks")).unwrap();
+        std::fs::write(
+            root.join("frame/tracks/b.md"),
+            "# B\n\n## Backlog\n\n## Done\n",
+        )
+        .unwrap();
+        let mut app = config_project(root, &two);
+        let path = root.join("frame/project.toml");
+
+        // Looking at the second track, which is the one that survives.
+        app.view = View::Track(1);
+        assert_eq!(app.current_track_id(), Some("b"));
+
+        std::fs::write(&path, COMMENTED_CONFIG).unwrap();
+        app.reload_changed_files(std::slice::from_ref(&path));
+
+        assert_eq!(app.active_track_ids, vec!["a".to_string()]);
+        assert!(!app.project.tracks.iter().any(|(id, _)| id == "b"));
+        assert_eq!(
+            app.current_track_id(),
+            Some("a"),
+            "the view followed the index into a track that is no longer there"
         );
     }
 

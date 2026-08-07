@@ -26,10 +26,23 @@ pub struct ProjectInfo {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentConfig {
-    #[serde(default)]
+    /// Which track `fr ready --cc` looks at first, or none.
+    ///
+    /// **Empty means none**, which is what the shipped template writes and
+    /// documents, so it is read that way here rather than left as `Some("")`
+    /// for every caller to remember — `fr ready --cc` used to put an empty
+    /// track id at the head of its list on any project created by `fr init`.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
     pub cc_focus: Option<String>,
     #[serde(default = "default_true")]
     pub cc_only: bool,
+}
+
+fn empty_string_as_none<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(value.filter(|s| !s.is_empty()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

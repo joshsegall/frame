@@ -17,7 +17,7 @@ use std::process::{Command, Stdio};
 use super::edit::detail_move_region;
 use super::navigate::{count_recent_tasks, count_tracks};
 use super::search::auto_expand_for_task;
-use super::tracks::{tracks_total_count, update_track_header};
+use super::tracks::update_track_header;
 
 pub(super) fn clipboard_set(text: &str) {
     #[cfg(target_os = "macos")]
@@ -1702,23 +1702,12 @@ pub(super) fn board_jump_bottom(app: &mut App) {
     app.board_state.cursor[col] = last;
 }
 
-/// Rebuild active_track_ids from config and clamp tracks_cursor
+/// Rebuild active_track_ids from config and clamp tracks_cursor.
+///
+/// The work lives on `App` because adopting an externally-changed config needs
+/// it too, and that happens in `app.rs` well below this module.
 pub(super) fn rebuild_active_track_ids(app: &mut App) {
-    app.active_track_ids = app
-        .project
-        .config
-        .tracks
-        .iter()
-        .filter(|t| t.state == "active")
-        .map(|t| t.id.clone())
-        .collect();
-
-    let total = tracks_total_count(app);
-    if total > 0 {
-        app.tracks_cursor = app.tracks_cursor.min(total - 1);
-    } else {
-        app.tracks_cursor = 0;
-    }
+    app.rebuild_active_track_ids();
 }
 
 #[cfg(test)]
