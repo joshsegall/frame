@@ -162,6 +162,23 @@ Not attempted: task ordering (a task follows the side it came from) and subtask 
 
 The mtime is deliberately not refreshed on this path: `track_changed_on_disk` reads it to decide whether memory and disk have diverged, and after a merge they have.
 
+**`project.toml` merges as an edit applied to the document on disk.** The TUI held a `ProjectConfig` parsed at startup and wrote the whole file back from it, so a track another process added was erased — and because `toml::to_string_pretty` cannot emit a comment, so was every line of documentation in the file, on every track operation, contended or not. A fresh `fr init` project went from 107 lines to 51 the first time a track was shelved.
+
+So `reconcile_config` is the third merge and the only one that does not return a merged value: it applies our `base → ours` delta to **their** `toml_edit` document, in place, and the caller writes that. `project.toml` is a file a person reads, and `ProjectConfig` models neither its comments nor any key it does not know — a merged struct would produce a correct config and destroy the file. The merged struct comes back out by re-parsing what was written, so memory and disk cannot drift.
+
+The delta from the ancestor to memory is exactly the operation the user just performed. That is what lets this live on the save path instead of every config mutation having to edit a document itself, as the CLI's handlers do.
+
+It covers the four regions the TUI can change — `tracks`, `ids.prefixes`, `agent.cc_focus`, `ui.tag_colors` — and nothing else, so `project.name`, `clean`, `recovery` and the rest of `ui` are whatever is on disk. Tracks match on id and merge field by field, so a rename by us and a shelve by them both survive. Two policies differ from the track merge, both for the same reason — a config row has to agree with the *file* it names:
+
+- **We changed a track they removed: theirs wins**, the opposite of edit-beats-delete for a task. Keeping ours would resurrect a row pointing at a file they have already archived or deleted.
+- **Both added the same id: ours wins**, because by then `tracks/<id>.md` is ours.
+
+Order is reapplied only when our side actually moved something; rewriting it unconditionally would have a shelve in the TUI silently undo another process's `fr track mv`.
+
+**Adopting a config is not a re-init.** The reload path used to skip `project.toml` entirely as "would need full re-init" — which would throw away the undo stack, every track's view state, and anything sitting in `unsaved`. `App::adopt_config` instead parses in tracks that appeared, drops tracks that went away after flushing any unsaved work for them, and re-resolves `View::Track` by track id rather than by index. Loading someone else's track is a passive load and does not mint.
+
+**An operation that writes a file validates against disk, not against the snapshot.** Creating a track wrote `tracks/<id>.md` unconditionally after checking for a duplicate id in the in-memory config, so a track another process had created was overwritten with an empty template and every task in it destroyed — damage no merge can undo, since the file is gone before the config write happens. `App::track_id_taken_on_disk` is asked under the lock, and the operation refuses. Refusing is right there and wrong on the save path: nothing has been written yet, and the user is at the prompt that asked for the name.
+
 **Code**: `src/io/watcher.rs` (FrameWatcher), `src/tui/render/conflict_popup.rs`, `src/ops/reconcile.rs`
 
 ## Merging Under Version Control

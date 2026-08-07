@@ -534,6 +534,43 @@ fn test_track_cc_focus_clear() {
     let _out = run_fr_ok(tmp.path(), &["ready", "--cc"]);
 }
 
+/// `fr track mv` was the one CLI command that wrote the config by serializing
+/// the struct, and it took the file's comments — and any key `ProjectConfig`
+/// does not model — with it every time. On a project made by `fr init` that was
+/// 107 lines down to 51.
+#[test]
+fn test_track_mv_keeps_comments_and_unmodelled_keys() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    let path = tmp.path().join("frame/project.toml");
+
+    let annotated = format!(
+        "# The project's own notes\n{}\n[experimental]\nnot_in_the_struct = true\n",
+        fs::read_to_string(&path).unwrap()
+    );
+    fs::write(&path, &annotated).unwrap();
+
+    run_fr_ok(tmp.path(), &["track", "mv", "side", "0"]);
+
+    let after = fs::read_to_string(&path).unwrap();
+    assert!(
+        after.contains("# The project's own notes"),
+        "the comment was erased by the reorder:\n{after}"
+    );
+    assert!(
+        after.contains("not_in_the_struct = true"),
+        "a key the struct does not model was erased by the reorder:\n{after}"
+    );
+
+    let config: frame::model::ProjectConfig = toml::from_str(&after).unwrap();
+    let ids: Vec<&str> = config.tracks.iter().map(|t| t.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["side", "main"],
+        "the reorder itself must still work"
+    );
+}
+
 #[test]
 fn test_ready_json() {
     let tmp = tempfile::TempDir::new().unwrap();

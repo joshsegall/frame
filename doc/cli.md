@@ -542,7 +542,7 @@ Reorder a track to a new position (0-indexed among active tracks).
 
 ### `fr track cc-focus [ID] [--clear]`
 
-Set or clear the cc-focus track. The cc-focus track is optional — when set, its tasks sort first in `fr ready --cc` output. Use `--clear` to remove the setting.
+Set or clear the cc-focus track. The cc-focus track is optional — when set, its tasks sort first in `fr ready --cc` output. Use `--clear` to remove the setting, which empties `cc_focus` rather than deleting the line: empty is what the shipped `project.toml` writes and documents as meaning none, and keeping the key keeps the comment next to it.
 
 ### `fr track rename ID`
 

@@ -439,22 +439,19 @@ pub(super) fn tag_color_open_picker(app: &mut App) {
 }
 
 /// Assign a palette color to the current tag and write to config
+///
+/// The write goes through [`App::save_config_logged`] like every other config
+/// change: the merge carries `ui.tag_colors` as one of its four regions, so
+/// changing the struct is all this has to do. It used to do its own unlocked
+/// read-modify-write with `let _ =` on the result — no lock, and a write that
+/// did not happen left memory and disk disagreeing with nothing recorded.
 pub(super) fn tag_color_assign(app: &mut App, tag: &str, hex: &str) {
-    use crate::io::config_io;
-
-    // Write to disk via toml_edit (round-trip safe)
-    let frame_dir = app.project.frame_dir.clone();
-    if let Ok((_config, mut doc)) = config_io::read_config(&frame_dir) {
-        config_io::set_tag_color(&mut doc, tag, hex);
-        let _ = config_io::write_config(&frame_dir, &doc);
-    }
-
-    // Update in-memory config
     app.project
         .config
         .ui
         .tag_colors
         .insert(tag.to_string(), hex.to_string());
+    app.save_config_logged();
 
     // Update theme
     if let Some(color) = crate::tui::theme::parse_hex_color_pub(hex) {
@@ -472,23 +469,16 @@ pub(super) fn tag_color_assign(app: &mut App, tag: &str, hex: &str) {
 }
 
 /// Clear the color for the current tag and write to config
+///
+/// Through the same one path as [`tag_color_assign`], for the same reasons.
 pub(super) fn tag_color_clear(app: &mut App) {
-    use crate::io::config_io;
-
     let tag = match &app.tag_color_popup {
         Some(tcp) if !tcp.tags.is_empty() => tcp.tags[tcp.cursor].0.clone(),
         _ => return,
     };
 
-    // Write to disk via toml_edit (round-trip safe)
-    let frame_dir = app.project.frame_dir.clone();
-    if let Ok((_config, mut doc)) = config_io::read_config(&frame_dir) {
-        config_io::clear_tag_color(&mut doc, &tag);
-        let _ = config_io::write_config(&frame_dir, &doc);
-    }
-
-    // Update in-memory config
     app.project.config.ui.tag_colors.shift_remove(&tag);
+    app.save_config_logged();
 
     // Update theme: remove the explicit mapping so it falls back to hardcoded defaults
     // But we need to check if there's a hardcoded default; if so, keep it

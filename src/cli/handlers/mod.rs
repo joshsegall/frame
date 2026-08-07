@@ -2825,9 +2825,15 @@ fn cmd_track_mv(args: TrackMvArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     track_ops::reorder_tracks(&mut project.config, &args.id, args.position)?;
 
-    // Rewrite the config with the new order
-    // We need to regenerate the TOML since reorder_tracks only modifies in-memory config
-    config_io::write_config_from_struct(&project.frame_dir, &project.config)?;
+    // `reorder_tracks` only moves entries in the in-memory config, so the new
+    // order has to be applied to the document. It used to serialize the struct
+    // instead, which is the one place in the CLI that did: on a project made by
+    // `fr init` that turned 107 lines into 51, taking every comment the
+    // template ships — and any key `ProjectConfig` does not model — with it.
+    let (_, mut doc) = config_io::read_config(&project.frame_dir)?;
+    let order: Vec<String> = project.config.tracks.iter().map(|t| t.id.clone()).collect();
+    config_io::set_track_order(&mut doc, &order);
+    config_io::write_config(&project.frame_dir, &doc)?;
 
     println!("{} moved to position {}", args.id, args.position);
     Ok(())
