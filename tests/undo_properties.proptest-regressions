@@ -11,3 +11,4 @@ cc 54e4acd48798c0c6e2b352ba5d4a6fe6e485c59ab85d72e0bdd69d0454b5f0a8 # shrinks to
 cc 8a78c79216287e68d204833284e019ea147705e65a0835e45744880e032489b3 # shrinks to steps = [Step { action: AddTask, target: 0, text: 0 }, Step { action: InsertAfter, target: 25, text: 0 }, Step { action: CrossTrackMove, target: 14, text: 0 }]
 cc 84b9ddb1a5693f45a119ba052b0df7a54ec8dcda23b73997b75bdebe74a20bb8 # shrinks to steps = [Step { action: TrackCcFocus, target: 20, text: 0 }]
 cc e1ee290c162bf3b9b04c4604a00926b99aa12e6273321b885738763ade72f7fd # shrinks to steps = [Step { action: TrackArchive, target: 0, text: 0 }, Step { action: TrackShelve, target: 20, text: 0 }, Step { action: TrackAdd, target: 0, text: 0 }]
+cc a5afb42ac470f10fb9dcb8db154a8e6f1dac749c6ffb362b67f8255ba4f90e38 # shrinks to steps = [Step { action: TrackAdd, target: 0, text: 0 }, Step { action: TrackArchive, target: 43, text: 0 }, Step { action: TrackMoveDown, target: 3, text: 0 }]
