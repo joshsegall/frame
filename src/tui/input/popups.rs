@@ -638,20 +638,37 @@ pub(super) fn handle_project_picker_key(app: &mut App, key: KeyEvent) {
 // Recovery log overlay
 
 /// Open the recovery log overlay by loading entries and caching lines.
+///
+/// Shows the most recent page and **says what it is leaving out**. The overlay
+/// has no `--limit` to reach for, so a silent truncation is worse here than on
+/// the CLI: nothing tells the reader there is more, and nothing lets them ask
+/// for it. The note points at `fr recovery`, which can show all of it.
+///
+/// The page stays small on purpose. The renderer re-wraps every cached line each
+/// frame, so loading a whole shared log — which now spans every worktree of a
+/// clone and is bounded at 5MB rather than 1 — would put tens of thousands of
+/// lines through that loop on every keystroke.
 pub(super) fn open_recovery_overlay(app: &mut App) {
-    let entries =
-        crate::io::recovery::read_recovery_entries(&app.project.frame_dir, Some(10), None);
+    const PAGE: usize = 10;
+
+    let listing =
+        crate::io::recovery::read_recovery_listing(&app.project.frame_dir, Some(PAGE), None, None);
     let mut lines = Vec::new();
-    if entries.is_empty() {
-        // Will be handled by the renderer
-    } else {
-        for entry in &entries {
-            let md = entry.to_display_markdown();
-            for line in md.lines() {
-                lines.push(line.to_string());
-            }
+    for entry in &listing.entries {
+        let md = entry.to_display_markdown();
+        for line in md.lines() {
+            lines.push(line.to_string());
         }
     }
+
+    app.recovery_log_note = (listing.hidden() > 0).then(|| {
+        format!(
+            "showing {} of {} — all: fr recovery --limit {}",
+            listing.entries.len(),
+            listing.matched,
+            listing.matched
+        )
+    });
     app.recovery_log_lines = lines;
     app.recovery_log_scroll = 0;
     app.show_recovery_log = true;
@@ -763,3 +780,74 @@ pub(super) fn handle_results_overlay(app: &mut App, key: KeyEvent) {
 
 // ---------------------------------------------------------------------------
 // Check project (palette action)
+
+#[cfg(test)]
+mod tests {
+    use crate::io::recovery::{RecoveryCategory, RecoveryEntry, log_recovery};
+    use crate::tui::app::app_on_disk;
+    use chrono::DateTime;
+
+    fn write_entries(frame_dir: &std::path::Path, count: usize) {
+        for i in 0..count {
+            log_recovery(
+                frame_dir,
+                RecoveryEntry {
+                    timestamp: DateTime::from_timestamp(1_700_000_000 + i as i64, 0).unwrap(),
+                    category: RecoveryCategory::Delete,
+                    description: format!("task A-{i:03} deleted"),
+                    fields: vec![],
+                    body: "body".to_string(),
+                },
+            );
+        }
+    }
+
+    /// The overlay is a page, not the whole log — and it has no `--limit` to
+    /// reach for, so it has to say what it is leaving out or nothing will.
+    #[test]
+    fn the_overlay_says_how_many_entries_it_is_not_showing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        write_entries(&app.project.frame_dir, 18);
+
+        super::open_recovery_overlay(&mut app);
+
+        let note = app
+            .recovery_log_note
+            .as_deref()
+            .expect("a truncated overlay must say so");
+        assert!(note.contains("showing 10 of 18"), "{note}");
+        assert!(note.contains("fr recovery --limit 18"), "{note}");
+    }
+
+    #[test]
+    fn the_overlay_says_nothing_when_it_is_showing_everything() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        write_entries(&app.project.frame_dir, 4);
+
+        super::open_recovery_overlay(&mut app);
+
+        assert_eq!(app.recovery_log_note, None);
+        assert!(!app.recovery_log_lines.is_empty());
+    }
+
+    /// The origin arrives for free — the overlay renders every field — and it
+    /// is what tells a reader an entry came from the worktree next door.
+    #[test]
+    fn the_overlay_shows_which_working_tree_an_entry_came_from() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        write_entries(&app.project.frame_dir, 1);
+
+        super::open_recovery_overlay(&mut app);
+
+        assert!(
+            app.recovery_log_lines
+                .iter()
+                .any(|l| l.starts_with("Origin:")),
+            "{:?}",
+            app.recovery_log_lines
+        );
+    }
+}

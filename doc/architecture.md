@@ -220,6 +220,20 @@ What remains is derived by inspecting current state, not from a step log, so not
 
 The marker is a **breadcrumb, not a mutex** — no command refuses to run because one exists. `fr clean` is excluded deliberately: its interrupted state is self-healing, and `auto_clean` runs it on every TUI file reload, so a marker per run would be churn with no signal in it.
 
+**Three locks, in a fixed order, and the two inner ones never reach outward.** Frame holds more than one lock at a time — a write command takes the project lock, then mints under the ID-frontier lock, then records a failure under the recovery-log lock — so the acquisition order has to be stated rather than assumed:
+
+```
+frame/.lock                  (project)
+  ├── <frontier>.lock        (ops::ids mint)
+  └── <recovery log>.lock    (log_recovery)
+```
+
+The hierarchy is a tree, not a cycle, and what keeps it one is that **neither leaf acquires anything**. `io::recovery` takes only its own lock, and never loads a project or touches the frontier; `io::ids` never writes to the recovery log. So there is no path that takes an inner lock and then reaches for the project lock, which is the shape a deadlock would need. Two commands hold *only* a leaf: `fr merge` (deliberately no project lock — acquiring one mid-rebase would block on or deadlock against the `fr` that invoked it) and `fr recovery prune`. A single-lock holder cannot be half of a cycle.
+
+Every acquisition is also timeout-bounded — 5s project, 5s frontier, 2s recovery — and **both leaves degrade rather than fail**: a mint that cannot take the frontier lock falls back to scanning, and an append that cannot take the log lock appends anyway and warns. So even a future ordering mistake produces a bounded stall and a degraded write, never a hang. That is deliberate: these are error paths, and a recovery log that blocks the thing it is trying to record is worse than one that races.
+
+`FileLock` is not re-entrant, so no path may take the same lock twice — an inner re-acquire against the same file fails even within one process, since `flock` excludes across file descriptions.
+
 **The TUI holds one lock per operation, not per save.** `App::save_track_logged` takes the lock for a single write; `App::save_batch_logged` takes it once for several. Saving a cross-track move's two tracks one at a time would take and release the lock between them, leaving a window another process can write into — the ordering would be correct but not atomic. The fallible `save_track` / `save_inbox` are private, and the inner writes never acquire, so a batch can hold one lock across all of them (`FileLock` is not re-entrant; an inner re-acquire would deadlock). A failed save is written to the recovery log and not surfaced in the UI: mid-flow a transient error toast is noise the user cannot act on, while `fr recovery` and `fr check` surface it where they can.
 
 **Verified, not assumed.** `io::fault` (debug builds only) fails a write selected by path — `FRAME_FAIL_WRITE=tracks/b.md` — so a test can cut one step of a real sequence and inspect what survived. The tests assert on files on disk rather than on the recovery log, because the log only catches a write that returns an error and would be skipped by an abrupt death; disk state is what survives either. Covered: cross-track move (both windows), track archival, `fr actor merge` with the registry write cut, and `fr check --fix` partway through its plan. Each asserts the work survives and that re-running converges.

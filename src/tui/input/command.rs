@@ -1186,22 +1186,29 @@ pub(super) fn palette_prune_recovery(app: &mut App) {
         return;
     }
 
-    // Count how many are older than 30 days
-    let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+    // The cutoff comes from the same place the prune itself reads it. It used to
+    // be a hardcoded 30 here while `prune_recovery` took it from `[recovery]
+    // prune_age_days` — so a project that configured anything else got a
+    // confirmation prompt promising one number and an action that did another.
+    // A prompt that misstates what it is about to do is worse than no prompt.
+    let days = recovery::settings(&app.project.frame_dir).prune_age_days;
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(days);
     let prunable = entries.iter().filter(|e| e.timestamp < cutoff).count();
 
     if prunable == 0 {
         app.status_message = Some(format!(
-            "{} entries, all < 30 days — nothing to prune",
-            entries.len()
+            "{} entries, all < {} days — nothing to prune",
+            entries.len(),
+            days
         ));
         return;
     }
 
     let msg = format!(
-        "Prune {} of {} entries older than 30 days? (y/n)",
+        "Prune {} of {} entries older than {} days? (y/n)",
         prunable,
-        entries.len()
+        entries.len(),
+        days
     );
 
     app.confirm_state = Some(crate::tui::app::ConfirmState {
@@ -1593,5 +1600,106 @@ pub(super) fn confirm_bulk_delete_tasks(app: &mut App, task_ids: &[(String, Stri
 
         app.selection.clear();
         app.status_message = Some(format!("Deleted {} tasks", count));
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use crate::io::recovery::{RecoveryCategory, RecoveryEntry, log_recovery};
+    use crate::tui::app::{ConfirmAction, app_on_disk};
+    use chrono::Utc;
+
+    fn log_aged(frame_dir: &std::path::Path, desc: &str, days_old: i64) {
+        log_recovery(
+            frame_dir,
+            RecoveryEntry {
+                timestamp: Utc::now() - chrono::Duration::days(days_old),
+                category: RecoveryCategory::Delete,
+                description: desc.to_string(),
+                fields: vec![],
+                body: "body".to_string(),
+            },
+        );
+    }
+
+    /// The prompt and the action must read the cutoff from the same place. They
+    /// did not: the preview hardcoded 30 days while `prune_recovery` took it
+    /// from `[recovery] prune_age_days`, so a project configuring anything else
+    /// got a confirmation promising one number and an action doing another.
+    #[test]
+    fn the_prune_prompt_uses_the_configured_age_not_a_hardcoded_thirty() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        std::fs::write(
+            app.project.frame_dir.join("project.toml"),
+            "[project]\nname = \"t\"\n\n[recovery]\nprune_age_days = 7\n",
+        )
+        .unwrap();
+
+        log_aged(&app.project.frame_dir, "ancient", 40);
+        log_aged(&app.project.frame_dir, "older than a week", 10);
+        log_aged(&app.project.frame_dir, "fresh", 1);
+
+        super::palette_prune_recovery(&mut app);
+
+        let state = app.confirm_state.as_ref().expect("a confirmation");
+        assert!(
+            matches!(state.action, ConfirmAction::PruneRecovery),
+            "{:?}",
+            state.message
+        );
+        assert!(
+            state.message.contains("older than 7 days"),
+            "the prompt must state the cutoff it will actually use: {}",
+            state.message
+        );
+        assert!(
+            state.message.contains("Prune 2 of 3"),
+            "and count against that cutoff, not 30 days: {}",
+            state.message
+        );
+    }
+
+    /// The same cutoff governs the "nothing to prune" message.
+    #[test]
+    fn nothing_to_prune_reports_the_configured_age() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        std::fs::write(
+            app.project.frame_dir.join("project.toml"),
+            "[project]\nname = \"t\"\n\n[recovery]\nprune_age_days = 365\n",
+        )
+        .unwrap();
+        log_aged(&app.project.frame_dir, "only a month old", 40);
+
+        super::palette_prune_recovery(&mut app);
+
+        assert!(app.confirm_state.is_none(), "nothing is prunable yet");
+        let msg = app.status_message.as_deref().unwrap_or_default();
+        assert!(msg.contains("< 365 days"), "{msg}");
+    }
+
+    /// And the prompt's count matches what the prune then removes.
+    #[test]
+    fn the_prompt_count_matches_what_the_prune_removes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        std::fs::write(
+            app.project.frame_dir.join("project.toml"),
+            "[project]\nname = \"t\"\n\n[recovery]\nprune_age_days = 7\n",
+        )
+        .unwrap();
+        log_aged(&app.project.frame_dir, "ancient", 40);
+        log_aged(&app.project.frame_dir, "older than a week", 10);
+        log_aged(&app.project.frame_dir, "fresh", 1);
+
+        super::palette_prune_recovery(&mut app);
+        super::confirm_prune_recovery(&mut app);
+
+        let msg = app.status_message.as_deref().unwrap_or_default();
+        assert!(msg.contains("Pruned 2"), "{msg}");
+        let left = crate::io::recovery::read_recovery_entries(&app.project.frame_dir, None, None);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].description, "fresh");
     }
 }

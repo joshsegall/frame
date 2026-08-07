@@ -27,9 +27,15 @@ pub fn render_recovery_overlay(frame: &mut Frame, app: &mut App, area: Rect) {
 
     frame.render_widget(Clear, popup_area);
 
+    // The count goes in the title rather than in the body: the body scrolls, and
+    // a note about what is missing is the one line that must not scroll away.
+    let title = match &app.recovery_log_note {
+        Some(note) => format!(" Recovery Log — {note} "),
+        None => " Recovery Log ".to_string(),
+    };
     let block = Block::default()
         .title(Span::styled(
-            " Recovery Log ",
+            title,
             Style::default()
                 .fg(bright)
                 .bg(bg)

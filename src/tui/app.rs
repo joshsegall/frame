@@ -1336,6 +1336,11 @@ pub struct App {
     pub recovery_log_scroll: usize,
     /// Cached recovery log lines for overlay display
     pub recovery_log_lines: Vec<String>,
+    /// What the overlay is not showing, for the title — `None` when it is
+    /// showing everything. The overlay has no `--limit` to reach for, so a
+    /// silent truncation here is worse than on the CLI: there is no way to ask
+    /// for the rest and no sign that there is a rest.
+    pub recovery_log_note: Option<String>,
     /// Total visual line count after wrapping (set by renderer)
     pub recovery_log_wrapped_count: usize,
     /// For each logical line, the visual line offset where it starts (set by renderer)
@@ -1502,6 +1507,7 @@ impl App {
             show_recovery_log: false,
             recovery_log_scroll: 0,
             recovery_log_lines: Vec::new(),
+            recovery_log_note: None,
             recovery_log_wrapped_count: 0,
             recovery_log_line_offsets: Vec::new(),
             show_results_overlay: false,
