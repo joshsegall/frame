@@ -3022,6 +3022,135 @@ fn test_recovery_limit() {
     assert!(!out.contains("first entry"));
 }
 
+// ---------------------------------------------------------------------------
+// `fr recovery` surfacing: what it hides, and how to find one entry
+//
+// `fr check` sends people straight here to find one specific entry. With the
+// default limit of 10 against a longer log, a silent truncation is
+// indistinguishable from an empty tail — which is how a real diagnosis
+// concluded frame had never written an entry that was simply on page two.
+// ---------------------------------------------------------------------------
+
+/// Write a log holding `count` entries, each naming task `M-<i>`.
+fn write_numbered_log(root: &Path, count: usize) {
+    let mut content = String::from(
+        "\
+<!-- frame recovery log — append-only error recovery data
+     This file captures data that Frame couldn't save normally.
+     If something went missing, check here.
+     View with: fr recovery
+     Prune old entries: fr recovery prune
+     Safe to delete if empty or stale. -->
+
+---
+",
+    );
+    for i in 0..count {
+        content.push_str(&format!(
+            "## 2026-02-10T{:02}:00:00Z — delete: task M-{} deleted\n\nTrack: main\n\n---\n",
+            i % 24,
+            i
+        ));
+    }
+    fs::write(root.join("frame/.recovery.log"), content).unwrap();
+}
+
+#[test]
+fn recovery_says_how_many_entries_it_is_hiding() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    write_numbered_log(tmp.path(), 18);
+
+    let out = run_fr_ok(tmp.path(), &["recovery"]);
+    assert!(
+        out.contains("showing 10 of 18"),
+        "a truncated listing must say so:\n{out}"
+    );
+    assert!(
+        out.contains("--limit 18"),
+        "and must say how to see the rest:\n{out}"
+    );
+}
+
+#[test]
+fn recovery_says_nothing_about_truncation_when_nothing_is_truncated() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    write_numbered_log(tmp.path(), 8);
+
+    let out = run_fr_ok(tmp.path(), &["recovery"]);
+    assert!(
+        !out.contains("showing"),
+        "a complete listing must not imply there is more:\n{out}"
+    );
+}
+
+#[test]
+fn recovery_for_an_id_finds_the_entry_the_default_limit_hides() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    write_numbered_log(tmp.path(), 18);
+
+    // M-0 is the oldest, so the default listing cannot reach it.
+    let listed = run_fr_ok(tmp.path(), &["recovery"]);
+    assert!(!listed.contains("task M-0 deleted"), "{listed}");
+
+    let found = run_fr_ok(tmp.path(), &["recovery", "--for", "M-0"]);
+    assert!(
+        found.contains("task M-0 deleted"),
+        "--for must reach past the default limit:\n{found}"
+    );
+    // Boundary-aware: M-0 is not M-10.
+    assert!(
+        !found.contains("task M-10 deleted"),
+        "--for must not match a longer id that starts the same:\n{found}"
+    );
+}
+
+#[test]
+fn recovery_for_a_missing_id_says_so_by_name() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    write_numbered_log(tmp.path(), 3);
+
+    let out = run_fr_ok(tmp.path(), &["recovery", "--for", "M-999"]);
+    assert!(
+        out.contains("No recovery log entries for M-999"),
+        "an empty result must name what was looked for:\n{out}"
+    );
+}
+
+#[test]
+fn recovery_for_a_conflict_marker_timestamp_selects_that_entry() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    write_numbered_log(tmp.path(), 3);
+
+    // The form a `conflict:` marker carries, per doc/format.md.
+    let out = run_fr_ok(tmp.path(), &["recovery", "--for", "2026-02-10T01:00:00Z"]);
+    assert!(out.contains("task M-1 deleted"), "{out}");
+    assert!(!out.contains("task M-2 deleted"), "{out}");
+}
+
+#[test]
+fn recovery_json_carries_the_entries_and_not_the_notice() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    write_numbered_log(tmp.path(), 18);
+
+    let out = run_fr_ok(tmp.path(), &["recovery", "--json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+    assert_eq!(
+        parsed.as_array().map(|a| a.len()),
+        Some(10),
+        "the array must hold exactly what the notice counts as shown"
+    );
+    assert!(
+        !out.contains("showing 10 of 18"),
+        "the notice is human-only; it must not corrupt the JSON payload:\n{out}"
+    );
+}
+
 #[test]
 fn test_check_with_lost_task() {
     let tmp = tempfile::TempDir::new().unwrap();

@@ -264,10 +264,53 @@ pub fn read_recovery_entries(
     limit: Option<usize>,
     since: Option<DateTime<Utc>>,
 ) -> Vec<RecoveryEntry> {
+    read_recovery_listing(frame_dir, limit, since, None).entries
+}
+
+/// A page of the recovery log, and how much of it was left out.
+///
+/// The count exists because a silent truncation is indistinguishable from an
+/// empty tail. `fr check` sends people straight to `fr recovery` to find one
+/// specific entry, and with the default limit of 10 against an 18-entry log,
+/// "the entry is not there" and "the entry is on the next page" look exactly
+/// alike — which is how a real diagnosis concluded frame had never written an
+/// entry it had.
+#[derive(Debug, Clone)]
+pub struct RecoveryListing {
+    /// The entries to show, most recent first, after `limit` was applied.
+    pub entries: Vec<RecoveryEntry>,
+    /// How many entries matched the filters *before* `limit` was applied.
+    pub matched: usize,
+}
+
+impl RecoveryListing {
+    /// How many matching entries `limit` held back.
+    pub fn hidden(&self) -> usize {
+        self.matched.saturating_sub(self.entries.len())
+    }
+}
+
+/// Read recovery entries, filtered and paged.
+///
+/// `for_id` selects the entries that mention one task: either a task ID, or the
+/// RFC 3339 timestamp a `conflict:` marker carries (`doc/format.md` documents
+/// that timestamp as identifying the entry holding the other side's version —
+/// this is the tool that follows it).
+pub fn read_recovery_listing(
+    frame_dir: &Path,
+    limit: Option<usize>,
+    since: Option<DateTime<Utc>>,
+    for_id: Option<&str>,
+) -> RecoveryListing {
     let path = recovery_log_path(frame_dir);
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
-        Err(_) => return Vec::new(),
+        Err(_) => {
+            return RecoveryListing {
+                entries: Vec::new(),
+                matched: 0,
+            };
+        }
     };
 
     let mut entries = parse_entries(&content);
@@ -277,6 +320,18 @@ pub fn read_recovery_entries(
         entries.retain(|e| e.timestamp >= since_dt);
     }
 
+    if let Some(needle) = for_id {
+        let stamp = DateTime::parse_from_rfc3339(needle)
+            .ok()
+            .map(|dt| dt.with_timezone(&Utc));
+        entries.retain(|e| match stamp {
+            Some(ts) => e.timestamp == ts,
+            None => entry_mentions(e, needle),
+        });
+    }
+
+    let matched = entries.len();
+
     // Return most recent entries (entries are parsed oldest-first)
     if let Some(n) = limit {
         let skip = entries.len().saturating_sub(n);
@@ -285,7 +340,40 @@ pub fn read_recovery_entries(
 
     // Reverse so most recent is first
     entries.reverse();
-    entries
+    RecoveryListing { entries, matched }
+}
+
+/// Whether an entry names `id` anywhere — description, a field value, or the
+/// body it preserved.
+///
+/// Matched on ID boundaries, so `BAC-1` does not answer for `BAC-100`. `.` is a
+/// boundary character too, which means `BAC-204` does not match `BAC-204.1`
+/// either: a lookup driven by a conflict marker names one exact task, and a
+/// prefix match would bury it under its own subtree.
+fn entry_mentions(entry: &RecoveryEntry, id: &str) -> bool {
+    if id.is_empty() {
+        return false;
+    }
+    if mentions(&entry.description, id) || mentions(&entry.body, id) {
+        return true;
+    }
+    entry.fields.iter().any(|(_, value)| mentions(value, id))
+}
+
+fn mentions(haystack: &str, id: &str) -> bool {
+    let boundary = |c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
+    let mut from = 0;
+    while let Some(offset) = haystack[from..].find(id) {
+        let start = from + offset;
+        let end = start + id.len();
+        let before_ok = haystack[..start].chars().next_back().is_none_or(boundary);
+        let after_ok = haystack[end..].chars().next().is_none_or(boundary);
+        if before_ok && after_ok {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
 }
 
 /// Get a summary of the recovery log.
@@ -547,6 +635,159 @@ mod tests {
             ],
             body: body.to_string(),
         }
+    }
+
+    /// An entry with a chosen timestamp, so the `--for <timestamp>` lookup and
+    /// the ordering can both be pinned without sleeping.
+    fn stamped_entry(secs: i64, desc: &str, body: &str) -> RecoveryEntry {
+        RecoveryEntry {
+            timestamp: DateTime::from_timestamp(1_700_000_000 + secs, 0).unwrap(),
+            category: RecoveryCategory::Delete,
+            description: desc.to_string(),
+            fields: vec![("Track".to_string(), "main".to_string())],
+            body: body.to_string(),
+        }
+    }
+
+    // -- `--for <ID>`: the lookup a conflict marker sends you to ------------
+
+    #[test]
+    fn for_id_matches_the_description_a_field_and_the_body() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+
+        log_recovery(&frame_dir, stamped_entry(1, "task M-001 deleted", "body"));
+        log_recovery(&frame_dir, stamped_entry(2, "unrelated", "- [ ] `M-002` x"));
+        log_recovery(&frame_dir, {
+            let mut e = stamped_entry(3, "unrelated", "body");
+            e.fields = vec![("Task".to_string(), "M-003".to_string())];
+            e
+        });
+
+        for id in ["M-001", "M-002", "M-003"] {
+            let listing = read_recovery_listing(&frame_dir, None, None, Some(id));
+            assert_eq!(listing.matched, 1, "{id} should match exactly one entry");
+        }
+    }
+
+    /// The reason the match is boundary-aware: a project long enough to have
+    /// `M-100` still has `M-1`, and a lookup for the short one must not drag in
+    /// every entry about the long one.
+    #[test]
+    fn for_id_does_not_match_a_longer_id_that_starts_the_same() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+
+        log_recovery(&frame_dir, stamped_entry(1, "task M-100 deleted", "body"));
+        log_recovery(&frame_dir, stamped_entry(2, "task M-1 deleted", "body"));
+
+        let listing = read_recovery_listing(&frame_dir, None, None, Some("M-1"));
+        assert_eq!(listing.matched, 1);
+        assert_eq!(listing.entries[0].description, "task M-1 deleted");
+    }
+
+    /// `.` is a boundary character, so a parent does not answer for its
+    /// subtree. A marker names one exact task; a prefix match would bury it.
+    #[test]
+    fn for_id_does_not_match_a_subtask_of_the_id() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+
+        log_recovery(&frame_dir, stamped_entry(1, "task M-004.1 deleted", "body"));
+
+        assert_eq!(
+            read_recovery_listing(&frame_dir, None, None, Some("M-004")).matched,
+            0
+        );
+        assert_eq!(
+            read_recovery_listing(&frame_dir, None, None, Some("M-004.1")).matched,
+            1
+        );
+    }
+
+    /// The other half of `--for`: a `conflict:` marker carries a timestamp, and
+    /// `doc/format.md` says it identifies the entry. This is what follows it.
+    #[test]
+    fn for_a_timestamp_selects_the_entry_the_marker_names() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+
+        log_recovery(&frame_dir, stamped_entry(0, "first", "body"));
+        log_recovery(&frame_dir, stamped_entry(60, "second", "body"));
+
+        let stamp = DateTime::from_timestamp(1_700_000_060, 0)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let listing = read_recovery_listing(&frame_dir, None, None, Some(&stamp));
+        assert_eq!(listing.matched, 1);
+        assert_eq!(listing.entries[0].description, "second");
+    }
+
+    #[test]
+    fn for_an_id_nothing_mentions_matches_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+        log_recovery(&frame_dir, stamped_entry(1, "task M-001 deleted", "body"));
+
+        assert_eq!(
+            read_recovery_listing(&frame_dir, None, None, Some("M-999")).matched,
+            0
+        );
+    }
+
+    // -- The count behind the truncation notice -----------------------------
+
+    /// `matched` counts what passed the filters, not what survived the limit —
+    /// otherwise the notice could never say how much it was hiding.
+    #[test]
+    fn matched_counts_before_the_limit_and_hidden_is_the_difference() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+
+        for i in 0..18 {
+            log_recovery(&frame_dir, stamped_entry(i, &format!("entry {i}"), "body"));
+        }
+
+        let listing = read_recovery_listing(&frame_dir, Some(10), None, None);
+        assert_eq!(listing.entries.len(), 10);
+        assert_eq!(listing.matched, 18);
+        assert_eq!(listing.hidden(), 8);
+
+        // Newest first, and it is the newest ten that are kept.
+        assert_eq!(listing.entries[0].description, "entry 17");
+        assert_eq!(listing.entries[9].description, "entry 8");
+    }
+
+    #[test]
+    fn nothing_is_hidden_when_the_limit_exceeds_the_matches() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+        for i in 0..3 {
+            log_recovery(&frame_dir, stamped_entry(i, &format!("entry {i}"), "body"));
+        }
+
+        let listing = read_recovery_listing(&frame_dir, Some(10), None, None);
+        assert_eq!(listing.matched, 3);
+        assert_eq!(listing.hidden(), 0);
+    }
+
+    #[test]
+    fn an_absent_log_lists_nothing_rather_than_failing() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+
+        let listing = read_recovery_listing(&frame_dir, Some(10), None, None);
+        assert!(listing.entries.is_empty());
+        assert_eq!(listing.matched, 0);
+        assert_eq!(listing.hidden(), 0);
     }
 
     #[test]

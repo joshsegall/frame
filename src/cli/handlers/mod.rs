@@ -4145,7 +4145,13 @@ fn cmd_recovery(args: RecoveryCmd, global_json: bool) -> Result<(), Box<dyn std:
         None => {
             let project = load_project_cwd()?;
             let json = args.json || global_json;
-            let limit = args.limit.unwrap_or(10);
+            // `--for` names one task, so paging it makes no sense by default:
+            // the whole point is to see every entry that mentions it.
+            let limit = match (args.limit, args.for_id.is_some()) {
+                (Some(n), _) => Some(n),
+                (None, true) => None,
+                (None, false) => Some(10),
+            };
             let since = if let Some(ref s) = args.since {
                 Some(
                     chrono::DateTime::parse_from_rfc3339(s)
@@ -4156,11 +4162,18 @@ fn cmd_recovery(args: RecoveryCmd, global_json: bool) -> Result<(), Box<dyn std:
                 None
             };
 
-            let entries = recovery::read_recovery_entries(&project.frame_dir, Some(limit), since);
+            let listing = recovery::read_recovery_listing(
+                &project.frame_dir,
+                limit,
+                since,
+                args.for_id.as_deref(),
+            );
 
-            if entries.is_empty() {
+            if listing.entries.is_empty() {
                 if json {
                     println!("[]");
+                } else if let Some(id) = &args.for_id {
+                    println!("No recovery log entries for {id}.");
                 } else {
                     println!("No recovery log entries.");
                 }
@@ -4169,11 +4182,22 @@ fn cmd_recovery(args: RecoveryCmd, global_json: bool) -> Result<(), Box<dyn std:
 
             if json {
                 let json_entries: Vec<serde_json::Value> =
-                    entries.iter().map(|e| e.to_json()).collect();
+                    listing.entries.iter().map(|e| e.to_json()).collect();
                 println!("{}", serde_json::to_string_pretty(&json_entries)?);
             } else {
-                for entry in &entries {
+                for entry in &listing.entries {
                     print!("{}", entry.to_display_markdown());
+                }
+                // A silent truncation reads exactly like an empty tail, which is
+                // how someone concluded an entry had never been written when it
+                // was simply on the next page.
+                if listing.hidden() > 0 {
+                    println!(
+                        "showing {} of {} — see all with `fr recovery --limit {}`",
+                        listing.entries.len(),
+                        listing.matched,
+                        listing.matched
+                    );
                 }
             }
             Ok(())

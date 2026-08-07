@@ -350,7 +350,8 @@ Everything below writes identity state shared across the clone, and is the
 | `fr check` | Read-only validation: deps, refs, duplicate and reissued IDs, unclosed code fences, actor-registry drift, local files leaking into git, ID-frontier health, interrupted operations, `#lost` tasks, recovery log |
 | `fr check --fix` | Applies repairs — **do not run unprompted**, see below |
 | `fr delete <ids>...` | **Permanently** delete tasks (`--yes` skips the prompt) |
-| `fr recovery` | View recovery log entries (most recent first) |
+| `fr recovery` | View recovery log entries (most recent first; says how many it hid) |
+| `fr recovery --for <id>` | Show only entries naming a task, or a `conflict:` marker's timestamp |
 | `fr recovery prune [--all]` | Remove old recovery log entries |
 | `fr recovery path` | Print path to recovery log file |
 

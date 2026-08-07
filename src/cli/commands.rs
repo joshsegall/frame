@@ -653,12 +653,16 @@ pub struct ActorRetireArgs {
 pub struct RecoveryCmd {
     #[command(subcommand)]
     pub action: Option<RecoveryAction>,
-    /// Maximum number of entries to show (default: 10)
+    /// Maximum number of entries to show (default: 10, or all with --for)
     #[arg(long)]
     pub limit: Option<usize>,
     /// Show entries after this timestamp (ISO-8601)
     #[arg(long)]
     pub since: Option<String>,
+    /// Show only entries naming this task ID, or the RFC 3339 timestamp from a
+    /// `conflict:` marker
+    #[arg(long = "for", value_name = "ID")]
+    pub for_id: Option<String>,
     /// Output as JSON
     #[arg(long)]
     pub json: bool,

@@ -607,14 +607,19 @@ Parses checkbox tasks from the file, auto-assigns IDs, preserves existing metada
 View the recovery log (most recent entries first).
 
 ```
-fr recovery [--limit N] [--since ISO-8601] [--json]
+fr recovery [--limit N] [--since ISO-8601] [--for ID] [--json]
 ```
 
 | Flag | Description |
 |------|-------------|
-| `--limit N` | Show at most N entries (default: 10) |
+| `--limit N` | Show at most N entries (default: 10, or all when `--for` is given) |
 | `--since TIMESTAMP` | Only show entries after this ISO-8601 timestamp |
+| `--for ID` | Only show entries naming this task, or carrying this RFC 3339 timestamp |
 | `--json` | Output as JSON array |
+
+When `--limit` holds entries back, the listing ends by saying how many and how to see the rest — a truncated log and an empty one otherwise look identical, which matters because [`fr check`](#fr-check) sends you here to find one specific entry.
+
+`--for` is how you follow a [`conflict:` marker](format.md#metadata-types): pass the task ID, or the timestamp the marker carries. Matching is on ID boundaries, so `M-1` does not match `M-100`, and a parent does not match its own subtasks (`M-4` does not match `M-4.1`) — pass the exact ID you want.
 
 ### `fr recovery prune`
 
