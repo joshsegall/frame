@@ -184,6 +184,8 @@ It flags **working-copy-local frame files leaking into git** — `frame/.state.j
 
 Check reports a file that git already **tracks** (needs `git rm --cached <path>` as well as a `.gitignore` line — ignore rules don't apply to files already in the index) and one that exists but **isn't ignored** (the next `git add -A` commits it). Projects outside git are skipped.
 
+It reports **unclaimed rescue copies**: files the TUI could not save and dumped into `frame/.rescue/` at exit (see [TUI save failures](tui.md)). The exit message names that directory once, on a terminal that is usually closed shortly afterwards — so without this the copies sit there being the only version of that work with nobody looking. A warning, and with no repair: moving a copy into place would overwrite a live file that may be newer, and deleting it destroys the thing the directory exists to protect. Clearing the directory clears the warning.
+
 It reports an **interrupted operation**: a multi-file operation that started and did not finish, recorded in `frame/.inflight`. Normally the next write command completes it and clears the marker, so seeing this means either nothing has been written since, or recovery declined to act because a precondition no longer held. See [Multi-file writes](architecture.md) and `fr recovery` for the detail.
 
 It reconciles the **track roster** in `project.toml` against the files in `tracks/`, in both directions, and reports either mismatch as an error. This is the one check that cannot work from the loaded project: `load_project` skips a configured track whose file is missing, so such a track — and every task in it — is absent from `fr list`, from the TUI, and from every other check here. Nothing else notices.

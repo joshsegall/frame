@@ -356,6 +356,29 @@ pub enum CheckWarning {
         /// The unclosed opening fence, trimmed.
         fence: String,
     },
+    /// The TUI left rescue copies behind and nobody has dealt with them.
+    ///
+    /// `frame/.rescue/` holds files the TUI could not save, written at exit as
+    /// the last thing it does. The exit message names the directory once, on a
+    /// terminal that is about to be closed — after which nothing mentions it
+    /// again, and the copies sit there being the only version of that work.
+    ///
+    /// A **warning**, and with no `--fix`: moving a rescue copy into place would
+    /// overwrite whatever is there now, which may be newer, and deleting it
+    /// would destroy the thing the directory exists to protect. Both are the
+    /// user's call. Clearing the directory clears the warning.
+    ///
+    /// Kept in the working copy rather than shared like the recovery log,
+    /// deliberately: a rescue copy is read within minutes of the crash that
+    /// produced it or not at all, and `frame/.rescue/` is where someone will
+    /// actually look. This finding is what makes "or not at all" less likely.
+    #[serde(rename = "unclaimed_rescue_copies")]
+    UnclaimedRescueCopies {
+        /// Absolute — the reader may not be in this working copy.
+        path: String,
+        /// File names, sorted, so the warning says what is waiting.
+        files: Vec<String>,
+    },
     /// A multi-file operation started and did not finish — an
     /// [`crate::io::inflight`] marker is still in place.
     ///
@@ -496,6 +519,7 @@ pub fn check_project(project: &Project) -> CheckResult {
     // The durable ID frontier store: unreadable, or reset at some point.
     check_id_frontier(&project.frame_dir, &mut result);
     check_inflight(&project.frame_dir, &mut result);
+    check_rescue(&project.frame_dir, &mut result);
 
     // Inbox item bodies that leave a code fence open.
     if let Some(ref inbox) = project.inbox {
@@ -1380,6 +1404,29 @@ fn check_inflight(frame_dir: &Path, result: &mut CheckResult) {
             started: marker.started,
         });
     }
+}
+
+/// Report rescue copies the TUI wrote at exit that nobody has dealt with.
+fn check_rescue(frame_dir: &Path, result: &mut CheckResult) {
+    let dir = frame_dir.join(crate::tui::app::RESCUE_DIR);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+
+    let mut files: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_file())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    if files.is_empty() {
+        return;
+    }
+    files.sort();
+
+    result.warnings.push(CheckWarning::UnclaimedRescueCopies {
+        path: dir.canonicalize().unwrap_or(dir).display().to_string(),
+        files,
+    });
 }
 
 fn check_id_frontier(frame_dir: &Path, result: &mut CheckResult) {

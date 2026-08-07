@@ -3175,6 +3175,41 @@ fn merge_logs_into_the_project_holding_the_merged_file() {
     );
 }
 
+/// The rescue directory is named once, in an exit message, on a terminal that
+/// is about to be closed. After that nothing mentioned it again — so the copies
+/// sat there being the only version of that work with nobody looking.
+#[test]
+fn check_reports_rescue_copies_nobody_has_dealt_with() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    let rescue = tmp.path().join("frame/.rescue");
+    fs::create_dir_all(&rescue).unwrap();
+    fs::write(rescue.join("main.md"), "# Main Track\n").unwrap();
+
+    let (out, _, ok) = run_fr(tmp.path(), &["check"]);
+    assert!(
+        ok,
+        "a waiting rescue copy is a warning, not a broken project:\n{out}"
+    );
+    assert!(out.contains("rescue"), "{out}");
+    assert!(
+        out.contains("main.md"),
+        "it should say what is waiting:\n{out}"
+    );
+    let named = out
+        .lines()
+        .map(str::trim)
+        .find(|l| l.ends_with("frame/.rescue"))
+        .unwrap_or_else(|| panic!("check should name the directory:\n{out}"));
+    assert!(Path::new(named).is_absolute(), "{named}");
+
+    // Clearing the directory clears the warning — there is no `--fix`, because
+    // which copy wins is the user's call.
+    fs::remove_dir_all(&rescue).unwrap();
+    let (after, _, _) = run_fr(tmp.path(), &["check"]);
+    assert!(!after.contains("rescue"), "{after}");
+}
+
 #[test]
 fn check_names_the_recovery_log_it_summarises() {
     let tmp = tempfile::TempDir::new().unwrap();

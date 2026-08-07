@@ -120,6 +120,18 @@ that saves some files and not others is the case worth being precise about: it i
 the one where a reassuring message would send you to a directory expecting to find
 work that is not in it.
 
+**`fr check` keeps saying so** until the directory is dealt with. The exit message
+names `frame/.rescue/` once, on a terminal that is often closed straight after —
+so the copies would otherwise sit there being the only version of that work with
+nobody looking. Compare each against the live file, then move it into place or
+delete it; there is no automatic repair, because which version wins is exactly the
+judgement a machine cannot make.
+
+The directory stays in the working copy rather than being shared across worktrees
+like the [recovery log](concepts.md#recovery), deliberately: a rescue copy is read
+within minutes of the crash that produced it or not at all, and `frame/.rescue/`
+next to the files it shadows is where someone will actually look.
+
 ### Track View — Navigate Mode
 
 **Cursor movement:**

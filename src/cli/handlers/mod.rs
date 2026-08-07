@@ -1568,6 +1568,18 @@ fn cmd_check(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
                             path
                         );
                     }
+                    check::CheckWarning::UnclaimedRescueCopies { path, files } => {
+                        println!(
+                            "  {} rescue {} the TUI could not save are still waiting: {}",
+                            files.len(),
+                            if files.len() == 1 { "copy" } else { "copies" },
+                            files.join(", ")
+                        );
+                        println!("  {path}");
+                        println!(
+                            "  compare each against the live file, then move it into place or delete it"
+                        );
+                    }
                     check::CheckWarning::InterruptedOperation {
                         operation,
                         command,

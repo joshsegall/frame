@@ -744,6 +744,14 @@ pub(super) fn palette_check_project(app: &mut App) {
                 check::CheckWarning::MissingId { track_id, title } => {
                     format!("  [{}] task missing ID: \"{}\"", track_id, title)
                 }
+                check::CheckWarning::UnclaimedRescueCopies { files, .. } => {
+                    format!(
+                        "  {} unsaved rescue {} waiting in .rescue/: {}",
+                        files.len(),
+                        if files.len() == 1 { "copy" } else { "copies" },
+                        files.join(", ")
+                    )
+                }
                 check::CheckWarning::MissingAddedDate { track_id, task_id } => {
                     format!("  [{}] {} missing added date", track_id, task_id)
                 }

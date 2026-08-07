@@ -925,14 +925,55 @@ const CASES: &[Case] = &[
         // committed directory, never the directory, so an equality test called
         // this untracked and offered the wrong remedy — add a `.gitignore` line
         // that was already there, rather than untrack it.
+        expect: &[
+            warning(
+                "local_file_committed",
+                &[
+                    ("path", Match::Eq("frame/.rescue")),
+                    ("tracked", Match::Eq("true")),
+                ],
+            ),
+            // The rescue copy is still sitting there unclaimed, which is its own
+            // finding and fires here too. Declared rather than carved out: a
+            // committed rescue dump exhibits both damages at once, and the
+            // corpus asserts the complete set.
+            warning(
+                "unclaimed_rescue_copies",
+                &[
+                    ("path", Match::Suffix("frame/.rescue")),
+                    ("files", Match::Eq("main.md")),
+                ],
+            ),
+        ],
+        // Untracking is `git rm --cached`, deliberately left to a human.
+        repair: Repair::None,
+    },
+    Case {
+        name: "unclaimed-rescue-copies",
+        provenance: "the TUI could not save at exit and dumped what it was holding \
+                     into frame/.rescue/; the terminal that named the directory is \
+                     long closed",
+        covers: &["unclaimed_rescue_copies"],
+        build: |root| {
+            let rescue = root.join("frame/.rescue");
+            std::fs::create_dir_all(&rescue).unwrap();
+            // Two files, so the plural path and the sorted order are both real.
+            std::fs::write(rescue.join("side.md"), "# Side Track\n").unwrap();
+            std::fs::write(rescue.join("main.md"), "# Main Track\n").unwrap();
+            Built::Ok
+        },
+        // A warning, not an error: the project is valid, and the copies are a
+        // decision waiting for a human rather than damage to repair.
         expect: &[warning(
-            "local_file_committed",
+            "unclaimed_rescue_copies",
             &[
-                ("path", Match::Eq("frame/.rescue")),
-                ("tracked", Match::Eq("true")),
+                ("path", Match::Suffix("frame/.rescue")),
+                ("files", Match::Eq("main.md,side.md")),
             ],
         )],
-        // Untracking is `git rm --cached`, deliberately left to a human.
+        // No `--fix`: moving a copy into place would overwrite whatever is there
+        // now, which may be newer, and deleting it destroys the only copy of the
+        // thing the directory exists to protect. Both are the user's call.
         repair: Repair::None,
     },
     Case {
