@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ab076eb35d45c79f6062fecb1fe8717e541c8fea499a23e4a52c134b659d49fe # shrinks to schedule = [Tui(Step { action: TrackArchive, target: 0, text: 0 }), Tui(Step { action: TrackRename, target: 29, text: 0 })]
+cc 88998033c164be453cdd2b3b2d2431cbdb6f447676a192cefccf1f906298f3ee # shrinks to schedule = [Tui(Step { action: DeleteTask, target: 54, text: 0 }), Tui(Step { action: TrackArchive, target: 19, text: 0 }), Tui(Step { action: MoveUp, target: 26, text: 0 })]
+cc 7b6830218a6e4ce77e4e9235684fb7fb3ceaf53ddaaabf7d7e79afb9dfc8a2e2 # shrinks to schedule = [CliBegin, Tui(Step { action: Indent, target: 46, text: 0 }), CliCommit, Tui(Step { action: TrackArchive, target: 0, text: 0 })]

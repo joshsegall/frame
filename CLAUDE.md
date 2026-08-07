@@ -104,8 +104,11 @@ Each answers a different question; a new test usually belongs in one of them rat
 | `conservation.rs` | P7 on **operation sequences**: does a random run of real ops lose a title, an ID, or a line frame does not own — and does every file it writes land settled? |
 | `damaged_corpus.rs` | does `fr check` report **exactly** the right findings for a known-damaged project, and repair exactly what it claims? |
 | `undo_properties.rs` | P9 on **TUI action sequences**: does undoing everything restore the project byte for byte, and redoing everything restore the result? |
+| `concurrency.rs` | P8 on **interleavings**: does a TUI session and a CLI writer over one project lose work either one acknowledged, hand an ID out twice, or leave a file unsettled? |
 | `merge_simulation.rs` | do independent actors minting IDs concurrently ever collide? |
 | `parity.rs` | do human and `--json` output, and CLI and TUI, agree? |
 | `cli_integration.rs` | the CLI surface, including crash injection via `FRAME_FAIL_WRITE` |
 
 **When adding a detector to `fr check`, add a case to `damaged_corpus.rs`** — `every_finding_tag_has_a_case` fails the build until you do, on purpose.
+
+Two suites share helpers under `tests/support/`, included with `#[path]` rather than copied. `tui_steps.rs` drives a real `App` through generated semantic key sequences (P9 and P8); `tree_checks.rs` reads a project off disk the way the code does — three file shapes, three parse/serialize pairs — and answers what is present and what is settled (P7 and P8). Neither is a test target of its own.
