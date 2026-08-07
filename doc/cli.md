@@ -638,11 +638,13 @@ fr recovery prune [--before TIMESTAMP] [--all]
 
 ### `fr recovery path`
 
-Print the absolute path to the recovery log file.
+Print the absolute path to the recovery log file — wherever it resolved to, which is not always `frame/.recovery.log`.
 
 ```
 fr recovery path
 ```
+
+The log's size, retention and location are set by [`[recovery]` in `project.toml`](concepts.md#recovery-1), with `FRAME_RECOVERY_LOG` overriding the configured path for one machine.
 
 ## Version Control
 

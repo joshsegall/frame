@@ -1436,6 +1436,7 @@ mod tests {
                 prefixes: IndexMap::new(),
             },
             ui: UiConfig::default(),
+            recovery: Default::default(),
         }
     }
 

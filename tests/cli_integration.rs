@@ -3056,6 +3056,110 @@ fn write_numbered_log(root: &Path, count: usize) {
 }
 
 // ---------------------------------------------------------------------------
+// Where the recovery log lives: `[recovery] path` and `FRAME_RECOVERY_LOG`
+//
+// The environment cases run through a real subprocess deliberately. Cargo runs
+// tests in parallel threads inside one process, so `std::env::set_var` is a
+// race against every other test, not a fixture.
+// ---------------------------------------------------------------------------
+
+/// Append a `[recovery]` section to the fixture's `project.toml`.
+fn set_recovery_config(root: &Path, body: &str) {
+    let path = root.join("frame/project.toml");
+    let mut text = fs::read_to_string(&path).unwrap();
+    text.push_str(&format!("\n[recovery]\n{body}"));
+    fs::write(&path, text).unwrap();
+}
+
+#[test]
+fn recovery_path_reports_the_default_location() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    let out = run_fr_ok(tmp.path(), &["recovery", "path"]);
+    assert!(
+        out.trim().ends_with("frame/.recovery.log"),
+        "unexpected default: {out}"
+    );
+    assert!(
+        Path::new(out.trim()).is_absolute(),
+        "the path must be absolute — it is quoted to people standing elsewhere: {out}"
+    );
+}
+
+#[test]
+fn a_configured_relative_path_moves_the_log_and_recovery_path_says_so() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    set_recovery_config(tmp.path(), "path = \"logs/frame.log\"\n");
+
+    let reported = run_fr_ok(tmp.path(), &["recovery", "path"]);
+    assert!(
+        reported.trim().ends_with("/logs/frame.log"),
+        "a relative path resolves against the project root: {reported}"
+    );
+
+    // And a real write lands there rather than in frame/. (Compared by
+    // existence rather than by string: macOS resolves the temp dir through
+    // /private, so the reported path and the fixture's differ harmlessly.)
+    run_fr_ok(tmp.path(), &["delete", "M-001", "--yes"]);
+    assert!(tmp.path().join("logs/frame.log").exists());
+    assert!(!tmp.path().join("frame/.recovery.log").exists());
+
+    let listed = run_fr_ok(tmp.path(), &["recovery"]);
+    assert!(listed.contains("M-001"), "{listed}");
+}
+
+#[test]
+fn the_environment_overrides_the_configured_path() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    set_recovery_config(tmp.path(), "path = \"logs/from-config.log\"\n");
+
+    let elsewhere = tmp.path().join("elsewhere/from-env.log");
+    let env = [(
+        "FRAME_RECOVERY_LOG",
+        elsewhere.to_str().expect("utf-8 temp path"),
+    )];
+
+    let (reported, _, ok) = run_fr_env(tmp.path(), &["recovery", "path"], &env);
+    assert!(ok);
+    assert_eq!(Path::new(reported.trim()), elsewhere);
+
+    let (_, _, ok) = run_fr_env(tmp.path(), &["delete", "M-001", "--yes"], &env);
+    assert!(ok);
+    assert!(elsewhere.exists(), "the entry went where the env said");
+    assert!(!tmp.path().join("logs/from-config.log").exists());
+}
+
+#[test]
+fn a_configured_size_and_age_are_accepted_by_the_real_binary() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    set_recovery_config(tmp.path(), "max_size = \"64KB\"\nprune_age_days = 7\n");
+
+    // Any command that loads the config would fail on a bad value.
+    run_fr_ok(tmp.path(), &["check"]);
+    run_fr_ok(tmp.path(), &["recovery"]);
+}
+
+/// A bad size is a config error, and it belongs on the strict path — every
+/// command that reads `project.toml` — not swallowed by the log writer.
+#[test]
+fn an_unparseable_size_is_reported_rather_than_ignored() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    set_recovery_config(tmp.path(), "max_size = \"5 megabytes\"\n");
+
+    let (_, stderr, ok) = run_fr(tmp.path(), &["check"]);
+    assert!(!ok, "a malformed size must not pass silently");
+    assert!(
+        stderr.contains("size") || stderr.contains("max_size"),
+        "the error should name the setting: {stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // `fr check` verifies the recovery-log pointer before printing it
 //
 // The `conflict:` marker is written into the track file and committed, so it

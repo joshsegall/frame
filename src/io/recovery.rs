@@ -9,20 +9,17 @@ use tempfile::NamedTempFile;
 
 use crate::io::lock::FileLock;
 
-/// Maximum size of the recovery log before inline trimming (1 MB).
-const MAX_LOG_SIZE: u64 = 1_048_576;
-
-/// The lock file guarding recovery-log mutations. Never removed — see
-/// [`recovery_lock_path`].
+/// The lock file guarding recovery-log mutations, for the default location.
+/// Never removed — see [`recovery_lock_path`]. Listed in
+/// [`crate::io::project_io::LOCAL_ONLY_FRAME_FILES`], which is why it stays a
+/// name here even though the lock is now derived from wherever the log resolves
+/// to: a lock left in `frame/` must still never be committed.
 pub const RECOVERY_LOCK: &str = ".recovery.lock";
 
 /// How long to wait for the recovery-log lock. Short: the critical section is
 /// one read plus one rename, and the callers are error paths that must not
 /// stall the operation that is already going wrong.
 const LOG_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// Default number of days before entries are prunable.
-pub const PRUNE_AGE_DAYS: i64 = 30;
 
 /// Maximum recovery entries per operation before abort.
 pub const BURST_LIMIT: usize = 20;
@@ -96,24 +93,111 @@ pub struct RecoverySummary {
 // Path helper
 // ---------------------------------------------------------------------------
 
-/// Return the path to the recovery log file.
-pub fn recovery_log_path(frame_dir: &Path) -> PathBuf {
+/// The environment override for the log's location. Machine-local by nature,
+/// which is what an absolute path should be — `project.toml` is committed.
+pub const LOG_PATH_ENV: &str = "FRAME_RECOVERY_LOG";
+
+/// Where the recovery log lives and how it is kept.
+#[derive(Debug, Clone)]
+pub struct RecoverySettings {
+    pub log: PathBuf,
+    /// Always a sibling of `log` named `<stem>.lock`.
+    pub lock: PathBuf,
+    pub max_size: u64,
+    pub prune_age_days: i64,
+}
+
+/// Resolve the log's location and retention for a project.
+///
+/// Highest precedence first:
+///
+/// 1. `FRAME_RECOVERY_LOG`
+/// 2. `[recovery].path` in `project.toml`, relative paths against the project root
+/// 3. `frame/.recovery.log`
+///
+/// **Reading the config here is deliberately best-effort.** Every caller is on
+/// an error path — a failed write, a dropped line, a discarded merge side — and
+/// a log that refuses to record anything because `project.toml` is malformed
+/// would withhold the evidence exactly when it is most needed. A bad
+/// `[recovery]` value is still reported loudly, by `load_project`, on every
+/// command that reads the config; this path only has to keep working after that
+/// has already gone wrong.
+pub fn settings(frame_dir: &Path) -> RecoverySettings {
+    let config = read_recovery_config(frame_dir);
+    let root = frame_dir.parent().unwrap_or(frame_dir);
+
+    let configured = std::env::var(LOG_PATH_ENV)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| config.path.clone().filter(|v| !v.trim().is_empty()));
+
+    let log = match configured {
+        Some(value) => {
+            let candidate = PathBuf::from(value.trim());
+            if candidate.is_absolute() {
+                candidate
+            } else {
+                root.join(candidate)
+            }
+        }
+        None => default_log_path(frame_dir),
+    };
+
+    RecoverySettings {
+        lock: lock_beside(&log),
+        log,
+        max_size: config.max_size.bytes(),
+        prune_age_days: config.prune_age_days,
+    }
+}
+
+/// Where the log lives when nothing overrides it.
+fn default_log_path(frame_dir: &Path) -> PathBuf {
     frame_dir.join(".recovery.log")
 }
 
-/// The lock guarding mutations of the recovery log.
+/// The lock guarding mutations of the log.
 ///
 /// A separate, never-removed file, for the reason [`FileLock::acquire_at`]
 /// gives and [`crate::io::ids`] already relies on: the log is replaced by
 /// `rename(2)`, so locking the log itself would let a waiter hold the lock on
 /// an unlinked inode while a newcomer locks the fresh file.
+///
+/// Derived from the log rather than fixed, because two processes that resolve
+/// different logs must not share one lock — that is two writers and one
+/// "lock". `.recovery.log` yields `.recovery.lock`, the name this has always
+/// used.
+fn lock_beside(log: &Path) -> PathBuf {
+    log.with_extension("lock")
+}
+
+/// The `[recovery]` section, or defaults when it cannot be read.
+fn read_recovery_config(frame_dir: &Path) -> crate::model::config::RecoveryConfig {
+    #[derive(serde::Deserialize, Default)]
+    struct RecoverySection {
+        #[serde(default)]
+        recovery: crate::model::config::RecoveryConfig,
+    }
+    std::fs::read_to_string(frame_dir.join("project.toml"))
+        .ok()
+        .and_then(|text| toml::from_str::<RecoverySection>(&text).ok())
+        .unwrap_or_default()
+        .recovery
+}
+
+/// Return the path to the recovery log file.
+pub fn recovery_log_path(frame_dir: &Path) -> PathBuf {
+    settings(frame_dir).log
+}
+
+/// The lock guarding mutations of the recovery log.
 pub fn recovery_lock_path(frame_dir: &Path) -> PathBuf {
-    frame_dir.join(RECOVERY_LOCK)
+    settings(frame_dir).lock
 }
 
 /// Take the recovery-log lock, or `None` if it cannot be had in time.
-fn lock_log(frame_dir: &Path) -> Option<FileLock> {
-    FileLock::acquire_at(&recovery_lock_path(frame_dir), LOG_LOCK_TIMEOUT).ok()
+fn lock_log(lock_path: &Path) -> Option<FileLock> {
+    FileLock::acquire_at(lock_path, LOG_LOCK_TIMEOUT).ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -184,28 +268,34 @@ pub fn log_recovery(frame_dir: &Path, entry: RecoveryEntry) {
 }
 
 fn log_recovery_inner(frame_dir: &Path, entry: RecoveryEntry) -> io::Result<()> {
-    let path = recovery_log_path(frame_dir);
+    let settings = settings(frame_dir);
+    let path = &settings.log;
 
     // Held across the trim and the append both. The append needs it as much as
     // the trim does: the log is replaced by rename, and an append racing that
     // rename lands on the unlinked inode and is gone. Falling back to an
     // unlocked append is deliberate — see `lock_log`'s callers below.
-    let guard = lock_log(frame_dir);
+    let guard = lock_log(&settings.lock);
     if guard.is_none() {
         eprintln!("warning: recovery log is busy; appending without the lock");
     }
 
-    // Trim while we already hold the lock, so the trim does not take one of its
-    // own — `FileLock` is not re-entrant.
-    if let Ok(meta) = std::fs::metadata(&path)
-        && meta.len() > MAX_LOG_SIZE
-    {
-        trim_locked(&path);
+    // A configured path may point somewhere that does not exist yet.
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
     }
 
-    let needs_header = !path.exists() || std::fs::metadata(&path).map_or(true, |m| m.len() == 0);
+    // Trim while we already hold the lock, so the trim does not take one of its
+    // own — `FileLock` is not re-entrant.
+    if let Ok(meta) = std::fs::metadata(path)
+        && meta.len() > settings.max_size
+    {
+        trim_locked(path, settings.prune_age_days);
+    }
 
-    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    let needs_header = !path.exists() || std::fs::metadata(path).map_or(true, |m| m.len() == 0);
+
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
 
     if needs_header {
         file.write_all(FILE_HEADER.as_bytes())?;
@@ -217,19 +307,26 @@ fn log_recovery_inner(frame_dir: &Path, entry: RecoveryEntry) -> io::Result<()> 
     Ok(())
 }
 
-/// Trim entries older than the cutoff when the log exceeds `MAX_LOG_SIZE`.
+/// Trim entries older than the cutoff once the log has outgrown its size.
 ///
 /// The caller must hold the recovery-log lock.
+///
+/// **Size is the trigger, age is the rule.** Outgrowing the limit is only what
+/// makes frame look; nothing younger than `prune_age_days` is removed, so a log
+/// full of recent entries grows past its limit and loses nothing. That is the
+/// right way round — the newest entries are the ones still worth having — and
+/// it means the size setting cannot be turned into a data-loss knob by
+/// accident.
 ///
 /// Best-effort: a log that cannot be read or rewritten is left as it is, which
 /// is the right failure. Trimming is housekeeping, and the alternative to an
 /// oversized log is not a smaller one, it is no log at all.
-fn trim_locked(path: &Path) {
+fn trim_locked(path: &Path, prune_age_days: i64) {
     let Ok(content) = std::fs::read_to_string(path) else {
         return;
     };
 
-    let cutoff = Utc::now() - chrono::Duration::days(PRUNE_AGE_DAYS);
+    let cutoff = Utc::now() - chrono::Duration::days(prune_age_days);
     let trimmed = prune_entries_before(&content, &cutoff);
 
     if trimmed.len() < content.len() {
@@ -499,7 +596,8 @@ pub fn prune_recovery(
     before: Option<DateTime<Utc>>,
     all: bool,
 ) -> io::Result<usize> {
-    let path = recovery_log_path(frame_dir);
+    let settings = settings(frame_dir);
+    let path = settings.log.clone();
     if !path.exists() {
         return Ok(0);
     }
@@ -508,7 +606,7 @@ pub fn prune_recovery(
     // The user asked for it and can ask again; there is nothing to lose by
     // waiting, and a great deal to lose by rewriting the log underneath
     // whoever holds it.
-    let _guard = lock_log(frame_dir).ok_or_else(|| {
+    let _guard = lock_log(&settings.lock).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::WouldBlock,
             "recovery log is in use, try again later",
@@ -526,7 +624,8 @@ pub fn prune_recovery(
         return Ok(count);
     }
 
-    let cutoff = before.unwrap_or_else(|| Utc::now() - chrono::Duration::days(PRUNE_AGE_DAYS));
+    let cutoff =
+        before.unwrap_or_else(|| Utc::now() - chrono::Duration::days(settings.prune_age_days));
     let original_entries = parse_entries(&content);
     let original_count = original_entries.len();
 
@@ -647,6 +746,188 @@ mod tests {
             fields: vec![("Track".to_string(), "main".to_string())],
             body: body.to_string(),
         }
+    }
+
+    /// A frame dir with a `project.toml` carrying the given `[recovery]` body.
+    fn project_with_recovery(section: &str) -> (TempDir, PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+        std::fs::write(
+            frame_dir.join("project.toml"),
+            format!("[project]\nname = \"t\"\n\n[recovery]\n{section}"),
+        )
+        .unwrap();
+        (tmp, frame_dir)
+    }
+
+    // -- Where the log lives ------------------------------------------------
+
+    #[test]
+    fn without_configuration_the_log_sits_in_the_frame_directory() {
+        let (_tmp, frame_dir) = project_with_recovery("");
+        let s = settings(&frame_dir);
+        assert_eq!(s.log, frame_dir.join(".recovery.log"));
+    }
+
+    /// The lock is derived from the log, and the derivation has to reproduce
+    /// the name this has always used or existing locks stop serialising.
+    #[test]
+    fn the_lock_is_named_beside_the_log_it_guards() {
+        let (_tmp, frame_dir) = project_with_recovery("");
+        let s = settings(&frame_dir);
+        assert_eq!(s.lock, frame_dir.join(".recovery.lock"));
+        assert_eq!(s.lock.file_name().unwrap(), RECOVERY_LOCK);
+        assert_ne!(s.lock, s.log);
+    }
+
+    #[test]
+    fn a_relative_configured_path_resolves_against_the_project_root() {
+        let (tmp, frame_dir) = project_with_recovery("path = \"logs/frame.log\"\n");
+        let s = settings(&frame_dir);
+        assert_eq!(s.log, tmp.path().join("logs/frame.log"));
+        assert_eq!(s.lock, tmp.path().join("logs/frame.lock"));
+    }
+
+    /// The escape hatch back to per-working-copy behaviour, spelled the way the
+    /// docs spell it.
+    #[test]
+    fn a_configured_path_can_pin_the_log_to_the_working_copy() {
+        let (_tmp, frame_dir) = project_with_recovery("path = \"frame/.recovery.log\"\n");
+        let s = settings(&frame_dir);
+        assert_eq!(s.log, frame_dir.join(".recovery.log"));
+    }
+
+    #[test]
+    fn an_absolute_configured_path_is_taken_as_written() {
+        let (_tmp, frame_dir) = project_with_recovery("path = \"/tmp/frame-abs.log\"\n");
+        assert_eq!(
+            settings(&frame_dir).log,
+            PathBuf::from("/tmp/frame-abs.log")
+        );
+    }
+
+    #[test]
+    fn an_empty_configured_path_falls_back_rather_than_writing_to_the_root() {
+        let (_tmp, frame_dir) = project_with_recovery("path = \"  \"\n");
+        assert_eq!(settings(&frame_dir).log, frame_dir.join(".recovery.log"));
+    }
+
+    #[test]
+    fn a_configured_size_and_age_are_read() {
+        let (_tmp, frame_dir) = project_with_recovery("max_size = \"64KB\"\nprune_age_days = 7\n");
+        let s = settings(&frame_dir);
+        assert_eq!(s.max_size, 64 * 1024);
+        assert_eq!(s.prune_age_days, 7);
+    }
+
+    /// The log is written from error paths. A `project.toml` too broken to
+    /// parse must not also cost us the record of what went wrong.
+    #[test]
+    fn a_broken_project_toml_falls_back_to_defaults_rather_than_losing_the_log() {
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+        std::fs::write(frame_dir.join("project.toml"), "this is not [ valid toml").unwrap();
+
+        let s = settings(&frame_dir);
+        assert_eq!(s.log, frame_dir.join(".recovery.log"));
+        assert_eq!(s.max_size, 5 * 1024 * 1024);
+        assert_eq!(s.prune_age_days, 30);
+
+        log_recovery(&frame_dir, stamped_entry(1, "still recorded", "body"));
+        assert_eq!(read_recovery_entries(&frame_dir, None, None).len(), 1);
+    }
+
+    #[test]
+    fn a_configured_path_is_where_entries_actually_land() {
+        let (tmp, frame_dir) = project_with_recovery("path = \"logs/frame.log\"\n");
+        log_recovery(&frame_dir, stamped_entry(1, "written", "body"));
+
+        assert!(tmp.path().join("logs/frame.log").exists(), "parent created");
+        assert!(!frame_dir.join(".recovery.log").exists(), "not the default");
+        let entries = read_recovery_entries(&frame_dir, None, None);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].description, "written");
+    }
+
+    // -- Retention: size triggers, age decides ------------------------------
+
+    /// Fill the log past `max_size` with entries of a chosen age.
+    fn fill_log(frame_dir: &Path, count: usize, days_old: i64) {
+        for i in 0..count {
+            log_recovery(
+                frame_dir,
+                RecoveryEntry {
+                    timestamp: Utc::now() - chrono::Duration::days(days_old),
+                    category: RecoveryCategory::Delete,
+                    description: format!("entry {i}"),
+                    fields: vec![],
+                    body: "x".repeat(2000),
+                },
+            );
+        }
+    }
+
+    /// The claim that matters most: outgrowing the limit is not itself a reason
+    /// to delete anything. A busy week must not cost this week's entries.
+    #[test]
+    fn an_oversized_log_of_recent_entries_loses_nothing() {
+        let (_tmp, frame_dir) = project_with_recovery("max_size = \"8KB\"\n");
+        fill_log(&frame_dir, 20, 0);
+
+        let entries = read_recovery_entries(&frame_dir, None, None);
+        assert_eq!(
+            entries.len(),
+            20,
+            "size is a trigger for housekeeping, not a cap on recent data"
+        );
+        assert!(
+            std::fs::metadata(&settings(&frame_dir).log).unwrap().len() > 8 * 1024,
+            "and the file really did outgrow its limit"
+        );
+    }
+
+    #[test]
+    fn an_oversized_log_drops_only_what_is_older_than_the_age_setting() {
+        let (_tmp, frame_dir) = project_with_recovery("max_size = \"8KB\"\nprune_age_days = 30\n");
+        fill_log(&frame_dir, 6, 90); // older than the cutoff
+        fill_log(&frame_dir, 6, 1); // newer than it
+
+        let descriptions: Vec<String> = read_recovery_entries(&frame_dir, None, None)
+            .into_iter()
+            .map(|e| e.description)
+            .collect();
+        assert!(
+            descriptions.len() < 12,
+            "the trim should have run: {descriptions:?}"
+        );
+        // Everything that survived is recent; the trim never touches those.
+        let recent = read_recovery_entries(&frame_dir, None, None)
+            .into_iter()
+            .filter(|e| e.timestamp > Utc::now() - chrono::Duration::days(30))
+            .count();
+        assert_eq!(recent, 6, "every recent entry survives");
+    }
+
+    /// Under the limit, age alone changes nothing — the trim never runs.
+    #[test]
+    fn an_undersized_log_keeps_entries_older_than_the_age_setting() {
+        let (_tmp, frame_dir) = project_with_recovery("max_size = \"5MB\"\n");
+        fill_log(&frame_dir, 3, 400);
+        assert_eq!(read_recovery_entries(&frame_dir, None, None).len(), 3);
+    }
+
+    #[test]
+    fn a_custom_age_moves_the_cutoff() {
+        let (_tmp, frame_dir) = project_with_recovery("max_size = \"8KB\"\nprune_age_days = 365\n");
+        fill_log(&frame_dir, 12, 90); // old by the default rule, young by this one
+
+        assert_eq!(
+            read_recovery_entries(&frame_dir, None, None).len(),
+            12,
+            "a 365-day retention keeps 90-day-old entries"
+        );
     }
 
     // -- `--for <ID>`: the lookup a conflict marker sends you to ------------

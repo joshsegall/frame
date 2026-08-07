@@ -4798,6 +4798,7 @@ pub(crate) fn app_on_disk(dir: &std::path::Path) -> App {
         clean: CleanConfig::default(),
         ids: IdConfig::default(),
         ui: UiConfig::default(),
+        recovery: Default::default(),
     };
     let project = crate::model::project::Project {
         root: dir.to_path_buf(),
@@ -5004,6 +5005,7 @@ mod tests {
             clean: CleanConfig::default(),
             ids: IdConfig::default(),
             ui: UiConfig::default(),
+            recovery: Default::default(),
         };
         let project = Project {
             root: std::path::PathBuf::from("/tmp/test"),
@@ -5097,6 +5099,7 @@ mod tests {
             clean: CleanConfig::default(),
             ids: IdConfig { prefixes },
             ui: UiConfig::default(),
+            recovery: Default::default(),
         };
         let project = Project {
             root: std::path::PathBuf::from("/tmp/test"),
@@ -5183,6 +5186,7 @@ mod tests {
             clean: CleanConfig::default(),
             ids: IdConfig::default(),
             ui: UiConfig::default(),
+            recovery: Default::default(),
         };
         let project = Project {
             root: std::path::PathBuf::from("/tmp/test"),

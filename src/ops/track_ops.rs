@@ -1175,6 +1175,7 @@ file = "tracks/old.md"
                 .into(),
             },
             ui: Default::default(),
+            recovery: Default::default(),
         };
 
         let mut tracks = vec![
@@ -1253,6 +1254,7 @@ file = "tracks/old.md"
                 .into(),
             },
             ui: Default::default(),
+            recovery: Default::default(),
         };
 
         let mut tracks = vec![
@@ -1334,6 +1336,7 @@ file = "tracks/old.md"
                 prefixes: [("a".into(), "AAA".into()), ("b".into(), "BBB".into())].into(),
             },
             ui: Default::default(),
+            recovery: Default::default(),
         };
 
         let track_content = "# A\n\n## Backlog\n\n## Done\n";

@@ -1163,6 +1163,7 @@ mod tests {
                     prefixes: indexmap::IndexMap::new(),
                 },
                 ui: UiConfig::default(),
+                recovery: Default::default(),
             },
             tracks: tracks
                 .into_iter()

@@ -374,6 +374,7 @@ mod tests {
             clean: CleanConfig::default(),
             ids: IdConfig::default(),
             ui: UiConfig::default(),
+            recovery: Default::default(),
         }
     }
 

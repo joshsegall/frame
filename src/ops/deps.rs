@@ -156,6 +156,7 @@ mod tests {
                 clean: Default::default(),
                 ids: Default::default(),
                 ui: Default::default(),
+                recovery: Default::default(),
             },
             tracks: vec![("main".to_string(), parse_track(track_md))],
             inbox: None,

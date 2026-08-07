@@ -58,6 +58,7 @@ pub fn minimal_project() -> Project {
             clean: Default::default(),
             ids: Default::default(),
             ui: Default::default(),
+            recovery: Default::default(),
         },
         tracks: vec![],
         inbox: None,

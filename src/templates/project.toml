@@ -51,6 +51,18 @@ archive_per_track = true     # separate archive file per track
 # --
 # TUI display settings.
 
+# Recovery log
+# ------------
+# Size is a trigger for housekeeping, not a cap: outgrowing max_size is what
+# makes frame consider trimming, and nothing younger than prune_age_days is
+# ever removed. To keep entries longer, raise prune_age_days.
+#
+# [recovery]
+# max_size = "5MB"           # bytes, or a size with a unit (KB/MB/GB)
+# prune_age_days = 30        # also the default cutoff for `fr recovery prune`
+# path = "frame/.recovery.log"  # relative to the project root; absolute paths
+#                               # are machine-specific — prefer FRAME_RECOVERY_LOG
+
 [ui]
 kitty_keyboard = true        # enhanced keyboard protocol (set false if your terminal has issues)
 note_wrap = true             # soft word wrap in note editor

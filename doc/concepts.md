@@ -154,7 +154,7 @@ When the Done section exceeds the configured threshold (default: 100 tasks), `fr
 
 Frame includes a recovery log (`frame/.recovery.log`) that prevents silent data loss. If the parser drops unrecognized lines, a write operation fails, or an edit conflict is dismissed in the TUI, the affected data is captured in the log.
 
-View the log with `fr recovery`, prune old entries with `fr recovery prune`, or open it from the TUI command palette ("View recovery log").
+View the log with `fr recovery`, prune old entries with `fr recovery prune`, print its location with `fr recovery path`, or open it from the TUI command palette ("View recovery log"). Its size, retention and location are configurable — see [`[recovery]`](#recovery).
 
 Tasks tagged `#lost` were created by the recovery system after a failed cross-track move or other mutation error. The `fr check` command warns about any `#lost` tasks.
 
@@ -273,6 +273,25 @@ done_threshold = 100       # max done tasks per track before archiving (default:
 done_retain = 10           # number of recent done tasks to keep in track after archiving (default: 10)
 archive_per_track = true   # separate archive file per track (default: true)
 ```
+
+### `[recovery]`
+
+Size, retention and location of the [recovery log](#recovery-log):
+
+```toml
+[recovery]
+max_size = "5MB"           # size past which a write also considers trimming (default: 5MB)
+prune_age_days = 30        # how old an entry must be before a trim may remove it (default: 30)
+path = "logs/frame.log"    # optional — where the log lives; see below
+```
+
+**Size is a trigger, age is the rule.** Outgrowing `max_size` is what makes frame *consider* trimming; nothing younger than `prune_age_days` is ever removed. A log full of recent entries grows past its limit and loses nothing, which is the right way round — the newest entries are the ones still worth having. If retention is what you care about, `prune_age_days` is the setting to change, not `max_size`.
+
+`max_size` accepts a plain number of bytes or a string with a unit: `"5MB"`, `"512KB"`, `"2GB"`. `KB`/`MB`/`GB` are 1024-based, and `KiB`/`MiB`/`GiB` are accepted as synonyms for them.
+
+`prune_age_days` is also the default cutoff for a bare `fr recovery prune`.
+
+**`path`** overrides where the log lives. A *relative* path resolves against the project root and is a choice that is correct on every machine — `path = "frame/.recovery.log"` pins the log to each working copy. An *absolute* path is accepted, but `project.toml` is committed and an absolute path is machine-specific; prefer the `FRAME_RECOVERY_LOG` environment variable, which overrides this setting and belongs to one machine by nature. A log placed outside the default location is yours to gitignore.
 
 ### `[ui]`
 
