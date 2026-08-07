@@ -85,7 +85,7 @@ pub fn cmd_merge(args: MergeArgs) -> i32 {
         return EXIT_MERGED;
     }
 
-    report_conflicts(&report, label, now);
+    report_conflicts(&report, ours, label, now);
     EXIT_CONFLICT
 }
 
@@ -171,7 +171,12 @@ fn resolve_kind(args: &MergeArgs, ours: &str) -> Option<FileKind> {
 ///
 /// Written to stderr because that is what a VCS surfaces while a merge is
 /// running, and repeated into the recovery log because stderr scrolls away.
-fn report_conflicts(report: &MergeReport, label: &str, now: chrono::DateTime<chrono::Utc>) {
+fn report_conflicts(
+    report: &MergeReport,
+    ours: &str,
+    label: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) {
     eprintln!("fr merge: conflict in {label}");
     let mut ids = Vec::new();
     for conflict in &report.conflicts {
@@ -187,15 +192,34 @@ fn report_conflicts(report: &MergeReport, label: &str, now: chrono::DateTime<chr
         }
     }
 
-    let logged = log_conflicts(report, label, now);
-
     // No conflict markers were written, so say plainly that the file is intact
     // and readable — otherwise the obvious next move is to open it looking for
     // `<<<<<<<` and conclude the merge did nothing.
     eprintln!("the merged file is valid frame markdown — no conflict markers were written");
-    if logged {
-        eprintln!("their version of each task above is in the recovery log — see `fr recovery`");
+
+    // Name the log by absolute path. The marker left in the file is committed
+    // and travels; the log does not, and the reader may well be in a different
+    // working copy by the time they follow this.
+    match log_conflicts(report, ours, label, now) {
+        Logged::At(path) => {
+            let lookup = ids
+                .first()
+                .map(|id| format!(" (`fr recovery --for {id}`)"))
+                .unwrap_or_default();
+            eprintln!(
+                "their version of each task above is in the recovery log{lookup}:\n  {}",
+                path.display()
+            );
+        }
+        Logged::NoProject { searched } => {
+            eprintln!(
+                "WARNING: their version was NOT recorded — no frame project found from\n  \
+                 {}\nthe merged file keeps our side; recover theirs from version control",
+                searched.display()
+            );
+        }
     }
+
     eprintln!("each task above carries a `conflict:` line, which `fr check` reports as an error");
     if ids.is_empty() {
         eprintln!("resolve with `fr note` / `fr state`, then clear it with `fr merge --resolve`");
@@ -207,21 +231,59 @@ fn report_conflicts(report: &MergeReport, label: &str, now: chrono::DateTime<chr
     }
 }
 
-/// Record each conflict in the project's recovery log. Returns whether anything
-/// was written.
+/// Where the discarded side went, or why it went nowhere.
+enum Logged {
+    /// Written to this log. Absolute — the reader may be standing anywhere.
+    At(std::path::PathBuf),
+    /// No project could be found holding the file being merged.
+    NoProject { searched: std::path::PathBuf },
+}
+
+/// Record each conflict in the recovery log of the project that owns the file
+/// being merged.
 ///
-/// Best-effort by design: the driver may be running somewhere the project cannot
-/// be discovered — a bare repo, a temp checkout — and a merge that already
-/// succeeded must not be failed over a log write. When it cannot log, the stderr
-/// report above simply omits the pointer.
-fn log_conflicts(report: &MergeReport, label: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
-    let Ok(cwd) = std::env::current_dir() else {
-        return false;
-    };
+/// **Located from `--ours`, not just from the working directory.** A VCS runs
+/// the driver from the worktree root with `%A` as a temp file there, so both
+/// answer the same; a driver run by hand or by an agent from somewhere else does
+/// not. The discovered project must contain the file being merged, or this
+/// declines — otherwise a merge of files in a scratch directory writes the
+/// discarded side into whatever unrelated project happens to sit above the
+/// current directory, which is a real way to lose it.
+///
+/// Best-effort by design: a merge that already succeeded must not be failed over
+/// a log write. But the caller is told which case it was, because "nothing was
+/// recorded" and "their version is in the log" are the two things a reader must
+/// never have confused.
+fn log_conflicts(
+    report: &MergeReport,
+    ours: &str,
+    label: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Logged {
+    let ours_path = std::path::Path::new(ours);
+    let ours_abs = ours_path
+        .canonicalize()
+        .unwrap_or_else(|_| ours_path.to_path_buf());
+
+    let mut searched = ours_abs.parent().unwrap_or(&ours_abs).to_path_buf();
+
     // `discover_project`, not `load_project_cwd`: no registry write, and no need
     // to parse a project we are not otherwise touching.
-    let Ok(root) = crate::io::project_io::discover_project(&cwd) else {
-        return false;
+    let mut found = crate::io::project_io::discover_project(&searched).ok();
+
+    if found.is_none()
+        && let Ok(cwd) = std::env::current_dir()
+    {
+        searched = cwd.clone();
+        // Only accept the working directory's project when it actually holds
+        // the file being merged.
+        found = crate::io::project_io::discover_project(&cwd)
+            .ok()
+            .filter(|root| ours_abs.starts_with(root));
+    }
+
+    let Some(root) = found else {
+        return Logged::NoProject { searched };
     };
     let frame_dir = root.join("frame");
 
@@ -240,5 +302,5 @@ fn log_conflicts(report: &MergeReport, label: &str, now: chrono::DateTime<chrono
             },
         );
     }
-    true
+    Logged::At(crate::io::recovery::recovery_log_path(&frame_dir))
 }

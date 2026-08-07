@@ -4270,7 +4270,7 @@ fn unsaved_exit_report(app: &App, rescue: &Rescue) -> Option<String> {
     } else {
         out.push_str(&format!(
             "\nCopies were written to:\n  {}\n",
-            app.project.frame_dir.join(RESCUE_DIR).display()
+            absolute(&app.project.frame_dir.join(RESCUE_DIR)).display()
         ));
         if rescue.failed.is_empty() {
             out.push_str("Move them into place once the cause is fixed.\n");
@@ -4296,9 +4296,33 @@ fn unsaved_exit_report(app: &App, rescue: &Rescue) -> Option<String> {
     }
     out.push_str(&format!(
         "Details: {}\n",
-        crate::io::recovery::recovery_log_path(&app.project.frame_dir).display()
+        absolute(&crate::io::recovery::recovery_log_path(
+            &app.project.frame_dir
+        ))
+        .display()
     ));
     Some(out)
+}
+
+/// A path fit to print in a message someone reads after the process is gone.
+///
+/// The project directory can be given relatively (`--project-dir ../other`), and
+/// a relative path in an exit message is a path the reader cannot follow: by the
+/// time they read it they may be in a different directory, and this is the last
+/// thing frame says before the only copy of their work stops being findable.
+fn absolute(path: &std::path::Path) -> std::path::PathBuf {
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+    // A file that does not exist yet cannot be canonicalized; anchor it on its
+    // parent, which usually does.
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => match parent.canonicalize() {
+            Ok(parent) => parent.join(name),
+            Err(_) => path.to_path_buf(),
+        },
+        _ => path.to_path_buf(),
+    }
 }
 
 /// Launch the TUI in project-picker-only mode (when no project is found).

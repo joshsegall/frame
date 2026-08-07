@@ -3056,6 +3056,144 @@ fn write_numbered_log(root: &Path, count: usize) {
 }
 
 // ---------------------------------------------------------------------------
+// `fr merge` says where the discarded side went — by absolute path
+//
+// The marker it leaves in the file is committed and travels; the log is not.
+// So the reader may well follow this from a different working copy, and
+// "see `fr recovery`" is not an answer they can act on.
+// ---------------------------------------------------------------------------
+
+/// A track file holding one conflicting task, in a directory of its own.
+fn write_conflict_sides(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    fs::create_dir_all(dir).unwrap();
+    let shell = |task: &str| format!("# Main Track\n\n## Backlog\n\n{task}\n## Done\n");
+    let base = dir.join("base.md");
+    let ours = dir.join("ours.md");
+    let theirs = dir.join("theirs.md");
+    fs::write(&base, shell("- [ ] `M-001` Original\n")).unwrap();
+    fs::write(&ours, shell("- [ ] `M-001` Our edit\n")).unwrap();
+    fs::write(&theirs, shell("- [ ] `M-001` Their edit\n")).unwrap();
+    (base, ours, theirs)
+}
+
+fn run_merge(cwd: &Path, base: &Path, ours: &Path, theirs: &Path) -> (String, String, bool) {
+    run_fr(
+        cwd,
+        &[
+            "merge",
+            "--kind",
+            "track",
+            "--base",
+            base.to_str().unwrap(),
+            "--ours",
+            ours.to_str().unwrap(),
+            "--theirs",
+            theirs.to_str().unwrap(),
+        ],
+    )
+}
+
+#[test]
+fn merge_names_the_recovery_log_it_wrote_to_by_absolute_path() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    let (base, ours, theirs) = write_conflict_sides(&tmp.path().join("work"));
+
+    let (_, stderr, ok) = run_merge(tmp.path(), &base, &ours, &theirs);
+    assert!(!ok, "a conflict exits non-zero");
+    assert!(
+        stderr.contains("is in the recovery log"),
+        "it did log, so it should say so:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("fr recovery --for M-001"),
+        "and name the lookup that retrieves it:\n{stderr}"
+    );
+    // The path is printed, absolute, on its own line.
+    let named = stderr
+        .lines()
+        .map(str::trim)
+        .find(|l| l.ends_with(".recovery.log") || l.ends_with("frame-recovery.log"))
+        .unwrap_or_else(|| panic!("no log path in:\n{stderr}"));
+    assert!(
+        Path::new(named).is_absolute(),
+        "the reader may be anywhere: {named}"
+    );
+    assert!(Path::new(named).exists(), "and it is really there: {named}");
+}
+
+/// The accident that found this: merging files in a scratch directory wrote the
+/// discarded side into whatever project happened to sit above the working
+/// directory. The merged file's project is the only one entitled to it.
+#[test]
+fn merge_declines_to_log_into_a_project_that_does_not_hold_the_merged_file() {
+    let bystander = tempfile::TempDir::new().unwrap();
+    create_test_project(bystander.path());
+
+    let elsewhere = tempfile::TempDir::new().unwrap();
+    let (base, ours, theirs) = write_conflict_sides(elsewhere.path());
+
+    // cwd is inside the bystander project; the files being merged are not.
+    let (_, stderr, ok) = run_merge(bystander.path(), &base, &ours, &theirs);
+    assert!(!ok);
+    assert!(
+        stderr.contains("NOT recorded"),
+        "it must say the other side went nowhere:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("recover theirs from version control"),
+        "and where to look instead:\n{stderr}"
+    );
+    assert!(
+        !bystander.path().join("frame/.recovery.log").exists(),
+        "an unrelated project's log must not be written to"
+    );
+    let listed = run_fr_ok(bystander.path(), &["recovery"]);
+    assert!(
+        !listed.contains("M-001"),
+        "nor its listing polluted:\n{listed}"
+    );
+}
+
+/// Run from inside the project the files belong to — the ordinary case, and the
+/// one a VCS produces, since it invokes the driver from the worktree root.
+#[test]
+fn merge_logs_into_the_project_holding_the_merged_file() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    let (base, ours, theirs) = write_conflict_sides(&tmp.path().join("work"));
+
+    // Even run from somewhere else entirely, the file's own project wins.
+    let outside = tempfile::TempDir::new().unwrap();
+    let (_, stderr, _) = run_merge(outside.path(), &base, &ours, &theirs);
+    assert!(stderr.contains("is in the recovery log"), "{stderr}");
+
+    let listed = run_fr_ok(tmp.path(), &["recovery", "--for", "M-001"]);
+    assert!(
+        listed.contains("Their edit"),
+        "their version should be retrievable from the project that owns the file:\n{listed}"
+    );
+}
+
+#[test]
+fn check_names_the_recovery_log_it_summarises() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    // M-002 carries `dep: M-001`, so deleting it also leaves a dangling dep and
+    // check exits non-zero. Irrelevant here — the summary prints either way.
+    run_fr_ok(tmp.path(), &["delete", "M-001", "--yes"]);
+
+    let (out, _, _) = run_fr(tmp.path(), &["check"]);
+    assert!(out.contains("Recovery log:"), "{out}");
+    let named = out
+        .lines()
+        .map(str::trim)
+        .find(|l| l.ends_with(".recovery.log") || l.ends_with("frame-recovery.log"))
+        .unwrap_or_else(|| panic!("check should name the log it counted:\n{out}"));
+    assert!(Path::new(named).is_absolute(), "{named}");
+}
+
+// ---------------------------------------------------------------------------
 // The recovery log is shared by every worktree of a clone
 //
 // The bug this closes: `fr check` was run in the main working tree, the

@@ -424,7 +424,15 @@ pub enum CheckWarning {
 pub enum CheckInfo {
     /// Recovery log summary
     #[serde(rename = "recovery_log")]
-    RecoveryLog { entry_count: usize, oldest: String },
+    RecoveryLog {
+        entry_count: usize,
+        oldest: String,
+        /// Absolute path to the log these entries are in. Worth naming: the log
+        /// is shared by every worktree of a clone and its location is
+        /// configurable, so "the recovery log" is not a place the reader can
+        /// assume they know.
+        path: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -506,6 +514,9 @@ pub fn check_project(project: &Project) -> CheckResult {
         result.info.push(CheckInfo::RecoveryLog {
             entry_count: summary.entry_count,
             oldest: oldest_str,
+            path: crate::io::recovery::recovery_log_path(&project.frame_dir)
+                .display()
+                .to_string(),
         });
     }
 

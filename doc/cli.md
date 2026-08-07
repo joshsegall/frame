@@ -701,9 +701,11 @@ Status `2` is why `project.toml` and `actors.toml` are not routed to the driver:
 **On conflict, no conflict markers are written.** A file full of `<<<<<<<` is not valid frame markdown, so it breaks the parser, `fr check` and `fr show` at exactly the moment you need them. Instead:
 
 - your version is kept in the file, which still parses;
-- their version goes to the [recovery log](#fr-recovery);
+- their version goes to the [recovery log](#fr-recovery), whose absolute path the merge prints, along with the `fr recovery --for <ID>` that retrieves it;
 - the task gets a `conflict:` line, which `fr check` reports as an error;
 - the merge exits 1, so git marks the path unmerged and stops.
+
+The log is located from the file being merged, not from the working directory, and the merge declines to write into a project that does not hold that file — otherwise merging files kept elsewhere would file the discarded side under an unrelated project. When no owning project can be found the merge says so loudly, names the directory it searched, and tells you to recover their side from version control. That warning and the "in the recovery log" line are mutually exclusive by construction: the reader is never told to go and read something that was not written.
 
 Git still shows the path as conflicted (`git status`, `git ls-files -u`) — there is simply nothing in the file to grep for. Apply whatever is missing with `fr note` / `fr state`, then:
 

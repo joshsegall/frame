@@ -959,6 +959,10 @@ pub(super) fn palette_check_project(app: &mut App) {
                 check::CheckInfo::RecoveryLog {
                     entry_count,
                     oldest,
+                    // The overlay has its own "View recovery log" action, so the
+                    // path would be noise here rather than the answer it is on
+                    // the CLI.
+                    path: _,
                 } => {
                     let entry_word = if *entry_count == 1 {
                         "entry"

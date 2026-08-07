@@ -1618,6 +1618,7 @@ fn cmd_check(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
                     check::CheckInfo::RecoveryLog {
                         entry_count,
                         oldest,
+                        path,
                     } => {
                         println!(
                             "Recovery log: {} {} (oldest: {})",
@@ -1629,6 +1630,7 @@ fn cmd_check(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
                             },
                             oldest,
                         );
+                        println!("  {path}");
                         println!("  view with: fr recovery");
                     }
                 }
