@@ -152,7 +152,15 @@ When the Done section exceeds the configured threshold (default: 100 tasks), `fr
 
 ## Recovery
 
-Frame includes a recovery log (`frame/.recovery.log`) that prevents silent data loss. If the parser drops unrecognized lines, a write operation fails, or an edit conflict is dismissed in the TUI, the affected data is captured in the log.
+Frame includes a recovery log that prevents silent data loss. If the parser drops unrecognized lines, a write operation fails, or an edit conflict is dismissed in the TUI, the affected data is captured in the log.
+
+**The log is shared by every git worktree of a clone**, and lives at `<git-common-dir>/frame-recovery.log` — inside `.git/`, which every worktree resolves to the same path and which can never be committed. For a project outside git it stays at `frame/.recovery.log`, where there are no worktrees to coordinate with. This is the same mechanism the ID frontier and the shared [actor token](#actors) use.
+
+It is shared for two reasons. The log holds content that reached no other file by definition, and a per-worktree copy is invisible from the worktree next door — so an entry written by one working tree reads as never written from another. It is also *ephemeral*: `git worktree remove` deletes ignored files silently, so a log inside a worktree is the only copy of something sitting in a directory git will delete on request.
+
+Every entry records the working tree it came from as `Origin:`, because a field like `Target: tracks/main.md` means nothing once one log serves several working copies. `fr recovery --here` narrows the listing to this one.
+
+A per-worktree log left over from an older frame is read alongside the shared one and moved into it on the next write, oldest entries first.
 
 View the log with `fr recovery`, prune old entries with `fr recovery prune`, print its location with `fr recovery path`, or open it from the TUI command palette ("View recovery log"). Its size, retention and location are configurable — see [`[recovery]`](#recovery).
 

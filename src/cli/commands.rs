@@ -663,6 +663,10 @@ pub struct RecoveryCmd {
     /// `conflict:` marker
     #[arg(long = "for", value_name = "ID")]
     pub for_id: Option<String>,
+    /// Show only entries written from this working tree (the log is shared by
+    /// every git worktree of a clone)
+    #[arg(long)]
+    pub here: bool,
     /// Output as JSON
     #[arg(long)]
     pub json: bool,

@@ -63,8 +63,11 @@ A frame project has a `frame/` directory containing:
 - `.inflight` — records a multi-file operation in progress; present only while one is running, or after one was interrupted. The next write command completes it (`ops::recover`) and removes it
 - `.rescue/` — copies of work the TUI could not save, written at exit (best-effort)
 - `.ids.toml` / `.ids.lock` — ID frontier, **only for projects outside git**; inside git it lives at `<git-common-dir>/frame-ids.toml` so every worktree of the clone shares one
+- `.recovery.log` / `.recovery.lock` — recovery log, **only for projects outside git** (or when `[recovery] path` says so); inside git it lives at `<git-common-dir>/frame-recovery.log`, shared by every worktree. It holds content that reached no other file, and `git worktree remove` deletes gitignored files silently — a per-worktree log is the only copy of something in a directory git will delete on request
 
-Working-copy-local files (`.lock`, `.state.json`, `.actor`, `.inflight`, `.ids.*`, `.rescue/`) are listed in one constant, `io::project_io::LOCAL_ONLY_FRAME_FILES`, which drives `fr check`'s leak guard — add new ones there, not in the caller. `.gitignore` coverage is a single pattern (`frame/.*`, see `gitignore_pattern`), so a new local file needs no `.gitignore` change at all. **The rule that makes that safe: nothing under `frame/` that needs committing may start with a dot.**
+**Two files are clone-shared rather than worktree-local, and the test is the same for both**: does it hold something that exists nowhere else, or that every worktree must agree on? The ID frontier and the recovery log qualify; `.lock`, `.state.json` and `.inflight` do not — each is *about* one working tree (its inodes, its view, its interrupted operation), and sharing them would over-serialize or cross wires.
+
+Working-copy-local files (`.lock`, `.state.json`, `.actor`, `.inflight`, `.ids.*`, `.recovery.*`, `.rescue/`) are listed in one constant, `io::project_io::LOCAL_ONLY_FRAME_FILES`, which drives `fr check`'s leak guard — add new ones there, not in the caller. The clone-shared names stay listed: a project outside git still keeps them in `frame/`, and one left there by an older frame must not be committed on its way out. `.gitignore` coverage is a single pattern (`frame/.*`, see `gitignore_pattern`), so a new local file needs no `.gitignore` change at all. **The rule that makes that safe: nothing under `frame/` that needs committing may start with a dot.**
 
 ## Documentation
 

@@ -3056,6 +3056,175 @@ fn write_numbered_log(root: &Path, count: usize) {
 }
 
 // ---------------------------------------------------------------------------
+// The recovery log is shared by every worktree of a clone
+//
+// The bug this closes: `fr check` was run in the main working tree, the
+// investigation ran in a linked worktree, and the conflict entry the message
+// pointed at was in neither place the investigator looked — so it was reported
+// as never written. The log also died with the worktree: `git worktree remove`
+// deletes ignored files silently, exit 0, no prompt.
+//
+// Both halves are asserted below.
+// ---------------------------------------------------------------------------
+
+/// A git repo holding a frame project, with a linked worktree at `../wt`.
+/// Returns false when git is unavailable.
+fn repo_with_worktree(root: &Path) -> bool {
+    if !git_ok(root, &["init", "-q"]) {
+        return false;
+    }
+    git_ok(root, &["config", "user.email", "test@example.com"]);
+    git_ok(root, &["config", "user.name", "Test"]);
+    create_test_project(root);
+    fs::write(root.join(".gitignore"), "frame/.*\n.xdg-config/\n").unwrap();
+    git_ok(root, &["add", "-A"]);
+    git_ok(root, &["commit", "-qm", "base"]);
+    git_ok(root, &["worktree", "add", "-q", "../wt"])
+}
+
+#[test]
+fn a_linked_worktree_reads_the_entries_the_main_tree_wrote() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let main = tmp.path().join("main");
+    fs::create_dir_all(&main).unwrap();
+    if !repo_with_worktree(&main) {
+        return; // git unavailable
+    }
+    let wt = tmp.path().join("wt");
+
+    // Something irreplaceable, written from the main working tree.
+    run_fr_ok(&main, &["delete", "M-001", "--yes"]);
+
+    // The linked worktree can see it — the case that failed.
+    let listed = run_fr_ok(&wt, &["recovery"]);
+    assert!(
+        listed.contains("M-001"),
+        "an entry written next door must be visible here:\n{listed}"
+    );
+    assert!(
+        listed.contains("from 2 working trees") || listed.contains("Origin:"),
+        "and it must say where it came from:\n{listed}"
+    );
+
+    // And the reverse direction.
+    run_fr_ok(&wt, &["add", "main", "From the worktree"]);
+    run_fr_ok(&wt, &["delete", "M-002", "--yes"]);
+    let from_main = run_fr_ok(&main, &["recovery"]);
+    assert!(
+        from_main.contains("M-002"),
+        "and the main tree sees the worktree's entries:\n{from_main}"
+    );
+}
+
+#[test]
+fn here_narrows_the_listing_to_this_working_tree() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let main = tmp.path().join("main");
+    fs::create_dir_all(&main).unwrap();
+    if !repo_with_worktree(&main) {
+        return;
+    }
+    let wt = tmp.path().join("wt");
+
+    run_fr_ok(&main, &["delete", "M-001", "--yes"]);
+    run_fr_ok(&wt, &["add", "main", "Worktree task"]);
+    run_fr_ok(&wt, &["delete", "M-002", "--yes"]);
+
+    // Matched on the description rather than the bare id: the fixture's M-002
+    // carries `dep: M-001`, so its preserved body names M-001 legitimately.
+    let all = run_fr_ok(&wt, &["recovery"]);
+    assert!(
+        all.contains("task M-001 deleted") && all.contains("task M-002 deleted"),
+        "{all}"
+    );
+
+    let here = run_fr_ok(&wt, &["recovery", "--here"]);
+    assert!(
+        here.contains("task M-002 deleted"),
+        "its own entry stays:\n{here}"
+    );
+    assert!(
+        !here.contains("task M-001 deleted"),
+        "the other tree's entry is filtered out:\n{here}"
+    );
+}
+
+/// The direct inverse of the measurement that motivated this: an ignored file
+/// in a worktree is deleted by `git worktree remove`, silently and with exit 0.
+/// The log must not be in that category any more.
+#[test]
+fn the_log_survives_the_removal_of_the_worktree_that_wrote_it() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let main = tmp.path().join("main");
+    fs::create_dir_all(&main).unwrap();
+    if !repo_with_worktree(&main) {
+        return;
+    }
+    let wt = tmp.path().join("wt");
+
+    run_fr_ok(&wt, &["delete", "M-001", "--yes"]);
+    assert!(run_fr_ok(&wt, &["recovery"]).contains("M-001"));
+
+    // Nothing gitignored is left in the worktree to be destroyed with it.
+    assert!(
+        !wt.join("frame/.recovery.log").exists(),
+        "the log should not be living in the worktree at all"
+    );
+
+    assert!(
+        git_ok(&main, &["worktree", "remove", "--force", "../wt"]),
+        "git worktree remove should succeed"
+    );
+    assert!(!wt.exists(), "the worktree is gone");
+
+    let survived = run_fr_ok(&main, &["recovery"]);
+    assert!(
+        survived.contains("M-001"),
+        "the only copy of a deleted task must outlive the worktree that deleted it:\n{survived}"
+    );
+}
+
+/// Migration: a log written by an older frame is read from the moment it is
+/// found, and moved into the shared one by the next write.
+#[test]
+fn a_per_worktree_log_from_an_older_frame_is_absorbed() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let main = tmp.path().join("main");
+    fs::create_dir_all(&main).unwrap();
+    if !repo_with_worktree(&main) {
+        return;
+    }
+
+    write_numbered_log(&main, 3);
+    let legacy = main.join("frame/.recovery.log");
+    assert!(legacy.exists());
+
+    // Visible before anything writes.
+    let before = run_fr_ok(&main, &["recovery"]);
+    assert!(before.contains("task M-2 deleted"), "{before}");
+    assert!(legacy.exists(), "a read must not move it");
+
+    // The next write brings it across and takes the old file away.
+    run_fr_ok(&main, &["delete", "M-001", "--yes"]);
+    assert!(!legacy.exists(), "absorbed");
+
+    let after = run_fr_ok(&main, &["recovery"]);
+    for expected in ["task M-0 deleted", "task M-2 deleted", "M-001"] {
+        assert!(after.contains(expected), "{expected} missing:\n{after}");
+    }
+
+    // And a second write does not re-add anything.
+    run_fr_ok(&main, &["add", "main", "Another"]);
+    run_fr_ok(&main, &["delete", "M-003", "--yes"]);
+    let again = run_fr_ok(&main, &["recovery", "--limit", "50"]);
+    assert_eq!(
+        again.matches("task M-0 deleted").count(),
+        1,
+        "absorbed entries must not duplicate:\n{again}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Where the recovery log lives: `[recovery] path` and `FRAME_RECOVERY_LOG`
 //
 // The environment cases run through a real subprocess deliberately. Cargo runs

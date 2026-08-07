@@ -4176,11 +4176,12 @@ fn cmd_recovery(args: RecoveryCmd, global_json: bool) -> Result<(), Box<dyn std:
                 None
             };
 
-            let listing = recovery::read_recovery_listing(
+            let listing = recovery::read_recovery_filtered(
                 &project.frame_dir,
                 limit,
                 since,
                 args.for_id.as_deref(),
+                args.here,
             );
 
             if listing.entries.is_empty() {
@@ -4205,7 +4206,18 @@ fn cmd_recovery(args: RecoveryCmd, global_json: bool) -> Result<(), Box<dyn std:
                 // A silent truncation reads exactly like an empty tail, which is
                 // how someone concluded an entry had never been written when it
                 // was simply on the next page.
-                if listing.hidden() > 0 {
+                let trees = listing.origins();
+                if trees > 1 {
+                    print!("{} entries from {} working trees", listing.matched, trees);
+                    if listing.hidden() > 0 {
+                        print!(
+                            " — showing {}, see all with `fr recovery --limit {}`",
+                            listing.entries.len(),
+                            listing.matched
+                        );
+                    }
+                    println!();
+                } else if listing.hidden() > 0 {
                     println!(
                         "showing {} of {} — see all with `fr recovery --limit {}`",
                         listing.entries.len(),

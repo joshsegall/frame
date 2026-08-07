@@ -98,6 +98,14 @@ Git worktrees of one clone are **not** separate actors. A linked worktree
 inherits its clone's token: nothing is written, and no new actor appears in the
 registry. This is automatic and needs no setup.
 
+The **recovery log is shared the same way** — one log per clone, under `.git/`,
+readable from every worktree. So an entry written in another worktree is still
+visible here, and each one names the working tree it came from. Use
+`fr recovery --here` to narrow to this one. If you are investigating a problem
+that happened in a different working copy, do not conclude an entry was never
+written because you are standing somewhere else — run `fr recovery --for <id>`,
+which searches the whole clone and is not subject to the default limit.
+
 **Do not run `fr actor claim`.** A clone's main working tree claims a token
 automatically on its first mint; a linked worktree never claims at all, because
 it inherits. Claiming one by hand in a worktree splits a single clone into two

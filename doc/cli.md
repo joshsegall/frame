@@ -178,7 +178,7 @@ It also flags **archived IDs left on a prefix their track no longer uses**. `fr 
 
 The two collision findings above are warnings rather than errors for a different reason: there is no automatic repair, and they fire on data that predates the fixes. It also reports an **unreadable ID frontier store** (the next mint resets it and falls back to scanning, which can't see another worktree's uncommitted tasks) and a leftover `frame-ids.toml.bak`, which means the frontier *was* reset at some point and numbers minted in that window may have been reissued. Deleting the `.bak` clears that one.
 
-It flags **working-copy-local frame files leaking into git** — `frame/.state.json`, `frame/.lock`, `frame/.recovery.log`, `frame/.actor`, `frame/.inflight`, and (for projects outside git, where the frontier store is working-copy-local) `frame/.ids.toml` and `frame/.ids.lock`. Committing these leaks machine-local state into shared history; the append-only recovery log also conflicts on every merge that touches it.
+It flags **working-copy-local frame files leaking into git** — `frame/.state.json`, `frame/.lock`, `frame/.actor`, `frame/.inflight`, and (for projects outside git, where the store is working-copy-local) `frame/.ids.toml`, `frame/.ids.lock` and `frame/.recovery.log`. Committing these leaks machine-local state into shared history; the append-only recovery log also conflicts on every merge that touches it. The recovery-log names stay on the list even though the log's default home is now inside `.git/`: a project outside git still keeps it in `frame/`, and one left there by an older frame must not be committed on its way out.
 
 `fr init` covers them with a single `.gitignore` pattern, `frame/.*`, rather than an entry each. Enumeration can't cover a file that doesn't exist yet — a project created before an entry was added never got that line, and had to be told about it after the fact — whereas the pattern covers the next one automatically. **This depends on a rule: nothing under `frame/` that needs to be committed may start with a dot.** That is already the convention (`actors.toml` is the one deliberately shared machine-relevant file, and is deliberately not a dotfile); if a committed dotfile ever becomes necessary, a `!frame/.foo` line after the pattern is the escape hatch. The pattern covers dotfiles directly inside `frame/`, not nested ones.
 
@@ -609,7 +609,7 @@ Parses checkbox tasks from the file, auto-assigns IDs, preserves existing metada
 View the recovery log (most recent entries first).
 
 ```
-fr recovery [--limit N] [--since ISO-8601] [--for ID] [--json]
+fr recovery [--limit N] [--since ISO-8601] [--for ID] [--here] [--json]
 ```
 
 | Flag | Description |
@@ -617,7 +617,10 @@ fr recovery [--limit N] [--since ISO-8601] [--for ID] [--json]
 | `--limit N` | Show at most N entries (default: 10, or all when `--for` is given) |
 | `--since TIMESTAMP` | Only show entries after this ISO-8601 timestamp |
 | `--for ID` | Only show entries naming this task, or carrying this RFC 3339 timestamp |
+| `--here` | Only show entries written from this working tree |
 | `--json` | Output as JSON array |
+
+The log is [shared by every git worktree of a clone](concepts.md#recovery), so the listing spans all of them by default and each entry records its `Origin:`. When entries come from more than one working tree the listing says so.
 
 When `--limit` holds entries back, the listing ends by saying how many and how to see the rest — a truncated log and an empty one otherwise look identical, which matters because [`fr check`](#fr-check) sends you here to find one specific entry.
 

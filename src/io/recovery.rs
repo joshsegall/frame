@@ -97,12 +97,21 @@ pub struct RecoverySummary {
 /// which is what an absolute path should be — `project.toml` is committed.
 pub const LOG_PATH_ENV: &str = "FRAME_RECOVERY_LOG";
 
+/// The field naming the working tree an entry was written from.
+pub const ORIGIN_FIELD: &str = "Origin";
+
 /// Where the recovery log lives and how it is kept.
 #[derive(Debug, Clone)]
 pub struct RecoverySettings {
     pub log: PathBuf,
     /// Always a sibling of `log` named `<stem>.lock`.
     pub lock: PathBuf,
+    /// A per-working-copy log left over from before the log was shared, if one
+    /// is still sitting there. Read alongside `log` and absorbed on the next
+    /// write.
+    pub legacy: Option<PathBuf>,
+    /// This working tree's frame directory, absolute — stamped on every entry.
+    pub origin: String,
     pub max_size: u64,
     pub prune_age_days: i64,
 }
@@ -143,16 +152,64 @@ pub fn settings(frame_dir: &Path) -> RecoverySettings {
         None => default_log_path(frame_dir),
     };
 
+    // A legacy per-working-copy log is only interesting when it is not already
+    // the resolved one.
+    let legacy = legacy_log_path(frame_dir);
+    let legacy = (legacy != log && legacy.exists()).then_some(legacy);
+
     RecoverySettings {
         lock: lock_beside(&log),
         log,
+        legacy,
+        origin: origin_of(frame_dir),
         max_size: config.max_size.bytes(),
         prune_age_days: config.prune_age_days,
     }
 }
 
+/// How a working tree names itself in the log it shares with its siblings.
+///
+/// Canonicalised, because a relative `--project-dir` would otherwise write an
+/// origin that means nothing to a reader in a different directory — and this
+/// value's whole job is to be read somewhere else.
+fn origin_of(frame_dir: &Path) -> String {
+    frame_dir
+        .canonicalize()
+        .unwrap_or_else(|_| frame_dir.to_path_buf())
+        .display()
+        .to_string()
+}
+
+/// The clone-shared log's name, under the git common directory.
+const SHARED_LOG: &str = "frame-recovery.log";
+
 /// Where the log lives when nothing overrides it.
+///
+/// **Inside git: `<git-common-dir>/frame-recovery.log`.** Every worktree of a
+/// clone resolves that to the same absolute path, which is the point.
+/// `git worktree remove` deletes ignored files without a word — verified, exit
+/// 0, no prompt — so a log in `frame/` is a file holding the only copy of
+/// something, sitting in a directory git will delete on request. And short of
+/// deletion it is simply invisible from the worktree next door, which is how a
+/// conflict entry written by the main working tree came to be reported as never
+/// written at all.
+///
+/// The mechanism is the one [`crate::io::ids`] uses for the ID frontier and
+/// [`crate::io::actors`] uses for the shared token: nothing under `.git/` can
+/// be committed, so this costs no repo clutter and needs no `.gitignore` entry.
+///
+/// **Outside git: `frame/.recovery.log`,** where there are no worktrees to
+/// coordinate with.
 fn default_log_path(frame_dir: &Path) -> PathBuf {
+    match crate::io::git::git_common_dir(frame_dir) {
+        Some(common) => common.join(SHARED_LOG),
+        None => legacy_log_path(frame_dir),
+    }
+}
+
+/// The per-working-copy location: where the log lived before it was shared, and
+/// where it still lives outside git.
+fn legacy_log_path(frame_dir: &Path) -> PathBuf {
     frame_dir.join(".recovery.log")
 }
 
@@ -220,6 +277,32 @@ pub fn atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
 // ---------------------------------------------------------------------------
 
 impl RecoveryEntry {
+    /// The working tree this entry was written from, if it says.
+    ///
+    /// Absent on entries written before the log was shared, and on a log
+    /// deliberately pinned to one working copy where the question cannot arise.
+    pub fn origin(&self) -> Option<&str> {
+        self.fields
+            .iter()
+            .find(|(key, _)| key == ORIGIN_FIELD)
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// Record which working tree wrote this, if it does not already say.
+    ///
+    /// **First, before the entry's own fields.** `Track: backend` and
+    /// `Target: tracks/main.md` are relative to a frame directory the entry
+    /// otherwise never names, so the origin is the context the rest is read in
+    /// — and once one log serves every worktree of a clone, reading them
+    /// without it is guesswork.
+    fn with_origin(mut self, origin: &str) -> Self {
+        if self.origin().is_none() {
+            self.fields
+                .insert(0, (ORIGIN_FIELD.to_string(), origin.to_string()));
+        }
+        self
+    }
+
     /// Format this entry as a markdown block for the recovery log.
     fn to_markdown(&self) -> String {
         let mut out = String::new();
@@ -285,6 +368,12 @@ fn log_recovery_inner(frame_dir: &Path, entry: RecoveryEntry) -> io::Result<()> 
         let _ = std::fs::create_dir_all(parent);
     }
 
+    // Bring any per-working-copy log across before appending to the shared one,
+    // so the entries stay in one place from here on.
+    if let Some(legacy) = &settings.legacy {
+        absorb_legacy_locked(legacy, path, &settings.origin);
+    }
+
     // Trim while we already hold the lock, so the trim does not take one of its
     // own — `FileLock` is not re-entrant.
     if let Ok(meta) = std::fs::metadata(path)
@@ -301,10 +390,52 @@ fn log_recovery_inner(frame_dir: &Path, entry: RecoveryEntry) -> io::Result<()> 
         file.write_all(FILE_HEADER.as_bytes())?;
     }
 
-    let markdown = entry.to_markdown();
+    let markdown = entry.with_origin(&settings.origin).to_markdown();
     file.write_all(markdown.as_bytes())?;
 
     Ok(())
+}
+
+/// Move a per-working-copy log's entries into the shared one.
+///
+/// The caller must hold the shared log's lock.
+///
+/// **Shared first, unlink second** — the ordering `fr clean` uses for archival,
+/// and for the same reason: an interruption between the two leaves a duplicate,
+/// which is recoverable by reading, rather than a hole, which is not. A failure
+/// to write leaves the legacy file exactly where it was.
+///
+/// Entries are stamped with the working copy they came from, so a migrated log
+/// has no unlabelled entries, and merged by timestamp so the result reads in
+/// order. Idempotent: the legacy file is gone afterwards, and nothing re-adds
+/// it.
+fn absorb_legacy_locked(legacy: &Path, shared: &Path, origin: &str) {
+    let Ok(legacy_text) = std::fs::read_to_string(legacy) else {
+        return;
+    };
+    let mut absorbed: Vec<RecoveryEntry> = parse_entries(&legacy_text)
+        .into_iter()
+        .map(|e| e.with_origin(origin))
+        .collect();
+    if absorbed.is_empty() {
+        // Nothing to carry across — but an empty file still shadows nothing, so
+        // let it go rather than leaving a permanent no-op behind.
+        let _ = std::fs::remove_file(legacy);
+        return;
+    }
+
+    let shared_text = std::fs::read_to_string(shared).unwrap_or_default();
+    absorbed.extend(parse_entries(&shared_text));
+    absorbed.sort_by_key(|e| e.timestamp);
+
+    let mut merged = String::from(FILE_HEADER);
+    for entry in &absorbed {
+        merged.push_str(&entry.to_markdown());
+    }
+
+    if atomic_write(shared, merged.as_bytes()).is_ok() {
+        let _ = std::fs::remove_file(legacy);
+    }
 }
 
 /// Trim entries older than the cutoff once the log has outgrown its size.
@@ -385,6 +516,14 @@ impl RecoveryListing {
     pub fn hidden(&self) -> usize {
         self.matched.saturating_sub(self.entries.len())
     }
+
+    /// How many distinct working trees the shown entries came from. `1` when
+    /// they all came from one place, or when none of them says.
+    pub fn origins(&self) -> usize {
+        let named: std::collections::BTreeSet<&str> =
+            self.entries.iter().filter_map(|e| e.origin()).collect();
+        named.len().max(1)
+    }
 }
 
 /// Read recovery entries, filtered and paged.
@@ -399,18 +538,38 @@ pub fn read_recovery_listing(
     since: Option<DateTime<Utc>>,
     for_id: Option<&str>,
 ) -> RecoveryListing {
-    let path = recovery_log_path(frame_dir);
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => {
-            return RecoveryListing {
-                entries: Vec::new(),
-                matched: 0,
-            };
-        }
-    };
+    read_recovery_filtered(frame_dir, limit, since, for_id, false)
+}
 
-    let mut entries = parse_entries(&content);
+/// As [`read_recovery_listing`], with `here_only` narrowing to entries written
+/// from this working tree.
+pub fn read_recovery_filtered(
+    frame_dir: &Path,
+    limit: Option<usize>,
+    since: Option<DateTime<Utc>>,
+    for_id: Option<&str>,
+    here_only: bool,
+) -> RecoveryListing {
+    let settings = settings(frame_dir);
+    let mut entries = read_entries_at(&settings.log);
+
+    // A per-working-copy log left over from before the log was shared is read
+    // alongside it, so nothing is invisible in the window before the next write
+    // absorbs it. Reading never mutates: a `fr recovery` that quietly rewrote
+    // two files would be a surprise, and the absorption belongs on the path
+    // that already holds the lock.
+    if let Some(legacy) = &settings.legacy {
+        entries.extend(
+            read_entries_at(legacy)
+                .into_iter()
+                .map(|e| e.with_origin(&settings.origin)),
+        );
+        entries.sort_by_key(|e| e.timestamp);
+    }
+
+    if here_only {
+        entries.retain(|e| e.origin().is_none_or(|o| o == settings.origin));
+    }
 
     // Filter by timestamp
     if let Some(since_dt) = since {
@@ -438,6 +597,13 @@ pub fn read_recovery_listing(
     // Reverse so most recent is first
     entries.reverse();
     RecoveryListing { entries, matched }
+}
+
+/// Every entry in one log file, oldest first. An unreadable file reads as empty.
+fn read_entries_at(path: &Path) -> Vec<RecoveryEntry> {
+    std::fs::read_to_string(path)
+        .map(|text| parse_entries(&text))
+        .unwrap_or_default()
 }
 
 /// Whether an entry names `id` anywhere — description, a field value, or the
@@ -473,11 +639,15 @@ fn mentions(haystack: &str, id: &str) -> bool {
     false
 }
 
-/// Get a summary of the recovery log.
+/// Get a summary of the recovery log, counting a not-yet-absorbed legacy log
+/// alongside it so the count matches what `fr recovery` lists.
 pub fn recovery_summary(frame_dir: &Path) -> Option<RecoverySummary> {
-    let path = recovery_log_path(frame_dir);
-    let content = std::fs::read_to_string(&path).ok()?;
-    let entries = parse_entries(&content);
+    let settings = settings(frame_dir);
+    let mut entries = read_entries_at(&settings.log);
+    if let Some(legacy) = &settings.legacy {
+        entries.extend(read_entries_at(legacy));
+        entries.sort_by_key(|e| e.timestamp);
+    }
     if entries.is_empty() {
         return None;
     }
@@ -598,7 +768,7 @@ pub fn prune_recovery(
 ) -> io::Result<usize> {
     let settings = settings(frame_dir);
     let path = settings.log.clone();
-    if !path.exists() {
+    if !path.exists() && settings.legacy.is_none() {
         return Ok(0);
     }
 
@@ -613,7 +783,14 @@ pub fn prune_recovery(
         )
     })?;
 
-    let content = std::fs::read_to_string(&path)?;
+    // Prune what `fr recovery` shows, which includes a legacy log still waiting
+    // to be absorbed — otherwise `--all` would report a clean sweep and leave
+    // entries that reappear in the next listing.
+    if let Some(legacy) = &settings.legacy {
+        absorb_legacy_locked(legacy, &path, &settings.origin);
+    }
+
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
 
     if all {
         let entries = parse_entries(&content);
@@ -849,6 +1026,183 @@ mod tests {
         let entries = read_recovery_entries(&frame_dir, None, None);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].description, "written");
+    }
+
+    // -- Origin, and absorbing a per-working-copy log -----------------------
+
+    #[test]
+    fn every_entry_records_the_working_tree_it_came_from() {
+        let (_tmp, frame_dir) = project_with_recovery("");
+        log_recovery(&frame_dir, stamped_entry(1, "written here", "body"));
+
+        let entries = read_recovery_entries(&frame_dir, None, None);
+        let origin = entries[0].origin().expect("an origin");
+        assert!(
+            Path::new(origin).is_absolute(),
+            "an origin is read from another directory, so it has to be absolute: {origin}"
+        );
+        assert_eq!(
+            Path::new(origin),
+            frame_dir.canonicalize().unwrap(),
+            "and it names this working tree's frame directory"
+        );
+        assert_eq!(entries[0].fields[0].0, ORIGIN_FIELD, "stamped first");
+    }
+
+    #[test]
+    fn an_origin_already_present_is_not_stamped_over() {
+        let (_tmp, frame_dir) = project_with_recovery("");
+        let mut entry = stamped_entry(1, "from elsewhere", "body");
+        entry
+            .fields
+            .insert(0, (ORIGIN_FIELD.to_string(), "/somewhere/else".to_string()));
+        log_recovery(&frame_dir, entry);
+
+        let entries = read_recovery_entries(&frame_dir, None, None);
+        assert_eq!(entries[0].origin(), Some("/somewhere/else"));
+        assert_eq!(
+            entries[0]
+                .fields
+                .iter()
+                .filter(|(k, _)| k == ORIGIN_FIELD)
+                .count(),
+            1,
+            "one origin, not two"
+        );
+    }
+
+    /// A log pinned to the working copy has no siblings to be confused with, so
+    /// `settings` reports no legacy file to absorb and nothing is moved.
+    #[test]
+    fn a_log_pinned_to_the_working_copy_is_not_treated_as_legacy() {
+        let (_tmp, frame_dir) = project_with_recovery("path = \"frame/.recovery.log\"\n");
+        log_recovery(&frame_dir, stamped_entry(1, "pinned", "body"));
+
+        assert!(settings(&frame_dir).legacy.is_none());
+        assert!(frame_dir.join(".recovery.log").exists());
+        assert_eq!(read_recovery_entries(&frame_dir, None, None).len(), 1);
+    }
+
+    /// Write a per-working-copy log directly, as an older frame would have.
+    fn write_legacy_log(frame_dir: &Path, entries: &[(i64, &str)]) {
+        let mut content = String::from(FILE_HEADER);
+        for (secs, desc) in entries {
+            content.push_str(&stamped_entry(*secs, desc, "legacy body").to_markdown());
+        }
+        std::fs::write(frame_dir.join(".recovery.log"), content).unwrap();
+    }
+
+    #[test]
+    fn a_legacy_log_is_visible_before_it_is_absorbed_and_reading_does_not_move_it() {
+        let (tmp, frame_dir) = project_with_recovery("path = \"logs/shared.log\"\n");
+        write_legacy_log(&frame_dir, &[(1, "old one"), (2, "old two")]);
+
+        let entries = read_recovery_entries(&frame_dir, None, None);
+        assert_eq!(entries.len(), 2, "read unions the two logs");
+        assert!(
+            frame_dir.join(".recovery.log").exists(),
+            "a read must not rewrite files"
+        );
+        assert!(!tmp.path().join("logs/shared.log").exists());
+
+        // And the entries are labelled, even though the file they came from
+        // never said where it was.
+        assert!(entries.iter().all(|e| e.origin().is_some()));
+    }
+
+    #[test]
+    fn the_first_write_absorbs_a_legacy_log_in_timestamp_order() {
+        let (tmp, frame_dir) = project_with_recovery("path = \"logs/shared.log\"\n");
+        write_legacy_log(&frame_dir, &[(10, "old one"), (30, "old three")]);
+        // Something already in the shared log, timestamped between them.
+        std::fs::create_dir_all(tmp.path().join("logs")).unwrap();
+        std::fs::write(
+            tmp.path().join("logs/shared.log"),
+            format!(
+                "{FILE_HEADER}{}",
+                stamped_entry(20, "shared two", "b").to_markdown()
+            ),
+        )
+        .unwrap();
+
+        log_recovery(&frame_dir, stamped_entry(40, "new four", "body"));
+
+        assert!(
+            !frame_dir.join(".recovery.log").exists(),
+            "the legacy log is gone once its entries are safely across"
+        );
+        let descriptions: Vec<String> = read_recovery_entries(&frame_dir, None, None)
+            .into_iter()
+            .map(|e| e.description)
+            .collect();
+        // Listing is newest first.
+        assert_eq!(
+            descriptions,
+            vec!["new four", "old three", "shared two", "old one"],
+            "merged by timestamp, not concatenated"
+        );
+    }
+
+    #[test]
+    fn absorbing_twice_does_not_duplicate_anything() {
+        let (_tmp, frame_dir) = project_with_recovery("path = \"logs/shared.log\"\n");
+        write_legacy_log(&frame_dir, &[(1, "old one")]);
+
+        log_recovery(&frame_dir, stamped_entry(2, "first write", "body"));
+        log_recovery(&frame_dir, stamped_entry(3, "second write", "body"));
+
+        let descriptions: Vec<String> = read_recovery_entries(&frame_dir, None, None)
+            .into_iter()
+            .map(|e| e.description)
+            .collect();
+        assert_eq!(descriptions.len(), 3, "no duplicates: {descriptions:?}");
+        assert_eq!(descriptions.iter().filter(|d| *d == "old one").count(), 1);
+    }
+
+    /// Shared-first, unlink-second — the ordering `fr clean` uses for archival.
+    /// If the shared write cannot happen, the only copy stays exactly where it
+    /// was. Provoked by pointing the shared log somewhere unwritable (`/dev/null`
+    /// is not a directory) rather than by fault injection, which is parsed once
+    /// per process and so cannot be switched on inside one test.
+    #[test]
+    fn a_failed_absorption_leaves_the_legacy_log_untouched() {
+        let (_tmp, frame_dir) = project_with_recovery("path = \"/dev/null/shared.log\"\n");
+        write_legacy_log(&frame_dir, &[(1, "irreplaceable")]);
+        let before = std::fs::read_to_string(frame_dir.join(".recovery.log")).unwrap();
+
+        log_recovery(&frame_dir, stamped_entry(2, "new", "body"));
+
+        let after = std::fs::read_to_string(frame_dir.join(".recovery.log")).unwrap();
+        assert_eq!(before, after, "the legacy log survives a failed absorption");
+        assert!(
+            read_recovery_entries(&frame_dir, None, None)
+                .iter()
+                .any(|e| e.description == "irreplaceable"),
+            "and is still readable"
+        );
+    }
+
+    // -- `--here`, and counting working trees -------------------------------
+
+    #[test]
+    fn here_narrows_to_entries_from_this_working_tree() {
+        let (_tmp, frame_dir) = project_with_recovery("");
+        log_recovery(&frame_dir, stamped_entry(1, "mine", "body"));
+        let mut theirs = stamped_entry(2, "theirs", "body");
+        theirs.fields.insert(
+            0,
+            (ORIGIN_FIELD.to_string(), "/elsewhere/frame".to_string()),
+        );
+        log_recovery(&frame_dir, theirs);
+
+        let all = read_recovery_filtered(&frame_dir, None, None, None, false);
+        assert_eq!(all.matched, 2);
+        assert_eq!(all.origins(), 2);
+
+        let here = read_recovery_filtered(&frame_dir, None, None, None, true);
+        assert_eq!(here.matched, 1);
+        assert_eq!(here.entries[0].description, "mine");
+        assert_eq!(here.origins(), 1);
     }
 
     // -- Retention: size triggers, age decides ------------------------------
@@ -1251,7 +1605,9 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].category, RecoveryCategory::Write);
         assert_eq!(entries[0].description, "rename failed");
-        assert_eq!(entries[0].fields.len(), 2);
+        // The two written, plus the `Origin` every entry is stamped with.
+        assert_eq!(entries[0].fields.len(), 3);
+        assert_eq!(entries[0].fields[0].0, ORIGIN_FIELD);
         assert_eq!(entries[0].body, "# Effect System\n\n## Backlog");
     }
 
@@ -1398,11 +1754,14 @@ mod tests {
 
         let entries = read_recovery_entries(&frame_dir, None, None);
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].fields.len(), 3);
-        assert_eq!(entries[0].fields[0].0, "Source");
-        assert_eq!(entries[0].fields[1].0, "Target");
-        assert_eq!(entries[0].fields[2].0, "Error");
-        assert_eq!(entries[0].fields[2].1, "Permission denied");
+        // `Origin` is stamped first — it is the context `Source` and `Target`
+        // are relative to, and they name nothing without it.
+        assert_eq!(entries[0].fields.len(), 4);
+        assert_eq!(entries[0].fields[0].0, ORIGIN_FIELD);
+        assert_eq!(entries[0].fields[1].0, "Source");
+        assert_eq!(entries[0].fields[2].0, "Target");
+        assert_eq!(entries[0].fields[3].0, "Error");
+        assert_eq!(entries[0].fields[3].1, "Permission denied");
     }
 
     #[test]
