@@ -3504,10 +3504,23 @@ impl App {
     /// re-init" and skip. It is not a re-init: a re-init would throw away the
     /// undo stack, every track's view state, and anything still sitting in
     /// `unsaved` — the session's in-memory content is precisely what must
-    /// survive. Three narrow steps do the job instead.
+    /// survive. Four narrow steps do the job instead.
+    ///
+    /// **The theme is one of them, and it belongs here rather than at the call
+    /// sites.** It used to be rebuilt only where a config was taken *whole*, so
+    /// two of the three ways a config is adopted left it stale: a merge on the
+    /// reload path, and a merge on the save path, which are precisely the two
+    /// that happen when a second writer is active. Someone else's change to
+    /// `[ui.colors]` or `[ui.tag_colors]` was in `project.config` and not on
+    /// the screen.
+    ///
+    /// [`Theme::from_config`] builds from defaults every time and `self.theme`
+    /// holds nothing a session can set on its own, so rebuilding is idempotent
+    /// and there is no runtime override to lose by doing it on every adoption.
     fn adopt_config(&mut self, config: crate::model::ProjectConfig) {
         let current = self.current_track_id().map(|s| s.to_string());
         self.project.config = config;
+        self.theme = Theme::from_config(&self.project.config.ui);
 
         let live: Vec<(String, String)> = self
             .project
@@ -4083,7 +4096,6 @@ impl App {
             return;
         };
         self.adopt_config(config);
-        self.theme = Theme::from_config(&self.project.config.ui);
         self.baselines.insert(SaveTarget::Config, text);
     }
 
@@ -6467,6 +6479,84 @@ name = \"theirs\"
         assert!(
             text.contains("```text"),
             "with the full error in the body, where lines are allowed: {text}"
+        );
+    }
+
+    // --- the theme follows the config, however the config arrives ---
+
+    /// `CONFIG_WITH_COMMENTS` plus a tag colour, as another writer would leave
+    /// it. `#112233` is nothing the default theme uses, so seeing it proves the
+    /// rebuild rather than agreeing with a default.
+    const CONFIG_WITH_TAG_COLOUR: &str = "\
+# What this project is for — the kind of line a struct dump cannot emit.
+[project]
+name = \"saves\"
+
+[[tracks]]
+id = \"a\"
+name = \"A\"
+state = \"active\"
+file = \"tracks/a.md\"
+
+[ui.tag_colors]
+urgent = \"#112233\"
+";
+
+    const THEIRS: ratatui::style::Color = ratatui::style::Color::Rgb(0x11, 0x22, 0x33);
+
+    /// The reload path's merge branch. It runs when we are holding a config
+    /// change that has not reached disk — which is exactly when a second writer
+    /// is active, so it is the branch a stale theme is *most* likely to be
+    /// noticed in, and it was one of the two that did not rebuild.
+    #[test]
+    fn an_external_theme_change_reaches_the_screen_through_a_reload_merge() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_with_config_file(tmp.path());
+        assert_ne!(app.theme.tag_color("urgent"), THEIRS, "not there to begin");
+
+        // Something outstanding, so the reload merges instead of taking theirs
+        // whole. The reason has to leave `project.toml` readable.
+        app.record_save_failure(SaveTarget::Config, &"lock timeout".to_string());
+        std::fs::write(config_path(&app), CONFIG_WITH_TAG_COLOUR).unwrap();
+        app.reload_changed_files(&[config_path(&app)]);
+
+        assert_eq!(
+            app.project
+                .config
+                .ui
+                .tag_colors
+                .get("urgent")
+                .map(|s| s.as_str()),
+            Some("#112233"),
+            "the merge took their colour into the config"
+        );
+        assert_eq!(
+            app.theme.tag_color("urgent"),
+            THEIRS,
+            "and the theme is what actually reaches the screen"
+        );
+    }
+
+    /// The other branch that did not rebuild: a *save* whose merge takes their
+    /// change along with ours. Same gap, reached without the reload path at all.
+    #[test]
+    fn an_external_theme_change_reaches_the_screen_through_a_save_merge() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_with_config_file(tmp.path());
+        rename_track_in_memory(&mut app);
+        std::fs::write(config_path(&app), CONFIG_WITH_TAG_COLOUR).unwrap();
+
+        app.save_config_logged();
+
+        assert!(
+            app.unsaved.is_empty(),
+            "the save landed: {:?}",
+            app.unsaved.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            app.theme.tag_color("urgent"),
+            THEIRS,
+            "their colour came back through the merge and into the theme"
         );
     }
 

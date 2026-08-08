@@ -32,6 +32,8 @@ All notable changes to frame will be documented in this file.
 
   Archiving, deleting, renaming or creating a track writes the config as one half of the change, so those now refuse **before** doing anything while the config is damaged, rather than moving a track file and leaving the config calling it active.
 
+- **Another process's `[ui.colors]` or `[ui.tag_colors]` change now reaches the screen.** The theme was rebuilt only where a config was taken from disk *whole*, so the two paths that **merge** a config — a reload while the session holds an unsaved config change, and a save that takes the other writer's keys along with ours — left the old palette on screen. Those are the two that happen when a second writer is active, which is the only time this can arise at all. The rebuild moved to the one place every config adoption goes through.
+
 - **A config save with no ancestor no longer replaces the file.** If the session had nothing to compute its change against, the whole file was rewritten from the in-memory struct even when what was on disk was perfectly good. The merge now takes the file itself as the ancestor: the change lands and every comment, key and formatting choice around it stays.
 
 - **A track added to a `project.toml` that writes `tracks = [...]` inline is no longer dropped.** TOML spells an array of tables two ways, and every config edit — add, remove, rename, reorder, state change — read only the `[[tracks]]` spelling and silently did nothing with the other. `tracks = []` is the shape that made it bite: the track appeared to be created and vanished on the next read.
