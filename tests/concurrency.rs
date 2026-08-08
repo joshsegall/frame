@@ -1,10 +1,11 @@
 //! P8 — two writers over one project.
 //!
 //! > For a settled project, and any interleaving of a TUI session and a CLI
-//! > writer whose edits touch **disjoint tasks**, at quiesce: every title
-//! > either writer acknowledged writing is somewhere under `frame/`, every
-//! > track the CLI created or archived is still in the state it left it in,
-//! > no ID appears twice, and every file is settled.
+//! > writer, at quiesce: every title either writer acknowledged writing is
+//! > somewhere under `frame/` — or, where the two genuinely raced for one task,
+//! > in the recovery log in an entry that names it, exactly once and on one side
+//! > only. Every track the CLI created or archived is still in the state it left
+//! > it in, no ID appears twice, and every file is settled.
 //!
 //! # The gap this closes
 //!
@@ -35,25 +36,64 @@
 //! the CLI side, which is the side that was already fixed. Nothing covered the
 //! TUI side, which is what this is for.
 //!
-//! # Why disjoint tasks
+//! # Overlapping edits, and the three answers the oracle needs
 //!
-//! Because it removes every judgement call from the oracle. When both writers
-//! edit the same task there is no right answer — `reconcile` keeps ours and
+//! This suite began with the two writers steered onto **disjoint tasks**, and
+//! the argument was that overlap has no right answer: `reconcile` keeps ours and
 //! writes theirs to the recovery log, which is defensible but means "the title
 //! is gone from the project and that is correct". An oracle that has to accept
 //! "gone, but mentioned in `.recovery.log`" cannot tell a documented conflict
 //! resolution from a plain lost update.
 //!
-//! So the CLI actor only ever adds tasks with unique generated titles and edits
-//! tasks it added itself; the TUI actor is steered away from anything the CLI
-//! owns ([`steer`]). They still write **the same files** — which is the whole
-//! point, since a track file is rewritten whole — but never the same task.
-//! Under those conditions a merge should be clean every time, and any loss is a
-//! real loss.
+//! That is true of an oracle with **two** answers. It stops being true with
+//! three. When the two writers touch one task, what happened is one of:
 //!
-//! A looser property that allows overlap and accepts the recovery-log escape
-//! hatch is a reasonable follow-up. It is deliberately not first: it would find
-//! the same defects with a weaker signal.
+//! 1. **The TUI never touched it.** The title has to be in the project. The log
+//!    is not an acceptable answer, and this is the case with the teeth — a merge
+//!    that sets aside a version nobody contested is not resolving a conflict, it
+//!    is losing an update.
+//! 2. **The TUI edited a version it had absorbed.** A supersession: the user saw
+//!    that title and changed it, so it is legitimately gone and nothing is owed.
+//!    The same rule `EditOwned` applies to the CLI's own overwrites.
+//! 3. **The TUI was holding a changed copy when the CLI wrote its own.** A real
+//!    race, and the only case where the recovery log is a correct home for one
+//!    of the two versions.
+//!
+//! [`Cli::observe_tui_step`] tells them apart by reading the app either side of
+//! every step — while the answer is still observable, which at quiesce it is
+//! not. So the ambiguity the steering existed to avoid is now *decided* rather
+//! than avoided, and the overlapping case is where the merge machinery is
+//! actually exercised.
+//!
+//! **The weaker properties this replaces are worth naming**, because both would
+//! read as green against a defect this one catches. "The title is somewhere, or
+//! it is logged" is nearly unfalsifiable. "Exactly one side survives and the
+//! other is in the log in an entry that names it" sounds much stronger and is
+//! satisfied *precisely* by the `8f5f3ab` defect, which filed an uncontested
+//! version as a conflict. Only asking what entitled the log to hold it separates
+//! the two — see
+//! [`a_version_nobody_contested_never_reaches_the_recovery_log`].
+//!
+//! **Tracks are still steered** ([`steer`]). C5's claim is about a track's
+//! *state*, and an informed TUI shelve legitimately changes it, so tracks need
+//! their own version of the three-case rule against a differently shaped claim.
+//! Until they have one, a run where the TUI archives a track the CLI just
+//! created is ambiguous rather than false.
+//!
+//! # How often the overlap actually fires, measured
+//!
+//! Over 384 generated cases, of 1041 task-surface steps: **985 ran before the
+//! CLI owned any task at all**, 23 more where the TUI had not been handed one,
+//! 33 where it held one — and 14 that landed on a claimed task, 5 superseding
+//! and 9 racing. Roughly 3.6% of cases reach a real overlap.
+//!
+//! That is the schedule shape, not the aiming: an overlap needs a CLI add, a
+//! commit, and a `Watch` before a TUI step can touch anything. Biasing it
+//! further would mean re-weighting `arb_event`, which re-maps the random stream
+//! and silently orphans every recorded seed — so `steer` aims one target in
+//! three at a CLI-owned task instead, which costs no seeds, and the branches are
+//! pinned by fixed cases rather than left to the search. Without that aiming the
+//! same measurement was 4 races, 2 inbox touches and **not one supersession**.
 //!
 //! # Why C5 exists, and why counting titles was not enough
 //!
@@ -99,14 +139,18 @@
 //!
 //! # Why the TUI is steered off the CLI's tracks
 //!
-//! The same argument as disjoint tasks, one level up. `TrackArchive` and
-//! `TrackShelve` are legitimate operations that take a track out of `tracks/`
-//! or out of the active set, so a run where the TUI archives a track the CLI
-//! just created makes C5 **ambiguous** rather than false — "the row is gone and
-//! that is correct" is exactly the answer no oracle can distinguish from a lost
-//! update. [`steer`] therefore excludes every track the CLI has acted on from
-//! every track-surface step, as it already excludes CLI-owned tasks from
-//! task-surface ones.
+//! The argument the task-level steering used to rest on, one level up and still
+//! standing. `TrackArchive` and `TrackShelve` are legitimate operations that
+//! take a track out of `tracks/` or out of the active set, so a run where the
+//! TUI archives a track the CLI just created makes C5 **ambiguous** rather than
+//! false — "the row is gone and that is correct" is exactly the answer a
+//! two-answer oracle cannot distinguish from a lost update. [`steer`] therefore
+//! excludes every track the CLI has acted on from every track-surface step.
+//!
+//! Giving tracks the three-case treatment tasks now have is the obvious next
+//! step and deliberately not taken here: the claim is about a track's *state*
+//! rather than a title's presence, so it needs its own notion of what the TUI
+//! absorbed and its own reading of the config merge's conflicts.
 //!
 //! It cuts the other way too: the CLI only ever archives a track it created
 //! itself, never one out of the fixture, for the same reason.
@@ -238,8 +282,9 @@ enum Event {
 }
 
 /// What the CLI writer does inside its window. Every one either creates content
-/// with a unique title or edits content the CLI itself created — see the
-/// module docs on why disjointness is the price of an unambiguous oracle.
+/// with a unique title or edits content the CLI itself created, so a lost title
+/// is unambiguous — the TUI is free to touch any of it, and what happens when it
+/// does is [`Cli::observe_tui_step`]'s business.
 #[derive(Debug, Clone, Copy)]
 enum CliOp {
     /// `fr add` — a new task at the bottom of a track's backlog.
@@ -330,6 +375,13 @@ struct Claim {
     title: String,
     /// `None` for an inbox item.
     task_id: Option<String>,
+    /// Whether the TUI has since changed this task from a copy that did not yet
+    /// hold what the CLI committed — the one condition under which the recovery
+    /// log is an acceptable place for this title to end up.
+    ///
+    /// Set by [`Cli::observe_tui_step`], which is where the three cases are told
+    /// apart and why they have to be.
+    at_risk: bool,
 }
 
 struct Cli {
@@ -348,6 +400,19 @@ struct Cli {
     /// as surely as a deleted row, since its file is in `archive/_tracks/` and
     /// `load_project` looks for it under `tracks/`.
     tracks_claimed: BTreeMap<String, String>,
+    /// What the CLI last committed for each task it owns, as the task's own
+    /// markdown lines. The yardstick for *informed*: a TUI copy that matches it
+    /// has seen the CLI's write, so an edit from there supersedes rather than
+    /// races.
+    committed: BTreeMap<String, Vec<String>>,
+    /// Tasks the TUI is holding a changed copy of — its own edit, not a version
+    /// it absorbed. Read by [`Self::commit`] to decide whether a claim is born
+    /// contested.
+    tui_edited: BTreeSet<String>,
+    /// Titles retired because the TUI knowingly superseded them. Kept only so a
+    /// fixed case can assert it reached the branch it is named for — a test that
+    /// passes because nothing happened is the failure mode these exist to avoid.
+    retired_by_tui: Vec<String>,
     /// Distinguishes every generated title, so a lost one is unambiguous.
     seq: usize,
 }
@@ -361,6 +426,9 @@ impl Cli {
             claims: Vec::new(),
             owned_ids: Vec::new(),
             tracks_claimed: BTreeMap::new(),
+            committed: BTreeMap::new(),
+            tui_edited: BTreeSet::new(),
+            retired_by_tui: Vec::new(),
             seq: 0,
         }
     }
@@ -468,6 +536,7 @@ impl Cli {
                     window.pending.push(Claim {
                         title,
                         task_id: Some(id),
+                        at_risk: false,
                     });
                 }
             }
@@ -497,6 +566,7 @@ impl Cli {
                         window.pending.push(Claim {
                             title,
                             task_id: Some(id),
+                            at_risk: false,
                         });
                     }
                     break;
@@ -513,6 +583,7 @@ impl Cli {
                 window.pending.push(Claim {
                     title,
                     task_id: None,
+                    at_risk: false,
                 });
             }
 
@@ -678,11 +749,25 @@ impl Cli {
         for title in &window.retired {
             self.claims.retain(|c| &c.title != title);
         }
-        for claim in window.pending {
-            if let Some(id) = &claim.task_id
-                && !self.owned_ids.contains(id)
-            {
-                self.owned_ids.push(id.clone());
+        for mut claim in window.pending {
+            if let Some(id) = &claim.task_id {
+                // Born contested: the TUI was already holding a changed copy of
+                // this task when the CLI wrote its own version, so the merge
+                // that follows has a genuine conflict to resolve and the
+                // recovery log is an acceptable home for one of the two.
+                claim.at_risk = self.tui_edited.contains(id);
+                if !self.owned_ids.contains(id) {
+                    self.owned_ids.push(id.clone());
+                }
+                // What the TUI has to be holding to count as informed about
+                // this task. Taken from the copy that was just written, so it
+                // is what a reader of the file would find.
+                for (_, track) in &window.project.tracks {
+                    if let Some(task) = task_ops::find_task_in_track(track, id) {
+                        self.committed.insert(id.clone(), own_lines(task));
+                        break;
+                    }
+                }
             }
             self.claims.push(claim);
         }
@@ -691,15 +776,147 @@ impl Cli {
         }
     }
 
-    /// Titles the CLI owns that live in the inbox, so a TUI step is not aimed
-    /// at one.
-    fn owned_inbox_titles(&self) -> BTreeSet<String> {
-        self.claims
-            .iter()
-            .filter(|c| c.task_id.is_none())
-            .map(|c| c.title.clone())
-            .collect()
+    /// Record what one TUI step did to the tasks and inbox items the CLI has
+    /// claimed, given the app's contents either side of it.
+    ///
+    /// # Three things a step can do, not two
+    ///
+    /// The first cut of this asked only whether the task changed across the
+    /// step, and it was wrong. **A step can change the app's view of a task
+    /// without the TUI having edited it at all**: the TUI refuses to edit a task
+    /// whose file moved underneath it and reloads instead, so `before` and
+    /// `after` differ while the user changed nothing. Classifying that as an
+    /// edit marked claims contested that nobody had contested. So:
+    ///
+    /// - `before == after` — untouched.
+    /// - `after` is what the CLI committed — the TUI **absorbed** their version.
+    ///   The opposite of an edit: it is the session catching up, and it clears
+    ///   any divergence rather than creating one.
+    /// - otherwise — the TUI genuinely **changed** it.
+    ///
+    /// **Touched means any change to the task's own lines**, not just its title.
+    /// A state change conflicts in `reconcile_track` exactly as a retitle does,
+    /// and sends the CLI's version — title and all — to the log.
+    ///
+    /// # Why divergence is remembered rather than judged here
+    ///
+    /// Whether a claim may end up in the recovery log cannot be decided at the
+    /// step, because it turns on what the CLI does *afterwards*. The shape that
+    /// matters is: the TUI edits a task it had absorbed, a CLI window then
+    /// writes its own version of that same task, and the merge at save time
+    /// keeps ours and logs theirs. At the moment of the TUI's edit that was an
+    /// ordinary informed edit; only the CLI's later commit makes it a race.
+    ///
+    /// So the step records *divergence* in [`Cli::tui_edited`], and
+    /// [`Cli::commit`] reads it: a claim is born at risk when the TUI was
+    /// already holding a changed copy of that task. That is the same
+    /// acknowledgement discipline the rest of this actor uses — the claim is
+    /// classified when it is made, from what was true then.
+    ///
+    /// Retirement still belongs here. A TUI edit to a task whose claimed version
+    /// the session had absorbed is a **supersession**: the user saw that title
+    /// and changed it, so it is legitimately gone and no assertion is owed —
+    /// the same rule `EditOwned` applies to the CLI's own overwrites, one actor
+    /// over.
+    ///
+    /// # The inbox has no divergence case, and that is not an omission
+    ///
+    /// An inbox item's identity *is* its content, so the TUI can only act on an
+    /// item it is already holding: there is no version of one to be behind. Every
+    /// TUI touch is therefore a supersession. That matches what `reconcile_inbox`
+    /// does — it merges by multiset, keeps both versions of a double edit, and
+    /// sets nothing aside — so an inbox claim never has the log to fall back on
+    /// and must never need it.
+    fn observe_tui_step(
+        &mut self,
+        before: &BTreeMap<String, Vec<String>>,
+        after: &BTreeMap<String, Vec<String>>,
+        inbox_before: &BTreeMap<String, usize>,
+        inbox_after: &BTreeMap<String, usize>,
+    ) {
+        let mut retired: Vec<String> = Vec::new();
+        let mut edited: Vec<String> = Vec::new();
+        let mut absorbed: Vec<String> = Vec::new();
+
+        for claim in &self.claims {
+            match &claim.task_id {
+                Some(id) => {
+                    let (was, now) = (before.get(id), after.get(id));
+                    if was == now {
+                        continue;
+                    }
+                    if now == self.committed.get(id) {
+                        absorbed.push(id.clone());
+                        continue;
+                    }
+                    edited.push(id.clone());
+                    // Editing from the version the CLI committed is a
+                    // supersession, not a race.
+                    if was == self.committed.get(id) {
+                        retired.push(claim.title.clone());
+                    }
+                }
+                None => {
+                    // Fewer copies in memory than before means this step took
+                    // one away — an edit, a delete or a triage.
+                    let n = |m: &BTreeMap<String, usize>| m.get(&claim.title).copied().unwrap_or(0);
+                    if n(inbox_after) < n(inbox_before) {
+                        retired.push(claim.title.clone());
+                    }
+                }
+            }
+        }
+
+        for id in absorbed {
+            self.tui_edited.remove(&id);
+        }
+        self.tui_edited.extend(edited);
+        self.retired_by_tui.extend(retired.iter().cloned());
+        self.claims.retain(|c| !retired.contains(&c.title));
     }
+}
+
+/// A task's own markdown lines, excluding its subtasks.
+///
+/// The unit `ops::reconcile` compares sides by, and for the same reason: a
+/// subtask is merged in its own right, so folding one into its parent's text
+/// would report a change to the child as a change to the parent.
+fn own_lines(task: &frame::model::task::Task) -> Vec<String> {
+    let mut bare = task.clone();
+    bare.subtasks.clear();
+    frame::parse::serialize_tasks(std::slice::from_ref(&bare), 0)
+}
+
+/// What the TUI is holding for each task the CLI owns, keyed by id.
+///
+/// Read out of `app.project` rather than off disk on purpose: the question is
+/// what the *session* believes, because that is what its next save writes and
+/// what the merge offers as "ours".
+fn tui_view(app: &App, cli: &Cli) -> BTreeMap<String, Vec<String>> {
+    let mut out = BTreeMap::new();
+    for id in &cli.owned_ids {
+        for (_, track) in &app.project.tracks {
+            if let Some(task) = task_ops::find_task_in_track(track, id) {
+                out.insert(id.clone(), own_lines(task));
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// How many copies of each inbox title the TUI is holding.
+///
+/// A count rather than a set, because `reconcile_inbox` works in multisets and
+/// two identical captures are two items, not one.
+fn tui_inbox(app: &App) -> BTreeMap<String, usize> {
+    let mut out: BTreeMap<String, usize> = BTreeMap::new();
+    if let Some(inbox) = &app.project.inbox {
+        for item in &inbox.items {
+            *out.entry(item.title.clone()).or_default() += 1;
+        }
+    }
+    out
 }
 
 fn track_file(project: &Project, track_id: &str) -> Option<String> {
@@ -712,52 +929,77 @@ fn track_file(project: &Project, track_id: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Keeping the two writers disjoint
+// Aiming the TUI
 // ---------------------------------------------------------------------------
 
-/// Re-aim a generated step so it never lands on something the CLI owns.
+/// Re-aim a generated step so it never lands on a **track** the CLI owns, and
+/// so a share of task steps land squarely on tasks it does.
 ///
-/// Returns `None` when there is nothing left for it to act on, in which case
-/// the step is skipped. This is the mechanism the whole property rests on:
-/// `apply_step` resolves `target` modulo the number of live candidates, so
-/// rewriting `target` to the index of an allowed one steers the step without
-/// teaching the shared driver anything about this suite.
+/// Returns `None` when there is nothing left for it to act on, in which case the
+/// step is skipped. `apply_step` resolves `target` modulo the number of live
+/// candidates, so rewriting `target` to the index of a chosen one steers the
+/// step without teaching the shared driver anything about this suite.
 ///
-/// A CLI-owned task is excluded along with its descendants — the TUI's own
-/// subtask ids are minted under the parent's, so `M-004.1` belongs to whoever
-/// owns `M-004`.
+/// # Why tasks and inbox items are no longer steered away
+///
+/// They were, and the module docs used to argue they had to be: on one task
+/// there is no right answer, so an oracle that accepts "gone from the project
+/// but named in the log" cannot tell a resolved conflict from a lost update.
+///
+/// That holds only for an oracle that cannot see *which of the two* it is
+/// looking at. [`Cli::observe_tui_step`] can — it reads the app either side of
+/// every step and separates a supersession from a race — so the ambiguity the
+/// steering existed to avoid is now decided rather than avoided.
+///
+/// # Why a share of them is aimed deliberately
+///
+/// Left to chance, overlap almost never happens. Reaching it needs a CLI add, a
+/// commit, a `Watch` to put the task in the TUI's hands, and then a step landing
+/// on that task out of the ten-odd live ones — and, for the stale case, a second
+/// CLI window editing it with no `Watch` after. Measured over 384 generated
+/// cases with no deliberate aiming: **four stale touches, two inbox touches, and
+/// not one informed touch.** A property that reaches its own subject matter 1.5%
+/// of the time and one of its three branches never is not covering it.
+///
+/// So one target in three is aimed at a CLI-owned task when the TUI is holding
+/// one. The entropy comes from `step.target`, which the generator already
+/// produces — **deliberately not from a new arm or a new weight in `arb_event`**,
+/// because that re-maps the whole random stream and silently orphans every
+/// recorded seed. Steering is the harness's own aiming mechanism and changing it
+/// costs no seeds at all.
+///
+/// # Tracks stay steered
+///
+/// The same work has not been done for them. C5's claim is about a track's
+/// *state*, and an informed TUI shelve legitimately changes that state, so it
+/// needs its own version of the three-case rule against a differently shaped
+/// claim. Until it has one, a run where the TUI archives a track the CLI just
+/// created is still ambiguous rather than false.
 fn steer(app: &App, step: &Step, cli: &Cli) -> Option<Step> {
     let mut step = *step;
     match step.action.surface() {
         tui_steps::Surface::Task => {
-            let live = live_task_ids(app);
-            let allowed: Vec<usize> = live
-                .iter()
-                .enumerate()
-                .filter(|(_, id)| !cli.owned_ids.iter().any(|o| id_is_under(id, o)))
-                .map(|(i, _)| i)
-                .collect();
-            if allowed.is_empty() {
-                return None;
+            if step.target.is_multiple_of(3) {
+                let live = live_task_ids(app);
+                // A CLI-owned task's descendants count as the TUI's own: subtask
+                // ids are minted under the parent's, so `M-004.1` under a
+                // CLI-owned `M-004` was added by whoever added the subtask.
+                // Aiming is about the claimed task itself.
+                let owned: Vec<usize> = live
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, id)| cli.owned_ids.contains(id))
+                    .map(|(i, _)| i)
+                    .collect();
+                if !owned.is_empty() {
+                    step.target = owned[(step.target / 3) % owned.len()];
+                }
             }
-            step.target = allowed[step.target % allowed.len()];
         }
-        tui_steps::Surface::Inbox => {
-            let owned = cli.owned_inbox_titles();
-            let items = app.project.inbox.as_ref().map(|i| &i.items)?;
-            let allowed: Vec<usize> = items
-                .iter()
-                .enumerate()
-                .filter(|(_, item)| !owned.contains(&item.title))
-                .map(|(i, _)| i)
-                .collect();
-            if allowed.is_empty() {
-                return None;
-            }
-            step.target = allowed[step.target % allowed.len()];
-        }
+        tui_steps::Surface::Inbox => {}
         tui_steps::Surface::Tracks => {
-            // The same disjointness rule, one level up. `TrackArchive` and
+            // The rule the task-level steering used to follow, one level up.
+            // `TrackArchive` and
             // `TrackShelve` are legitimate TUI operations that take a track out
             // of `tracks/` or out of the active set — so a run where the TUI
             // archives a track the CLI just created makes C5 *ambiguous*, not
@@ -788,10 +1030,6 @@ fn steer(app: &App, step: &Step, cli: &Cli) -> Option<Step> {
         }
     }
     Some(step)
-}
-
-fn id_is_under(id: &str, owner: &str) -> bool {
-    id == owner || id.starts_with(&format!("{owner}."))
 }
 
 // ---------------------------------------------------------------------------
@@ -853,16 +1091,98 @@ struct Verdict {
     /// C5: tracks the CLI created or archived that are no longer in the state
     /// it left them in, or whose content is not where that state says.
     unconfigured_tracks: Vec<String>,
+    /// C6: titles in the recovery log that no conflict entitles it to — the
+    /// merge set a version aside on a task the TUI never raced it for.
+    unjustified_setaside: Vec<String>,
+    /// C6's other half: a title the log did keep, in an entry that does not name
+    /// the task it came from. Content nobody can find is content nobody can put
+    /// back.
+    unidentified_setaside: Vec<String>,
+    /// C7: a claimed title present more than once. Keeping both sides of a
+    /// conflict as two tasks loses no text and still corrupts the project.
+    duplicated_titles: Vec<String>,
+    /// Claims that left the project and were found in the recovery log. Not a
+    /// failure — `unjustified_setaside` is the failure — but the fixed cases
+    /// assert on it so that a race they mean to provoke cannot quietly not
+    /// happen and still pass.
+    log_satisfied: Vec<String>,
+    /// Titles the TUI knowingly superseded, from [`Cli::retired_by_tui`], for
+    /// the same reason.
+    retired_by_tui: Vec<String>,
 }
 
 fn judge(app: &App, frame_dir: &Path, cli: &Cli) -> Verdict {
     let (titles, _) = present(frame_dir);
     let text = tree_checks::all_text(frame_dir);
+    // Not part of `all_text`, which collects `.md` only — so "in the project"
+    // and "in the log" stay two separate questions, which is the whole point of
+    // asking them separately.
+    //
+    // **`Write` entries only, and the distinction is load-bearing.** Frame logs
+    // a deleted task's source too (`log_task_deletion`, category `Delete`), and
+    // that is a different mechanism with a different licence: it records what a
+    // user threw away on purpose, not a version a merge set aside. Accepting any
+    // category let a deletion entry stand in for a conflict resolution, which is
+    // precisely the conflation C6 exists to prevent — found by reverting the
+    // retirement rule and watching C6 fire on a plain delete.
+    let log: Vec<_> = frame::io::recovery::read_recovery_entries(frame_dir, None, None)
+        .into_iter()
+        .filter(|e| e.category == frame::io::recovery::RecoveryCategory::Write)
+        .collect();
 
-    let lost_by_cli = cli
+    let mut lost_by_cli = Vec::new();
+    let mut unjustified_setaside = Vec::new();
+    let mut unidentified_setaside = Vec::new();
+    let mut log_satisfied = Vec::new();
+
+    for claim in &cli.claims {
+        if titles.contains(&claim.title) || text.contains(&claim.title) {
+            continue;
+        }
+        // Gone from the project. Whether that is allowed turns entirely on what
+        // the TUI did to this task, which `observe_tui_step` decided at the time
+        // and recorded in `at_risk`.
+        let Some(entry) = log
+            .iter()
+            .find(|e| e.body.contains(&claim.title) || e.description.contains(&claim.title))
+        else {
+            lost_by_cli.push(claim.title.clone());
+            continue;
+        };
+        log_satisfied.push(claim.title.clone());
+        if !claim.at_risk {
+            // The log has it and nothing licensed the log to have it: no TUI
+            // edit raced this task. A merge that sets aside a version nobody
+            // contested is not resolving a conflict, it is losing an update —
+            // the shape `8f5f3ab` had, which the old disjoint property could
+            // only see as a plain loss and a looser one would call correct.
+            unjustified_setaside.push(claim.title.clone());
+            continue;
+        }
+        if let Some(id) = &claim.task_id
+            && !frame::io::recovery::entry_names(entry, id)
+        {
+            unidentified_setaside.push(format!("{} (task {id})", claim.title));
+        }
+    }
+
+    // C7. Titles rather than ids: `duplicate_ids` below already covers the same
+    // id appearing twice, and a task resurrected under a *new* id by a merge on
+    // the track it was moved out of would pass that and still leave the project
+    // holding two of it.
+    let mut title_tally: BTreeMap<String, usize> = BTreeMap::new();
+    for task in tree_checks::all_tasks(frame_dir) {
+        if !task.title.trim().is_empty() {
+            *title_tally.entry(task.title.clone()).or_default() += 1;
+        }
+    }
+    let duplicated_titles: Vec<String> = cli
         .claims
         .iter()
-        .filter(|c| !titles.contains(&c.title) && !text.contains(&c.title))
+        // Tasks only. An inbox item is not in `all_tasks`, and duplicating one
+        // is what `reconcile_inbox` does on purpose.
+        .filter(|c| c.task_id.is_some())
+        .filter(|c| title_tally.get(&c.title).is_some_and(|n| *n > 1))
         .map(|c| c.title.clone())
         .collect();
 
@@ -940,6 +1260,11 @@ fn judge(app: &App, frame_dir: &Path, cli: &Cli) -> Verdict {
         unsettled: unsettled(frame_dir),
         still_unsaved: app.unsaved.keys().map(|t| t.label().to_string()).collect(),
         unconfigured_tracks,
+        unjustified_setaside,
+        unidentified_setaside,
+        duplicated_titles,
+        log_satisfied,
+        retired_by_tui: cli.retired_by_tui.clone(),
     }
 }
 
@@ -971,10 +1296,19 @@ fn run(schedule: &[Event]) -> Result<Verdict, String> {
         match event {
             Event::Tui(step) => {
                 if let Some(step) = steer(&app, step, &cli) {
+                    // Read either side of the step, so what it did to a task the
+                    // CLI owns can be classified while the answer is still
+                    // observable. At quiesce it is far too late: the merge has
+                    // run and every trace of who was holding what is gone.
+                    let before = tui_view(&app, &cli);
+                    let inbox_before = tui_inbox(&app);
                     apply_step(&mut app, &step);
                     if app.mode != Mode::Navigate {
                         return Err(format!("step {step:?} left the app in {:?}", app.mode));
                     }
+                    let after = tui_view(&app, &cli);
+                    let inbox_after = tui_inbox(&app);
+                    cli.observe_tui_step(&before, &after, &inbox_before, &inbox_after);
                 }
             }
             Event::CliBegin => cli.begin(),
@@ -1036,11 +1370,224 @@ fn a_track_archived_after_an_add_still_carries_the_task() {
     );
 }
 
+/// Aim a task step at the first task the CLI owns.
+///
+/// `steer` re-aims a target when `target % 3 == 0`, picking
+/// `owned[(target / 3) % owned.len()]`, so zero is "the CLI's first task" and
+/// reads as that at every call site below.
+fn at_cli_task(action: ActionKind) -> Event {
+    Event::Tui(Step {
+        action,
+        target: 0,
+        text: 0,
+    })
+}
+
+/// **Informed supersession.** The TUI absorbed the CLI's task and then deleted
+/// it. The title is gone from the project, nothing is in the recovery log, and
+/// that is correct — the user saw that version and removed it.
+///
+/// This is the case the disjoint property could never express, and the reason
+/// the oracle needs three answers rather than two. Without the retirement rule
+/// in `observe_tui_step` the claim survives and C1 reports frame for losing a
+/// task the user deliberately threw away — confirmed by reverting it.
+#[test]
+fn a_delete_of_a_task_the_tui_had_absorbed_retires_the_claim() {
+    let verdict = run(&[
+        Event::CliBegin,
+        Event::CliOp(CliOp::AddTask { track: 0 }),
+        Event::CliCommit,
+        // The watcher catches up, so the TUI's copy *is* what the CLI wrote.
+        Event::Watch,
+        at_cli_task(ActionKind::DeleteTask),
+    ])
+    .expect("schedule runs");
+
+    // Non-vacuity first: this case is worthless unless the informed branch
+    // actually ran and the title actually left the project.
+    assert_eq!(
+        verdict.retired_by_tui,
+        vec!["cli task 1".to_string()],
+        "the informed branch did not fire, so the rest of this proves nothing"
+    );
+    assert!(
+        verdict.lost_by_cli.is_empty(),
+        "a task the TUI knowingly deleted is not a lost update: {:?}",
+        verdict.lost_by_cli
+    );
+    assert!(
+        verdict.unjustified_setaside.is_empty(),
+        "nothing raced here, so nothing belongs in the log: {:?}",
+        verdict.unjustified_setaside
+    );
+}
+
+/// **A genuine race.** The TUI edits a task inside the window in which a CLI
+/// command goes on to write its own version of that same task.
+///
+/// `reconcile_track` keeps ours and hands theirs to the recovery log, so the
+/// CLI's newest title leaves the project — the documented resolution, not a
+/// loss. The claim is allowed that answer *only* because the TUI was holding a
+/// changed copy when the CLI committed. Had the TUI never touched the task, the
+/// identical end state would be `unjustified_setaside` instead, which is the
+/// shape `8f5f3ab` had and the distinction the whole three-case rule buys.
+#[test]
+fn a_stale_edit_sends_the_cli_version_to_the_recovery_log() {
+    let verdict = run(&[
+        Event::CliBegin,
+        Event::CliOp(CliOp::AddTask { track: 0 }),
+        Event::CliCommit,
+        Event::Watch,
+        // The second window takes the lock and holds it. The TUI's edit lands
+        // *inside* that window — which is the only way a stale edit happens at
+        // all, and is why the order here is not incidental: after the CLI has
+        // written, the TUI sees the file moved and reloads instead of editing.
+        // The documented degraded path is exactly this — a save that failed on
+        // lock contention, followed by that process writing the file.
+        Event::CliBegin,
+        at_cli_task(ActionKind::EditTitle),
+        Event::CliOp(CliOp::EditOwned { which: 0 }),
+        Event::CliCommit,
+    ])
+    .expect("schedule runs");
+
+    // Non-vacuity: the race has to have actually happened. `cli task 2` is the
+    // retitle, and it must be gone from the project and found in the log —
+    // otherwise this passes without ever reaching a conflict.
+    assert_eq!(
+        verdict.log_satisfied,
+        vec!["cli task 2".to_string()],
+        "no version reached the recovery log, so no conflict was provoked"
+    );
+    assert!(
+        verdict.lost_by_cli.is_empty(),
+        "the log is an acceptable home for a contested version: {:?}",
+        verdict.lost_by_cli
+    );
+    assert!(
+        verdict.unjustified_setaside.is_empty(),
+        "this race is what entitles the log to hold it: {:?}",
+        verdict.unjustified_setaside
+    );
+    assert!(
+        verdict.unidentified_setaside.is_empty(),
+        "and it has to say which task it came from: {:?}",
+        verdict.unidentified_setaside
+    );
+    assert!(
+        verdict.duplicated_titles.is_empty(),
+        "one side survives, not both: {:?}",
+        verdict.duplicated_titles
+    );
+}
+
+/// **The inbox, where nothing is ever set aside.** A capture the TUI went on to
+/// delete is retired like any informed touch — and unlike a track, there is no
+/// stale case to fall back on, because an item's identity is its content and the
+/// TUI can only act on one it already holds.
+#[test]
+fn an_inbox_capture_the_tui_deleted_is_not_a_lost_update() {
+    let verdict = run(&[
+        Event::CliBegin,
+        Event::CliOp(CliOp::Capture),
+        Event::CliCommit,
+        Event::Watch,
+        // The fixture has two items and the capture appends, so index 2 is the
+        // CLI's. Inbox steps are not re-aimed, so this is the raw cursor.
+        Event::Tui(Step {
+            action: ActionKind::InboxDelete,
+            target: 2,
+            text: 0,
+        }),
+    ])
+    .expect("schedule runs");
+
+    assert_eq!(
+        verdict.retired_by_tui,
+        vec!["cli task 1".to_string()],
+        "the inbox branch did not fire, so the rest of this proves nothing"
+    );
+    assert!(
+        verdict.lost_by_cli.is_empty(),
+        "an item the TUI triaged away is not a lost update: {:?}",
+        verdict.lost_by_cli
+    );
+    assert!(
+        verdict.unjustified_setaside.is_empty(),
+        "and the inbox merge sets nothing aside: {:?}",
+        verdict.unjustified_setaside
+    );
+}
+
+/// **C6's teeth, stated deterministically.** A version the TUI never contested
+/// must never end up in the recovery log.
+///
+/// This is the `8f5f3ab` shape: the TUI's save fails on the held lock, a handler
+/// then takes the changed file into memory to catch up, and the CLI writes the
+/// same task again. If adopting a file updates the mtime but not the ancestor,
+/// the next merge meets that task absent from the ancestor and present on both
+/// sides — "both added it differently" — keeps ours and files theirs as a
+/// conflict. The merge does the right thing with wrong inputs, and **nobody was
+/// ever in dispute**.
+///
+/// Every weaker oracle calls this correct. "The title is somewhere, or it is
+/// logged" is satisfied. Even "exactly one side survives and the other is in the
+/// log in an entry that names it" is satisfied — that is exactly what the buggy
+/// merge produces. Only asking *what entitled the log to hold it* separates the
+/// two, which is why `at_risk` exists and why it is set from what the TUI was
+/// holding rather than from the end state.
+///
+/// **Fixed rather than left to the search.** With the defect reintroduced this
+/// schedule reports it instantly; the property ran 768 generated cases and never
+/// reached it. The seed that originally found it is one of the orphaned `found:`
+/// lines in the regressions file, which is the rule in `CLAUDE.md` playing out
+/// exactly as written.
+#[test]
+fn a_version_nobody_contested_never_reaches_the_recovery_log() {
+    let verdict = run(&[
+        // The CLI adds a task the TUI has never seen.
+        Event::CliBegin,
+        Event::CliOp(CliOp::AddTask { track: 0 }),
+        Event::CliCommit,
+        // A window opens and holds the lock, so the TUI's edit cannot save and
+        // goes to `unsaved` — the designed degraded path. Catching up on the
+        // changed file is what brings the CLI's task into memory.
+        Event::CliBegin,
+        Event::Tui(Step {
+            action: ActionKind::EditTitle,
+            target: 1,
+            text: 0,
+        }),
+        // The same task, written again by the same actor that first wrote it.
+        Event::CliOp(CliOp::EditOwned { which: 0 }),
+        Event::CliCommit,
+        // Anything that saves. The merge runs here.
+        Event::Tui(Step {
+            action: ActionKind::SetDone,
+            target: 1,
+            text: 0,
+        }),
+    ])
+    .expect("schedule runs");
+
+    assert!(
+        verdict.unjustified_setaside.is_empty(),
+        "the TUI never touched this task, so no merge may set its version aside: {:?}",
+        verdict.unjustified_setaside
+    );
+    assert!(
+        verdict.log_satisfied.is_empty(),
+        "with nothing in dispute the log should be empty of claims entirely: {:?}",
+        verdict.log_satisfied
+    );
+    assert!(verdict.lost_by_cli.is_empty(), "{:?}", verdict.lost_by_cli);
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(96))]
 
-    /// P8: an interleaving of a TUI session and a CLI writer over disjoint
-    /// tasks loses nothing either one acknowledged.
+    /// P8: an interleaving of a TUI session and a CLI writer loses nothing
+    /// either one acknowledged, and sets a version aside only where they raced.
     #[test]
     fn p8_two_writers_do_not_lose_acknowledged_work(
         // Long schedules on purpose. At 12 events this found the first two
@@ -1068,6 +1615,21 @@ proptest! {
             verdict.unconfigured_tracks.is_empty(),
             "the CLI left these tracks in a state the project no longer has: {:?}\nschedule: {schedule:?}",
             verdict.unconfigured_tracks
+        );
+        prop_assert!(
+            verdict.unjustified_setaside.is_empty(),
+            "the merge put these in the recovery log with no concurrent edit to justify it: {:?}\nschedule: {schedule:?}",
+            verdict.unjustified_setaside
+        );
+        prop_assert!(
+            verdict.unidentified_setaside.is_empty(),
+            "these survive only in the recovery log, in an entry that does not name the task: {:?}\nschedule: {schedule:?}",
+            verdict.unidentified_setaside
+        );
+        prop_assert!(
+            verdict.duplicated_titles.is_empty(),
+            "these titles are in the project more than once: {:?}\nschedule: {schedule:?}",
+            verdict.duplicated_titles
         );
         prop_assert!(
             verdict.lost_by_tui.is_empty(),

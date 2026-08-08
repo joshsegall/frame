@@ -104,7 +104,7 @@ Each answers a different question; a new test usually belongs in one of them rat
 | `conservation.rs` | P7 on **operation sequences**: does a random run of real ops lose a title, an ID, a line frame does not own, or a `dep:` that resolved — and does every file it writes land settled? |
 | `damaged_corpus.rs` | does `fr check` report **exactly** the right findings for a known-damaged project, and repair exactly what it claims? |
 | `undo_properties.rs` | P9 on **TUI action sequences**: does undoing everything restore the project byte for byte, and redoing everything restore the result? |
-| `concurrency.rs` | P8 on **interleavings**: does a TUI session and a CLI writer over one project lose work either one acknowledged, move a track out of the state the CLI left it in, hand an ID out twice, or leave a file unsettled? |
+| `concurrency.rs` | P8 on **interleavings**: does a TUI session and a CLI writer over one project lose work either one acknowledged, set a version aside in the recovery log without the two having raced for it, move a track out of the state the CLI left it in, hand an ID out twice, or leave a file unsettled? |
 | `merge_simulation.rs` | do independent actors minting IDs concurrently ever collide? |
 | `parity.rs` | do human and `--json` output, and CLI and TUI, agree? |
 | `cli_integration.rs` | the CLI surface, including crash injection via `FRAME_FAIL_WRITE` |

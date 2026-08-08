@@ -23,10 +23,17 @@
 #    longer reach the shape their comment describes and must not be read as
 #    pins.
 #
-# The rule that follows: BEFORE adding an arm to `arb_event`, convert anything
-# here that is load-bearing into a fixed-case test. Nothing is load-bearing
-# today — every defect below has its own named pin, listed beside it — which is
-# why this file could be relabelled rather than rewritten.
+# 3. A line can stop reaching its shape without the stream moving at all.
+#    `steer` decides what a generated step is *aimed at*, so changing it leaves
+#    every schedule decoding identically while what those schedules DO differs.
+#    Dropping the task-level steering was exactly that. It orphans nothing —
+#    the seeds still decode to the same events — but a line whose comment names
+#    a task step is no longer evidence about the case it once found.
+#
+# The rule that follows: BEFORE changing `arb_event` OR `steer`, convert
+# anything here that is load-bearing into a fixed-case test. Nothing is
+# load-bearing today — every defect below has its own named pin, listed beside
+# it — which is why this file could be relabelled rather than rewritten.
 # ---------------------------------------------------------------------------
 
 # --- `found:` — recorded before 3486cf8 added TrackNew/TrackArchive to
