@@ -504,7 +504,7 @@ Some actions are **palette-only** (no direct key binding):
 | Archive track | Tracks | Archive a non-empty track |
 | Delete track | Tracks | Delete an empty track (a track with tasks must be archived instead) |
 | Unarchive track | Tracks | Restore an archived track to active |
-| Rename track prefix | Tracks | Rename a track's ID prefix |
+| Rename track prefix | Tracks | Rename a track's ID prefix (refused on an archived track — unarchive it first) |
 | Check project | Global | Run project integrity check and display results |
 | Preview clean | Global | Preview what `fr clean` would do |
 | Prune recovery | Global | Remove old entries from the recovery log |

@@ -22,7 +22,19 @@ All notable changes to frame will be documented in this file.
 
 - **`fr check` reports unclaimed rescue copies.** `frame/.rescue/` holds work the TUI could not save; the exit message named it once and nothing mentioned it again. A warning, with no `--fix`: moving a copy into place overwrites a live file that may be newer, and deleting it destroys the only copy of that work.
 
+- **`fr check` reports an unclaimed archived track file** — a `.md` in `archive/_tracks/` that no archived `[[tracks]]` entry claims. The roster check only ever scanned `tracks/`, so a stray file one directory over was invisible; anyone whose archived track was renamed by an older frame (see below) has one on disk right now and no way to have learned it.
+
+  A warning rather than an error, unlike its `tracks/` counterpart: this is archived content, absent from views that would not have shown it anyway, so it does not fail a build. The message distinguishes a file no config entry claims from one whose entry exists but is `active` or `shelved` — the second is a copy left behind after an unarchive, and it pairs with the missing-file error to say exactly what to move where. No `--fix`: adopting it invents an id, a name and a prefix, deleting it discards content, and only the person who renamed it knows which id it should answer to.
+
 ### Fixed
+
+- **An archived track can no longer be renamed, on either surface.** Archived is frozen — shelving, reordering, cc-focus and adding a task all refuse an archived track — and rename was the one exception. It did not work, either, in three different ways:
+
+  `fr track rename --new-id` printed success and moved nothing. An archived track's `file` field still reads `tracks/<id>.md` while the file itself sits in `archive/_tracks/`, so the rename moved the done-task archive, left the track file under the old id, and landed a project `fr check` calls an error. `--name` rewrote `project.toml` and silently skipped the track file's `# Title`, for the same reason. `--prefix` refused with `track not found`, which is false: the track exists, and `load_project` simply never loaded it. `fr track delete` said the same false thing.
+
+  Worst was the TUI's prefix rename, which had no archived guard at all and reached the ops layer, where the first write is the done-task archive: it rewrote every archived ID onto the new prefix, *then* failed, leaving those IDs on a prefix no track owns while the status bar said the rename had failed. That write now happens only after the rename is accepted — an irreversible write ahead of the call that validates it was the defect, not the one caller that exposed it.
+
+  All of it now refuses through one predicate, with a message that says how to proceed: `cannot rename archived track 'api' — unarchive it first: \`fr track activate api\``. The round trip — activate, rename, archive — renames the track file, the done-task archive and the archived task IDs, and lands sound, so refusing costs two commands rather than any capability. A track that genuinely is absent still gets `track not found`, now from `--prefix` too, which used to report `no prefix configured` instead.
 
 - **The TUI no longer overwrites a `project.toml` it cannot read.** A config that stopped parsing mid-session — a hand edit, an unresolved merge conflict, another process — was replaced on the next save with a serialization of the in-memory settings. That flattened the file: every comment gone (the shipped template is 89 lines, 62 of them comments), every key frame does not model gone, and the damaged text destroyed, which may have been the only copy of what somebody was midway through writing. Silently, from a keystroke the user thought was a track rename.
 

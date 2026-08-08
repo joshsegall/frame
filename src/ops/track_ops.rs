@@ -108,6 +108,35 @@ pub fn accepts_new_tasks(state: &str) -> bool {
     state == "active"
 }
 
+/// Whether a track can be renamed — its name, its id, or its ID prefix.
+///
+/// **An archived track is frozen**, which is what every other mutation already
+/// means by archived: [`shelve_track`], [`reorder_tracks`] and [`set_cc_focus`]
+/// all refuse one, and [`accepts_new_tasks`] keeps tasks out. Rename was the
+/// only exception, and it did not refuse so much as fail to work:
+/// `--name` rewrote `project.toml` and silently skipped the file's `# Title`,
+/// because `file` still says `tracks/<id>.md` for a track whose file the archive
+/// moved to `archive/_tracks/`; `--new-id` moved the done-task archive, left the
+/// track file where it was, and reported success on a project `fr check` then
+/// called an error; `--prefix` refused with `track not found`, which is false —
+/// the track exists, `load_project` just never loaded it.
+///
+/// Renaming one *properly* would mean writing under `archive/`, and for
+/// `--prefix` it would mean loading the archived file into a roster that
+/// `project.tracks` excludes by construction. The way out already exists and
+/// costs two commands: `fr track activate`, rename, `fr track archive`. That
+/// round trip lands `fr check` valid, which is why this refuses rather than
+/// inventing a second way to rewrite a file the archive owns.
+///
+/// One predicate, three consumers: the CLI's `cmd_track_rename` and both of the
+/// TUI's rename entry points. The TUI's name rename already refused on its own;
+/// its prefix rename did not, and reached `rename_archive_prefix` — rewriting
+/// the ids in `archive/<id>.md` before the call that fails, leaving them on a
+/// prefix no track owns while the status bar said the rename had failed.
+pub fn accepts_rename(state: &str) -> bool {
+    state != "archived"
+}
+
 /// Change a track's state to shelved.
 pub fn shelve_track(
     doc: &mut toml_edit::DocumentMut,
@@ -396,6 +425,19 @@ pub fn delete_track(
 }
 
 /// Move a track file to archive/_tracks/ directory
+///
+/// **The config's `file` field is not updated, and for an archived track it is
+/// therefore fiction** — it still reads `tracks/<id>.md` while the file is here.
+/// Every reader that wants an archived track's path derives
+/// `archive/_tracks/<id>.md` from the id instead: `check_track_roster`,
+/// [`restore_track_file`]'s counterpart in `fr track activate`, and this
+/// function's own destination. Rewriting the field on archive would change what
+/// unarchive reads back, so it stays as it is.
+///
+/// What makes deriving-from-id *safe* rather than lucky is that nothing can
+/// change an archived track's id: [`accepts_rename`] refuses. Before it did,
+/// `--new-id` moved the row to a new id and left this file under the old one,
+/// which `fr check` now reports as an unclaimed archived track file.
 pub fn archive_track_file(
     frame_dir: &Path,
     track_id: &str,

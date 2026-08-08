@@ -6793,3 +6793,185 @@ fn a_tui_save_does_not_erase_a_capture_a_real_fr_just_made() {
         "the TUI's own capture did not land:\n{body}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// An archived track is frozen, including its name
+//
+// Rename was the one mutation that did not refuse an archived track, and it did
+// not work either. `--name` rewrote `project.toml` and silently skipped the
+// file's `# Title`, because `file` still reads `tracks/<id>.md` for a track
+// whose file the archive moved to `archive/_tracks/`. `--new-id` moved the
+// done-task archive, left the track file under the old id, and printed success
+// on a project `fr check` then called an error. `--prefix` refused with `track
+// not found`, which is false — the track exists; `load_project` never loaded it.
+//
+// The way out is `activate`, rename, `archive`, pinned below as the reason
+// refusing costs no capability.
+// ---------------------------------------------------------------------------
+
+/// Set up `a` as an archived track with a done-task archive beside it, so a
+/// rename has both files to get wrong.
+fn archived_track_project(root: &Path) {
+    two_track_project(root);
+    run_fr_ok(root, &["add", "a", "a task that finished"]);
+    run_fr_ok(root, &["state", "A-002", "done"]);
+    // A done-task archive at `archive/a.md`, which is what `rename_track_id`
+    // moves while leaving the track file behind.
+    let config = root.join("frame/project.toml");
+    let text = fs::read_to_string(&config).unwrap();
+    fs::write(
+        &config,
+        text.replace("done_threshold = 100", "done_threshold = 0")
+            .replace("done_retain = 10", "done_retain = 0"),
+    )
+    .unwrap();
+    run_fr_ok(root, &["clean"]);
+    assert!(
+        root.join("frame/archive/a.md").exists(),
+        "the done-task archive is part of the fixture"
+    );
+    run_fr_ok(root, &["track", "archive", "a"]);
+}
+
+/// Every flag refuses, nothing on disk moves, and the message names the way out.
+#[test]
+fn renaming_an_archived_track_refuses_on_every_flag() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    archived_track_project(root);
+
+    let before = fs::read_to_string(root.join("frame/project.toml")).unwrap();
+    let file_before = fs::read_to_string(root.join("frame/archive/_tracks/a.md")).unwrap();
+    let archive_before = fs::read_to_string(root.join("frame/archive/a.md")).unwrap();
+
+    for flags in [
+        vec!["--name", "Renamed"],
+        vec!["--new-id", "b2"],
+        vec!["--prefix", "QQ", "--yes"],
+    ] {
+        let mut args = vec!["track", "rename", "a"];
+        args.extend(flags.iter().copied());
+        let (_, stderr, ok) = run_fr(root, &args);
+        assert!(!ok, "{flags:?} must refuse an archived track");
+        assert!(
+            stderr.contains("archived") && stderr.contains("fr track activate a"),
+            "the message must say why and how to proceed, not `track not found`: {stderr}"
+        );
+    }
+
+    assert_eq!(
+        fs::read_to_string(root.join("frame/project.toml")).unwrap(),
+        before,
+        "a refused rename writes no config"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("frame/archive/_tracks/a.md")).unwrap(),
+        file_before,
+        "nor the archived track file"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("frame/archive/a.md")).unwrap(),
+        archive_before,
+        "nor the done-task archive — which `--prefix` used to rewrite before failing"
+    );
+    let (check, _, ok) = run_fr(root, &["check"]);
+    assert!(ok, "and the project stays sound: {check}");
+}
+
+/// Deleting one refuses too, and had the same false message for the same
+/// reason: `find_track` only sees tracks that loaded.
+#[test]
+fn deleting_an_archived_track_says_it_is_archived() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    archived_track_project(root);
+
+    let (_, stderr, ok) = run_fr(root, &["track", "delete", "a"]);
+    assert!(!ok);
+    assert!(
+        stderr.contains("archived") && stderr.contains("fr track activate a"),
+        "an archived track exists; deleting it is what is not on offer: {stderr}"
+    );
+}
+
+/// A track that really is absent still gets `track not found` — from every flag,
+/// including `--prefix`, which used to report `no prefix configured` instead.
+#[test]
+fn renaming_a_missing_track_still_says_not_found() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    two_track_project(root);
+
+    for flags in [
+        vec!["--name", "X"],
+        vec!["--new-id", "y"],
+        vec!["--prefix", "QQ", "--yes"],
+    ] {
+        let mut args = vec!["track", "rename", "ghost"];
+        args.extend(flags.iter().copied());
+        let (_, stderr, ok) = run_fr(root, &args);
+        assert!(!ok, "{flags:?}");
+        assert!(
+            stderr.contains("track not found: ghost"),
+            "{flags:?} should say the track is missing: {stderr}"
+        );
+    }
+}
+
+/// Refusing costs two commands, not capability: the round trip renames both
+/// files and the archived ids, and lands sound.
+#[test]
+fn unarchiving_to_rename_and_re_archiving_lands_sound() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    archived_track_project(root);
+
+    run_fr_ok(root, &["track", "activate", "a"]);
+    run_fr_ok(root, &["track", "rename", "a", "--new-id", "a2"]);
+    run_fr_ok(root, &["track", "rename", "a2", "--prefix", "AA", "--yes"]);
+    run_fr_ok(root, &["track", "archive", "a2"]);
+
+    assert!(
+        root.join("frame/archive/_tracks/a2.md").exists(),
+        "the track file followed the id"
+    );
+    assert!(!root.join("frame/archive/_tracks/a.md").exists());
+    let archive = fs::read_to_string(root.join("frame/archive/a2.md")).unwrap();
+    assert!(
+        archive.contains("AA-002"),
+        "and so did the archived task ids: {archive}"
+    );
+    let (check, _, ok) = run_fr(root, &["check"]);
+    assert!(ok, "{check}");
+}
+
+/// The detector for the residue an old frame left behind: a file under
+/// `archive/_tracks/` that no archived track claims. A warning, so the project
+/// still exits 0 — it is archived content, not live work gone missing.
+#[test]
+fn an_unclaimed_archived_track_file_is_reported_as_a_warning() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    archived_track_project(root);
+
+    // Exactly what `fr track rename --new-id` used to leave: the config row
+    // takes the new id, the file keeps the old one.
+    let config = root.join("frame/project.toml");
+    let text = fs::read_to_string(&config).unwrap();
+    fs::write(&config, text.replace("id = \"a\"", "id = \"a9\"")).unwrap();
+
+    let (out, _, ok) = run_fr(root, &["check"]);
+    assert!(
+        !ok,
+        "the missing file the row now names is still an error: {out}"
+    );
+    assert!(
+        out.contains("archive/_tracks/a9.md"),
+        "the row points nowhere: {out}"
+    );
+    assert!(
+        out.contains("archive/_tracks/a.md"),
+        "and the file it left behind is named too, which is the pair that says \
+         what to move: {out}"
+    );
+}

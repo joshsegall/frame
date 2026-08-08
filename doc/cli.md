@@ -193,7 +193,9 @@ It reconciles the **track roster** in `project.toml` against the files in `track
 - a **missing track file**: `project.toml` names a file that is not there. An archived track is expected to live in `archive/_tracks/` instead, and is only reported when it is missing from there too.
 - an **unreferenced track file**: a `.md` in `tracks/` that no `[[tracks]]` entry points at. Its tasks are invisible, and its IDs are invisible to the duplicate-ID check as well, so a collision with a live track goes unreported until the file is wired back in.
 
-The two usually appear together, because the usual cause is one rename that only half landed — an interrupted `fr track rename --new-id`, a merge that took one side's `project.toml` and the other's file layout, a manual `mv`, or an editor's "rename file". Neither is repairable by `--fix`: dropping the config entry discards a track a `git checkout` may restore, recreating the file fabricates content, and adopting an unreferenced file invents an id, a name and an ID prefix when what you probably want is the original entry back.
+- an **unclaimed archived track file**: a `.md` in `archive/_tracks/` that no *archived* `[[tracks]]` entry claims. A **warning** where the two above are errors, because the consequence is milder — this is archived content, absent from views that would not have shown it anyway, so it does not fail a build. Three things reach it, and the message says which: no config entry carries that id at all (residue of a merge, a manual `mv`, or a `fr track rename --new-id` run on an archived track by a version of frame that allowed it); or an entry does but is `active` or `shelved`, meaning a copy stayed behind under `archive/` after the track came back out. That last one pairs with the missing-file error above when an unarchive was interrupted, and the two findings together name the file to move and where it goes. No `--fix`: adopting it invents an id, a name and a prefix, deleting it discards content, and when it is the far half of an old rename only the person who renamed it knows which id it should answer to.
+
+The first two usually appear together, because the usual cause is one rename that only half landed — an interrupted `fr track rename --new-id`, a merge that took one side's `project.toml` and the other's file layout, a manual `mv`, or an editor's "rename file". Neither is repairable by `--fix`: dropping the config entry discards a track a `git checkout` may restore, recreating the file fabricates content, and adopting an unreferenced file invents an id, a name and an ID prefix when what you probably want is the original entry back.
 
 It reports a **stranded line**: content frame could not attribute to any task — a line indented deeper than the level it sits at that is neither metadata, nor a task, nor part of a `- note:` block. Two findings, by where the line sits, because the likely remedy differs:
 
@@ -563,6 +565,17 @@ fr track rename ID [--name NAME] [--new-id NEW_ID] [--prefix PREFIX] [--dry-run]
 At least one of `--name`, `--new-id`, or `--prefix` is required. Flags can be combined.
 
 `--prefix` rewrites the track's **archived** task IDs too, and reports how many. It used to rewrite only the live ones — it read the archive as a track file, found no `## Section` headers, and wrote nothing while printing success — so archives renamed before this carry the old prefix still. `fr check` reports that state and `--fix` repairs it.
+
+**An archived track cannot be renamed** — by any of the three flags. Archived is frozen, which is what every other operation already means by it: shelving, reordering and cc-focus all refuse an archived track, and so does adding a task to one. Rename is now the same, and says how to proceed:
+
+```
+$ fr track rename api --new-id api-v1
+error: cannot rename archived track 'api' — unarchive it first: `fr track activate api`
+```
+
+The round trip is `fr track activate`, rename, `fr track archive`, and it renames everything a live rename does — the track file, the done-task archive, the archived task IDs. Renaming in place would mean writing a file the archive owns, and for `--prefix` it would mean loading a track that is deliberately not loaded, which is why this refuses rather than growing a second way to do it.
+
+Refusing also replaces three misleading messages. `--new-id` used to report success while moving nothing (leaving a project `fr check` then called an error), `--name` rewrote `project.toml` and silently skipped the track file's `# Title`, and `--prefix` said `track not found` — which was false, since the track exists and only its file lives elsewhere. `fr track delete` said the same false thing and now names the real reason too. A track that genuinely is absent still gets `track not found` from every flag.
 
 ## Maintenance
 

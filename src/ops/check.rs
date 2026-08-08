@@ -439,6 +439,42 @@ pub enum CheckWarning {
         field: String,
         path: String,
     },
+    /// A file in `archive/_tracks/` that no archived `[[tracks]]` entry claims.
+    ///
+    /// The archived counterpart of [`CheckError::TrackFileUnreferenced`], and a
+    /// warning where that one is an error, because the consequence is milder: a
+    /// stray file in `tracks/` is live work that should be visible and is not,
+    /// while this is archived content, absent from views that would not have
+    /// shown it anyway. Warnings exit 0, so archive residue does not fail a
+    /// build — it just stops being invisible.
+    ///
+    /// Three shapes reach it, and [`Self::ArchivedTrackFileUnclaimed::state`]
+    /// tells them apart. No config row at all (`None`) is residue: a merge, a
+    /// manual `mv`, or a `fr track rename --new-id` run on an archived track by
+    /// a frame old enough to have allowed it — that rename moved the done-task
+    /// archive and left this file behind under the old id, and nothing reported
+    /// it, because the roster check only ever scanned `tracks/`. A row in state
+    /// `active` or `shelved` is a copy the archive still holds after the track
+    /// came back out, and it pairs with a [`CheckError::TrackFileMissing`] on
+    /// `tracks/<id>.md` when an unarchive was interrupted — the two findings
+    /// together name the file to move and where it belongs.
+    ///
+    /// **No `--fix`.** Adopting the file invents an id, a name and an ID prefix;
+    /// deleting it discards content. When it is the far half of an old rename
+    /// the repair is a `mv`, and which id it should answer to is known only to
+    /// the person who renamed it — the same reasoning as
+    /// [`CheckError::TrackFileUnreferenced`].
+    #[serde(rename = "archived_track_file_unclaimed")]
+    ArchivedTrackFileUnclaimed {
+        /// Path relative to `frame/`.
+        path: String,
+        /// The `# Title` the file carries, when it has one.
+        title: Option<String>,
+        /// The state of the `[[tracks]]` row whose id matches the filename, or
+        /// `None` when no row does. It decides which of the three stories this
+        /// is, so the message can say which.
+        state: Option<String>,
+    },
 }
 
 /// Informational messages (not errors or warnings).
@@ -1321,9 +1357,14 @@ fn is_transient(name: &str) -> bool {
 fn check_track_roster(project: &Project, result: &mut CheckResult) {
     let frame_dir = &project.frame_dir;
     let mut referenced: HashSet<String> = HashSet::new();
+    // The ids entitled to a file in `archive/_tracks/`: exactly the archived
+    // ones. Collected on the pass that already computes where each of them
+    // should be, and used by the scan of that directory below.
+    let mut archived_ids: HashSet<String> = HashSet::new();
 
     for tc in &project.config.tracks {
         if tc.state == "archived" {
+            archived_ids.insert(tc.id.clone());
             // An archived track keeps its `file` pointing at `tracks/`, but the
             // file itself was moved to `archive/_tracks/` — see
             // `track_ops::archive_track_file`. Missing from `tracks/` is the
@@ -1352,9 +1393,21 @@ fn check_track_roster(project: &Project, result: &mut CheckResult) {
         }
     }
 
-    // The other direction: a real file nothing points at.
-    let tracks_dir = frame_dir.join("tracks");
-    let Ok(entries) = std::fs::read_dir(&tracks_dir) else {
+    // The other direction, for each of the two directories a track file can
+    // live in. Separate functions because each gives up on its own missing
+    // directory: as one body, the `tracks/` scan's early return silently took
+    // the archive scan with it.
+    check_unreferenced_track_files(frame_dir, &referenced, result);
+    check_unclaimed_archived_track_files(project, &archived_ids, result);
+}
+
+/// A real file in `tracks/` that no `[[tracks]]` entry points at.
+fn check_unreferenced_track_files(
+    frame_dir: &Path,
+    referenced: &HashSet<String>,
+    result: &mut CheckResult,
+) {
+    let Ok(entries) = std::fs::read_dir(frame_dir.join("tracks")) else {
         return;
     };
     let mut unreferenced: Vec<(String, Option<String>)> = Vec::new();
@@ -1378,6 +1431,55 @@ fn check_track_roster(project: &Project, result: &mut CheckResult) {
         result
             .errors
             .push(CheckError::TrackFileUnreferenced { path, title });
+    }
+}
+
+/// The same drift one directory over: a file in `archive/_tracks/` that no
+/// archived `[[tracks]]` entry claims.
+///
+/// A track file gets here exactly one way — `track_ops::archive_track_file`,
+/// which names it for the track's id — so the filename stem *is* the id it
+/// claims to be, and the config row carrying that id (or the absence of one) is
+/// what says whether the claim holds. See
+/// [`CheckWarning::ArchivedTrackFileUnclaimed`] for the three shapes.
+fn check_unclaimed_archived_track_files(
+    project: &Project,
+    archived_ids: &HashSet<String>,
+    result: &mut CheckResult,
+) {
+    let dir = project.frame_dir.join("archive").join("_tracks");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let mut unclaimed: Vec<(String, Option<String>, Option<String>)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "md") || !path.is_file() {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if archived_ids.contains(stem) {
+            continue;
+        }
+        let state = project
+            .config
+            .tracks
+            .iter()
+            .find(|tc| tc.id == stem)
+            .map(|tc| tc.state.clone());
+        unclaimed.push((
+            format!("archive/_tracks/{}.md", stem),
+            track_title(&path),
+            state,
+        ));
+    }
+    unclaimed.sort();
+    for (path, title, state) in unclaimed {
+        result
+            .warnings
+            .push(CheckWarning::ArchivedTrackFileUnclaimed { path, title, state });
     }
 }
 

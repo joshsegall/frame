@@ -91,26 +91,17 @@ pub(super) fn tracks_prepend(app: &mut App) {
 /// loaded the track, so the save failed with "track not found" and left an
 /// unsaved entry nothing could ever clear.
 ///
-/// Frozen is what the CLI already means by archived — `fr track rename
-/// --prefix` skips archived tracks for the same reason — so this says so
-/// instead of inventing a way to rewrite a file under `archive/`.
+/// Frozen is what the CLI means by archived — see
+/// [`crate::ops::track_ops::accepts_rename`], the predicate both surfaces now
+/// share — so this says so instead of inventing a way to rewrite a file under
+/// `archive/`.
 pub(super) fn tracks_edit_name(app: &mut App) {
     let track_id = match tracks_cursor_track_id(app) {
         Some(id) => id,
         None => return,
     };
-    if app
-        .project
-        .config
-        .tracks
-        .iter()
-        .any(|t| t.id == track_id && t.state == "archived")
-    {
-        app.status_message = Some(format!(
-            "\"{}\" is archived — unarchive it to rename it",
-            app.track_name(&track_id)
-        ));
-        app.status_is_error = true;
+    if !track_accepts_rename(app, &track_id) {
+        refuse_archived_rename(app, &track_id);
         return;
     }
     let current_name = app.track_name(&track_id).to_string();
@@ -249,12 +240,42 @@ pub(super) fn tracks_total_count(app: &App) -> usize {
     app.project.config.tracks.len()
 }
 
+/// Whether the track under the cursor can be renamed at all.
+///
+/// The Tracks view lists every configured track, archived ones included, so both
+/// rename entry points can be invoked on one.
+fn track_accepts_rename(app: &App, track_id: &str) -> bool {
+    app.project
+        .config
+        .tracks
+        .iter()
+        .find(|t| t.id == track_id)
+        .is_none_or(|t| crate::ops::track_ops::accepts_rename(&t.state))
+}
+
+/// The one refusal message, so the two entry points cannot drift apart.
+fn refuse_archived_rename(app: &mut App, track_id: &str) {
+    app.status_message = Some(format!(
+        "\"{}\" is archived — unarchive it to rename it",
+        app.track_name(track_id)
+    ));
+    app.status_is_error = true;
+}
+
 /// Enter EDIT mode to rename the track prefix under the cursor
+///
+/// Archived refuses here for the reason it refuses in [`tracks_edit_name`], and
+/// this path had further to fall: with no guard it reached
+/// [`execute_prefix_rename`], whose first write is the done-task archive.
 pub(super) fn tracks_rename_prefix(app: &mut App) {
     let track_id = match tracks_cursor_track_id(app) {
         Some(id) => id,
         None => return,
     };
+    if !track_accepts_rename(app, &track_id) {
+        refuse_archived_rename(app, &track_id);
+        return;
+    }
 
     let current_prefix = match app.project.config.ids.prefixes.get(&track_id) {
         Some(p) => p.clone(),
@@ -329,15 +350,17 @@ pub(super) fn execute_prefix_rename(app: &mut App) {
     // under one lock — a writer landing in the middle would see ids under two
     // prefixes at once — or none of it.
     app.with_project_lock(|app| {
-        // Rename IDs in archive file (shared ops function)
-        let _ = crate::ops::track_ops::rename_archive_prefix(
-            &app.project.frame_dir,
-            &track_id,
-            &old_prefix,
-            &new_prefix,
-        );
-
-        // Call the rename operation on in-memory tracks
+        // Call the rename operation on in-memory tracks.
+        //
+        // **This runs before the archive is touched**, and the order is the
+        // point. The archive rewrite used to go first, so a rename this call
+        // refuses had already rewritten `archive/<id>.md` — the ids left on a
+        // prefix no track owns, which is the collision
+        // `rename_archive_prefix`'s own doc comment warns about, while the
+        // status bar reported the rename as failed. An archived track reached
+        // that every time; `accepts_rename` now stops it earlier, but an
+        // irreversible write ahead of the call that validates it is the defect
+        // rather than the one caller that found it.
         let result = crate::ops::track_ops::rename_track_prefix(
             &mut app.project.config,
             &mut app.project.tracks,
@@ -348,6 +371,15 @@ pub(super) fn execute_prefix_rename(app: &mut App) {
 
         match result {
             Ok(rename_result) => {
+                // Rename IDs in archive file (shared ops function), in the
+                // order the CLI writes them: archive, then config.
+                let _ = crate::ops::track_ops::rename_archive_prefix(
+                    &app.project.frame_dir,
+                    &track_id,
+                    &old_prefix,
+                    &new_prefix,
+                );
+
                 // Save config
                 save_config(app);
 
@@ -482,5 +514,94 @@ mod tests {
 
         tracks_edit_name(&mut app);
         assert_eq!(app.mode, crate::tui::app::Mode::Edit);
+    }
+
+    /// The prefix rename had no guard at all, and it had further to fall than
+    /// the name rename: `execute_prefix_rename` rewrote the ids in
+    /// `archive/<id>.md` *before* calling the function that refuses an archived
+    /// track, so the archived ids ended up on a prefix no track owned while the
+    /// status bar reported the rename as failed.
+    /// `app_on_disk` builds an `IdConfig::default()`, which configures no
+    /// prefix — and `tracks_rename_prefix` returns early when a track has none,
+    /// *before* it would reach anything a guard protects. A test that skips the
+    /// prefix map therefore passes whether the guard is there or not.
+    fn with_prefix_and_done_archive(app: &mut App) -> std::path::PathBuf {
+        app.project
+            .config
+            .ids
+            .prefixes
+            .insert("a".into(), "A".into());
+        let done_archive = app.project.frame_dir.join("archive/a.md");
+        std::fs::create_dir_all(done_archive.parent().unwrap()).unwrap();
+        std::fs::write(
+            &done_archive,
+            "# Archive — a\n\n- [x] `A-001` Finished\n  - added: 2026-01-01\n",
+        )
+        .unwrap();
+        done_archive
+    }
+
+    #[test]
+    fn an_archived_tracks_prefix_rename_does_not_open_or_touch_the_archive() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        let done_archive = with_prefix_and_done_archive(&mut app);
+
+        super::super::confirm::confirm_archive_track(&mut app, "a");
+        app.tracks_cursor = 0;
+        tracks_rename_prefix(&mut app);
+
+        assert_ne!(
+            app.mode,
+            crate::tui::app::Mode::Edit,
+            "the prefix rename must not have opened"
+        );
+        assert!(app.prefix_rename.is_none(), "and no rename is pending");
+        assert!(
+            std::fs::read_to_string(&done_archive)
+                .unwrap()
+                .contains("`A-001`"),
+            "the archived id must be untouched"
+        );
+    }
+
+    /// The ordering the guard above sits in front of, pinned on its own: the
+    /// archive is written only once the rename has been accepted. The guard is
+    /// what makes the archived case unreachable, but an irreversible write
+    /// ahead of the call that validates it is the defect.
+    #[test]
+    fn a_refused_prefix_rename_leaves_the_archive_alone() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        let done_archive = with_prefix_and_done_archive(&mut app);
+        // Archiving releases the track from memory, so `rename_track_prefix`
+        // cannot find it — the refusal the old ordering wrote *through*. The id
+        // has to be this track's: `rename_archive_prefix` derives the archive
+        // path from it, so a made-up id would find no file and the test would
+        // pass on an empty rename rather than on the ordering.
+        super::super::confirm::confirm_archive_track(&mut app, "a");
+
+        // Entered directly, bypassing the guard: the ordering is the subject
+        // here, and it outlives the one caller that happened to expose it.
+        app.prefix_rename = Some(crate::tui::app::PrefixRenameState {
+            track_id: "a".into(),
+            track_name: "A".into(),
+            old_prefix: "A".into(),
+            new_prefix: "QQ".into(),
+            confirming: false,
+            task_id_count: 0,
+            dep_ref_count: 0,
+            affected_track_count: 0,
+            validation_error: String::new(),
+        });
+        execute_prefix_rename(&mut app);
+
+        assert!(app.status_is_error, "the rename was refused");
+        assert!(
+            std::fs::read_to_string(&done_archive)
+                .unwrap()
+                .contains("`A-001`"),
+            "so nothing may have rewritten the archive first"
+        );
     }
 }

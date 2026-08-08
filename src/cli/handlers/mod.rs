@@ -1618,6 +1618,25 @@ fn cmd_check(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
                             refs::PathRejection::Ignored.reason()
                         );
                     }
+                    check::CheckWarning::ArchivedTrackFileUnclaimed { path, title, state } => {
+                        let titled = title
+                            .as_ref()
+                            .map(|t| format!(" (titled \"{}\")", t))
+                            .unwrap_or_default();
+                        match state {
+                            Some(state) => println!(
+                                "  {} is archived content of a track project.toml lists as \
+                                 {}{} — move it back to tracks/, or archive the track again",
+                                path, state, titled
+                            ),
+                            None => println!(
+                                "  {} is not claimed by any archived track in project.toml{} \
+                                 — add a [[tracks]] entry for it, or move it to the id that \
+                                 should own it",
+                                path, titled
+                            ),
+                        }
+                    }
                 }
             }
         }
@@ -2869,9 +2888,26 @@ fn cmd_track_cc_focus(args: CcFocusArgs) -> Result<(), Box<dyn std::error::Error
 fn cmd_track_delete(track_id: String) -> Result<(), Box<dyn std::error::Error>> {
     let (project, _lock) = lock_and_load()?;
 
-    // Check if track exists and is empty
-    let track =
-        find_track(&project, &track_id).ok_or_else(|| format!("track not found: {}", track_id))?;
+    // `find_track` searches the tracks that *loaded*, and `load_project` skips a
+    // configured track whose `file` is missing — which is every archived track,
+    // since its file sits in `archive/_tracks/` while `file` still names
+    // `tracks/`. So an archived track reached the not-found arm and was told it
+    // does not exist. It does; deleting it is what is not on offer.
+    let track = match find_track(&project, &track_id) {
+        Some(track) => track,
+        None => {
+            let archived = track_state(&project, &track_id).is_some_and(|s| s == "archived");
+            return Err(if archived {
+                format!(
+                    "track '{}' is archived — unarchive it first: `fr track activate {}`",
+                    track_id, track_id
+                )
+            } else {
+                format!("track not found: {}", track_id)
+            }
+            .into());
+        }
+    };
 
     if !track_ops::is_track_empty_by_id(&project.frame_dir, track, &track_id) {
         let count = track_ops::total_task_count(track);
@@ -2898,6 +2934,29 @@ fn cmd_track_rename(args: TrackRenameArgs) -> Result<(), Box<dyn std::error::Err
     }
 
     let (mut config, mut doc) = config_io::read_config(&project.frame_dir)?;
+
+    // One gate for all three flags, before any of them writes anything.
+    //
+    // Resolving the row here is also what makes the refusals honest. Each flag
+    // used to discover a missing track on its own and say something different
+    // about it: `--new-id` and `--name` reported `track not found`, `--prefix`
+    // reported `no prefix configured for track '<id>'`, and for an *archived*
+    // track — which exists, but which `load_project` never loads — both of those
+    // messages were simply false.
+    let state = config
+        .tracks
+        .iter()
+        .find(|t| t.id == args.id)
+        .map(|t| t.state.clone())
+        .ok_or_else(|| format!("track not found: {}", args.id))?;
+    if !track_ops::accepts_rename(&state) {
+        return Err(format!(
+            "cannot rename archived track '{}' — unarchive it first: \
+             `fr track activate {}`",
+            args.id, args.id
+        )
+        .into());
+    }
 
     // Handle --name
     if let Some(ref new_name) = args.name {

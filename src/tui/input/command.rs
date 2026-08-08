@@ -955,6 +955,14 @@ pub(super) fn palette_check_project(app: &mut App) {
                         track_id, task_id, field, path
                     )
                 }
+                check::CheckWarning::ArchivedTrackFileUnclaimed { path, state, .. } => {
+                    match state {
+                        Some(state) => {
+                            format!("  {} is archived, but its track is {}", path, state)
+                        }
+                        None => format!("  {} is claimed by no track", path),
+                    }
+                }
             };
             lines.push(Line::from(Span::styled(msg, yellow)));
         }

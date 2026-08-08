@@ -1184,6 +1184,70 @@ const CASES: &[Case] = &[
         ],
         repair: Repair::None,
     },
+    Case {
+        name: "archived-track-file-unclaimed",
+        provenance: "`fr track rename --new-id` run on an archived track by a \
+                     frame old enough to have allowed it: the config row took \
+                     the new id and the file kept the old one. A merge or a \
+                     manual `mv` under archive/_tracks/ lands the same way",
+        covers: &["archived_track_file_unclaimed"],
+        build: |root| {
+            let dir = root.join("frame/archive/_tracks");
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("stray.md"),
+                "# Stray Work\n\n## Backlog\n\n## Done\n",
+            )
+            .unwrap();
+            Built::Ok
+        },
+        // A warning, not an error: archived content missing from views that
+        // would not have shown it anyway. The `tracks/` counterpart is an error
+        // because the work there is live.
+        expect: &[warning(
+            "archived_track_file_unclaimed",
+            &[
+                ("path", Match::Eq("archive/_tracks/stray.md")),
+                ("title", Match::Eq("Stray Work")),
+                // No `[[tracks]]` row carries this id at all.
+                ("state", Match::Eq("null")),
+            ],
+        )],
+        // Adopting it invents an id, a name and a prefix; deleting it discards
+        // content. Which id it should answer to is known only to whoever
+        // renamed it.
+        repair: Repair::None,
+    },
+    Case {
+        name: "archived-track-file-shadows-live-track",
+        provenance: "an unarchive interrupted after the config write, or an \
+                     archive whose file move was undone by a checkout — the row \
+                     says active while a copy sits in archive/_tracks/",
+        covers: &["archived_track_file_unclaimed"],
+        build: |root| {
+            let dir = root.join("frame/archive/_tracks");
+            fs::create_dir_all(&dir).unwrap();
+            // Deliberately id-free. A real interruption leaves a byte-identical
+            // copy of `tracks/main.md`, which also trips
+            // `id_reissued_after_archive` on every id in it — that pairing has
+            // its own case, and this one is here for the `state` field.
+            fs::write(dir.join("main.md"), "# Main\n\n## Backlog\n\n## Done\n").unwrap();
+            Built::Ok
+        },
+        expect: &[warning(
+            "archived_track_file_unclaimed",
+            &[
+                ("path", Match::Eq("archive/_tracks/main.md")),
+                ("title", Match::Eq("Main")),
+                // The row exists and is not archived, which is what makes the
+                // file's presence there wrong.
+                ("state", Match::Eq("active")),
+            ],
+        )],
+        // Which copy is current — the one in `tracks/` or the one under
+        // `archive/` — is exactly what a repair would have to guess.
+        repair: Repair::None,
+    },
 ];
 
 // ---------------------------------------------------------------------------

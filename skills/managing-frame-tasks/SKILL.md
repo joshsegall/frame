@@ -322,6 +322,9 @@ Parked, or Done — not just the Backlog. A cross-track move lands the task in t
 | `fr track rename <id> --prefix <PREFIX> --dry-run` | Preview prefix rename |
 | `fr track delete <id>` | Delete an empty track |
 
+An archived track is frozen: rename and delete both refuse one. To rename it,
+`fr track activate <id>` first, rename, then `fr track archive <id>` again.
+
 ### Multi-project
 
 | Command | Description |
