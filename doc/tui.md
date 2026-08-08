@@ -110,6 +110,17 @@ While a file is outstanding, an external change to it is **merged** rather than
 allowed to overwrite the unsaved version — see
 [architecture.md](architecture.md#file-watching--conflict-resolution).
 
+**Archiving or deleting a track asks `project.toml` on disk first**, and refuses
+when another `fr` has already archived that track or removed it. Neither
+operation is a save, so neither is protected by the merge: both act on
+`tracks/<file>`, and once the other process has moved it, the session's copy
+would be written back to that path and — for an archive — renamed over the copy
+now in `archive/_tracks/`. A rename does not consult what it lands on, so
+nothing would be merged and nothing would reach the recovery log. The status
+line says which of the two happened, nothing is changed, and the session takes
+the config it has just read, so the track leaves the tracks view as it would
+have on the next reload.
+
 If `frame/` is not writable when the TUI starts, the rule says `frame/ not
 writable` straight away rather than letting you find out at the first save.
 
@@ -501,8 +512,8 @@ Some actions are **palette-only** (no direct key binding):
 | Expand all | Track | Expand all tasks with children |
 | Delete task | Track, Detail, Recent | Permanently delete a task (supports bulk with multi-select) |
 | Import tasks | Track | Import tasks from a markdown file into the current track |
-| Archive track | Tracks | Archive a non-empty track |
-| Delete track | Tracks | Delete an empty track (a track with tasks must be archived instead) |
+| Archive track | Tracks | Archive a non-empty track (refused when another process has already archived or removed it) |
+| Delete track | Tracks | Delete an empty track (a track with tasks must be archived instead; refused when another process has archived or removed it) |
 | Unarchive track | Tracks | Restore an archived track to active |
 | Rename track prefix | Tracks | Rename a track's ID prefix (refused on an archived track — unarchive it first) |
 | Check project | Global | Run project integrity check and display results |

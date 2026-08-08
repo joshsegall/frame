@@ -3,7 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::model::SectionKind;
 use crate::ops::task_ops::{self};
 
-use crate::tui::app::{App, Mode, PendingMove, SaveTarget, TrackExit};
+use crate::tui::app::{App, Mode, PendingMove, SaveTarget, TrackExit, TrackOnDisk};
 use crate::tui::undo::Operation;
 
 use super::*;
@@ -94,7 +94,39 @@ pub(super) fn confirm_archive_track(app: &mut App, track_id: &str) {
     // track that is archived in the config and still in `tracks/` — or write
     // back the copy it had loaded and undo the move.
     let mut archived = false;
+    let mut stale = None;
     let done = app.with_project_lock(|app| {
+        // Has another process already taken this track out of `tracks/`?
+        //
+        // Nothing below would notice. `save_track_logged` writes
+        // `tracks/<file>` back from memory — `absorb_external_change` reads the
+        // file to see whether anyone else has written it, finds it *missing*
+        // and returns, so the save goes through unconditionally and recreates
+        // it. `archive_track_file` then renames that copy over the one the
+        // other process archived, and a rename does not consult what it lands
+        // on: no merge runs, nothing reaches the recovery log, and whatever
+        // they put there is gone. The config merge sees both sides saying
+        // `archived` and reports nothing either.
+        //
+        // Asking disk rather than `app.project.config` is the whole point, and
+        // it is safe to ask here for the same reason `track_id_taken_on_disk`
+        // is: the lock is held, so this cannot go stale before the move.
+        match app.track_on_disk(track_id) {
+            TrackOnDisk::Archived => {
+                stale = Some(format!(
+                    "\"{track_name}\" was already archived by another process — nothing was changed"
+                ));
+                return;
+            }
+            TrackOnDisk::Gone => {
+                stale = Some(format!(
+                    "\"{track_name}\" is no longer in this project — nothing was changed"
+                ));
+                return;
+            }
+            TrackOnDisk::Live | TrackOnDisk::Unreadable => {}
+        }
+
         // Whatever this track is still holding belongs in the copy being
         // archived, so it has to reach disk before the file moves. If it
         // cannot — the usual reason being that a save already failed and it is
@@ -152,6 +184,12 @@ pub(super) fn confirm_archive_track(app: &mut App, track_id: &str) {
     if !done {
         return;
     }
+    if let Some(message) = stale {
+        app.status_message = Some(message);
+        app.status_is_error = true;
+        app.catch_up_on_config();
+        return;
+    }
     if !archived {
         app.status_message = Some(format!(
             "could not archive \"{track_name}\": its latest edits are not on disk yet"
@@ -203,7 +241,33 @@ pub(super) fn confirm_delete_track(app: &mut App, track_id: &str) {
     // `confirm_archive_track`. This one matters more: the file it removes is
     // the only copy there is.
     let mut content = None;
+    let mut stale = None;
     let done = app.with_project_lock(|app| {
+        // The same question the archive asks, and it matters more here. This
+        // one removes the row outright, so a track another process archived
+        // while the session was not looking would lose its config entry with
+        // its file sitting in `archive/_tracks/` — the unclaimed archived file
+        // `fr check` reports, created by a keystroke rather than found. The
+        // `content` undo records would be `None` too, since the file is no
+        // longer where this reads it from, so the undo could not put it back.
+        match app.track_on_disk(track_id) {
+            TrackOnDisk::Archived => {
+                stale = Some(format!(
+                    "\"{}\" was archived by another process — nothing was changed",
+                    tc.name
+                ));
+                return;
+            }
+            TrackOnDisk::Gone => {
+                stale = Some(format!(
+                    "\"{}\" is no longer in this project — nothing was changed",
+                    tc.name
+                ));
+                return;
+            }
+            TrackOnDisk::Live | TrackOnDisk::Unreadable => {}
+        }
+
         // Read the file before unlinking it, so undo has something to put back.
         // This is the only copy: delete does not archive, and nothing here
         // reaches the recovery log.
@@ -221,6 +285,12 @@ pub(super) fn confirm_delete_track(app: &mut App, track_id: &str) {
         save_config(app);
     });
     if !done {
+        return;
+    }
+    if let Some(message) = stale {
+        app.status_message = Some(message);
+        app.status_is_error = true;
+        app.catch_up_on_config();
         return;
     }
 
@@ -250,6 +320,100 @@ mod lock_tests {
     use super::*;
     use crate::io::lock::FileLock;
     use crate::tui::app::{app_on_disk, app_with_config_file};
+
+    /// Put the project in the state another process leaves behind when it
+    /// archives a track this session still believes is active: the row on disk
+    /// says `archived` and the file has moved, while memory says neither.
+    fn archived_by_someone_else(app: &App) {
+        let frame_dir = &app.project.frame_dir;
+        let config = frame_dir.join("project.toml");
+        let text = std::fs::read_to_string(&config).unwrap();
+        std::fs::write(
+            &config,
+            text.replace("state = \"active\"", "state = \"archived\""),
+        )
+        .unwrap();
+        std::fs::create_dir_all(frame_dir.join("archive/_tracks")).unwrap();
+        std::fs::rename(
+            frame_dir.join("tracks/a.md"),
+            frame_dir.join("archive/_tracks/a.md"),
+        )
+        .unwrap();
+    }
+
+    /// **A stale archive must not move its own copy over the archived one.**
+    ///
+    /// Found by P8 once `TrackArchive` was allowed to land on a track the CLI
+    /// owned. Nothing on the path noticed: `save_track_logged` writes
+    /// `tracks/a.md` back from memory, because `absorb_external_change` reads
+    /// the file to see whether anyone else has written it, finds it missing and
+    /// returns; the config merge sees both sides saying `archived` and reports
+    /// nothing; and `archive_track_file` renames the stale copy over the other
+    /// one, which a rename does without consulting what it lands on. No merge,
+    /// no recovery entry, and whatever the other process archived is gone.
+    #[test]
+    fn archiving_a_track_someone_else_archived_does_not_overwrite_it() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_with_config_file(tmp.path());
+        archived_by_someone_else(&app);
+        let archived = app.project.frame_dir.join("archive/_tracks/a.md");
+        let theirs = "# A\n\n## Backlog\n\n- [ ] `A-001` One\n- [ ] `A-002` Theirs\n\n## Done\n";
+        std::fs::write(&archived, theirs).unwrap();
+
+        confirm_archive_track(&mut app, "a");
+
+        assert_eq!(
+            std::fs::read_to_string(&archived).unwrap(),
+            theirs,
+            "the archived copy is theirs, and this session never held `A-002`"
+        );
+        assert!(
+            !app.project.frame_dir.join("tracks/a.md").exists(),
+            "and the file it was holding must not be back under tracks/"
+        );
+        assert!(
+            app.status_message
+                .as_deref()
+                .is_some_and(|s| s.contains("already archived by another process")),
+            "the refusal has to say why: {:?}",
+            app.status_message
+        );
+        // Refusing is only half of it. A session still holding the track can
+        // write `tracks/a.md` back from any later save — the `1da9c05` hole —
+        // so the refusal ends by taking the config it just read.
+        assert!(
+            App::find_track_in_project(&app.project, "a").is_none(),
+            "the session has to let go of a track the project no longer has"
+        );
+    }
+
+    /// The same guard on the operation that would do more damage. Deleting a
+    /// track another process archived removes its row while the file sits in
+    /// `archive/_tracks/` — the unclaimed archived file `fr check` reports,
+    /// created by a keystroke rather than found — and the `content` the undo
+    /// records would be `None`, so there would be no way back either.
+    #[test]
+    fn deleting_a_track_someone_else_archived_does_not_drop_its_row() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_with_config_file(tmp.path());
+        archived_by_someone_else(&app);
+
+        confirm_delete_track(&mut app, "a");
+
+        let config = std::fs::read_to_string(app.project.frame_dir.join("project.toml")).unwrap();
+        assert!(config.contains("id = \"a\""), "the row survives: {config}");
+        assert!(
+            app.project.frame_dir.join("archive/_tracks/a.md").exists(),
+            "and so does the file"
+        );
+        assert!(
+            app.status_message
+                .as_deref()
+                .is_some_and(|s| s.contains("archived by another process")),
+            "{:?}",
+            app.status_message
+        );
+    }
 
     /// The same answer for the same reason, reached the other way: a
     /// `project.toml` frame cannot parse stops the operation before it starts.

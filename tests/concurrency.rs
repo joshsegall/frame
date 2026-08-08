@@ -178,13 +178,17 @@
 //! **How often the track overlap fires, measured**: across two runs of 384
 //! generated cases, 9 and 12 track-surface steps reached a row the CLI had
 //! claimed, of which 5 and 4 were informed changes; the rest were the session
-//! absorbing a row it had not seen. The **stale** branch — the one
-//! [`a_shelve_that_did_not_see_the_archive_does_not_undo_it`] is named for —
-//! was reached by the search **not once**, in either run or in the 96-case
-//! default. It needs a create, a commit, a `Watch`, a second window holding the
-//! lock, a shelve aimed at that track inside it, and an archive of the same
-//! track before the window closes. That case is pinned as a fixed schedule and
-//! nothing else reaches it, which is exactly what fixed cases are for.
+//! absorbing a row it had not seen. Deliberate aiming put 1–3 shelves and 2–3
+//! archives on a claimed track per run.
+//!
+//! **Neither stale branch was reached by the search — not once, in any run.**
+//! Both need the same rare shape: a create, a commit, a `Watch`, and then a
+//! second CLI window that acts on that same track with no `Watch` after it, all
+//! before the schedule ends. So [`a_shelve_that_did_not_see_the_archive_does_not_undo_it`]
+//! and [`an_archive_of_an_already_archived_track_does_not_overwrite_it`] are
+//! the only things that reach the two defects they are named for. That is what
+//! a fixed case is for, and it is worth knowing which claims are carried by the
+//! search and which by a schedule written out by hand.
 //!
 //! # Acknowledgement, precisely
 //!
@@ -269,6 +273,16 @@
 //!    is missing — so the track left the project while every title in it stayed
 //!    under `frame/` and C1 said nothing. The first defect found on the track
 //!    surface, and reaching it is what lifting the shelve steering was for.
+//! 9. Archiving a track another process had already archived moved the session's
+//!    own copy over theirs, destroying whatever they had put in it. Three things
+//!    in a row failed to notice: `absorb_external_change` reads the file to see
+//!    whether anyone else has written it and returns when it is *missing*, so
+//!    the pre-archive save recreated `tracks/<id>.md` from memory; the config
+//!    merge saw both sides saying `archived` and reported nothing; and
+//!    `archive_track_file` is a rename, which does not consult what it lands on.
+//!    **No merge ran at any point**, because at no point did two versions of the
+//!    file meet. Found by lifting the archive steering, one commit after the
+//!    shelve.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -527,16 +541,41 @@ impl Cli {
     /// `lock_and_load`: lock first, then read, then finish any interrupted
     /// operation — in that order, which is the whole point of that function.
     ///
-    /// The timeout is zero rather than `acquire_default`'s five seconds. In a
-    /// single-threaded harness a blocking acquire against a lock this harness
-    /// itself holds could only ever time out, and a try-lock that fails is
-    /// exactly the real "another frame process is writing" outcome — the
-    /// schedule can simply try again later.
+    /// # This waits, and a try-lock here was a source of silent vacuity
+    ///
+    /// It used to pass a zero timeout, reasoning that a blocking acquire
+    /// against a lock the harness itself holds could only ever time out, and
+    /// that a try-lock which fails is the real "another frame process is
+    /// writing" outcome anyway.
+    ///
+    /// The first half is already handled one line up: a window that is open
+    /// returns before reaching the lock, and between events nothing else in the
+    /// harness holds it, since every save and every `with_project_lock` finishes
+    /// inside the step that started it. So a wait here can only ever be waiting
+    /// out the lock **this harness released moments ago** — and on that, `flock`
+    /// can refuse an acquire microseconds after a release, which is the same
+    /// platform behaviour that made the `R` key lose to the session's own
+    /// previous save.
+    ///
+    /// The second half was the harmful part. A `CliBegin` that lost that race
+    /// opened no window, so every `CliOp` after it was a no-op and the schedule
+    /// quietly did less than it says — for a generated case a lost event, and
+    /// for a **fixed** case the difference between provoking a conflict and
+    /// asserting nothing. It showed up as
+    /// [`a_stale_edit_sends_the_cli_version_to_the_recovery_log`] and
+    /// [`a_shelve_that_did_not_see_the_archive_does_not_undo_it`] failing under
+    /// a parallel `cargo test` and passing on their own, always on their
+    /// non-vacuity assertion and never on a claim about frame. Those assertions
+    /// are what turned an intermittent puzzle into a one-line diagnosis, which
+    /// is the argument for having them.
+    ///
+    /// `cap_waits` keeps the wait to 20ms, so a genuinely contended acquire
+    /// costs that rather than `acquire_default`'s five seconds.
     fn begin(&mut self) {
         if self.window.is_some() {
             return;
         }
-        let Ok(lock) = FileLock::acquire(&self.frame_dir, Duration::from_millis(0)) else {
+        let Ok(lock) = FileLock::acquire_default(&self.frame_dir) else {
             return;
         };
         let Ok(mut project) = project_io::load_project(&self.root) else {
@@ -1159,33 +1198,29 @@ fn track_file(project: &Project, track_id: &str) -> Option<String> {
 /// recorded seed. Steering is the harness's own aiming mechanism and changing it
 /// costs no seeds at all.
 ///
-/// # Tracks: shelve is un-steered, the rest are not
+/// # Tracks: the two state-changing actions are un-steered, the rest are not
 ///
-/// [`Cli::observe_tui_tracks`] now decides a claimed track's row the same way,
+/// [`Cli::observe_tui_tracks`] decides a claimed track's row the same way,
 /// against a claim about *state* rather than about a title's presence — so a
-/// shelve of a track the CLI owns is no longer ambiguous and no longer steered
-/// away from.
+/// shelve or an archive of a track the CLI owns is no longer ambiguous and no
+/// longer steered away from.
 ///
-/// **Shelve alone, and the asymmetry is in the product rather than here.**
-/// `archived` is a terminal state for every action this suite can generate:
-/// `tracks_toggle_shelve` returns before it does anything unless the row is
-/// active or shelved, `track_accepts_rename` refuses an archived track, the
-/// palette offers "Archive track" only for active and shelved rows,
-/// `TrackDelete` is held out of the generated set, and unarchive is not in
-/// `ACTIONS` at all. And of the actions that remain, **shelve is the only one
-/// that can be stale**: `TrackArchive` runs inside `with_project_lock`, so a
-/// contended one does not half-happen and never waits in `unsaved`, while
-/// rename, reorder and cc-focus do not touch `state`. A shelve goes through
+/// **Those two and no others**, because they are the only ones that can move a
+/// claimed row at all. `track_accepts_rename` refuses an archived track and a
+/// rename touches only `name`; reorder and cc-focus touch neither `state` nor
+/// any track file; `TrackAdd` cannot land on an existing row; `TrackDelete` is
+/// held out of the generated set entirely. Unarchive is a real palette entry and
+/// deliberately still absent from `ACTIONS` — adding an arm there re-maps the
+/// random stream in this suite *and* in P9.
+///
+/// The two differ in what they can get wrong, which is why they arrived one
+/// commit apart. A shelve is config-only and can be **stale**: it goes through
 /// `save_config_logged`, which parks the change in `unsaved` when the lock is
-/// held and merges it later — the one path on which the two writers' views of a
-/// row can actually diverge.
-///
-/// `TrackArchive` keeps its steering for now. Un-steering it raises a second
-/// claim rather than the same one: `confirm_archive_track` saves the track
-/// before it moves the file, so a stale archive can write `tracks/<id>.md` back
-/// from memory and move that over the copy the CLI already archived. That is
-/// about content, not state, and deserves its own look — the same way
-/// `TrackNew` preceded `TrackArchive` when C5 was built.
+/// held and merges it later, so the two writers' views of a row can diverge. An
+/// archive cannot diverge that way — `with_project_lock` means it happens whole
+/// or not at all — but it moves a **file**, and it does that from whatever the
+/// session is holding. That is a claim about content, and C1 and C2 are what
+/// answer it.
 fn steer(app: &App, step: &Step, cli: &Cli) -> Option<Step> {
     let mut step = *step;
     match step.action.surface() {
@@ -1208,10 +1243,15 @@ fn steer(app: &App, step: &Step, cli: &Cli) -> Option<Step> {
             }
         }
         tui_steps::Surface::Inbox => {}
-        tui_steps::Surface::Tracks if step.action == ActionKind::TrackShelve => {
-            // Un-steered, and aimed. See the module docs for why a shelve is
-            // the one track action that can be decided rather than avoided, and
-            // why it is the only one whose steering is lifted here.
+        tui_steps::Surface::Tracks
+            if matches!(
+                step.action,
+                ActionKind::TrackShelve | ActionKind::TrackArchive
+            ) =>
+        {
+            // Un-steered, and aimed. See the module docs for why these two are
+            // decided rather than avoided, and why they are the only ones whose
+            // steering is lifted.
             //
             // The aiming is the task rule verbatim: one target in three, out of
             // the entropy `target` already carries, because a new arm or a new
@@ -1219,10 +1259,12 @@ fn steer(app: &App, step: &Step, cli: &Cli) -> Option<Step> {
             // target is left exactly as generated — `apply_step` resolves it
             // modulo the view itself.
             //
-            // Only rows the TUI can actually act on are aimed at. `s` on a row
-            // the session already believes is archived returns before it does
-            // anything, so aiming there would spend the case on a no-op and
-            // read as coverage of the archived branch.
+            // Only rows the TUI can actually act on are aimed at, and the two
+            // actions happen to agree on which those are: `s` on a row the
+            // session already believes is archived returns before it does
+            // anything, and the palette offers "Archive track" for active and
+            // shelved rows only. Aiming at an archived row would spend the case
+            // on a no-op and read as coverage of a branch nothing entered.
             if step.target.is_multiple_of(3) {
                 let aimable: Vec<usize> = app
                     .tracks_view_order()
@@ -1245,12 +1287,12 @@ fn steer(app: &App, step: &Step, cli: &Cli) -> Option<Step> {
             }
         }
         tui_steps::Surface::Tracks => {
-            // The rule the task-level steering used to follow, one level up.
-            // `TrackArchive` is a legitimate TUI operation that takes a track
-            // out of `tracks/` — so a run where the TUI archives a track the
-            // CLI just created makes C5 *ambiguous*, not false, exactly as two
-            // writers on one task make C1 ambiguous. Steering keeps every
-            // failure a real one.
+            // Everything else stays off the CLI's tracks. Not because it would
+            // be ambiguous — a rename, a reorder and a cc-focus change cannot
+            // move a claimed row's state or its file at all — but because
+            // aiming them there would spend generated steps on operations no
+            // claim in this suite is about. `TrackDelete` is the one that would
+            // be ambiguous, and it is held out of the generated set entirely.
             //
             // **In the coordinates the action will resolve it in.** `target`
             // becomes `tracks_cursor`, and that indexes `App::tracks_view_order`
@@ -1434,6 +1476,21 @@ struct Verdict {
     /// that means to provoke a race on a row asserts on this, so a schedule
     /// that quietly stopped racing cannot pass by doing nothing.
     config_conflicts: Vec<String>,
+    /// Everything the session said to the user, one entry per step that said
+    /// anything.
+    ///
+    /// The only handle a fixed case has on **whether its step pressed
+    /// anything**, and it earned its place: the archive case below read as
+    /// green until this existed, while its step abandoned itself — the palette
+    /// offers "Delete track" rather than "Archive track" for an empty track,
+    /// and `palette` correctly refuses to perform whichever command the query
+    /// happened to match. Nothing in the end state distinguished "refused
+    /// correctly" from "never pressed": both leave the project exactly as the
+    /// CLI left it.
+    ///
+    /// Collected per step rather than read at quiesce, where `force_retry_unsaved`
+    /// has already replaced it with `Nothing waiting to be saved`.
+    tui_statuses: Vec<String>,
 }
 
 fn judge(app: &App, frame_dir: &Path, cli: &Cli) -> Verdict {
@@ -1615,6 +1672,7 @@ fn judge(app: &App, frame_dir: &Path, cli: &Cli) -> Verdict {
             .filter(|e| e.description.contains("in project.toml"))
             .map(|e| e.description.clone())
             .collect(),
+        tui_statuses: Vec::new(),
     }
 }
 
@@ -1641,6 +1699,9 @@ fn run(schedule: &[Event]) -> Result<Verdict, String> {
     let mut app = App::new(project);
     let mut cli = Cli::new(root);
     let mut delivered = snapshot(&frame_dir);
+    // What the session said, step by step. Cleared before each step so an entry
+    // belongs to the step that produced it and not to one three events ago.
+    let mut statuses: Vec<String> = Vec::new();
 
     for event in schedule {
         match event {
@@ -1651,7 +1712,11 @@ fn run(schedule: &[Event]) -> Result<Verdict, String> {
                     // observable. At quiesce it is far too late: the merge has
                     // run and every trace of who was holding what is gone.
                     let before = tui_view(&app, &cli);
+                    app.status_message = None;
                     apply_step(&mut app, &step);
+                    if let Some(said) = app.status_message.clone() {
+                        statuses.push(said);
+                    }
                     if app.mode != Mode::Navigate {
                         return Err(format!("step {step:?} left the app in {:?}", app.mode));
                     }
@@ -1677,7 +1742,9 @@ fn run(schedule: &[Event]) -> Result<Verdict, String> {
     app.force_retry_unsaved();
     deliver(&mut app, &frame_dir, &mut delivered);
 
-    Ok(judge(&app, &frame_dir, &cli))
+    let mut verdict = judge(&app, &frame_dir, &cli);
+    verdict.tui_statuses = statuses;
+    Ok(verdict)
 }
 
 /// A window that adds a task to a track and then archives that track claimed
@@ -1869,6 +1936,81 @@ fn a_shelve_that_did_not_see_the_archive_does_not_undo_it() {
         verdict.tracks_superseded.is_empty(),
         "this shelve was stale, so it restates nothing: {:?}",
         verdict.tracks_superseded
+    );
+    assert_c5_clean(&verdict);
+}
+
+/// **An archive of a track that is already archived must not overwrite it.**
+///
+/// The content half of the same staleness, and the reason `TrackArchive` was
+/// un-steered a commit after `TrackShelve`.
+///
+/// The CLI creates a track and the TUI absorbs it. The CLI then adds a task to
+/// that track and archives it — two writes it acknowledges — and **no `Watch`
+/// follows**, so the session is still holding the empty version it saw and a
+/// config that calls the track active. Archiving from there walks straight into
+/// three things in a row: `save_track_logged` writes `tracks/<id>.md` back from
+/// memory (the file is gone, so `absorb_external_change` finds nothing to
+/// absorb and returns), the config merge sees both sides agreeing on `archived`
+/// and says nothing, and `archive_track_file` renames that stale copy over the
+/// one the CLI archived.
+///
+/// No merge runs at any point, because at no point do two versions of the file
+/// meet — the second write is a `rename(2)`, and a rename does not consult what
+/// it lands on.
+#[test]
+fn an_archive_of_an_already_archived_track_does_not_overwrite_it() {
+    let verdict = run(&[
+        Event::CliBegin,
+        Event::CliOp(CliOp::TrackNew),
+        Event::CliCommit,
+        // A task in it before the session ever sees it. **Not decoration**: the
+        // palette offers "Archive track" only for a track with something in it
+        // and "Delete track" for an empty one, so a session holding an empty
+        // copy cannot reach the archive path at all — `palette` checks the
+        // confirmation it gets back and abandons the step rather than
+        // performing whichever command the query happened to match. Without
+        // this the case runs to green having pressed nothing.
+        Event::CliBegin,
+        // Straight at the track the first window created: with `main` and
+        // `side` ahead of it, index 2 is the CLI's own.
+        Event::CliOp(CliOp::AddTask { track: 2 }),
+        Event::CliCommit,
+        // The TUI takes that copy, and a config that says active.
+        Event::Watch,
+        Event::CliBegin,
+        Event::CliOp(CliOp::AddTask { track: 2 }),
+        Event::CliOp(CliOp::TrackArchive { which: 0 }),
+        Event::CliCommit,
+        // No `Watch`. The session's copy is now two writes behind, and both of
+        // them are in the file it is about to move.
+        at_cli_track(ActionKind::TrackArchive),
+    ])
+    .expect("schedule runs");
+
+    // Non-vacuity, and it is not a formality here: this case read as green for
+    // an hour while its last step abandoned itself, because the palette offers
+    // "Delete track" for an empty track and the session's stale copy was empty.
+    // The end state was identical either way — the CLI's archive alone produces
+    // it — so only the session's own account of what it did can tell a refusal
+    // from a keystroke that never landed.
+    assert!(
+        verdict
+            .tui_statuses
+            .iter()
+            .any(|s| s.contains("already archived by another process")),
+        "the archive step did not reach the guard: {:?}",
+        verdict.tui_statuses
+    );
+    assert!(
+        verdict.lost_by_cli.is_empty(),
+        "the CLI wrote this task and archived it, and a stale archive moved its own copy over it: {:?}",
+        verdict.lost_by_cli
+    );
+    assert!(
+        verdict.duplicate_ids.is_empty(),
+        "{:?}",
+        verdict.duplicate_ids
     );
     assert_c5_clean(&verdict);
 }

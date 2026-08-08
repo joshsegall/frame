@@ -1044,6 +1044,30 @@ pub enum TrackExit {
     NoFlush,
 }
 
+/// What `project.toml` on disk says about a track, for an operation that is
+/// about to move or unlink its file. See [`App::track_on_disk`].
+///
+/// The two failure answers are separate because they are separate news for
+/// whoever is at the keyboard, and [`Self::Unreadable`] is separate from both
+/// because it is **not this question's business**: a damaged config is refused
+/// by [`App::with_project_lock`]'s pre-flight before any of this runs, and a
+/// *missing* one is deliberately allowed there and rebuilt by the save path. A
+/// guard that treated "no config to ask" as "the track is gone" would refuse
+/// every operation on a project that has not written its config yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackOnDisk {
+    /// A row exists and is not archived: still this session's to act on.
+    Live,
+    /// A row exists and says `archived`. Another process moved the file to
+    /// `archive/_tracks/`, so `tracks/<file>` is not there to write or move.
+    Archived,
+    /// The config is readable and has no row for this track at all — another
+    /// process deleted it.
+    Gone,
+    /// There is no config on disk to ask.
+    Unreadable,
+}
+
 /// A file whose in-memory content did not reach disk.
 ///
 /// Its presence in [`App::unsaved`] is what stops an external reload from
@@ -3677,6 +3701,39 @@ impl App {
                 .frame_dir
                 .join(format!("tracks/{track_id}.md"))
                 .exists()
+    }
+
+    /// What `project.toml` **on disk** says about a track.
+    ///
+    /// The companion to [`Self::track_id_taken_on_disk`] and there for the same
+    /// reason: an operation that moves or unlinks a file has to validate
+    /// against what is on disk, not against a snapshot that can be hours old.
+    /// Called with the project lock held, so the answer cannot go stale between
+    /// asking and acting.
+    pub fn track_on_disk(&self, track_id: &str) -> TrackOnDisk {
+        let Ok((config, _)) = crate::io::config_io::read_config(&self.project.frame_dir) else {
+            return TrackOnDisk::Unreadable;
+        };
+        match config.tracks.iter().find(|t| t.id == track_id) {
+            None => TrackOnDisk::Gone,
+            Some(tc) if tc.state == "archived" => TrackOnDisk::Archived,
+            Some(_) => TrackOnDisk::Live,
+        }
+    }
+
+    /// Take the config on disk, after refusing an operation because the session
+    /// was out of date about it.
+    ///
+    /// Refusing is only half the answer. A session left holding a track the
+    /// project no longer has is the state `1da9c05` fixed — it is still
+    /// reachable by a jump, by the tracks view and by an undo, and *anything*
+    /// that saves it writes `tracks/<file>`, recreating the file the other
+    /// process just moved. So the refusal ends by doing what the watcher would
+    /// have done a moment later, which drops the track through
+    /// [`Self::release_track`] like any other config change.
+    pub fn catch_up_on_config(&mut self) {
+        let path = self.project.frame_dir.join("project.toml");
+        self.reload_changed_files(&[path]);
     }
 
     /// Rebuild the active-track list from the config, keeping the cursor in
