@@ -111,11 +111,7 @@ pub fn clear_cc_focus(doc: &mut toml_edit::DocumentMut) {
 
 /// Add a new track to the config document
 pub fn add_track_to_config(doc: &mut toml_edit::DocumentMut, track: &TrackConfig) {
-    if !doc.contains_key("tracks") {
-        doc["tracks"] = toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new());
-    }
-
-    if let Some(tracks) = doc["tracks"].as_array_of_tables_mut() {
+    if let Some(tracks) = tracks_mut(doc) {
         let mut table = toml_edit::Table::new();
         table["id"] = toml_edit::value(&track.id);
         table["name"] = toml_edit::value(&track.name);
@@ -125,6 +121,49 @@ pub fn add_track_to_config(doc: &mut toml_edit::DocumentMut, track: &TrackConfig
     }
 }
 
+/// The `[[tracks]]` entries, whatever shape `tracks` arrived in.
+///
+/// TOML spells an array of tables two ways, and every helper below could only
+/// read one of them. `[[tracks]]` gave an `ArrayOfTables`; `tracks = [...]` —
+/// an ordinary array holding inline tables — gave an `Array`, so
+/// `as_array_of_tables_mut` returned `None` and **every track edit did
+/// nothing, silently**. Adding a track appeared to work, wrote no row, and the
+/// track vanished on the next read.
+///
+/// `tracks = []` is the shape that made this bite: it is what
+/// `toml::to_string_pretty` emits for a project with no tracks, and the guard
+/// this replaced asked `contains_key` — which an empty array answers yes to. So
+/// the first track added to any config that had been through a struct dump was
+/// dropped.
+///
+/// Normalising to `[[tracks]]` rewrites how those rows are spelled, which is
+/// the one formatting change in this file that is not preserved. It only
+/// happens to a document frame is about to edit anyway, and losing the inline
+/// spelling is the smaller loss by a distance: the alternative is losing the
+/// edit.
+fn tracks_mut(doc: &mut toml_edit::DocumentMut) -> Option<&mut toml_edit::ArrayOfTables> {
+    match doc.get("tracks") {
+        Some(item) if item.is_array_of_tables() => {}
+        // Absent, or the inline spelling. Carry over any rows it holds.
+        item => {
+            let mut converted = toml_edit::ArrayOfTables::new();
+            if let Some(array) = item.and_then(|i| i.as_array()) {
+                for value in array.iter() {
+                    if let Some(inline) = value.as_inline_table() {
+                        converted.push(inline.clone().into_table());
+                    }
+                }
+            } else if item.is_some_and(|i| !i.is_none()) {
+                // Some other type entirely. `read_config` would not have parsed
+                // it, so we are not here — but do not clobber it if we are.
+                return None;
+            }
+            doc["tracks"] = toml_edit::Item::ArrayOfTables(converted);
+        }
+    }
+    doc["tracks"].as_array_of_tables_mut()
+}
+
 /// Overwrite one field of a track's entry, leaving the rest of the row alone.
 ///
 /// The named-field helpers above each rewrite one key; this is the same move
@@ -132,10 +171,7 @@ pub fn add_track_to_config(doc: &mut toml_edit::DocumentMut, track: &TrackConfig
 /// ([`crate::ops::reconcile::reconcile_config`]) — it decides per field which
 /// side won, and cannot enumerate them at the call site.
 pub fn set_track_field(doc: &mut toml_edit::DocumentMut, track_id: &str, field: &str, value: &str) {
-    if let Some(tracks) = doc
-        .get_mut("tracks")
-        .and_then(|t| t.as_array_of_tables_mut())
-    {
+    if let Some(tracks) = tracks_mut(doc) {
         for table in tracks.iter_mut() {
             if table.get("id").and_then(|v| v.as_str()) == Some(track_id) {
                 set_keeping_decor(table, field, value);
@@ -152,10 +188,7 @@ pub fn set_track_field(doc: &mut toml_edit::DocumentMut, track_id: &str, field: 
 /// past the end append.
 pub fn insert_track_in_config(doc: &mut toml_edit::DocumentMut, track: &TrackConfig, index: usize) {
     add_track_to_config(doc, track);
-    if let Some(tracks) = doc
-        .get_mut("tracks")
-        .and_then(|t| t.as_array_of_tables_mut())
-    {
+    if let Some(tracks) = tracks_mut(doc) {
         let last = tracks.len().saturating_sub(1);
         if index < last {
             let mut tables: Vec<toml_edit::Table> = tracks.iter().cloned().collect();
@@ -173,10 +206,7 @@ pub fn insert_track_in_config(doc: &mut toml_edit::DocumentMut, track: &TrackCon
 /// other unmentioned ones, at the end — that is how a track another process
 /// added survives a reorder we computed without knowing about it.
 pub fn set_track_order(doc: &mut toml_edit::DocumentMut, order: &[String]) {
-    let Some(tracks) = doc
-        .get_mut("tracks")
-        .and_then(|t| t.as_array_of_tables_mut())
-    else {
+    let Some(tracks) = tracks_mut(doc) else {
         return;
     };
     let mut pool: Vec<toml_edit::Table> = tracks.iter().cloned().collect();
@@ -191,6 +221,38 @@ pub fn set_track_order(doc: &mut toml_edit::DocumentMut, order: &[String]) {
     }
     ordered.extend(pool);
     rebuild_tracks(tracks, ordered);
+}
+
+/// Reorder the keys of a flat table — `[ids.prefixes]`, `[ui.tag_colors]` — to
+/// match `order`, matching on key.
+///
+/// [`set_track_order`] for the string maps, and it exists for the same reason:
+/// a key that is *created* lands at the end of its table, wherever it belongs.
+/// Undoing a track delete restores the track's prefix to the slot it held, and
+/// the file has to come back the same way — a nearly-right inverse fails a
+/// byte-for-byte comparison as surely as a wrong one.
+///
+/// A key `order` does not mention keeps its position relative to the other
+/// unmentioned ones, at the end, so a prefix another process added survives a
+/// reorder computed without knowing about it. Ranked explicitly rather than
+/// left to sort stability, so the result does not depend on it.
+pub fn set_map_order(doc: &mut toml_edit::DocumentMut, path: &[&str], order: &[String]) {
+    let mut item = doc.as_item_mut();
+    for key in path {
+        let Some(next) = item.as_table_mut().and_then(|t| t.get_mut(key)) else {
+            return;
+        };
+        item = next;
+    }
+    let Some(table) = item.as_table_mut() else {
+        return;
+    };
+    let existing: Vec<String> = table.iter().map(|(k, _)| k.to_string()).collect();
+    let rank = |key: &str| match order.iter().position(|o| o == key) {
+        Some(i) => i,
+        None => order.len() + existing.iter().position(|e| e == key).unwrap_or(0),
+    };
+    table.sort_values_by(|k1, _, k2, _| rank(k1.get()).cmp(&rank(k2.get())));
 }
 
 /// Replace the array's entries, each carrying its own comments with it.
@@ -250,7 +312,7 @@ pub fn set_prefix(doc: &mut toml_edit::DocumentMut, track_id: &str, prefix: &str
 
 /// Update a track's state in the config document
 pub fn update_track_state(doc: &mut toml_edit::DocumentMut, track_id: &str, new_state: &str) {
-    if let Some(tracks) = doc["tracks"].as_array_of_tables_mut() {
+    if let Some(tracks) = tracks_mut(doc) {
         for table in tracks.iter_mut() {
             if table.get("id").and_then(|v| v.as_str()) == Some(track_id) {
                 set_keeping_decor(table, "state", new_state);
@@ -262,7 +324,7 @@ pub fn update_track_state(doc: &mut toml_edit::DocumentMut, track_id: &str, new_
 
 /// Remove a track entry from the config document by id
 pub fn remove_track_from_config(doc: &mut toml_edit::DocumentMut, track_id: &str) {
-    if let Some(tracks) = doc["tracks"].as_array_of_tables_mut() {
+    if let Some(tracks) = tracks_mut(doc) {
         let mut idx_to_remove = None;
         for (i, table) in tracks.iter().enumerate() {
             if table.get("id").and_then(|v| v.as_str()) == Some(track_id) {
@@ -278,7 +340,7 @@ pub fn remove_track_from_config(doc: &mut toml_edit::DocumentMut, track_id: &str
 
 /// Update the name field of a track in the config document
 pub fn update_track_name(doc: &mut toml_edit::DocumentMut, track_id: &str, new_name: &str) {
-    if let Some(tracks) = doc["tracks"].as_array_of_tables_mut() {
+    if let Some(tracks) = tracks_mut(doc) {
         for table in tracks.iter_mut() {
             if table.get("id").and_then(|v| v.as_str()) == Some(track_id) {
                 set_keeping_decor(table, "name", new_name);
@@ -290,7 +352,7 @@ pub fn update_track_name(doc: &mut toml_edit::DocumentMut, track_id: &str, new_n
 
 /// Update the id field of a track in the config document
 pub fn update_track_id(doc: &mut toml_edit::DocumentMut, old_id: &str, new_id: &str) {
-    if let Some(tracks) = doc["tracks"].as_array_of_tables_mut() {
+    if let Some(tracks) = tracks_mut(doc) {
         for table in tracks.iter_mut() {
             if table.get("id").and_then(|v| v.as_str()) == Some(old_id) {
                 set_keeping_decor(table, "id", new_id);
@@ -618,6 +680,83 @@ file = "tracks/ui.md"
         // Nothing outside the array moved.
         assert!(result.starts_with("[project]"));
         assert!(result.contains("# Tracks"));
+    }
+
+    /// TOML spells an array of tables two ways and every helper here read only
+    /// one of them, so a track added to a config using the other spelling was
+    /// dropped without a word.
+    ///
+    /// `tracks = []` is how it bit: that is what `toml::to_string_pretty`
+    /// emits for a project with no tracks, so the first track added to any
+    /// config that had been through a struct dump went nowhere. The guard that
+    /// was here asked `contains_key`, which an empty array answers yes to.
+    #[test]
+    fn test_a_track_is_added_whichever_way_tracks_is_spelled() {
+        let add = |text: &str| {
+            let mut doc: toml_edit::DocumentMut = text.parse().unwrap();
+            add_track_to_config(
+                &mut doc,
+                &TrackConfig {
+                    id: "docs".to_string(),
+                    name: "Docs".to_string(),
+                    state: "active".to_string(),
+                    file: "tracks/docs.md".to_string(),
+                },
+            );
+            track_ids(&doc.to_string())
+        };
+
+        assert_eq!(
+            add("tracks = []\n\n[project]\nname = \"p\"\n"),
+            vec!["docs"],
+            "an empty inline array is not a reason to drop the track"
+        );
+        assert_eq!(
+            add("[project]\nname = \"p\"\n"),
+            vec!["docs"],
+            "nor is no `tracks` key at all"
+        );
+        assert_eq!(
+            add(
+                "tracks = [{ id = \"api\", name = \"API\", state = \"active\", file = \"tracks/api.md\" }]\n\n[project]\nname = \"p\"\n"
+            ),
+            vec!["api", "docs"],
+            "and a populated inline array keeps the rows it already had"
+        );
+    }
+
+    /// A key `set_prefix` creates lands at the end of its table, which is wrong
+    /// wherever the map says it belongs. Undoing a track delete restores the
+    /// prefix to the slot it held, and the file has to come back the same:
+    /// `["z", "a"]` where the original said `["a", "z"]` is a failed inverse.
+    #[test]
+    fn test_set_map_order_puts_a_created_key_back_in_its_slot() {
+        let text = "[project]\nname = \"p\"\n\n[ids.prefixes]\nz = \"Z\"\n";
+        let mut doc: toml_edit::DocumentMut = text.parse().unwrap();
+        set_prefix(&mut doc, "a", "A");
+        set_map_order(&mut doc, &["ids", "prefixes"], &["a".into(), "z".into()]);
+
+        let config: ProjectConfig = toml::from_str(&doc.to_string()).unwrap();
+        assert_eq!(
+            config.ids.prefixes.keys().collect::<Vec<_>>(),
+            vec!["a", "z"]
+        );
+    }
+
+    /// A key the order does not mention is one another process added, and it
+    /// stays — at the end, rather than being dropped or moved among ours.
+    #[test]
+    fn test_set_map_order_keeps_a_key_it_was_not_told_about() {
+        let text =
+            "[project]\nname = \"p\"\n\n[ids.prefixes]\nz = \"Z\"\ntheirs = \"T\"\na = \"A\"\n";
+        let mut doc: toml_edit::DocumentMut = text.parse().unwrap();
+        set_map_order(&mut doc, &["ids", "prefixes"], &["a".into(), "z".into()]);
+
+        let config: ProjectConfig = toml::from_str(&doc.to_string()).unwrap();
+        assert_eq!(
+            config.ids.prefixes.keys().collect::<Vec<_>>(),
+            vec!["a", "z", "theirs"]
+        );
     }
 
     /// The property that decides how decor is handled: every operation here is

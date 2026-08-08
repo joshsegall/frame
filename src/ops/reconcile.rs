@@ -525,6 +525,7 @@ pub fn reconcile_config(
 
     reconcile_string_map(
         "prefix",
+        &["ids", "prefixes"],
         &base.ids.prefixes,
         &ours.ids.prefixes,
         &theirs.ids.prefixes,
@@ -536,6 +537,7 @@ pub fn reconcile_config(
 
     reconcile_string_map(
         "tag colour",
+        &["ui", "tag_colors"],
         &base.ui.tag_colors,
         &ours.ui.tag_colors,
         &theirs.ui.tag_colors,
@@ -694,6 +696,7 @@ fn we_reordered(base: &ProjectConfig, ours: &ProjectConfig) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn reconcile_string_map(
     label: &str,
+    path: &[&str],
     base: &IndexMap<String, String>,
     ours: &IndexMap<String, String>,
     theirs: &IndexMap<String, String>,
@@ -702,6 +705,12 @@ fn reconcile_string_map(
     clear: fn(&mut toml_edit::DocumentMut, &str),
     out: &mut ReconciledConfig,
 ) {
+    // Whether we created a key that does not belong at the end, which is where
+    // `set` can only put it. Asked so the reorder below runs when it is needed
+    // and not otherwise — rewriting the order unconditionally would push our
+    // stale sequence over theirs, the hazard `we_reordered` guards for tracks.
+    let mut placed_a_key = false;
+
     for key in union_keys(ours.keys(), base.keys(), theirs.keys()) {
         let (b, o, t) = (base.get(&key), ours.get(&key), theirs.get(&key));
         if o == b {
@@ -735,9 +744,25 @@ fn reconcile_string_map(
             }
         }
         match o {
-            Some(v) => set(doc, &key, v),
+            Some(v) => {
+                if b.is_none() && t.is_none() {
+                    let index = ours.get_index_of(&key);
+                    placed_a_key |= index.is_some_and(|i| i + 1 < ours.len());
+                }
+                set(doc, &key, v);
+            }
             None => clear(doc, &key),
         }
+    }
+
+    if placed_a_key {
+        let mut order: Vec<String> = ours.keys().cloned().collect();
+        for key in theirs.keys() {
+            if !ours.contains_key(key) && !base.contains_key(key) {
+                order.push(key.clone());
+            }
+        }
+        crate::io::config_io::set_map_order(doc, path, &order);
     }
 }
 

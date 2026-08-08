@@ -24,6 +24,20 @@ All notable changes to frame will be documented in this file.
 
 ### Fixed
 
+- **The TUI no longer overwrites a `project.toml` it cannot read.** A config that stopped parsing mid-session — a hand edit, an unresolved merge conflict, another process — was replaced on the next save with a serialization of the in-memory settings. That flattened the file: every comment gone (the shipped template is 89 lines, 62 of them comments), every key frame does not model gone, and the damaged text destroyed, which may have been the only copy of what somebody was midway through writing. Silently, from a keystroke the user thought was a track rename.
+
+  It now refuses, and the config joins the unsaved set instead: shown in the indicator, retried on the timer, and copied to `frame/.rescue/project.toml` at exit. **Repairing the file is all it takes** — the next retry merges the held-up change into it. This is what every other `fr` command already did; `load_project` fails on such a project, so the TUI will not start on one either.
+
+  A **missing** `project.toml` is the other case and is recreated rather than refused: there is nothing on disk to destroy, and refusing would leave the project unloadable with the only config in one session's memory. It is rebuilt from the file as it was when the session last agreed with it, so its comments come back with it.
+
+  Archiving, deleting, renaming or creating a track writes the config as one half of the change, so those now refuse **before** doing anything while the config is damaged, rather than moving a track file and leaving the config calling it active.
+
+- **A config save with no ancestor no longer replaces the file.** If the session had nothing to compute its change against, the whole file was rewritten from the in-memory struct even when what was on disk was perfectly good. The merge now takes the file itself as the ancestor: the change lands and every comment, key and formatting choice around it stays.
+
+- **A track added to a `project.toml` that writes `tracks = [...]` inline is no longer dropped.** TOML spells an array of tables two ways, and every config edit — add, remove, rename, reorder, state change — read only the `[[tracks]]` spelling and silently did nothing with the other. `tracks = []` is the shape that made it bite: the track appeared to be created and vanished on the next read.
+
+- **Undoing a track delete restores its ID prefix to the position it held.** The prefix was written back at the end of `[ids.prefixes]` rather than in its old slot, so an undo left `project.toml` reordered.
+
 - **A stray line in `inbox.md` is no longer deleted by the next write.** A line between two items that frame does not understand — a note somebody left, a heading, the residue of a hand edit — was dropped on parse and reported to the recovery log, which meant the first `fr inbox`, triage or TUI edit removed it from the file for good.
 
   It is now carried on the item above it and written back in place, along with the blank line that separates it. Blank line included, because that blank is what makes the line a stray note rather than the item's body text: `- item` followed directly by a line is body, `- item`, blank, line is not. Re-emitting the line without it would quietly turn a preserved note into part of the item above.

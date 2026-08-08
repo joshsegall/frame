@@ -1159,6 +1159,27 @@ fn retry_delay(attempts: usize) -> Duration {
 /// mid-write, and it will be finished shortly. The rest are conditions only a
 /// person can clear, so retrying them on a timer accomplishes nothing; they wait
 /// for an explicit retry instead.
+/// An error message reduced to something a one-line field can hold.
+///
+/// A recovery entry's fields are written `Key: value` a line each
+/// ([`crate::io::recovery`]), and the status bar is one line, so a multi-line
+/// message corrupts the first and overflows the second. `toml::de::Error` is
+/// the one that made this matter: it renders as a caret diagram several lines
+/// tall, whose first line — `TOML parse error at line 3, column 1` — is the
+/// whole of what is useful at either destination.
+///
+/// The ellipsis is there so nobody reads the summary as the entire error. The
+/// full text is not lost: [`App::record_save_failure`] puts it in the entry's
+/// body, which is fenced and holds as many lines as it likes.
+fn one_line(error: &str) -> String {
+    let mut lines = error.lines().map(str::trim).filter(|l| !l.is_empty());
+    let first = lines.next().unwrap_or_default().to_string();
+    match lines.next() {
+        Some(_) => format!("{first} …"),
+        None => first,
+    }
+}
+
 fn is_permanent(error: &str) -> bool {
     let e = error.to_ascii_lowercase();
     e.contains("permission denied")
@@ -3085,7 +3106,11 @@ impl App {
     /// all, and a file failing for an hour is still one entry rather than a
     /// hundred crowding out everything else in the log.
     fn record_save_failure(&mut self, target: SaveTarget, e: &dyn std::fmt::Display) {
-        let error = e.to_string();
+        // What the status bar shows, what `is_permanent` reads, and what the
+        // log's `Error:` field holds are all one line — see [`one_line`]. The
+        // full text still reaches the log, in the body.
+        let full = e.to_string();
+        let error = one_line(&full);
         let entry = self
             .unsaved
             .entry(target.clone())
@@ -3114,7 +3139,7 @@ impl App {
                 category: crate::io::recovery::RecoveryCategory::Write,
                 description: format!("{} save failed", target.label()),
                 fields: vec![("Error".to_string(), error.clone())],
-                body: String::new(),
+                body: if full == error { String::new() } else { full },
             },
         );
 
@@ -3382,23 +3407,77 @@ impl App {
     /// The delta from the ancestor to memory is exactly the operation the user
     /// just performed, which is what lets this stay on the save path instead of
     /// every config mutation having to edit a document itself.
+    ///
+    /// # When the file on disk is not usable
+    ///
+    /// **A `project.toml` that exists but cannot be read or parsed is not
+    /// written.** It used to be replaced with `toml::to_string_pretty` of the
+    /// in-memory struct, which models neither comments nor any key it does not
+    /// know — so a file somebody was midway through resolving a merge conflict
+    /// in was flattened to 27 lines of settings, silently, by a keystroke the
+    /// user thought was a track rename. The damaged text is the only copy of
+    /// whatever they were writing. Every `fr` command already refuses such a
+    /// project — `load_project` fails, so the TUI will not even start on one —
+    /// and this is the same refusal arriving mid-session.
+    ///
+    /// Refusing means returning the error, which puts `project.toml` in
+    /// [`App::unsaved`]: the retry re-runs this against disk, so repairing the
+    /// file by hand is all it takes for the pending change to land, and the
+    /// in-memory config still reaches `frame/.rescue/project.toml` at exit if it
+    /// never does. That is where a struct dump belongs — beside the damaged
+    /// file, not on top of it.
+    ///
+    /// A file that is **missing** is the other case and gets the opposite
+    /// answer: there is no content to destroy, refusing would leave the project
+    /// unloadable by every other command with the only config in this session's
+    /// memory, and the retry could never succeed on its own. So it is rebuilt —
+    /// from the ancestor text, which carries the comments the file had when we
+    /// last agreed with it, rather than from the struct.
     fn save_config_locked(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let frame_dir = self.project.frame_dir.clone();
+        let ancestor = self.baselines.get(&SaveTarget::Config).cloned();
+        let parse = |text: &str| toml::from_str::<crate::model::ProjectConfig>(text).ok();
 
-        // No ancestor, or a file we cannot read or parse: there is nothing to
-        // merge against or into, and the floor is what this did before the
-        // merge existed.
-        let prepared = self
-            .baselines
-            .get(&SaveTarget::Config)
-            .and_then(|text| toml::from_str::<crate::model::ProjectConfig>(text).ok())
-            .zip(crate::io::config_io::read_config(&frame_dir).ok());
-
-        let Some((base, (theirs, mut doc))) = prepared else {
-            crate::io::config_io::write_config_from_struct(&frame_dir, &self.project.config)?;
-            self.last_save_at = Some(Instant::now());
-            self.frame_unwritable = false;
-            return Ok(());
+        let (base, theirs, mut doc) = match crate::io::config_io::read_config(&frame_dir) {
+            // The ancestor falls back to *their* config rather than to a struct
+            // dump. With no ancestor there is no delta to compute, so the merge
+            // takes ours for every key it models and leaves the rest of their
+            // document — every comment, every key `ProjectConfig` does not know
+            // — exactly as it is. That is the same outcome the struct dump
+            // reached on the keys we own, without the destruction.
+            Ok((theirs, doc)) => {
+                let base = ancestor
+                    .as_deref()
+                    .and_then(parse)
+                    .unwrap_or_else(|| theirs.clone());
+                (base, theirs, doc)
+            }
+            Err(crate::io::project_io::ProjectError::ReadError { ref source, .. })
+                if source.kind() == io::ErrorKind::NotFound =>
+            {
+                // Gone. Rebuild it from the last text we agreed with, so the
+                // comments come back with it, and treat that text as theirs
+                // too: nobody wrote anything we could be merging against.
+                let restored = ancestor.as_deref().and_then(|text| {
+                    let config = parse(text)?;
+                    let doc = text.parse::<toml_edit::DocumentMut>().ok()?;
+                    Some((config, doc))
+                });
+                let Some((config, doc)) = restored else {
+                    // No file and no ancestor: the struct is the only copy there
+                    // is, so writing it destroys nothing and restores a project
+                    // that loads. The one call this fallback still has.
+                    crate::io::config_io::write_config_from_struct(
+                        &frame_dir,
+                        &self.project.config,
+                    )?;
+                    self.last_save_at = Some(Instant::now());
+                    self.frame_unwritable = false;
+                    return Ok(());
+                };
+                (config.clone(), config, doc)
+            }
+            Err(e) => return Err(e.into()),
         };
 
         let result =
@@ -3631,6 +3710,44 @@ impl App {
     ///
     /// Saves inside `f` write under this lock rather than taking their own; see
     /// [`Self::lock_held`].
+    ///
+    /// # Why a damaged `project.toml` refuses the whole operation here
+    ///
+    /// Every caller writes the config as one half of its change, and
+    /// [`Self::save_config_locked`] refuses to overwrite a `project.toml` it
+    /// cannot read. Letting that refusal happen *inside* the body would leave
+    /// the other half done and the pair inconsistent, differently at each site:
+    /// archiving would move the track file with the config still calling it
+    /// active — and commit an `.inflight` marker whose recovery asserts the
+    /// config was already archived — deleting would unlink the only copy of a
+    /// track the config still lists, a prefix rename would leave the archive
+    /// file renamed and the prefix map behind it.
+    ///
+    /// So the question is asked once, up front, under the lock that makes the
+    /// answer hold for the duration. Refusing here needs no rollback, no
+    /// reordering and no marker cleanup at any of the five sites, and it makes
+    /// the "or neither" contract above true rather than nearly true.
+    ///
+    /// A **missing** `project.toml` passes: the save recreates it rather than
+    /// refusing, so the pair completes.
+    /// Whether `project.toml` is in a state a save can write to, as one
+    /// sentence when it is not.
+    ///
+    /// Missing counts as readable — see [`Self::save_config_locked`], which
+    /// recreates it. Anything else that stops `read_config` is content on disk
+    /// that a write would destroy.
+    fn config_is_readable(&self) -> Result<(), String> {
+        match crate::io::config_io::read_config(&self.project.frame_dir) {
+            Ok(_) => Ok(()),
+            Err(crate::io::project_io::ProjectError::ReadError { ref source, .. })
+                if source.kind() == io::ErrorKind::NotFound =>
+            {
+                Ok(())
+            }
+            Err(e) => Err(one_line(&e.to_string())),
+        }
+    }
+
     pub fn with_project_lock(&mut self, f: impl FnOnce(&mut Self)) -> bool {
         let lock = match FileLock::acquire_default(&self.project.frame_dir) {
             Ok(lock) => lock,
@@ -3641,6 +3758,11 @@ impl App {
                 return false;
             }
         };
+        if let Err(e) = self.config_is_readable() {
+            self.status_message = Some(format!("{e} — nothing was changed"));
+            self.status_is_error = true;
+            return false;
+        }
         self.lock_held = true;
         f(self);
         self.lock_held = false;
@@ -5571,6 +5693,39 @@ pub(crate) fn app_on_disk(dir: &std::path::Path) -> App {
     App::new(project)
 }
 
+/// The `project.toml` [`app_with_config_file`] writes, matching the config
+/// [`app_on_disk`] builds in memory so the first save has no delta to apply.
+///
+/// It carries the two things `ProjectConfig` cannot model and
+/// `toml::to_string_pretty` therefore destroys: a comment, and a key frame does
+/// not know.
+#[cfg(test)]
+pub(crate) const CONFIG_WITH_COMMENTS: &str = "\
+# What this project is for — the kind of line a struct dump cannot emit.
+[project]
+name = \"saves\"
+# A key a future frame, or the user, invented.
+future_setting = \"keep me\"
+
+[[tracks]]
+id = \"a\"
+name = \"A\"
+state = \"active\"
+file = \"tracks/a.md\"
+";
+
+/// [`app_on_disk`], plus a real `project.toml` — which that one deliberately
+/// does without, so the config save paths have a file and an ancestor to work
+/// against.
+#[cfg(test)]
+pub(crate) fn app_with_config_file(dir: &std::path::Path) -> App {
+    let frame_dir = dir.join("frame");
+    std::fs::create_dir_all(&frame_dir).unwrap();
+    std::fs::write(frame_dir.join("project.toml"), CONFIG_WITH_COMMENTS).unwrap();
+    // Seeds the `Config` baseline from the file, as a real startup does.
+    app_on_disk(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6092,6 +6247,232 @@ mod tests {
             "the skip should be visible: {:?}",
             app.status_message
         );
+    }
+
+    // --- project.toml: what a save does when the file is not usable ---
+
+    /// A `project.toml` frame cannot read is content, and the only copy of it.
+    const DAMAGED: &str = "\
+[project]
+<<<<<<< HEAD
+name = \"mine\"
+=======
+name = \"theirs\"
+>>>>>>> other
+";
+
+    fn config_path(app: &App) -> std::path::PathBuf {
+        app.project.frame_dir.join("project.toml")
+    }
+
+    /// Something for the save to be carrying, so a refusal has stakes.
+    fn rename_track_in_memory(app: &mut App) {
+        app.project.config.tracks[0].name = "Renamed".into();
+    }
+
+    /// The item: a file frame cannot parse used to be replaced with
+    /// `toml::to_string_pretty` of the in-memory struct, which flattened away
+    /// every comment and every unmodelled key — and, worse, destroyed a
+    /// half-resolved merge conflict that existed nowhere else, from a keystroke
+    /// the user thought was a track rename.
+    #[test]
+    fn a_damaged_config_is_not_overwritten() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_with_config_file(tmp.path());
+        rename_track_in_memory(&mut app);
+        std::fs::write(config_path(&app), DAMAGED).unwrap();
+
+        app.save_config_logged();
+
+        assert_eq!(
+            std::fs::read_to_string(config_path(&app)).unwrap(),
+            DAMAGED,
+            "the damaged file is the only copy of it and must survive byte for byte"
+        );
+        assert!(
+            app.unsaved.contains_key(&SaveTarget::Config),
+            "and the change we could not write goes on the books: {:?}",
+            app.unsaved.keys().collect::<Vec<_>>()
+        );
+
+        // Announced on the retry, not the first failure — `worth_announcing`'s
+        // rule, and this follows it rather than carving out an exception. The
+        // entry must *not* be `permanent`, or the timer would stop retrying and
+        // repairing the file by hand would no longer be enough on its own.
+        assert!(
+            !app.unsaved[&SaveTarget::Config].permanent,
+            "a damaged file is not a permanent failure: the user can fix it"
+        );
+        app.save_config_logged();
+        assert!(
+            app.status_message
+                .as_deref()
+                .is_some_and(|m| m.contains("parse")),
+            "and the notice says why: {:?}",
+            app.status_message
+        );
+    }
+
+    /// Which is what makes the refusal a deferral rather than a loss: the retry
+    /// re-runs against disk, so repairing the file by hand is the whole of what
+    /// it takes for the held-up change to land.
+    #[test]
+    fn repairing_the_file_lets_the_held_up_change_land() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_with_config_file(tmp.path());
+        rename_track_in_memory(&mut app);
+        std::fs::write(config_path(&app), DAMAGED).unwrap();
+        app.save_config_logged();
+        assert!(app.unsaved.contains_key(&SaveTarget::Config));
+
+        // The user resolves the conflict.
+        std::fs::write(config_path(&app), CONFIG_WITH_COMMENTS).unwrap();
+        // The save path, not `force_retry_unsaved`: `R` asks for the lock with
+        // a 0ms timeout, which fails spuriously under a loaded machine. What is
+        // under test is that the retry re-reads disk and clears the entry.
+        app.save_config_logged();
+
+        let text = std::fs::read_to_string(config_path(&app)).unwrap();
+        assert!(
+            app.unsaved.is_empty(),
+            "the entry clears itself: {:?}",
+            app.unsaved.values().map(|f| &f.error).collect::<Vec<_>>()
+        );
+        assert!(
+            text.contains("Renamed"),
+            "carrying the change with it: {text}"
+        );
+        assert!(
+            text.contains("future_setting") && text.contains("struct dump cannot emit"),
+            "into the file the user repaired, not over it: {text}"
+        );
+    }
+
+    /// The other side of the same question, and the opposite answer. Nothing is
+    /// on disk to destroy; refusing would leave the project unloadable by every
+    /// other `fr` command with the only config in this session's memory, and the
+    /// retry could never clear itself. So it is rebuilt — from the ancestor
+    /// text, which is why the comments come back with it.
+    #[test]
+    fn a_missing_config_is_rebuilt_with_its_comments() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_with_config_file(tmp.path());
+        rename_track_in_memory(&mut app);
+        std::fs::remove_file(config_path(&app)).unwrap();
+
+        app.save_config_logged();
+
+        let text = std::fs::read_to_string(config_path(&app)).expect("the file comes back");
+        assert!(
+            app.unsaved.is_empty(),
+            "with nothing left outstanding: {:?}",
+            app.unsaved.keys().collect::<Vec<_>>()
+        );
+        assert!(text.contains("Renamed"), "carrying the change: {text}");
+        assert!(
+            text.contains("struct dump cannot emit") && text.contains("future_setting"),
+            "and the comments and unmodelled keys it had when we last agreed with it: {text}"
+        );
+    }
+
+    /// The third way the struct dump used to be reached, and the worst trade of
+    /// the three: the file on disk is *fine*, and it was flattened only because
+    /// this session had no ancestor to compute a delta from. With no ancestor
+    /// the merge takes theirs as the base, so our keys win and their document —
+    /// comments, unmodelled keys, formatting — is what gets written into.
+    #[test]
+    fn a_save_with_no_ancestor_edits_the_file_rather_than_replacing_it() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_with_config_file(tmp.path());
+        app.baselines.remove(&SaveTarget::Config);
+        rename_track_in_memory(&mut app);
+
+        app.save_config_logged();
+
+        let text = std::fs::read_to_string(config_path(&app)).unwrap();
+        assert!(text.contains("Renamed"), "our change lands: {text}");
+        assert!(
+            text.contains("struct dump cannot emit") && text.contains("future_setting"),
+            "without taking the file's own content with it: {text}"
+        );
+    }
+
+    /// The pre-flight. Every `with_project_lock` caller writes the config as one
+    /// half of its change, so a refusal *inside* the body would leave the other
+    /// half done — the track file moved with the config still calling it active,
+    /// or the only copy of a track unlinked from a config that still lists it.
+    /// Asked once, under the lock, it needs no rollback at any of the sites.
+    #[test]
+    fn a_damaged_config_refuses_a_two_file_operation_before_it_starts() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_with_config_file(tmp.path());
+        std::fs::write(config_path(&app), DAMAGED).unwrap();
+
+        let mut ran = false;
+        let done = app.with_project_lock(|_| ran = true);
+
+        assert!(!done, "the operation reports that it did not happen");
+        assert!(!ran, "and the body never ran");
+        assert!(
+            crate::io::inflight::read(&app.project.frame_dir).is_none(),
+            "so nothing recorded an operation in flight either"
+        );
+        assert!(
+            app.status_message
+                .as_deref()
+                .is_some_and(|m| m.contains("nothing was changed")),
+            "and it says so: {:?}",
+            app.status_message
+        );
+    }
+
+    /// A missing one passes: the save recreates it, so the pair completes rather
+    /// than half-completing. The distinction the pre-flight draws is the same one
+    /// `save_config_locked` draws, and it has to be, or one of them is wrong.
+    #[test]
+    fn a_missing_config_does_not_refuse_a_two_file_operation() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_with_config_file(tmp.path());
+        std::fs::remove_file(config_path(&app)).unwrap();
+
+        let mut ran = false;
+        assert!(app.with_project_lock(|_| ran = true));
+        assert!(ran, "the body runs and the save puts the file back");
+    }
+
+    /// A recovery entry's fields are one line each and the status bar is one
+    /// line, and `toml::de::Error` renders as a caret diagram several lines
+    /// tall. Unflattened it broke the log's own format — the entry's remaining
+    /// lines read as further fields — in the one situation the log exists for.
+    #[test]
+    fn a_multi_line_error_is_flattened_for_the_field_and_kept_in_the_body() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_with_config_file(tmp.path());
+        std::fs::write(config_path(&app), DAMAGED).unwrap();
+
+        app.save_config_logged();
+        app.save_config_logged(); // the retry, which is what announces
+
+        let entry = &app.unsaved[&SaveTarget::Config];
+        assert!(!entry.error.contains('\n'), "one line: {:?}", entry.error);
+        assert!(entry.error.ends_with('…'), "and says so: {:?}", entry.error);
+
+        let log = crate::io::recovery::recovery_log_path(&app.project.frame_dir);
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(
+            text.lines().filter(|l| l.starts_with("Error: ")).count(),
+            1,
+            "the field stays a field: {text}"
+        );
+        assert!(
+            text.contains("```text"),
+            "with the full error in the body, where lines are allowed: {text}"
+        );
+    }
+
+    #[test]
+    fn one_line_leaves_a_single_line_error_alone() {
+        assert_eq!(one_line("permission denied"), "permission denied");
     }
 
     /// The point of item 5: a failed save is recorded, not discarded. 61 sites

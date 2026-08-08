@@ -249,7 +249,56 @@ pub(super) fn confirm_delete_track(app: &mut App, track_id: &str) {
 mod lock_tests {
     use super::*;
     use crate::io::lock::FileLock;
-    use crate::tui::app::app_on_disk;
+    use crate::tui::app::{app_on_disk, app_with_config_file};
+
+    /// The same answer for the same reason, reached the other way: a
+    /// `project.toml` frame cannot parse stops the operation before it starts.
+    ///
+    /// This is the site the pre-flight exists for. Left to fail inside the body,
+    /// the config write is refused *after* the marker is begun and the file is
+    /// moved — so `tracks/a.md` ends up in `archive/_tracks/` with the config
+    /// still calling the track active, and the committed marker's recovery would
+    /// have asserted "config already had it archived", which was never true.
+    #[test]
+    fn archiving_a_track_does_nothing_while_project_toml_is_damaged() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_with_config_file(tmp.path());
+        let track_path = app.project.frame_dir.join("tracks/a.md");
+        let archived = app.project.frame_dir.join("archive/_tracks/a.md");
+        let config = app.project.frame_dir.join("project.toml");
+        let damaged = "[project]\n<<<<<<< HEAD\nname = \"mine\"\n";
+        std::fs::write(&config, damaged).unwrap();
+
+        confirm_archive_track(&mut app, "a");
+
+        assert!(track_path.exists(), "the track file must not have moved");
+        assert!(!archived.exists(), "and must not have been copied either");
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            damaged,
+            "the damaged config is untouched"
+        );
+        assert_eq!(
+            app.project.config.tracks[0].state, "active",
+            "nor should the config have been changed in memory"
+        );
+        assert!(
+            crate::io::inflight::read(&app.project.frame_dir).is_none(),
+            "and no marker claims an archive is half-done"
+        );
+
+        // And once the file is readable again, the same keystroke works.
+        std::fs::write(&config, crate::tui::app::CONFIG_WITH_COMMENTS).unwrap();
+        confirm_archive_track(&mut app, "a");
+        assert!(!track_path.exists() && archived.exists(), "the file moved");
+        assert_eq!(app.project.config.tracks[0].state, "archived");
+        assert!(
+            std::fs::read_to_string(&config)
+                .unwrap()
+                .contains("struct dump cannot emit"),
+            "with the file's comments intact"
+        );
+    }
 
     /// Archiving a track is a `project.toml` write and a file move, and the TUI
     /// did both with no lock at all — so another `fr` that had already read the
