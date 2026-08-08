@@ -56,8 +56,6 @@ pub struct Track {
     pub description: Option<String>,
     /// All nodes in the file, in order
     pub nodes: Vec<TrackNode>,
-    /// The original source lines of the entire file
-    pub source_lines: Vec<String>,
     /// The line ending the file used, re-applied when it is written back.
     /// See [`crate::parse::LineEnding`].
     pub eol: crate::parse::LineEnding,

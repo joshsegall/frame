@@ -153,7 +153,6 @@ fn parse_single_task(
         depth,
         leading_lines: Vec::new(),
         trailing_lines: Vec::new(),
-        source_lines: None,
         source_text: None,
         dirty: false,
     };
@@ -287,8 +286,6 @@ fn parse_single_task(
         task.subtasks = subtasks;
         idx = next_idx;
     }
-
-    task.source_lines = Some(start_idx..idx);
 
     (task, idx)
 }

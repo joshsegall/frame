@@ -21,7 +21,6 @@ The dependency flow is strictly: `model` ← `parse` ← `io` ← `ops` ← `cli
 The parser/serializer system is designed so that **parse-then-serialize is byte-identical when nothing changes**. This is the most important architectural invariant.
 
 Each parsed `Task` stores:
-- `source_lines: Range<usize>` — original line span in the file
 - `source_text: Vec<String>` — the task's **own** lines only (task line + metadata), **excluding** subtask lines
 - `dirty: bool` — whether the task was modified after parsing
 

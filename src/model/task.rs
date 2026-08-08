@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::ops::Range;
 
 use crate::model::task_id::TaskId;
 
@@ -155,9 +154,6 @@ pub struct Task {
     pub trailing_lines: Vec<String>,
 
     // --- Source tracking ---
-    /// Line range in the original source file (0-indexed)
-    #[serde(skip)]
-    pub source_lines: Option<Range<usize>>,
     /// The original source lines for this task (for verbatim emission)
     #[serde(skip)]
     pub source_text: Option<Vec<String>>,
@@ -179,7 +175,6 @@ impl Task {
             depth: 0,
             leading_lines: Vec::new(),
             trailing_lines: Vec::new(),
-            source_lines: None,
             source_text: None,
             dirty: true,
         }
@@ -191,8 +186,8 @@ impl Task {
     }
 }
 
-/// Compares the *semantic* fields only. `source_text`, `source_lines`, `dirty`,
-/// `leading_lines` and `trailing_lines` are carried source, not task identity:
+/// Compares the *semantic* fields only. `source_text`, `dirty`, `leading_lines`
+/// and `trailing_lines` are carried source, not task identity:
 /// two tasks that say the same thing are equal even if one of them is dragging a
 /// stranded line behind it. Conservation of the stranded lines is checked at the
 /// text level by the parse properties, not here.
@@ -259,7 +254,6 @@ mod tests {
         assert!(task.metadata.is_empty());
         assert!(task.subtasks.is_empty());
         assert_eq!(task.depth, 0);
-        assert!(task.source_lines.is_none());
         assert!(task.source_text.is_none());
         assert!(task.dirty);
     }
@@ -290,7 +284,6 @@ mod tests {
         let mut a = Task::new(TaskState::Todo, Some("T-001".into()), "Same".into());
         let mut b = Task::new(TaskState::Todo, Some("T-001".into()), "Same".into());
         a.source_text = Some(vec!["- [ ] `T-001` Same".into()]);
-        a.source_lines = Some(0..1);
         a.dirty = false;
         b.dirty = true;
         assert_eq!(a, b);

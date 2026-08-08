@@ -90,8 +90,8 @@ use proptest::prelude::*;
 // ---------------------------------------------------------------------------
 
 // `Task` already has a hand-written `PartialEq` (src/model/task.rs) that ignores
-// `source_text`, `source_lines` and `dirty` — precisely the semantic comparison
-// these properties want, so tasks are compared directly.
+// `source_text` and `dirty` — precisely the semantic comparison these properties
+// want, so tasks are compared directly.
 //
 // `Track` and `TrackNode` have no `PartialEq` at all, and `InboxItem` derives one
 // that *does* compare `source_text` and `dirty`. Both need a projection: after a
@@ -708,7 +708,6 @@ fn arb_track_model() -> impl Strategy<Value = Track> {
                 section(SectionKind::Parked, parked, false),
                 section(SectionKind::Done, done, true),
             ],
-            source_lines: Vec::new(),
             eol,
         })
 }
