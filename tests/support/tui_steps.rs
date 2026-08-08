@@ -55,12 +55,33 @@ use frame::tui::input::handle_key;
 // ---------------------------------------------------------------------------
 
 /// A small settled project: two active tracks, every section populated, one
-/// subtask tree, and an inbox.
+/// subtask tree, two `dep:` references, and an inbox.
 ///
 /// Deliberately smaller than `parity.rs`'s fixture. That one exists so no read
 /// command's filter is vacuous; this one exists so a generated sequence reaches
 /// every section of a track within a handful of steps, and a smaller tree makes
 /// a byte diff readable.
+///
+/// # The two deps, and what they are for
+///
+/// Both point at `M-003.1`, a **subtask** — the one thing a renumbering renames
+/// without renaming what the user asked it to. One comes from its own sibling
+/// inside the same subtree, one from the other track. `M-003` is the fixture's
+/// only subtree, so it is what a `CrossTrackMove`, `Indent` or `Outdent` step
+/// re-keys, and these are the references that have to follow it.
+///
+/// They cost the consumers nothing. P9 compares the tree byte for byte, so a
+/// dep the forward path rewrote and the undo did not put back is already a
+/// failure under the property as written — no new assertion, no new claim. P8
+/// gets the same rewrite going through the merge machinery under contention;
+/// its claims are about titles, and a dep is not a title, so that coverage is
+/// incidental rather than asserted.
+///
+/// **How often it actually fires, measured rather than assumed**: across 112
+/// generated cases, 7 ended with the fixture's dep rewritten — about 6%, the
+/// same order as C5's archive shape in P8. Real coverage accumulating across
+/// runs, not coverage on every run, and worth knowing which of the two it is.
+/// `conservation.rs` reaches the same operations far more often, on purpose.
 pub fn create_fixture(root: &Path) {
     let frame = root.join("frame");
     fs::create_dir_all(frame.join("tracks")).unwrap();
@@ -114,6 +135,7 @@ side = \"S\"
     - added: 2025-05-03
   - [>] `M-003.2` Sub two
     - added: 2025-05-03
+    - dep: M-003.1
 
 ## Parked
 
@@ -149,6 +171,7 @@ side = \"S\"
 
 - [ ] `S-001` Side task one
   - added: 2025-05-01
+  - dep: M-003.1
 
 ## Parked
 
