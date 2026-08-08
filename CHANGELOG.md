@@ -32,6 +32,10 @@ All notable changes to frame will be documented in this file.
 
   Archiving, deleting, renaming or creating a track writes the config as one half of the change, so those now refuse **before** doing anything while the config is damaged, rather than moving a track file and leaving the config calling it active.
 
+- **`R` no longer reports a save failure it never rechecked.** The explicit retry asked for the project lock without waiting at all, the same as the timer — but the timer runs on the event tick and cannot afford to block, whereas `R` is you asking and waiting. Losing that race made the retry do nothing and then announce `Still cannot save: <the file's last error>`, quoting the *previous* incident as though it had just been reproduced, for a condition that may since have cleared. It now waits briefly, and when the lock genuinely cannot be had it says the project is busy instead.
+
+  The race was not hypothetical or confined to other processes: a lock this session released microseconds earlier can still refuse the immediately following attempt, so `R` could lose to the session's own previous save.
+
 - **Another process's `[ui.colors]` or `[ui.tag_colors]` change now reaches the screen.** The theme was rebuilt only where a config was taken from disk *whole*, so the two paths that **merge** a config — a reload while the session holds an unsaved config change, and a save that takes the other writer's keys along with ours — left the old palette on screen. Those are the two that happen when a second writer is active, which is the only time this can arise at all. The rebuild moved to the one place every config adoption goes through.
 
 - **A config save with no ancestor no longer replaces the file.** If the session had nothing to compute its change against, the whole file was rewritten from the in-memory struct even when what was on disk was perfectly good. The merge now takes the file itself as the ancestor: the change lands and every comment, key and formatting choice around it stays.

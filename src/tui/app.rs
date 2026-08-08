@@ -997,6 +997,26 @@ impl Rescue {
     }
 }
 
+/// What a retry pass did — which is not the same as what it saved.
+///
+/// `retry_unsaved_saves` used to return one number, the abandoned count, and a
+/// pass that never got the project lock was indistinguishable from one that ran
+/// and left everything outstanding. So `R` reported `Still cannot save: <the
+/// file's error>` — wrong twice over. Nothing had been attempted, and the error
+/// quoted was left over from the previous incident, describing a condition that
+/// may since have cleared.
+///
+/// The same distinction [`App::dump_unsaved`] draws between a rescue that wrote
+/// nothing and one that had nothing to write: a caller that cannot tell them
+/// apart will report the wrong one.
+#[derive(Debug, Default)]
+pub struct RetryOutcome {
+    /// Entries taken off the books because no retry could ever satisfy them.
+    pub abandoned: usize,
+    /// The project lock could not be had, so nothing was attempted at all.
+    pub blocked: bool,
+}
+
 impl SaveTarget {
     /// How this file is named to the user, in messages and the recovery log.
     pub fn label(&self) -> String {
@@ -1101,6 +1121,10 @@ pub const RETRY_BACKOFF_START: Duration = Duration::from_secs(1);
 /// pointlessly without making the first slow.
 pub const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(60);
 
+/// How long an explicit retry waits for the project lock. See
+/// [`retry_lock_wait`] for why this is not zero and the timer's is.
+pub const FORCED_RETRY_WAIT: Duration = Duration::from_millis(250);
+
 /// What the unsaved indicator should say, or `None` when there is nothing to say.
 ///
 /// Computed from [`App::unsaved`] rather than stored, so it cannot drift from the
@@ -1144,6 +1168,29 @@ impl UnsavedIndicator {
             (Some(name), _) => format!("unsaved: {name}"),
             (None, n) => format!("unsaved: {n} files"),
         }
+    }
+}
+
+/// How long a retry pass will wait for the project lock.
+///
+/// **Zero for the timer, and not for `R`.** The timer runs on the 250ms event
+/// tick, so any wait there is a wait the render loop takes — during exactly the
+/// contention it is recovering from — and `lock_file` makes one attempt before
+/// testing the elapsed time, so zero is a clean try-lock.
+///
+/// That is wrong for an explicit retry, and observably so. `lock_file` polls
+/// every 10ms, and a lock this process released microseconds earlier can still
+/// refuse a `LOCK_NB` attempt made immediately afterwards — traced to
+/// `EWOULDBLOCK`, with the very next poll succeeding. So a zero-wait `R` could
+/// lose a race against the session's own previous save and report a failure
+/// that never happened. The user pressing `R` is standing at the keyboard
+/// having asked for this; a quarter second is imperceptible to them and around
+/// twenty-five polls to the lock.
+fn retry_lock_wait(force: bool) -> Duration {
+    if force {
+        FORCED_RETRY_WAIT
+    } else {
+        Duration::ZERO
     }
 }
 
@@ -3284,24 +3331,22 @@ impl App {
     /// to reconstruct. One success writes the failed edit along with everything
     /// that accumulated after it.
     ///
-    /// **The lock timeout here is zero, deliberately.** `acquire_default` blocks
-    /// for five seconds, and a retry on the 250ms event tick using that would
-    /// freeze the TUI for five seconds at a time during exactly the contention
-    /// it is recovering from. `lock_file` makes one attempt before testing the
-    /// elapsed time, so a zero timeout is a clean try-lock. The original saves
-    /// keep the patient timeout; only this is impatient.
+    /// **How long this waits for the lock depends on who asked** — see
+    /// [`retry_lock_wait`]. The timer cannot afford to wait at all; `R` cannot
+    /// afford not to. `acquire_default`'s five seconds is wrong for both, and
+    /// the original saves keep it.
     ///
     /// One acquisition covers every outstanding file, so a retry cannot be
     /// interleaved by another writer partway through.
     ///
-    /// Returns how many entries were *abandoned* rather than written — a file
-    /// whose content the session no longer holds, which no retry can produce.
-    /// [`Self::release_track`] is what keeps that from happening; this is the
-    /// backstop, and it is the difference between "saved everything" and "gave
-    /// up on something" in what the caller reports.
-    pub fn retry_unsaved_saves(&mut self, force: bool) -> usize {
+    /// The [`RetryOutcome`] reports what happened rather than only how much:
+    /// entries *abandoned* rather than written — a file whose content the
+    /// session no longer holds, which no retry can produce, and which
+    /// [`Self::release_track`] is what normally prevents — and separately
+    /// whether the pass ran at all.
+    pub fn retry_unsaved_saves(&mut self, force: bool) -> RetryOutcome {
         if self.unsaved.is_empty() {
-            return 0;
+            return RetryOutcome::default();
         }
 
         let now = Instant::now();
@@ -3312,10 +3357,10 @@ impl App {
             .map(|(t, _)| t.clone())
             .collect();
         if due.is_empty() {
-            return 0;
+            return RetryOutcome::default();
         }
 
-        let Ok(lock) = FileLock::acquire(&self.project.frame_dir, Duration::from_millis(0)) else {
+        let Ok(lock) = FileLock::acquire(&self.project.frame_dir, retry_lock_wait(force)) else {
             // Still contended. Push each due file out by its own backoff rather
             // than hammering the lock every tick.
             for target in &due {
@@ -3324,7 +3369,10 @@ impl App {
                     f.next_retry_at = now + retry_delay(f.attempts);
                 }
             }
-            return 0;
+            return RetryOutcome {
+                abandoned: 0,
+                blocked: true,
+            };
         };
 
         let mut abandoned = 0;
@@ -3348,7 +3396,10 @@ impl App {
         }
 
         drop(lock);
-        abandoned
+        RetryOutcome {
+            abandoned,
+            blocked: false,
+        }
     }
 
     /// Retry now, resetting every backoff — the `R` key and the palette action.
@@ -3367,8 +3418,20 @@ impl App {
             f.attempts = 0;
             f.next_retry_at = Instant::now();
         }
-        let abandoned = self.retry_unsaved_saves(true);
-        let saved = outstanding.saturating_sub(abandoned);
+        let outcome = self.retry_unsaved_saves(true);
+
+        // Nothing was attempted, so nothing about the files has been learned.
+        // Restating a file's error here reports the *previous* incident as
+        // though this retry had just reproduced it — and the condition it
+        // describes may well have cleared.
+        if outcome.blocked {
+            self.status_message =
+                Some("another frame process is writing — nothing was retried".into());
+            self.status_is_error = true;
+            return;
+        }
+
+        let saved = outstanding.saturating_sub(outcome.abandoned);
 
         if self.unsaved.is_empty() {
             // Nothing written and nothing left: every entry named content this
@@ -6339,10 +6402,9 @@ name = \"theirs\"
 
         // The user resolves the conflict.
         std::fs::write(config_path(&app), CONFIG_WITH_COMMENTS).unwrap();
-        // The save path, not `force_retry_unsaved`: `R` asks for the lock with
-        // a 0ms timeout, which fails spuriously under a loaded machine. What is
-        // under test is that the retry re-reads disk and clears the entry.
-        app.save_config_logged();
+        // Through `R`, which is how a user gets here — and which used to lose a
+        // race against this test's own previous save. See `retry_lock_wait`.
+        app.force_retry_unsaved();
 
         let text = std::fs::read_to_string(config_path(&app)).unwrap();
         assert!(
@@ -7728,23 +7790,79 @@ a = "A"
         );
     }
 
-    /// A retry must never block the event loop. `acquire_default` waits five
-    /// seconds; using it here would freeze the TUI for five seconds a tick
-    /// during exactly the contention being recovered from.
+    /// The **timer's** retry must never block the event loop. `acquire_default`
+    /// waits five seconds; using it here would freeze the TUI for five seconds
+    /// a tick during exactly the contention being recovered from.
+    ///
+    /// Asked with `force = false`, which is the caller this is about. It used
+    /// to pass `true` — and once an explicit retry started waiting on purpose,
+    /// a test named for the event loop would have been measuring the keystroke
+    /// path and passing on a bound neither of them can exceed.
     #[test]
     fn a_retry_does_not_wait_on_a_held_lock() {
         let tmp = tempfile::TempDir::new().unwrap();
         let mut app = app_on_disk(tmp.path());
         let _held = FileLock::acquire_default(&app.project.frame_dir).unwrap();
         app.record_save_failure(SaveTarget::Track("a".into()), &"lock timeout".to_string());
+        // The timer only visits what is due, and a fresh failure is not.
+        for f in app.unsaved.values_mut() {
+            f.next_retry_at = Instant::now();
+        }
 
         let started = Instant::now();
-        app.retry_unsaved_saves(true);
+        let outcome = app.retry_unsaved_saves(false);
         assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "retry blocked for {:?}; it must use a try-lock",
+            outcome.blocked,
+            "the lock was held, so nothing was attempted"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "the timer's retry blocked for {:?}; it must use a try-lock",
             started.elapsed()
         );
+    }
+
+    /// The other half, stated as a value rather than a stopwatch: a keystroke
+    /// waits and a tick does not.
+    ///
+    /// `lock_file` polls every 10ms, and a `LOCK_NB` attempt made immediately
+    /// after this process released the same lock can still be refused with
+    /// `EWOULDBLOCK` — so a zero-wait `R` loses a race against the session's own
+    /// previous save and reports a failure that never happened.
+    #[test]
+    fn an_explicit_retry_waits_for_the_lock_and_a_tick_does_not() {
+        assert_eq!(retry_lock_wait(false), Duration::ZERO);
+        assert!(
+            retry_lock_wait(true) >= Duration::from_millis(50),
+            "an explicit retry must outlast at least a few 10ms polls"
+        );
+    }
+
+    /// A retry that never ran must not report the file's previous error as
+    /// though it had just reproduced it. Nothing was attempted, so nothing is
+    /// known — and the condition that error describes may since have cleared.
+    #[test]
+    fn a_blocked_explicit_retry_says_so_rather_than_restating_the_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        app.record_save_failure(
+            SaveTarget::Track("a".into()),
+            &"disk quota exceeded".to_string(),
+        );
+        let _held = FileLock::acquire_default(&app.project.frame_dir).unwrap();
+
+        app.force_retry_unsaved();
+
+        let message = app.status_message.clone().unwrap_or_default();
+        assert!(
+            message.contains("nothing was retried"),
+            "it should say the retry did not happen: {message:?}"
+        );
+        assert!(
+            !message.contains("disk quota"),
+            "and not quote an error this retry never observed: {message:?}"
+        );
+        assert!(app.status_is_error);
     }
 
     /// Backoff has to grow even when the lock itself is what we cannot get,

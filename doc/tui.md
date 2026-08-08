@@ -100,7 +100,11 @@ failure that the next retry clears is never shown at all.
 
 An error retrying cannot clear (a read-only filesystem, permission denied, no
 space) is not retried on the timer; `R`, or the palette's "Retry saving N files",
-tries it anyway and resets the backoff.
+tries it anyway and resets the backoff. `R` waits briefly for the project lock
+where the timer does not — the timer runs on the event tick and cannot afford to
+block, while you have asked and are waiting. If another `fr` holds the lock
+throughout, `R` says so rather than repeating what the files failed with last
+time, which it has not rechecked.
 
 While a file is outstanding, an external change to it is **merged** rather than
 allowed to overwrite the unsaved version — see
