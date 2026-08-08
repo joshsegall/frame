@@ -6,3 +6,5 @@
 # everyone who runs the test benefits from these saved cases.
 cc 03d1dc421c7c9749304e63eab9cad9010bfb8bde8cdf96b6235ab744e5471dda # shrinks to ops = [Delete { task: 4 }, AddTask { track: 0, title: "a plain new task" }, Delete { task: 8 }, Clean]
 cc bc56dd50da2f5b3b303b2114308f83909345a7c88ee897fa650e3bacff69b8ff # shrinks to ops = [SetNote { task: 2, text: "a note\nwith two lines" }, SetNote { task: 2, text: "a note" }]
+cc b3b5740db563d27894640e095c00dec1d73cc87593199b64c8cc534ea4afc0ca # shrinks to ops = [MoveToTrack { task: 8, track: 1 }]
+cc d6ce0115faff78dfa3ee6d53583ae2652c7fe1f83a139dd48ad81a4e0226522f # shrinks to ops = [RenamePrefix { track: 0 }]

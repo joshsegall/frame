@@ -101,7 +101,7 @@ Each answers a different question; a new test usually belongs in one of them rat
 |---|---|
 | `round_trip.rs` | does a fixture survive parse → serialize? |
 | `parse_properties.rs` | P1–P6 on each **parse/serialize pair** (track, archive, inbox): no panic, content preserved, conserved against ground truth, converges, every line accounted for, line ending kept |
-| `conservation.rs` | P7 on **operation sequences**: does a random run of real ops lose a title, an ID, or a line frame does not own — and does every file it writes land settled? |
+| `conservation.rs` | P7 on **operation sequences**: does a random run of real ops lose a title, an ID, a line frame does not own, or a `dep:` that resolved — and does every file it writes land settled? |
 | `damaged_corpus.rs` | does `fr check` report **exactly** the right findings for a known-damaged project, and repair exactly what it claims? |
 | `undo_properties.rs` | P9 on **TUI action sequences**: does undoing everything restore the project byte for byte, and redoing everything restore the result? |
 | `concurrency.rs` | P8 on **interleavings**: does a TUI session and a CLI writer over one project lose work either one acknowledged, move a track out of the state the CLI left it in, hand an ID out twice, or leave a file unsettled? |

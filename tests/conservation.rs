@@ -35,16 +35,61 @@
 //!    were both that, found only after the diff showed up in someone's
 //!    `git status`. P4 asserts convergence for the parse/serialize pair; this
 //!    asserts operations land *on* the fixpoint rather than near it.
+//! 5. **No dependency is broken.** Every `dep:` that resolved before an
+//!    operation names the same task after it. See below — this one is stated
+//!    in titles, not ids, and the reason is the whole point of it.
+//!
+//! # Claim 5, and why it is not about dangling deps
+//!
+//! The obvious statement is "no operation increases the set of dangling deps",
+//! and it is too weak to be worth writing. A dep rewritten to point at a
+//! *different existing task* satisfies it, and two real defects have exactly
+//! that shape: the chained rewrite `apply_id_map_to_deps` exists to prevent,
+//! and the positional undo in
+//! `cross_track_move_undo_restores_out_of_order_subtask_ids`, where re-keying
+//! `.1 .3 .2` back by position handed two tasks each other's id. Every dep
+//! still resolved in both.
+//!
+//! So the claim is about **identity**, and what identifies a task across a
+//! renumbering is its title — which claims 1 and 2 already conserve.
+//! `resolved_dep_pairs` reads every dep that resolves and names both ends by
+//! title; the claim is that the set only shrinks where a title was licensed to
+//! go. It is checked per step rather than against a run-wide baseline, so a dep
+//! an earlier step created is covered too.
+//!
+//! **Titles have to be unique for that to mean anything**, which is what
+//! `unique` is for — `arb_title` draws from four fixed strings and a repeat
+//! over eight steps is close to certain. That also closes a smaller hole in
+//! claims 1 and 2: `titles` is a set, so two tasks sharing a title collapse to
+//! one entry and losing one of them is invisible.
+//!
+//! **What it does not catch**, stated so nobody assumes otherwise: a *chained*
+//! rewrite needs a freshly minted id to equal an id the same map retired, which
+//! a real mint does not produce. That guard is defended by the unit test
+//! `an_id_map_matches_the_pre_image_and_never_chains`, not by this property.
 //!
 //! # Licensed removal
 //!
-//! Three operations are allowed to take something away, and the harness tracks
+//! Four operations are allowed to take something away, and the harness tracks
 //! what: `Delete` removes one task's subtree, `EditTitle` retires the old title,
-//! and `RenamePrefix` retires every ID under the old prefix — live and archived
-//! alike, which is the point of having it here. Everything else must conserve.
-//! Cross-track moves are deliberately **not** in the op set — they re-mint the
-//! task's ID by design, so ID conservation would need a rename map, and
-//! `tests/merge_simulation.rs` already owns namespace behaviour.
+//! `RenamePrefix` retires every ID under the old prefix — live and archived
+//! alike, which is the point of having it here — and `MoveToTrack` retires
+//! every ID in the subtree it re-mints. Everything else must conserve.
+//!
+//! `MoveToTrack` was deliberately **out** of the op set until `267f671`, on the
+//! stated grounds that it re-mints IDs by design so ID conservation would need
+//! a rename map. `move_task_to_track` now returns that map, so the reason is
+//! spent and the operation that carried the defect is in. Only its *ids* are
+//! licensed: a move renames, it does not remove, so every title and every dep
+//! must survive it, and that is the half of the operation this property checks.
+//!
+//! Note what that licensing rests on. The harness licenses from the map the
+//! product hands back, so a map that under-reports fails claim 2 rather than
+//! claim 5 — which is a fair report of the same defect, and worth knowing when
+//! reading a failure. Claim 5 earns its keep on the defects that leave the map
+//! correct: a rewrite that misses subtasks, one that skips a whole operation's
+//! worth of deps (`RenamePrefix`), and one that edits memory without marking
+//! the task dirty so nothing reaches the file.
 //!
 //! # Three file shapes, three pairs
 //!
@@ -107,8 +152,12 @@ const TRACK_A: &str = "\
   - [ ] `A-002.1` A subtask
     - added: 2026-01-01
       content indented past its metadata
+  - [ ] `A-002.2` A second subtask
+    - added: 2026-01-01
+    - dep: A-001
 - [ ] `A-003` Third task
   - added: 2026-01-01
+  - dep: A-002.1
 
 ## Parked
 
@@ -129,6 +178,7 @@ const TRACK_B: &str = "\
 
 - [ ] `B-001` Beta work
   - added: 2026-01-01
+  - dep: A-002.1
 
 ## Done
 ";
@@ -196,23 +246,105 @@ const UNOWNED_LINES: &[&str] = &[
 // (`concurrency.rs`). Three file shapes settle under three different pairs, and
 // getting that wrong under-counts silently; the module docs there say why.
 
+/// Every dependency that **resolves**, named by the titles at both ends.
+///
+/// Titles rather than ids, and that is the whole design of claim 5. An id is
+/// what a renumbering changes, so a claim stated in ids can only ever ask
+/// whether the dep still points at *something* — and a dep rewritten to point
+/// at the wrong existing task passes that. Two real defects have exactly that
+/// shape: the chained rewrite `apply_id_map_to_deps` exists to prevent, where a
+/// map holding `A -> B` and `B -> C` applied in two passes carries a dep on `A`
+/// all the way to `C`; and the positional inverse in
+/// `cross_track_move_undo_restores_out_of_order_subtask_ids`, where undoing a
+/// re-key of `.1 .3 .2` handed two tasks each other's id and every reference to
+/// either one silently pointed at the other. Both leave every dep resolvable.
+///
+/// A dep that resolves to nothing is simply absent, so it cannot fail: the
+/// claim is about references that worked, not about the count of ones that did
+/// not.
+///
+/// **First id wins** when two tasks somehow share one, because that is what
+/// `ops::deps` does when it resolves a dep for real — it takes the first match
+/// in track order. A reader that disagreed would report a defect the product
+/// does not have.
+fn resolved_dep_pairs(frame_dir: &Path) -> BTreeSet<(String, String)> {
+    let tasks = tree_checks::all_tasks(frame_dir);
+    let mut by_id: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for task in &tasks {
+        if let Some(id) = &task.id {
+            by_id
+                .entry(id.to_string())
+                .or_insert_with(|| task.title.clone());
+        }
+    }
+    let mut out = BTreeSet::new();
+    for task in &tasks {
+        if task.title.trim().is_empty() {
+            continue;
+        }
+        for dep in frame::ops::deps::task_deps(task) {
+            if let Some(target) = by_id.get(&dep)
+                && !target.trim().is_empty()
+            {
+                out.insert((task.title.clone(), target.clone()));
+            }
+        }
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Operations
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 enum Op {
-    AddTask { track: usize, title: String },
-    SetState { task: usize, state: TaskState },
-    SetNote { task: usize, text: String },
-    EditTitle { task: usize, title: String },
-    AddTag { task: usize, tag: String },
-    Delete { task: usize },
-    Capture { text: String },
-    Triage { item: usize, track: usize },
+    AddTask {
+        track: usize,
+        title: String,
+    },
+    SetState {
+        task: usize,
+        state: TaskState,
+    },
+    SetNote {
+        task: usize,
+        text: String,
+    },
+    EditTitle {
+        task: usize,
+        title: String,
+    },
+    AddTag {
+        task: usize,
+        tag: String,
+    },
+    Delete {
+        task: usize,
+    },
+    Capture {
+        text: String,
+    },
+    Triage {
+        item: usize,
+        track: usize,
+    },
     Clean,
     CheckFix,
-    RenamePrefix { track: usize },
+    RenamePrefix {
+        track: usize,
+    },
+    /// `fr dep <a> add <b>` — so deps accumulate during a run rather than only
+    /// existing where the fixture put them.
+    AddDep {
+        from: usize,
+        to: usize,
+    },
+    /// `fr mv <id> --track <other>` — the operation P7 used to leave out.
+    MoveToTrack {
+        task: usize,
+        track: usize,
+    },
 }
 
 fn arb_title() -> impl Strategy<Value = String> {
@@ -228,6 +360,22 @@ fn arb_title() -> impl Strategy<Value = String> {
         .as_slice(),
     )
     .prop_map(str::to_string)
+}
+
+/// The generated titles, made unique by the step that produced them.
+///
+/// [`arb_title`] draws from four fixed strings so a shrunk case stays readable,
+/// and over eight operations a repeat is close to certain. Two tasks sharing a
+/// title break more than the dep claim, which identifies a task by its title:
+/// `titles` is a `BTreeSet`, so a repeat collapses to one entry, and losing one
+/// of the two tasks is invisible because the other still supplies it. Suffixing
+/// keeps the shrink output readable — `a plain new task 3` still says which of
+/// the four it was — and makes both claims see one task per title.
+///
+/// A bare trailing number, because `#` re-parses as a tag and a backtick as an
+/// ID delimiter. Same constraints [`arb_title`] documents.
+fn unique(title: &str, step: usize) -> String {
+    format!("{title} {step}")
 }
 
 fn arb_op() -> impl Strategy<Value = Op> {
@@ -250,6 +398,8 @@ fn arb_op() -> impl Strategy<Value = Op> {
         3 => Just(Op::Clean),
         2 => Just(Op::CheckFix),
         1 => (0usize..2).prop_map(|track| Op::RenamePrefix { track }),
+        3 => (0usize..12, 0usize..12).prop_map(|(from, to)| Op::AddDep { from, to }),
+        3 => (0usize..12, 0usize..2).prop_map(|(task, track)| Op::MoveToTrack { task, track }),
     ]
 }
 
@@ -292,7 +442,7 @@ fn save_all(project: &Project) {
 
 /// Apply one operation to a project loaded from disk, and write the result
 /// back. Returns what the operation was licensed to remove.
-fn apply_op(project: &mut Project, op: &Op) -> Licensed {
+fn apply_op(project: &mut Project, op: &Op, step: usize) -> Licensed {
     let mut licensed = Licensed::default();
     let frame_dir = project.frame_dir.clone();
 
@@ -309,7 +459,7 @@ fn apply_op(project: &mut Project, op: &Op) -> Licensed {
             };
             let mint = Mint::new(&frame_dir, &track_id, &prefix, None);
             let (_, track) = &mut project.tracks[idx];
-            let _ = task_ops::add_task(track, title.clone(), InsertPosition::Bottom, mint);
+            let _ = task_ops::add_task(track, unique(title, step), InsertPosition::Bottom, mint);
         }
         Op::SetState { task, state } => {
             let all = addressable(project);
@@ -347,7 +497,7 @@ fn apply_op(project: &mut Project, op: &Op) -> Licensed {
                 if let Some(t) = task_ops::find_task_in_track(track, &id) {
                     licensed.titles.insert(t.title.clone());
                 }
-                let _ = task_ops::edit_title(track, &id, title.clone());
+                let _ = task_ops::edit_title(track, &id, unique(title, step));
             }
         }
         Op::AddTag { task, tag } => {
@@ -383,7 +533,7 @@ fn apply_op(project: &mut Project, op: &Op) -> Licensed {
         }
         Op::Capture { text } => {
             if let Some(inbox) = project.inbox.as_mut() {
-                inbox_ops::add_inbox_item(inbox, text.clone(), Vec::new(), None);
+                inbox_ops::add_inbox_item(inbox, unique(text, step), Vec::new(), None);
             }
         }
         Op::Triage { item, track } => {
@@ -470,6 +620,102 @@ fn apply_op(project: &mut Project, op: &Op) -> Licensed {
                 let _ = frame::io::config_io::write_config_from_struct(&frame_dir, &project.config);
             }
         }
+        // Deps that only ever come from the fixture are deps on two tasks, in
+        // two places. Generating them puts a reference on whatever the run has
+        // built by now — including tasks earlier steps created, moved or
+        // re-keyed — which is where a rewrite is most likely to go wrong.
+        Op::AddDep { from, to } => {
+            let all = addressable(project);
+            if all.len() < 2 {
+                return licensed;
+            }
+            let (track_id, id) = all[from % all.len()].clone();
+            let (_, dep_id) = all[to % all.len()].clone();
+            // A task cannot depend on itself, and a dep on one's own descendant
+            // is a cycle `fr check` reports — neither is what this is for.
+            if dep_id == id
+                || dep_id.starts_with(&format!("{id}."))
+                || id.starts_with(&format!("{dep_id}."))
+            {
+                return licensed;
+            }
+            let snapshot = project.tracks.clone();
+            if let Some((_, track)) = project.tracks.iter_mut().find(|(t, _)| *t == track_id) {
+                let _ = task_ops::add_dep(track, &id, &dep_id, &snapshot);
+            }
+        }
+        // The operation this suite used to leave out. The stated reason was that
+        // it re-mints the task's ID by design, so ID conservation would need a
+        // rename map — `move_task_to_track` now returns exactly that map, so the
+        // reason is spent and the op that carried the defect is in.
+        Op::MoveToTrack { task, track } => {
+            let all = addressable(project);
+            if all.is_empty() || project.tracks.len() < 2 {
+                return licensed;
+            }
+            let (source_id, id) = all[task % all.len()].clone();
+            let target_idx = track % project.tracks.len();
+            let target_id = project.tracks[target_idx].0.clone();
+            if target_id == source_id {
+                return licensed;
+            }
+            // Only a top-level task moves cross-track; a subtask is not
+            // addressable this way and the op is a no-op for one.
+            let Some(prefix) = project.config.ids.prefixes.get(&target_id).cloned() else {
+                return licensed;
+            };
+            let source_idx = project
+                .tracks
+                .iter()
+                .position(|(t, _)| *t == source_id)
+                .expect("source track was just addressed");
+            if !task_ops::is_top_level_in_section(
+                &project.tracks[source_idx].1,
+                &id,
+                frame::model::SectionKind::Backlog,
+            ) && !task_ops::is_top_level_in_section(
+                &project.tracks[source_idx].1,
+                &id,
+                frame::model::SectionKind::Parked,
+            ) && !task_ops::is_top_level_in_section(
+                &project.tracks[source_idx].1,
+                &id,
+                frame::model::SectionKind::Done,
+            ) {
+                return licensed;
+            }
+
+            let mint = Mint::new(&frame_dir, &target_id, &prefix, None);
+            let (left, right) = if source_idx < target_idx {
+                let (l, r) = project.tracks.split_at_mut(target_idx);
+                (&mut l[source_idx].1, &mut r[0].1)
+            } else {
+                let (l, r) = project.tracks.split_at_mut(source_idx);
+                (&mut r[0].1, &mut l[target_idx].1)
+            };
+            let (source_track, target_track) = if source_idx < target_idx {
+                (left, right)
+            } else {
+                (right, left)
+            };
+            let moved = task_ops::move_task_to_track(
+                source_track,
+                target_track,
+                &id,
+                InsertPosition::Bottom,
+                mint,
+            );
+            if let Ok(moved) = moved {
+                // Every id the move retired is licensed; the new ones are picked
+                // up when the step re-baselines. The *titles* are not licensed —
+                // a move renames, it does not remove, and that is the half of
+                // this operation P7 still gets to check.
+                for (old, _) in &moved.id_mappings {
+                    licensed.ids.insert(old.clone());
+                }
+                task_ops::apply_id_map_to_deps(&mut project.tracks, &moved.id_mappings);
+            }
+        }
     }
 
     save_all(project);
@@ -514,8 +760,13 @@ proptest! {
         let mut expected_unowned: Vec<&str> = UNOWNED_LINES.to_vec();
 
         for (step, op) in ops.iter().enumerate() {
+            // Read before the operation runs: claim 5 is about what this one
+            // step did to references that worked going into it, so a run-wide
+            // baseline would miss every dep a earlier step created.
+            let before_pairs = resolved_dep_pairs(&frame_dir);
+
             let mut project = project_io::load_project(root).expect("project loads");
-            let licensed = apply_op(&mut project, op);
+            let licensed = apply_op(&mut project, op, step);
 
             for t in &licensed.titles {
                 titles.remove(t);
@@ -562,6 +813,21 @@ proptest! {
                     );
                 }
             }
+
+            // Claim 5. A pair may go only when one of its ends was licensed
+            // to go: `Delete` takes a task and every reference to it, and
+            // `EditTitle` retires the name this claim identifies a task by.
+            let broken: Vec<_> = before_pairs
+                .difference(&resolved_dep_pairs(&frame_dir))
+                .filter(|(from, to)| {
+                    !licensed.titles.contains(from) && !licensed.titles.contains(to)
+                })
+                .cloned()
+                .collect();
+            prop_assert!(
+                broken.is_empty(),
+                "step {step} ({op:?}) broke these dependencies (dependent, dependency): {broken:?}"
+            );
 
             assert_settled(&frame_dir, step, op)?;
 
@@ -681,6 +947,7 @@ fn deep_content_survives_a_section_move() {
             task: 0,
             text: "a note\nwith two lines".into(),
         },
+        0,
     );
 
     let mut project = project_io::load_project(root).unwrap();
@@ -690,6 +957,7 @@ fn deep_content_survives_a_section_move() {
             task: 1,
             state: TaskState::Done,
         },
+        0,
     );
 
     let mut project = project_io::load_project(root).unwrap();
@@ -699,6 +967,7 @@ fn deep_content_survives_a_section_move() {
             task: 0,
             text: "a note".into(),
         },
+        0,
     );
 
     assert!(
@@ -736,6 +1005,7 @@ fn a_note_absorbs_unowned_content_under_its_own_task() {
             task: 2, // A-002.1, the task carrying the deep content
             text: "a note\nwith two lines".into(),
         },
+        0,
     );
 
     // Still in the file, now as part of that task's note.
