@@ -41,3 +41,4 @@ cc bf3b6c942f8edb2a14a34b3d678db6e0cbfb4655f286992a6508545e5aee9c30 # found: [Cl
 # --- regenerate the originals that shrank to the shapes named.
 cc 13d03aa4429023fa92bf7911389ca8ed9b95d95761c778d288ea63a0a830d237 # shrinks to schedule = [CliBegin, Tui(Step { action: TrackShelve, target: 0, text: 0 }), CliOp(TrackNew)]
 cc 995e67e1614b9fc0a1575d24c29760499c652857f4f5cd91acdafff4ce5f5dab # shrinks to schedule = [CliBegin, CliOp(TrackNew), CliCommit, Tui(Step { action: TrackArchive, target: 0, text: 0 }), Tui(Step { action: TrackShelve, target: 1, text: 0 })]
+cc 7167723c563bfa32878ea09310513dfa570d662a423a93b5b5b11192492f3ab7 # shrinks to [CliBegin, CliOp(TrackNew), CliCommit, Tui(TrackArchive), Tui(TrackMoveDown), CliBegin, CliOp(AddTask), CliOp(TrackArchive)] — a flaw in this suite's own oracle again, not in frame; pinned as a fixed case by `a_track_archived_after_an_add_still_carries_the_task`, so this line is not what holds it

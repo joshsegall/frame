@@ -572,6 +572,31 @@ impl Cli {
                 else {
                     return;
                 };
+                // An add earlier in this window was a *separate command* in
+                // reality, and it wrote its track before this one ran. Model
+                // that by flushing now, while the file is still at
+                // `tracks/<id>.md` for the commit's move to pick up.
+                //
+                // Dropping it from `dirty_tracks` instead — which is what this
+                // did — meant the content never reached any file while the
+                // commit went on to promote its claim, and C1 then reported
+                // frame for losing a task nothing had written. The suite's own
+                // oracle, not the product, and the third time in this shape
+                // after `12250db`: **the CLI actor claims what it wrote, so
+                // every op that takes content out of the window has to say
+                // where it went.**
+                //
+                // A failed flush leaves the track in `dirty_tracks` while the
+                // retain below takes it out of `project.tracks`, so the commit
+                // finds no content for it, fails, and claims nothing. That is
+                // the conservative answer and it needs no extra bookkeeping.
+                if window.dirty_tracks.contains(&track_id)
+                    && let Some((_, track)) =
+                        window.project.tracks.iter().find(|(id, _)| id == &track_id)
+                    && project_io::save_track(&frame_dir, &file, track).is_ok()
+                {
+                    window.dirty_tracks.remove(&track_id);
+                }
                 if frame::ops::track_ops::archive_track(
                     &mut window.doc,
                     &mut window.project.config,
@@ -583,7 +608,6 @@ impl Cli {
                 }
                 // Out of `tracks/` is out of the project, on this side too.
                 window.project.tracks.retain(|(id, _)| id != &track_id);
-                window.dirty_tracks.remove(&track_id);
                 window.dirty_config = true;
                 window
                     .pending_tracks
@@ -919,6 +943,99 @@ fn judge(app: &App, frame_dir: &Path, cli: &Cli) -> Verdict {
     }
 }
 
+/// Run one schedule to quiesce and judge what it left behind.
+///
+/// Shared by the property and by the fixed cases below. A fixed case pins a
+/// schedule that a generator change cannot orphan, which a `.proptest-regressions`
+/// seed cannot do — a seed decodes through `arb_event` *as it is now*, so adding
+/// an arm silently re-aims every line recorded before it.
+///
+/// `Err` is a step that left the app somewhere other than Navigate: in this
+/// harness that sends the *next* step's keys to a handler nobody intended, so
+/// the run is meaningless rather than failing.
+fn run(schedule: &[Event]) -> Result<Verdict, String> {
+    // Five seconds per contended acquisition would make this suite take hours.
+    // Only the waiting is shortened; contention itself is real.
+    frame::io::lock::cap_waits(Duration::from_millis(20));
+
+    let tmp = fixture();
+    let root = tmp.path();
+    let frame_dir = root.join("frame");
+
+    let project = project_io::load_project(root).expect("project loads");
+    let mut app = App::new(project);
+    let mut cli = Cli::new(root);
+    let mut delivered = snapshot(&frame_dir);
+
+    for event in schedule {
+        match event {
+            Event::Tui(step) => {
+                if let Some(step) = steer(&app, step, &cli) {
+                    apply_step(&mut app, &step);
+                    if app.mode != Mode::Navigate {
+                        return Err(format!("step {step:?} left the app in {:?}", app.mode));
+                    }
+                }
+            }
+            Event::CliBegin => cli.begin(),
+            Event::CliOp(op) => cli.op(*op),
+            Event::CliCommit => cli.commit(),
+            Event::Watch => deliver(&mut app, &frame_dir, &mut delivered),
+            Event::Retry => app.force_retry_unsaved(),
+        }
+    }
+
+    // Quiesce, in the order the real thing would settle: the other process
+    // finishes and lets go, the watcher catches up, the grace period drains,
+    // the TUI is given every chance to write what it is holding, and one last
+    // delivery lands.
+    cli.commit();
+    deliver(&mut app, &frame_dir, &mut delivered);
+    flush_and_save(&mut app);
+    app.force_retry_unsaved();
+    deliver(&mut app, &frame_dir, &mut delivered);
+
+    Ok(judge(&app, &frame_dir, &cli))
+}
+
+/// A window that adds a task to a track and then archives that track claimed
+/// the task without ever writing it.
+///
+/// `fr add` and `fr track archive` are two commands, each with its own lock and
+/// its own write, so the task reaches `tracks/<id>.md` before the archive moves
+/// that file — and the title is under `frame/` either way. Modelling both as
+/// one window let `CliOp::TrackArchive` drop the track from `dirty_tracks` with
+/// the add still unwritten, and the commit promoted the claim regardless. C1
+/// then reported frame for losing a task nothing had written.
+///
+/// Pinned as a fixed case rather than left to the seed that found it, because
+/// the seed decodes through `arb_event` and the next arm added there would
+/// re-aim it at something else entirely.
+#[test]
+fn a_track_archived_after_an_add_still_carries_the_task() {
+    let schedule = [
+        Event::CliBegin,
+        Event::CliOp(CliOp::TrackNew),
+        Event::CliCommit,
+        Event::CliBegin,
+        // Straight at the track the previous window created, which is the only
+        // one `TrackArchive` will consider.
+        Event::CliOp(CliOp::AddTask { track: 2 }),
+        Event::CliOp(CliOp::TrackArchive { which: 0 }),
+    ];
+    let verdict = run(&schedule).expect("schedule runs");
+    assert!(
+        verdict.lost_by_cli.is_empty(),
+        "a task added before its track was archived went with the file: {:?}",
+        verdict.lost_by_cli
+    );
+    assert!(
+        verdict.unconfigured_tracks.is_empty(),
+        "{:?}",
+        verdict.unconfigured_tracks
+    );
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(96))]
 
@@ -932,50 +1049,10 @@ proptest! {
         // is three or four track-level actions deep. The cost is a few seconds.
         schedule in prop::collection::vec(arb_event(), 1..28)
     ) {
-        // Five seconds per contended acquisition would make this suite take
-        // hours. Only the waiting is shortened; contention itself is real.
-        frame::io::lock::cap_waits(Duration::from_millis(20));
-
-        let tmp = fixture();
-        let root = tmp.path();
-        let frame_dir = root.join("frame");
-
-        let project = project_io::load_project(root).expect("project loads");
-        let mut app = App::new(project);
-        let mut cli = Cli::new(root);
-        let mut delivered = snapshot(&frame_dir);
-
-        for event in &schedule {
-            match event {
-                Event::Tui(step) => {
-                    if let Some(step) = steer(&app, step, &cli) {
-                        apply_step(&mut app, &step);
-                        prop_assert!(
-                            app.mode == Mode::Navigate,
-                            "step {step:?} left the app in {:?}",
-                            app.mode
-                        );
-                    }
-                }
-                Event::CliBegin => cli.begin(),
-                Event::CliOp(op) => cli.op(*op),
-                Event::CliCommit => cli.commit(),
-                Event::Watch => deliver(&mut app, &frame_dir, &mut delivered),
-                Event::Retry => app.force_retry_unsaved(),
-            }
-        }
-
-        // Quiesce, in the order the real thing would settle: the other process
-        // finishes and lets go, the watcher catches up, the grace period
-        // drains, the TUI is given every chance to write what it is holding,
-        // and one last delivery lands.
-        cli.commit();
-        deliver(&mut app, &frame_dir, &mut delivered);
-        flush_and_save(&mut app);
-        app.force_retry_unsaved();
-        deliver(&mut app, &frame_dir, &mut delivered);
-
-        let verdict = judge(&app, &frame_dir, &cli);
+        let verdict = match run(&schedule) {
+            Ok(verdict) => verdict,
+            Err(detail) => return Err(TestCaseError::fail(format!("{detail}\nschedule: {schedule:?}"))),
+        };
 
         prop_assert!(
             verdict.still_unsaved.is_empty(),
