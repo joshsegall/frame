@@ -434,6 +434,14 @@ pub enum ConfigConflictReason {
     /// track, because re-adding the row would resurrect a reference to a file
     /// they have already moved or deleted.
     EditedAndRemoved,
+    /// Both sides changed a track's `state`, and **theirs is the change that
+    /// moved the file**. Theirs stands and ours is set aside, for the same
+    /// reason as [`Self::EditedAndRemoved`] and [`Self::RemovedAndEdited`]: a
+    /// row is a pointer, and the pointer has to agree with where the content
+    /// went.
+    ///
+    /// See [`state_moves_the_file`] for which changes those are.
+    EditedAndMoved,
 }
 
 impl ConfigConflictReason {
@@ -443,6 +451,7 @@ impl ConfigConflictReason {
             ConfigConflictReason::BothAdded => "both-added",
             ConfigConflictReason::RemovedAndEdited => "removed-and-edited",
             ConfigConflictReason::EditedAndRemoved => "edited-and-removed",
+            ConfigConflictReason::EditedAndMoved => "edited-and-moved",
         }
     }
 
@@ -454,6 +463,9 @@ impl ConfigConflictReason {
             ConfigConflictReason::EditedAndRemoved => {
                 "we changed it, they removed it; kept the version on disk"
             }
+            ConfigConflictReason::EditedAndMoved => {
+                "both sides changed it, and theirs moved the file; kept the version on disk"
+            }
         }
     }
 
@@ -463,8 +475,29 @@ impl ConfigConflictReason {
     /// their work as well as ours is news, but a keystroke that did not do what
     /// it looked like it did is not something to report in the same breath.
     pub fn ours_lost(self) -> bool {
-        matches!(self, ConfigConflictReason::EditedAndRemoved)
+        matches!(
+            self,
+            ConfigConflictReason::EditedAndRemoved | ConfigConflictReason::EditedAndMoved
+        )
     }
+}
+
+/// Whether a change of a track's `state` moves its file on disk.
+///
+/// `archived` is the one state that says the content is in `archive/_tracks/`
+/// rather than under `tracks/` — an archived row still *names* `tracks/<id>.md`
+/// while the file is elsewhere, so the state is what decides where to look. So
+/// crossing into or out of `archived` is a rename on disk, performed under the
+/// lock as part of the same operation that set the state; `active` ↔ `shelved`
+/// moves nothing.
+///
+/// That asymmetry is why `state` cannot be merged as though it were a label.
+/// Keeping our `shelved` over their `archived` leaves the row naming a file
+/// that is not there, and `load_project` skips a configured track whose file is
+/// absent — so the track and every task in it leave the project, which is
+/// strictly worse than either writer intended. P8 reaches this in eight events.
+fn state_moves_the_file(from: &str, to: &str) -> bool {
+    (from == "archived") != (to == "archived")
 }
 
 /// The result of merging the config.
@@ -635,6 +668,26 @@ fn reconcile_track_entries(
                         continue;
                     }
                     if tv != bv {
+                        // Both changed it. Keeping ours is the rule for a name
+                        // or a file, and the wrong rule for a `state` change
+                        // that moved the content: their rename has already
+                        // happened, under the lock, and our value would leave
+                        // the row pointing at nothing. Ours yields only when
+                        // theirs moved the file and ours did not — if we are
+                        // the ones who moved it, or if both did, ours still
+                        // stands and there is nothing better to do.
+                        if field == "state"
+                            && state_moves_the_file(bv, tv)
+                            && !state_moves_the_file(bv, ov)
+                        {
+                            out.conflicts.push(ConfigConflict {
+                                key: format!("track {id:?} {field}"),
+                                reason: ConfigConflictReason::EditedAndMoved,
+                                set_aside: format!("{field} = {ov:?}"),
+                            });
+                            out.took_theirs += 1;
+                            continue;
+                        }
                         out.conflicts.push(ConfigConflict {
                             key: format!("track {id:?} {field}"),
                             reason: ConfigConflictReason::BothEdited,
@@ -1758,6 +1811,85 @@ ui = "UI"
             assert_eq!(merged.tracks[1].state, "shelved");
             assert!(r.conflicts.is_empty());
             assert_eq!(r.took_theirs, 1);
+        }
+
+        /// Set one track's `state` in a config's TOML text, leaving every other
+        /// track's alone.
+        fn with_state(text: &str, id: &str, state: &str) -> String {
+            let block = text
+                .find(&format!("id = {id:?}\n"))
+                .expect("the track is in the config");
+            let line = block
+                + text[block..]
+                    .find("state = ")
+                    .expect("the track has a state line");
+            let end = line + text[line..].find('\n').expect("the line ends");
+            format!("{}state = {state:?}{}", &text[..line], &text[end..])
+        }
+
+        /// **A state that moved the file wins over one that did not.**
+        ///
+        /// We shelved a track — a config-only change — while another process
+        /// archived it, which moved `tracks/ui.md` into `archive/_tracks/`
+        /// under the lock. Keeping our `shelved` would leave the row naming a
+        /// file that is not there, and `load_project` skips a configured track
+        /// whose file is missing: the track and every task in it would leave
+        /// the project, which is worse than either writer asked for.
+        ///
+        /// Found by P8 in eight events
+        /// (`a_shelve_that_did_not_see_the_archive_does_not_undo_it`), and the
+        /// same doctrine `RemovedAndEdited` and `EditedAndRemoved` already
+        /// follow: a row is a pointer, so the side that moved the content
+        /// decides what it points at.
+        #[test]
+        fn their_archive_beats_our_shelve() {
+            let ours = with_state(CFG, "ui", "shelved");
+            let theirs = with_state(CFG, "ui", "archived");
+            let (r, _, merged) = merge(CFG, &ours, &theirs);
+
+            assert_eq!(merged.tracks[1].state, "archived");
+            assert_eq!(r.conflicts.len(), 1);
+            assert_eq!(
+                r.conflicts[0].reason,
+                ConfigConflictReason::EditedAndMoved,
+                "ours is the version set aside, so the status line has to say so"
+            );
+            assert!(r.conflicts[0].set_aside.contains("shelved"));
+            assert!(r.conflicts[0].reason.ours_lost());
+        }
+
+        /// **The rule is not "archived wins".** Reverse the sides and ours
+        /// stands: we are the ones who archived, so we are the ones who moved
+        /// `tracks/ui.md` while holding the lock, and their `shelved` is the
+        /// value that would leave the row pointing at nothing.
+        ///
+        /// A merge that simply preferred the word `archived` would pass the
+        /// test above and strand the row here.
+        #[test]
+        fn our_archive_beats_their_shelve() {
+            let ours = with_state(CFG, "ui", "archived");
+            let theirs = with_state(CFG, "ui", "shelved");
+            let (r, _, merged) = merge(CFG, &ours, &theirs);
+
+            assert_eq!(merged.tracks[1].state, "archived");
+            assert_eq!(r.conflicts[0].reason, ConfigConflictReason::BothEdited);
+            assert!(r.conflicts[0].set_aside.contains("shelved"));
+        }
+
+        /// When **both** sides moved the file there is nothing better to do
+        /// than the ordinary rule, and saying so is the point: we unarchived to
+        /// `active`, they unarchived to `shelved`, and whichever rename landed
+        /// second is what is on disk. Ours stands, the conflict is recorded,
+        /// and `fr check` is what reconciles a row with a file after that.
+        #[test]
+        fn both_crossing_the_archive_boundary_keeps_ours() {
+            let base = with_state(CFG, "ui", "archived");
+            let ours = with_state(CFG, "ui", "active");
+            let theirs = with_state(CFG, "ui", "shelved");
+            let (r, _, merged) = merge(&base, &ours, &theirs);
+
+            assert_eq!(merged.tracks[1].state, "active");
+            assert_eq!(r.conflicts[0].reason, ConfigConflictReason::BothEdited);
         }
 
         #[test]

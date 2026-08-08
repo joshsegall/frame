@@ -186,6 +186,7 @@ It covers the four regions the TUI can change — `tracks`, `ids.prefixes`, `age
 
 - **We changed a track they removed: theirs wins**, the opposite of edit-beats-delete for a task. Keeping ours would resurrect a row pointing at a file they have already archived or deleted.
 - **Both added the same id: ours wins**, because by then `tracks/<id>.md` is ours.
+- **Both changed `state` and only theirs moved the file: theirs wins.** `state` is not a label like `name` — `archived` says the content is in `archive/_tracks/`, so crossing into or out of it is a rename on disk performed under the same lock, while `active` ↔ `shelved` moves nothing. Keeping our `shelved` over their `archived` left the row naming a file that is not there, and `load_project` drops a configured track whose file is missing: the track and every task in it leave the project, which is worse than either side asked for. Where both sides crossed, ours still stands — whichever rename landed second is what is on disk, and `fr check` is what reconciles a row with a file after that. P8 found this once a shelve was allowed to land on a track the other writer owned.
 
 Order is reapplied only when our side actually moved something; rewriting it unconditionally would have a shelve in the TUI silently undo another process's `fr track mv`.
 

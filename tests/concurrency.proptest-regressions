@@ -34,6 +34,11 @@
 # anything here that is load-bearing into a fixed-case test. Nothing is
 # load-bearing today — every defect below has its own named pin, listed beside
 # it — which is why this file could be relabelled rather than rewritten.
+#
+# Two of the lines below were load-bearing, and were converted rather than
+# relabelled when the shelve steering was lifted: each now names the fixed case
+# that replaced it. That is rule 3 being followed rather than discovered, and
+# the reason every line here names a pin.
 # ---------------------------------------------------------------------------
 
 # --- `found:` — recorded before 3486cf8 added TrackNew/TrackArchive to
@@ -44,8 +49,12 @@ cc 7b6830218a6e4ce77e4e9235684fb7fb3ceaf53ddaaabf7d7e79afb9dfc8a2e2 # found: [Cl
 cc d38c96843d63d741622fc3388560cc8869c3ba1e8352dc92bf2d3ccae44761e9 # found: [CliBegin, CliOp(AddTask), CliCommit, CliBegin, CliOp(EditOwned) x2] — a flaw in this suite's own oracle (12250db), not in frame; nothing to pin
 cc bf3b6c942f8edb2a14a34b3d678db6e0cbfb4655f286992a6508545e5aee9c30 # found: [CliBegin, CliOp(AddTask), CliCommit, CliBegin, Tui(EditTitle), CliOp(EditOwned), Tui(SetDone)] — pinned by `adopting_the_file_makes_it_the_ancestor`
 
-# --- Current: recorded against `arb_event` as it stands, so these still
-# --- regenerate the originals that shrank to the shapes named.
-cc 13d03aa4429023fa92bf7911389ca8ed9b95d95761c778d288ea63a0a830d237 # shrinks to schedule = [CliBegin, Tui(Step { action: TrackShelve, target: 0, text: 0 }), CliOp(TrackNew)]
-cc 995e67e1614b9fc0a1575d24c29760499c652857f4f5cd91acdafff4ce5f5dab # shrinks to schedule = [CliBegin, CliOp(TrackNew), CliCommit, Tui(Step { action: TrackArchive, target: 0, text: 0 }), Tui(Step { action: TrackShelve, target: 1, text: 0 })]
+# --- `found:` — recorded before a shelve stopped being steered, so what these
+# --- schedules aim at has moved even though they decode identically. Both were
+# --- load-bearing and both were converted to fixed cases first, per rule 3.
+cc 13d03aa4429023fa92bf7911389ca8ed9b95d95761c778d288ea63a0a830d237 # found: [CliBegin, Tui(TrackShelve), CliOp(TrackNew)] — the f26f3b0 revert case; pinned by `a_shelve_does_not_erase_a_track_another_process_created`
+cc 995e67e1614b9fc0a1575d24c29760499c652857f4f5cd91acdafff4ce5f5dab # found: [CliBegin, CliOp(TrackNew), CliCommit, Tui(TrackArchive), Tui(TrackShelve)] — the mis-steer in e435a41; pinned by `steering_aims_in_view_order_not_config_order`
+
+# --- Current: recorded against `arb_event` and `steer` as they stand.
+# --- (none — the shelve un-steering moved every line above into `found:`)
 cc 7167723c563bfa32878ea09310513dfa570d662a423a93b5b5b11192492f3ab7 # shrinks to [CliBegin, CliOp(TrackNew), CliCommit, Tui(TrackArchive), Tui(TrackMoveDown), CliBegin, CliOp(AddTask), CliOp(TrackArchive)] — a flaw in this suite's own oracle again, not in frame; pinned as a fixed case by `a_track_archived_after_an_add_still_carries_the_task`, so this line is not what holds it

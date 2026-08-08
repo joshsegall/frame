@@ -3723,10 +3723,14 @@ impl App {
             );
         }
 
+        // "changed under you" rather than "was removed": a rejected change is
+        // one the other process removed the row for *or* one whose state moved
+        // the file out from under ours, and naming only the first would be
+        // false about the second in the one voice the user is meant to trust.
         let rejected: Vec<&str> = result.rejected().map(|c| c.key.as_str()).collect();
         if !rejected.is_empty() {
             self.status_message = Some(format!(
-                "{} was removed by another process — kept the version on disk",
+                "{} changed under you — kept the version on disk",
                 rejected.join(", ")
             ));
             self.status_is_error = true;

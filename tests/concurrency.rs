@@ -5,7 +5,9 @@
 //! > somewhere under `frame/` — or, where the two genuinely raced for one task,
 //! > in the recovery log in an entry that names it, exactly once and on one side
 //! > only. Every track the CLI created or archived is still in the state it left
-//! > it in, no ID appears twice, and every file is settled.
+//! > it in — or the one a TUI that had seen that state moved it to — with its
+//! > content where that state says, no ID appears twice, and every file is
+//! > settled.
 //!
 //! # The gap this closes
 //!
@@ -74,11 +76,12 @@
 //! the two — see
 //! [`a_version_nobody_contested_never_reaches_the_recovery_log`].
 //!
-//! **Tracks are still steered** ([`steer`]). C5's claim is about a track's
-//! *state*, and an informed TUI shelve legitimately changes it, so tracks need
-//! their own version of the three-case rule against a differently shaped claim.
-//! Until they have one, a run where the TUI archives a track the CLI just
-//! created is ambiguous rather than false.
+//! **Tracks get the same treatment against a differently shaped claim**, in
+//! [`Cli::observe_tui_tracks`] — with the third case resolved the other way, for
+//! a reason given in full there: a task's superseded version has a home in the
+//! recovery log and a config row does not. A shelve is therefore no longer
+//! steered away from the CLI's tracks; every other track action still is, and
+//! [`steer`] says why.
 //!
 //! # How often the overlap actually fires, measured
 //!
@@ -110,7 +113,8 @@
 //! defect in its own subject matter is worth extending, not working around.**
 //!
 //! So C5: *every track the CLI created or archived is still in the state the
-//! CLI left it in, with its content where that state says it should be.*
+//! CLI left it in — or the state a TUI that had absorbed the CLI's row moved it
+//! to — with its content where that state says it should be.*
 //!
 //! Both halves of that earn their place. **State, not mere existence**: a row
 //! flipped back to `active` by a stale config write loses the track as surely
@@ -137,23 +141,50 @@
 //! shape by construction. That is real coverage accumulating across runs, not
 //! coverage on every run, and it is worth knowing which of the two it is.
 //!
-//! # Why the TUI is steered off the CLI's tracks
+//! # C5 is three claims, not one
 //!
-//! The argument the task-level steering used to rest on, one level up and still
-//! standing. `TrackArchive` and `TrackShelve` are legitimate operations that
-//! take a track out of `tracks/` or out of the active set, so a run where the
-//! TUI archives a track the CLI just created makes C5 **ambiguous** rather than
-//! false — "the row is gone and that is correct" is exactly the answer a
-//! two-answer oracle cannot distinguish from a lost update. [`steer`] therefore
-//! excludes every track the CLI has acted on from every track-surface step.
+//! One verdict field used to carry three failures with three different licences,
+//! and they are worth separating because they say different things to whoever
+//! reads the failure:
 //!
-//! Giving tracks the three-case treatment tasks now have is the obvious next
-//! step and deliberately not taken here: the claim is about a track's *state*
-//! rather than a title's presence, so it needs its own notion of what the TUI
-//! absorbed and its own reading of the config merge's conflicts.
+//! - **The row is gone** from `project.toml`. Nothing licenses this. No action
+//!   in the generated set removes a claimed row, and an unreadable config counts
+//!   as losing every track rather than none — reading it is what `load_project`
+//!   does first.
+//! - **The state is not the one owed** — the CLI's, or the one an informed TUI
+//!   step restated it to. This is the only one a TUI action can license.
+//! - **The content is not where the row's own state says it is.** Never
+//!   licensed, and read against the state *on disk* rather than the expected
+//!   one, so it fires alongside the second instead of being masked by it. This
+//!   is the sentence that says why a wrong state matters: `load_project` skips a
+//!   configured track whose file is absent, so the track and every task in it
+//!   leave the project while C1 still finds every title under `frame/`.
+//!
+//! # What a shelve costs, and why only a shelve
+//!
+//! [`steer`] no longer keeps a shelve off the CLI's tracks. Every other
+//! track-surface action it still does, and the asymmetry is in the product
+//! rather than in the harness — see [`steer`] for the table it comes from. The
+//! short version: `archived` is a terminal state for every generated action, so
+//! un-steering costs nothing on a claim the CLI archived; and of the actions
+//! that can move an *active* claim, a shelve is the only one that can be stale,
+//! because `TrackArchive` runs inside `with_project_lock` and the rest do not
+//! touch `state`.
 //!
 //! It cuts the other way too: the CLI only ever archives a track it created
-//! itself, never one out of the fixture, for the same reason.
+//! itself, never one out of the fixture, so the fixture's tracks stay the ones
+//! the TUI is free to do anything to.
+//!
+//! **How often the track overlap fires, measured**: across two runs of 384
+//! generated cases, 9 and 12 track-surface steps reached a row the CLI had
+//! claimed, of which 5 and 4 were informed changes; the rest were the session
+//! absorbing a row it had not seen. The **stale** branch — the one
+//! [`a_shelve_that_did_not_see_the_archive_does_not_undo_it`] is named for —
+//! was reached by the search **not once**, in either run or in the 96-case
+//! default. It needs a create, a commit, a `Watch`, a second window holding the
+//! lock, a shelve aimed at that track inside it, and an archive of the same
+//! track before the window closes. That case is pinned as a fixed schedule and
+//! nothing else reaches it, which is exactly what fixed cases are for.
 //!
 //! # Acknowledgement, precisely
 //!
@@ -231,6 +262,13 @@
 //!    sides had added and discarded their newer version to the recovery log
 //!    (`8f5f3ab`). The headline defect's shape, on the paths where a merge is
 //!    avoided rather than run.
+//! 8. The config merge treated a track's `state` as a label like its name, so a
+//!    shelve that had not seen another process's archive was kept over it. The
+//!    row then named `tracks/<id>.md` with the file already in
+//!    `archive/_tracks/`, and `load_project` drops a configured track whose file
+//!    is missing — so the track left the project while every title in it stayed
+//!    under `frame/` and C1 said nothing. The first defect found on the track
+//!    surface, and reaching it is what lifting the shelve steering was for.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -240,6 +278,7 @@ use proptest::prelude::*;
 
 use frame::io::lock::FileLock;
 use frame::io::project_io;
+use frame::model::config::TrackConfig;
 use frame::model::project::Project;
 use frame::ops::ids::Mint;
 use frame::ops::task_ops::{self, InsertPosition};
@@ -359,10 +398,14 @@ struct Window {
     pending: Vec<Claim>,
     /// Titles this window retired, dropped from the claims on the same terms.
     retired: Vec<String>,
-    /// Tracks this window created or restated, as (id, the state it left them
-    /// in). Promoted to claims on the same terms as titles: only once the
-    /// commit completes without error.
-    pending_tracks: Vec<(String, String)>,
+    /// Config rows this window created or restated, exactly as it wrote them.
+    /// Promoted to claims on the same terms as titles: only once the commit
+    /// completes without error.
+    ///
+    /// The whole row rather than the id and the state, because the row is the
+    /// yardstick for *informed* — a TUI holding this is holding what the CLI
+    /// wrote, which is what [`Cli::observe_tui_step`] has to be able to ask.
+    pending_tracks: Vec<TrackConfig>,
     /// Track files the commit owes a move to `archive/_tracks/`, recorded when
     /// the row was archived and performed *after* the config is written —
     /// `cmd_track_state_change`'s order.
@@ -384,6 +427,49 @@ struct Claim {
     at_risk: bool,
 }
 
+/// A track the CLI acted on, and what the TUI has since done to its row.
+///
+/// # Why the expectation moves and the yardstick does not
+///
+/// C5's claim is about a track's *state*, and unlike a title's presence a state
+/// can be legitimately changed by the other writer: a user who has seen the row
+/// the CLI wrote may shelve it. So the claim is restated rather than asserted
+/// flat — but only from a row the TUI demonstrably had, which is what the two
+/// stored rows are for.
+///
+/// [`Self::committed`] is what the CLI wrote and never moves until the CLI
+/// writes again. [`Self::absorbed`] is the row the session is known to be *in
+/// step with*, and it moves twice: to the CLI's row when the TUI catches up, and
+/// to the TUI's own when it knowingly changes one. Without the second move a
+/// second shelve — the user toggling back — would read as a change from a row
+/// nobody was holding, and the oracle would report frame for it.
+struct TrackClaim {
+    /// The row exactly as the CLI last committed it.
+    committed: TrackConfig,
+    /// The row the TUI is in step with. **Its `state` is what C5 expects**:
+    /// the CLI's until an informed TUI step supersedes it, and the CLI's again
+    /// if the session later takes their version back.
+    absorbed: TrackConfig,
+    /// Whether an informed step has restated this claim. Reported in the
+    /// verdict so a fixed case can assert the branch it names actually ran.
+    superseded: bool,
+}
+
+impl TrackClaim {
+    fn new(row: TrackConfig) -> Self {
+        TrackClaim {
+            absorbed: row.clone(),
+            committed: row,
+            superseded: false,
+        }
+    }
+
+    /// The state C5 requires the row to be in.
+    fn expected(&self) -> &str {
+        &self.absorbed.state
+    }
+}
+
 struct Cli {
     root: PathBuf,
     frame_dir: PathBuf,
@@ -392,14 +478,14 @@ struct Cli {
     claims: Vec<Claim>,
     /// Ids of tasks this actor owns, so the TUI can be steered away from them.
     owned_ids: Vec<String>,
-    /// Tracks this actor has acted on, and the state it left each in. C5's
-    /// left-hand side, and what the TUI is steered off at the track level.
+    /// Tracks this actor has acted on, and the state each is owed. C5's
+    /// left-hand side.
     ///
     /// The claim is *the state I left it in*, not merely *it still exists*:
     /// a row flipped back to `active` by a stale config write loses the track
     /// as surely as a deleted row, since its file is in `archive/_tracks/` and
     /// `load_project` looks for it under `tracks/`.
-    tracks_claimed: BTreeMap<String, String>,
+    tracks_claimed: BTreeMap<String, TrackClaim>,
     /// What the CLI last committed for each task it owns, as the task's own
     /// markdown lines. The yardstick for *informed*: a TUI copy that matches it
     /// has seen the CLI's write, so an edit from there supersedes rather than
@@ -603,7 +689,18 @@ impl Cli {
                 };
                 window.project.tracks.push((track_id.clone(), track));
                 window.dirty_config = true;
-                window.pending_tracks.push((track_id, "active".to_string()));
+                // The row `new_track` just inserted, taken from the config
+                // rather than rebuilt here: what the commit writes is what the
+                // claim has to be measured against.
+                if let Some(row) = window
+                    .project
+                    .config
+                    .tracks
+                    .iter()
+                    .find(|tc| tc.id == track_id)
+                {
+                    window.pending_tracks.push(row.clone());
+                }
             }
 
             CliOp::TrackArchive { which } => {
@@ -625,7 +722,7 @@ impl Cli {
                     .filter(|tc| {
                         tc.state == "active"
                             && (claimed.contains(&tc.id)
-                                || window.pending_tracks.iter().any(|(id, _)| id == &tc.id))
+                                || window.pending_tracks.iter().any(|row| row.id == tc.id))
                     })
                     .map(|tc| tc.id.clone())
                     .collect();
@@ -680,9 +777,15 @@ impl Cli {
                 // Out of `tracks/` is out of the project, on this side too.
                 window.project.tracks.retain(|(id, _)| id != &track_id);
                 window.dirty_config = true;
-                window
-                    .pending_tracks
-                    .push((track_id.clone(), "archived".to_string()));
+                if let Some(row) = window
+                    .project
+                    .config
+                    .tracks
+                    .iter()
+                    .find(|tc| tc.id == track_id)
+                {
+                    window.pending_tracks.push(row.clone());
+                }
                 window.pending_archive_files.push((track_id, file));
             }
         }
@@ -771,8 +874,13 @@ impl Cli {
             }
             self.claims.push(claim);
         }
-        for (track_id, state) in window.pending_tracks {
-            self.tracks_claimed.insert(track_id, state);
+        // A re-claim replaces the whole `TrackClaim`, so a supersession does not
+        // survive the CLI restating the row: archiving a track the TUI had
+        // shelved is the CLI having the last word, and the claim starts again
+        // from what it just wrote.
+        for row in window.pending_tracks {
+            self.tracks_claimed
+                .insert(row.id.clone(), TrackClaim::new(row));
         }
     }
 
@@ -827,13 +935,7 @@ impl Cli {
     /// does — it merges by multiset, keeps both versions of a double edit, and
     /// sets nothing aside — so an inbox claim never has the log to fall back on
     /// and must never need it.
-    fn observe_tui_step(
-        &mut self,
-        before: &BTreeMap<String, Vec<String>>,
-        after: &BTreeMap<String, Vec<String>>,
-        inbox_before: &BTreeMap<String, usize>,
-        inbox_after: &BTreeMap<String, usize>,
-    ) {
+    fn observe_tui_step(&mut self, before: &TuiView, after: &TuiView) {
         let mut retired: Vec<String> = Vec::new();
         let mut edited: Vec<String> = Vec::new();
         let mut absorbed: Vec<String> = Vec::new();
@@ -841,7 +943,7 @@ impl Cli {
         for claim in &self.claims {
             match &claim.task_id {
                 Some(id) => {
-                    let (was, now) = (before.get(id), after.get(id));
+                    let (was, now) = (before.tasks.get(id), after.tasks.get(id));
                     if was == now {
                         continue;
                     }
@@ -860,7 +962,7 @@ impl Cli {
                     // Fewer copies in memory than before means this step took
                     // one away — an edit, a delete or a triage.
                     let n = |m: &BTreeMap<String, usize>| m.get(&claim.title).copied().unwrap_or(0);
-                    if n(inbox_after) < n(inbox_before) {
+                    if n(&after.inbox) < n(&before.inbox) {
                         retired.push(claim.title.clone());
                     }
                 }
@@ -873,6 +975,78 @@ impl Cli {
         self.tui_edited.extend(edited);
         self.retired_by_tui.extend(retired.iter().cloned());
         self.claims.retain(|c| !retired.contains(&c.title));
+
+        self.observe_tui_tracks(before, after);
+    }
+
+    /// The same question about a claimed track's config row, and the same three
+    /// answers — with the third resolved differently, on purpose.
+    ///
+    /// # Three cases again, and why the third gets no licence
+    ///
+    /// - `was == now` — untouched. The CLI's state stands, unconditionally.
+    /// - `now` is the row the CLI committed — **absorbed**. The session caught
+    ///   up, which clears any earlier supersession rather than creating one.
+    /// - `was` is the row the session was in step with — an **informed** change.
+    ///   The user saw that row and shelved or archived it, so the claim is
+    ///   restated to the state they left, exactly as a task claim is retired.
+    /// - anything else — the TUI changed a row it was **not** holding the CLI's
+    ///   version of. **No licence**, and that is the substantive difference from
+    ///   a task.
+    ///
+    /// For a task the third case earns the recovery log: one of the two versions
+    /// has to go somewhere, and an entry naming the task is a place a person can
+    /// get it back from. A track row has no such home. A row in `.recovery.log`
+    /// is not a track in the project, and the merge's own doctrine already says
+    /// which side wins — [`ConfigConflictReason::RemovedAndEdited`] keeps the
+    /// removal because "a row kept alive here would point at nothing", and
+    /// [`ConfigConflictReason::EditedAndRemoved`] keeps theirs because re-adding
+    /// ours "would resurrect a reference to a file they have already moved".
+    ///
+    /// In this harness the third case can only be one thing: the CLI archived a
+    /// track and the TUI, still holding the row from before, shelved it. The
+    /// file has already moved under the lock, so the state that says where it is
+    /// has to stand. Excusing that would be excusing the exact end state C5 was
+    /// written to catch — `load_project` skips a configured track whose file is
+    /// absent, so the track and every task in it leave the project.
+    ///
+    /// [`ConfigConflictReason::RemovedAndEdited`]: frame::ops::reconcile::ConfigConflictReason
+    /// [`ConfigConflictReason::EditedAndRemoved`]: frame::ops::reconcile::ConfigConflictReason
+    fn observe_tui_tracks(&mut self, before: &TuiView, after: &TuiView) {
+        let mut restated: Vec<(String, TrackConfig)> = Vec::new();
+        let mut reabsorbed: Vec<String> = Vec::new();
+
+        for (id, claim) in &self.tracks_claimed {
+            let (was, now) = (before.tracks.get(id), after.tracks.get(id));
+            if was == now {
+                continue;
+            }
+            if now == Some(&claim.committed) {
+                reabsorbed.push(id.clone());
+                continue;
+            }
+            // A row that left memory altogether is not a state the user chose,
+            // so it restates nothing: the claim stands and the end state on disk
+            // answers for it.
+            if was == Some(&claim.absorbed)
+                && let Some(now) = now
+            {
+                restated.push((id.clone(), now.clone()));
+            }
+        }
+
+        for id in reabsorbed {
+            if let Some(claim) = self.tracks_claimed.get_mut(&id) {
+                claim.absorbed = claim.committed.clone();
+                claim.superseded = false;
+            }
+        }
+        for (id, row) in restated {
+            if let Some(claim) = self.tracks_claimed.get_mut(&id) {
+                claim.absorbed = row;
+                claim.superseded = true;
+            }
+        }
     }
 }
 
@@ -887,36 +1061,53 @@ fn own_lines(task: &frame::model::task::Task) -> Vec<String> {
     frame::parse::serialize_tasks(std::slice::from_ref(&bare), 0)
 }
 
-/// What the TUI is holding for each task the CLI owns, keyed by id.
+/// Everything the TUI is holding that the CLI has claimed, read either side of
+/// a step.
 ///
-/// Read out of `app.project` rather than off disk on purpose: the question is
-/// what the *session* believes, because that is what its next save writes and
-/// what the merge offers as "ours".
-fn tui_view(app: &App, cli: &Cli) -> BTreeMap<String, Vec<String>> {
-    let mut out = BTreeMap::new();
+/// Read out of `app` rather than off disk on purpose: the question is what the
+/// *session* believes, because that is what its next save writes and what the
+/// merge offers as "ours".
+struct TuiView {
+    /// Each task the CLI owns, as its own markdown lines.
+    tasks: BTreeMap<String, Vec<String>>,
+    /// How many copies of each inbox title the session holds. A count rather
+    /// than a set, because `reconcile_inbox` works in multisets and two
+    /// identical captures are two items, not one.
+    inbox: BTreeMap<String, usize>,
+    /// The config row for each track the CLI has claimed.
+    tracks: BTreeMap<String, TrackConfig>,
+}
+
+fn tui_view(app: &App, cli: &Cli) -> TuiView {
+    let mut tasks = BTreeMap::new();
     for id in &cli.owned_ids {
         for (_, track) in &app.project.tracks {
             if let Some(task) = task_ops::find_task_in_track(track, id) {
-                out.insert(id.clone(), own_lines(task));
+                tasks.insert(id.clone(), own_lines(task));
                 break;
             }
         }
     }
-    out
-}
 
-/// How many copies of each inbox title the TUI is holding.
-///
-/// A count rather than a set, because `reconcile_inbox` works in multisets and
-/// two identical captures are two items, not one.
-fn tui_inbox(app: &App) -> BTreeMap<String, usize> {
-    let mut out: BTreeMap<String, usize> = BTreeMap::new();
-    if let Some(inbox) = &app.project.inbox {
-        for item in &inbox.items {
-            *out.entry(item.title.clone()).or_default() += 1;
+    let mut inbox: BTreeMap<String, usize> = BTreeMap::new();
+    if let Some(items) = app.project.inbox.as_ref() {
+        for item in &items.items {
+            *inbox.entry(item.title.clone()).or_default() += 1;
         }
     }
-    out
+
+    let mut tracks = BTreeMap::new();
+    for id in cli.tracks_claimed.keys() {
+        if let Some(row) = app.project.config.tracks.iter().find(|tc| &tc.id == id) {
+            tracks.insert(id.clone(), row.clone());
+        }
+    }
+
+    TuiView {
+        tasks,
+        inbox,
+        tracks,
+    }
 }
 
 fn track_file(project: &Project, track_id: &str) -> Option<String> {
@@ -968,13 +1159,33 @@ fn track_file(project: &Project, track_id: &str) -> Option<String> {
 /// recorded seed. Steering is the harness's own aiming mechanism and changing it
 /// costs no seeds at all.
 ///
-/// # Tracks stay steered
+/// # Tracks: shelve is un-steered, the rest are not
 ///
-/// The same work has not been done for them. C5's claim is about a track's
-/// *state*, and an informed TUI shelve legitimately changes that state, so it
-/// needs its own version of the three-case rule against a differently shaped
-/// claim. Until it has one, a run where the TUI archives a track the CLI just
-/// created is still ambiguous rather than false.
+/// [`Cli::observe_tui_tracks`] now decides a claimed track's row the same way,
+/// against a claim about *state* rather than about a title's presence — so a
+/// shelve of a track the CLI owns is no longer ambiguous and no longer steered
+/// away from.
+///
+/// **Shelve alone, and the asymmetry is in the product rather than here.**
+/// `archived` is a terminal state for every action this suite can generate:
+/// `tracks_toggle_shelve` returns before it does anything unless the row is
+/// active or shelved, `track_accepts_rename` refuses an archived track, the
+/// palette offers "Archive track" only for active and shelved rows,
+/// `TrackDelete` is held out of the generated set, and unarchive is not in
+/// `ACTIONS` at all. And of the actions that remain, **shelve is the only one
+/// that can be stale**: `TrackArchive` runs inside `with_project_lock`, so a
+/// contended one does not half-happen and never waits in `unsaved`, while
+/// rename, reorder and cc-focus do not touch `state`. A shelve goes through
+/// `save_config_logged`, which parks the change in `unsaved` when the lock is
+/// held and merges it later — the one path on which the two writers' views of a
+/// row can actually diverge.
+///
+/// `TrackArchive` keeps its steering for now. Un-steering it raises a second
+/// claim rather than the same one: `confirm_archive_track` saves the track
+/// before it moves the file, so a stale archive can write `tracks/<id>.md` back
+/// from memory and move that over the copy the CLI already archived. That is
+/// about content, not state, and deserves its own look — the same way
+/// `TrackNew` preceded `TrackArchive` when C5 was built.
 fn steer(app: &App, step: &Step, cli: &Cli) -> Option<Step> {
     let mut step = *step;
     match step.action.surface() {
@@ -997,14 +1208,49 @@ fn steer(app: &App, step: &Step, cli: &Cli) -> Option<Step> {
             }
         }
         tui_steps::Surface::Inbox => {}
+        tui_steps::Surface::Tracks if step.action == ActionKind::TrackShelve => {
+            // Un-steered, and aimed. See the module docs for why a shelve is
+            // the one track action that can be decided rather than avoided, and
+            // why it is the only one whose steering is lifted here.
+            //
+            // The aiming is the task rule verbatim: one target in three, out of
+            // the entropy `target` already carries, because a new arm or a new
+            // weight in `arb_event` would re-map the whole stream. An unaimed
+            // target is left exactly as generated — `apply_step` resolves it
+            // modulo the view itself.
+            //
+            // Only rows the TUI can actually act on are aimed at. `s` on a row
+            // the session already believes is archived returns before it does
+            // anything, so aiming there would spend the case on a no-op and
+            // read as coverage of the archived branch.
+            if step.target.is_multiple_of(3) {
+                let aimable: Vec<usize> = app
+                    .tracks_view_order()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, id)| cli.tracks_claimed.contains_key(**id))
+                    .filter(|(_, id)| {
+                        app.project
+                            .config
+                            .tracks
+                            .iter()
+                            .find(|tc| &tc.id == *id)
+                            .is_some_and(|tc| tc.state == "active" || tc.state == "shelved")
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                if !aimable.is_empty() {
+                    step.target = aimable[(step.target / 3) % aimable.len()];
+                }
+            }
+        }
         tui_steps::Surface::Tracks => {
             // The rule the task-level steering used to follow, one level up.
-            // `TrackArchive` and
-            // `TrackShelve` are legitimate TUI operations that take a track out
-            // of `tracks/` or out of the active set — so a run where the TUI
-            // archives a track the CLI just created makes C5 *ambiguous*, not
-            // false, exactly as two writers on one task make C1 ambiguous.
-            // Steering keeps every failure a real one.
+            // `TrackArchive` is a legitimate TUI operation that takes a track
+            // out of `tracks/` — so a run where the TUI archives a track the
+            // CLI just created makes C5 *ambiguous*, not false, exactly as two
+            // writers on one task make C1 ambiguous. Steering keeps every
+            // failure a real one.
             //
             // **In the coordinates the action will resolve it in.** `target`
             // becomes `tracks_cursor`, and that indexes `App::tracks_view_order`
@@ -1030,6 +1276,62 @@ fn steer(app: &App, step: &Step, cli: &Cli) -> Option<Step> {
         }
     }
     Some(step)
+}
+
+/// **Steering aims in the coordinates the step will be resolved in.**
+///
+/// `target` becomes `tracks_cursor`, and that indexes [`App::tracks_view_order`]
+/// — active, then shelved, then archived — not `config.tracks`. The two orders
+/// coincide only while every track is active, which is exactly long enough to
+/// look like the same list: once a step archives one, its row moves to the end
+/// of the view and everything below it shifts up, so "index 1 among the
+/// unclaimed" points at the track *after* the one meant. In the CI run that
+/// found this, that was the CLI's own track, and C5 reported frame for a shelve
+/// the oracle had aimed there itself.
+///
+/// Pinned here rather than by the seed that found it — `995e67e…`, now a
+/// `found:` line. That seed reached the shape through two steered track steps,
+/// and one of the two is a shelve, which this commit stops steering. Asking
+/// `steer` directly cannot be re-aimed by anything.
+#[test]
+fn steering_aims_in_view_order_not_config_order() {
+    let tmp = fixture();
+    let project = project_io::load_project(tmp.path()).expect("project loads");
+    let mut app = App::new(project);
+
+    // The fixture is `main` then `side`, both active. Add the CLI's track after
+    // them and archive `main`, so the view order and the config order stop
+    // agreeing about where anything is.
+    app.project.config.tracks.push(TrackConfig {
+        id: "clitrack1".to_string(),
+        name: "CLI Track".to_string(),
+        state: "active".to_string(),
+        file: "tracks/clitrack1.md".to_string(),
+    });
+    app.project.config.tracks[0].state = "archived".to_string();
+    assert_eq!(app.tracks_view_order(), vec!["side", "clitrack1", "main"]);
+
+    let mut cli = Cli::new(tmp.path());
+    cli.tracks_claimed.insert(
+        "clitrack1".to_string(),
+        TrackClaim::new(app.project.config.tracks[2].clone()),
+    );
+
+    // A steered action — a rename, since a shelve is no longer one — over every
+    // target the generator produces for it.
+    for target in 0..12 {
+        let step = Step {
+            action: ActionKind::TrackRename,
+            target,
+            text: 0,
+        };
+        let steered = steer(&app, &step, &cli).expect("two unclaimed tracks are left");
+        assert_ne!(
+            app.tracks_view_order()[steered.target],
+            "clitrack1",
+            "target {target} was steered onto the track the CLI claimed"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1088,9 +1390,20 @@ struct Verdict {
     duplicate_ids: Vec<String>,
     unsettled: Option<String>,
     still_unsaved: Vec<String>,
-    /// C5: tracks the CLI created or archived that are no longer in the state
-    /// it left them in, or whose content is not where that state says.
-    unconfigured_tracks: Vec<String>,
+    /// C5a: a track the CLI claimed whose row has left `project.toml`
+    /// altogether. Nothing licenses this — no generated TUI action removes a
+    /// row, and an unreadable config counts as losing every one of them.
+    tracks_missing_row: Vec<String>,
+    /// C5b: the row is there and its state is not the one that is owed —
+    /// the CLI's, or the one an informed TUI step restated it to.
+    tracks_wrong_state: Vec<String>,
+    /// C5c: the row's content is not where the row's **own** state says it is.
+    /// Read against the state on disk rather than the expected one, so it fires
+    /// alongside `tracks_wrong_state` instead of being masked by it: "the state
+    /// is wrong" and "the project points at nothing" are different sentences,
+    /// and `load_project` skips a configured track whose file is absent, so the
+    /// second one loses the track and every task in it.
+    tracks_content_misplaced: Vec<String>,
     /// C6: titles in the recovery log that no conflict entitles it to — the
     /// merge set a version aside on a task the TUI never raced it for.
     unjustified_setaside: Vec<String>,
@@ -1109,6 +1422,18 @@ struct Verdict {
     /// Titles the TUI knowingly superseded, from [`Cli::retired_by_tui`], for
     /// the same reason.
     retired_by_tui: Vec<String>,
+    /// Every track C5 actually had a claim about. A C5 assertion over an empty
+    /// claim set passes without asking anything, which is the failure mode the
+    /// fixed cases below exist to rule out.
+    tracks_checked: Vec<String>,
+    /// Tracks whose claim an informed TUI step restated, from
+    /// [`TrackClaim::superseded`]. Same purpose: a case named for the informed
+    /// branch has to show that the branch ran.
+    tracks_superseded: Vec<String>,
+    /// Conflicts the config merge recorded, by the key it named. A fixed case
+    /// that means to provoke a race on a row asserts on this, so a schedule
+    /// that quietly stopped racing cannot pass by doing nothing.
+    config_conflicts: Vec<String>,
 }
 
 fn judge(app: &App, frame_dir: &Path, cli: &Cli) -> Verdict {
@@ -1217,16 +1542,22 @@ fn judge(app: &App, frame_dir: &Path, cli: &Cli) -> Verdict {
     // `load_project` skips a configured track whose file is absent, so the
     // track and every task in it leave the project just as completely as a
     // deleted row would take them.
-    let unconfigured_tracks = match frame::io::config_io::read_config(frame_dir) {
-        Ok((config, _)) => cli
-            .tracks_claimed
-            .iter()
-            .filter(|(id, expected)| {
-                let Some(tc) = config.tracks.iter().find(|tc| &tc.id == *id) else {
-                    return true; // the row is gone
+    let mut tracks_missing_row = Vec::new();
+    let mut tracks_wrong_state = Vec::new();
+    let mut tracks_content_misplaced = Vec::new();
+    match frame::io::config_io::read_config(frame_dir) {
+        Ok((config, _)) => {
+            for (id, claim) in &cli.tracks_claimed {
+                let Some(tc) = config.tracks.iter().find(|tc| &tc.id == id) else {
+                    tracks_missing_row.push(id.clone());
+                    continue;
                 };
-                if &&tc.state != expected {
-                    return true; // not the state the CLI left it in
+                if tc.state != claim.expected() {
+                    tracks_wrong_state.push(format!(
+                        "{id}: owed {:?}, found {:?}",
+                        claim.expected(),
+                        tc.state
+                    ));
                 }
                 // And the content is where that state says it is. An archived
                 // track's file lives in `archive/_tracks/` while its row still
@@ -1236,14 +1567,19 @@ fn judge(app: &App, frame_dir: &Path, cli: &Cli) -> Verdict {
                 } else {
                     frame_dir.join(&tc.file)
                 };
-                !path.exists()
-            })
-            .map(|(id, _)| id.clone())
-            .collect(),
+                if !path.exists() {
+                    tracks_content_misplaced.push(format!(
+                        "{id}: {:?} names {}",
+                        tc.state,
+                        path.display()
+                    ));
+                }
+            }
+        }
         // An unreadable config is a total loss of every track, not a reason to
         // report none: reading it is what `load_project` does first.
-        Err(_) => cli.tracks_claimed.keys().cloned().collect(),
-    };
+        Err(_) => tracks_missing_row.extend(cli.tracks_claimed.keys().cloned()),
+    }
 
     let mut seen = BTreeSet::new();
     let mut duplicate_ids = Vec::new();
@@ -1259,12 +1595,26 @@ fn judge(app: &App, frame_dir: &Path, cli: &Cli) -> Verdict {
         duplicate_ids,
         unsettled: unsettled(frame_dir),
         still_unsaved: app.unsaved.keys().map(|t| t.label().to_string()).collect(),
-        unconfigured_tracks,
+        tracks_missing_row,
+        tracks_wrong_state,
+        tracks_content_misplaced,
         unjustified_setaside,
         unidentified_setaside,
         duplicated_titles,
         log_satisfied,
         retired_by_tui: cli.retired_by_tui.clone(),
+        tracks_checked: cli.tracks_claimed.keys().cloned().collect(),
+        tracks_superseded: cli
+            .tracks_claimed
+            .iter()
+            .filter(|(_, claim)| claim.superseded)
+            .map(|(id, _)| id.clone())
+            .collect(),
+        config_conflicts: log
+            .iter()
+            .filter(|e| e.description.contains("in project.toml"))
+            .map(|e| e.description.clone())
+            .collect(),
     }
 }
 
@@ -1301,14 +1651,12 @@ fn run(schedule: &[Event]) -> Result<Verdict, String> {
                     // observable. At quiesce it is far too late: the merge has
                     // run and every trace of who was holding what is gone.
                     let before = tui_view(&app, &cli);
-                    let inbox_before = tui_inbox(&app);
                     apply_step(&mut app, &step);
                     if app.mode != Mode::Navigate {
                         return Err(format!("step {step:?} left the app in {:?}", app.mode));
                     }
                     let after = tui_view(&app, &cli);
-                    let inbox_after = tui_inbox(&app);
-                    cli.observe_tui_step(&before, &after, &inbox_before, &inbox_after);
+                    cli.observe_tui_step(&before, &after);
                 }
             }
             Event::CliBegin => cli.begin(),
@@ -1363,11 +1711,166 @@ fn a_track_archived_after_an_add_still_carries_the_task() {
         "a task added before its track was archived went with the file: {:?}",
         verdict.lost_by_cli
     );
+    assert_c5_clean(&verdict);
+}
+
+/// The three C5 fields, asserted together with the claim set they were read
+/// against.
+///
+/// Every fixed case below wants all four sentences, and a C5 assertion over an
+/// empty claim set is the vacuity these cases exist to rule out — so the
+/// non-vacuity check lives here rather than being remembered at each call.
+/// All three are reported together rather than one `assert!` short-circuiting
+/// the next: a stale write usually breaks the state *and* strands the file, and
+/// a failure that says only the first leaves the reader to guess whether the
+/// second happened too.
+fn assert_c5_clean(verdict: &Verdict) {
     assert!(
-        verdict.unconfigured_tracks.is_empty(),
-        "{:?}",
-        verdict.unconfigured_tracks
+        !verdict.tracks_checked.is_empty(),
+        "no track was claimed, so C5 asked nothing and the rest of this proves nothing"
     );
+    let mut said = Vec::new();
+    if !verdict.tracks_missing_row.is_empty() {
+        said.push(format!(
+            "row gone from project.toml: {:?}",
+            verdict.tracks_missing_row
+        ));
+    }
+    if !verdict.tracks_wrong_state.is_empty() {
+        said.push(format!(
+            "not the state it is owed: {:?}",
+            verdict.tracks_wrong_state
+        ));
+    }
+    if !verdict.tracks_content_misplaced.is_empty() {
+        said.push(format!(
+            "the row points at a file that is not there: {:?}",
+            verdict.tracks_content_misplaced
+        ));
+    }
+    assert!(said.is_empty(), "{}", said.join("\n"));
+}
+
+/// Aim a track step at the first claimed track the TUI can act on.
+///
+/// `steer` re-aims a shelve when `target % 3 == 0`, picking
+/// `aimable[(target / 3) % aimable.len()]`, so zero is "the CLI's first
+/// shelvable track" and reads as that at every call site below.
+fn at_cli_track(action: ActionKind) -> Event {
+    Event::Tui(Step {
+        action,
+        target: 0,
+        text: 0,
+    })
+}
+
+/// **The shortest schedule that catches a config write from a stale snapshot.**
+///
+/// The TUI shelves a track while another process holds the lock and goes on to
+/// create one. The shelve cannot save, so it waits in `unsaved` and merges
+/// against whatever is on disk by the time it retries — and what is on disk by
+/// then has the other writer's new track in it.
+///
+/// Before `f26f3b0` the retry wrote `project.toml` from the session's startup
+/// snapshot, and `clitrack1` went with it. **This is the case that confirms C5
+/// can see that**, and it was a `.proptest-regressions` seed until this commit
+/// re-aimed what a shelve is pointed at. A seed decodes through `steer` as it is
+/// now; a schedule does not, which is the whole reason for pinning it here.
+#[test]
+fn a_shelve_does_not_erase_a_track_another_process_created() {
+    let verdict = run(&[
+        Event::CliBegin,
+        Event::Tui(Step {
+            action: ActionKind::TrackShelve,
+            target: 0,
+            text: 0,
+        }),
+        Event::CliOp(CliOp::TrackNew),
+    ])
+    .expect("schedule runs");
+
+    assert_c5_clean(&verdict);
+}
+
+/// **An informed shelve restates the claim rather than breaking it.**
+///
+/// The CLI creates a track, the watcher delivers it, and the user shelves the
+/// row they can see. The CLI claimed that track `active` and it is now
+/// `shelved`, and that is correct: the same rule a task claim follows when the
+/// TUI edits a version it had absorbed.
+///
+/// Without the restatement in [`Cli::observe_tui_tracks`] this reports frame for
+/// a state the user chose on purpose — which is exactly what the steering this
+/// commit lifts was avoiding rather than deciding.
+#[test]
+fn a_shelve_of_a_track_the_tui_had_absorbed_restates_the_claim() {
+    let verdict = run(&[
+        Event::CliBegin,
+        Event::CliOp(CliOp::TrackNew),
+        Event::CliCommit,
+        // The watcher catches up, so the row the TUI shelves *is* the row the
+        // CLI wrote. Without this the shelve is stale and owes a different
+        // answer entirely — see the case below.
+        Event::Watch,
+        at_cli_track(ActionKind::TrackShelve),
+    ])
+    .expect("schedule runs");
+
+    // Non-vacuity first: this case is worthless unless the informed branch
+    // actually ran on the track it names.
+    assert_eq!(
+        verdict.tracks_superseded,
+        vec!["clitrack1".to_string()],
+        "the informed branch did not fire, so the rest of this proves nothing"
+    );
+    assert_c5_clean(&verdict);
+}
+
+/// **A shelve that never saw the archive must not undo it.** The third case,
+/// and the one a track resolves differently from a task.
+///
+/// The CLI creates a track and the TUI absorbs it. A second window then takes
+/// the lock, so the user's shelve cannot save and waits in `unsaved` — the
+/// documented degraded path — and that window archives the very track being
+/// shelved. The merge that follows meets `active` in the ancestor, `shelved` on
+/// our side and `archived` on theirs.
+///
+/// `archived` is not a label. It says the file is in `archive/_tracks/`, where
+/// the CLI moved it under the lock. A merge that keeps `shelved` leaves the row
+/// naming `tracks/<id>.md` with nothing there, and `load_project` skips a
+/// configured track whose file is missing — so the track and every task in it
+/// leave the project while every other claim in this suite reads as satisfied.
+/// C1 sees the titles under `frame/` and says nothing; that is precisely the gap
+/// C5 exists for.
+#[test]
+fn a_shelve_that_did_not_see_the_archive_does_not_undo_it() {
+    let verdict = run(&[
+        Event::CliBegin,
+        Event::CliOp(CliOp::TrackNew),
+        Event::CliCommit,
+        Event::Watch,
+        // The second window holds the lock, so the shelve below fails to save
+        // and is still in memory when the archive lands.
+        Event::CliBegin,
+        at_cli_track(ActionKind::TrackShelve),
+        Event::CliOp(CliOp::TrackArchive { which: 0 }),
+        Event::CliCommit,
+        Event::Watch,
+    ])
+    .expect("schedule runs");
+
+    // Non-vacuity: the two sides have to have actually met. A schedule that
+    // stopped racing would satisfy every assertion below by doing nothing.
+    assert!(
+        !verdict.config_conflicts.is_empty(),
+        "no config conflict was provoked, so no merge decided anything"
+    );
+    assert!(
+        verdict.tracks_superseded.is_empty(),
+        "this shelve was stale, so it restates nothing: {:?}",
+        verdict.tracks_superseded
+    );
+    assert_c5_clean(&verdict);
 }
 
 /// Aim a task step at the first task the CLI owns.
@@ -1612,9 +2115,19 @@ proptest! {
             verdict.lost_by_cli
         );
         prop_assert!(
-            verdict.unconfigured_tracks.is_empty(),
-            "the CLI left these tracks in a state the project no longer has: {:?}\nschedule: {schedule:?}",
-            verdict.unconfigured_tracks
+            verdict.tracks_missing_row.is_empty(),
+            "the CLI configured these tracks and project.toml no longer has a row for them: {:?}\nschedule: {schedule:?}",
+            verdict.tracks_missing_row
+        );
+        prop_assert!(
+            verdict.tracks_wrong_state.is_empty(),
+            "these tracks are not in the state they are owed: {:?}\nschedule: {schedule:?}",
+            verdict.tracks_wrong_state
+        );
+        prop_assert!(
+            verdict.tracks_content_misplaced.is_empty(),
+            "these rows point at a file that is not there, so load_project drops the track: {:?}\nschedule: {schedule:?}",
+            verdict.tracks_content_misplaced
         );
         prop_assert!(
             verdict.unjustified_setaside.is_empty(),
