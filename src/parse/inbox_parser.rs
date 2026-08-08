@@ -176,7 +176,6 @@ pub fn parse_inbox(source: &str) -> (Inbox, Vec<String>) {
         Inbox {
             header_lines,
             items,
-            source_lines: lines,
             eol: crate::parse::LineEnding::detect(source),
         },
         dropped_lines,

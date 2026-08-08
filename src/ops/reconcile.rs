@@ -397,9 +397,8 @@ pub fn reconcile_inbox(base: &Inbox, ours: &Inbox, theirs: &Inbox) -> Reconciled
         inbox: Inbox {
             header_lines,
             items,
-            source_lines: ours.source_lines.clone(),
-            // Ours, like `source_lines` above: the merge keeps our file's
-            // shape and merges their content into it.
+            // Ours: the merge keeps our file's shape and merges their content
+            // into it.
             eol: ours.eol,
         },
         took_theirs,

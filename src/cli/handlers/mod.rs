@@ -1976,7 +1976,6 @@ fn cmd_inbox_add(args: InboxCmd) -> Result<(), Box<dyn std::error::Error>> {
     let inbox = project.inbox.get_or_insert_with(|| Inbox {
         header_lines: vec!["# Inbox".to_string(), String::new()],
         items: Vec::new(),
-        source_lines: vec!["# Inbox".to_string(), String::new()],
         // A file frame is creating, so frame picks: LF, like everything else
         // it writes from scratch.
         eol: crate::parse::LineEnding::default(),

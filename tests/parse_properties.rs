@@ -779,7 +779,6 @@ fn arb_inbox_model() -> impl Strategy<Value = Inbox> {
                     item
                 })
                 .collect(),
-            source_lines: Vec::new(),
             eol,
         })
 }
