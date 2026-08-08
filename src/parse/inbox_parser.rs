@@ -8,8 +8,14 @@ use crate::parse::task_parser::parse_title_and_tags;
 /// The first line is the title (with optional `#tags`).
 /// Subsequent indented lines are the body text.
 ///
-/// Returns the parsed Inbox and a list of lines that were dropped (not recognized
-/// as items, headers, or blank lines). Callers can log these to the recovery log.
+/// Content this parser does not model — a stray note between items, a heading
+/// somebody added — is **carried on the item above it** ([`InboxItem::trailing_lines`])
+/// rather than dropped. Nothing routine reaches the recovery log.
+///
+/// Returns the parsed Inbox and a list of dropped lines, which callers log to the
+/// recovery log. That list is empty for every input today and
+/// `nothing_is_ever_dropped` pins it that way; it stays as the reporting path for
+/// a format addition this parser does not yet understand.
 pub fn parse_inbox(source: &str) -> (Inbox, Vec<String>) {
     let lines: Vec<String> = source.lines().map(|l| l.to_string()).collect();
 
@@ -28,7 +34,12 @@ pub fn parse_inbox(source: &str) -> (Inbox, Vec<String>) {
 
     // Parse items
     let mut items = Vec::new();
-    let mut dropped_lines = Vec::new();
+    // Kept as a backstop and pinned empty (`nothing_is_ever_dropped`). Every
+    // shape that used to land here is now carried by the item above it, but the
+    // channel stays: a future addition to the format that this parser does not
+    // model should reach the recovery log rather than vanish, and a caller that
+    // has already wired up the reporting is what makes that automatic.
+    let dropped_lines = Vec::new();
 
     while idx < lines.len() {
         let line = &lines[idx];
@@ -102,9 +113,32 @@ pub fn parse_inbox(source: &str) -> (Inbox, Vec<String>) {
                 idx += 1;
             }
 
-            // Skip blank lines between items
+            // The blank lines that follow the item. Where they end up depends on
+            // what comes after them, so remember where they started.
+            let blanks_start = idx;
             while idx < lines.len() && lines[idx].trim().is_empty() {
                 idx += 1;
+            }
+
+            // Anything here that is not another item is content frame does not
+            // model — a stray note, a heading somebody added, the residue of a
+            // hand edit. It used to be dropped and reported to the recovery log.
+            // It is now carried on the item above it, verbatim.
+            //
+            // **The blank lines come with it, and that is the whole trick.** A
+            // stranded line is only stranded *because* a blank separates it from
+            // the item: without one the parser reads it as body
+            // (`- one\nstray` gives item "one" with body "stray"). Re-emitting
+            // the line without its blank would turn a preserved line into body
+            // content on the next read — trading a visible drop for a silent
+            // change of meaning, which is worse. So the blanks leave
+            // `source_text` and travel with the run.
+            let mut trailing_lines = Vec::new();
+            if idx < lines.len() && !is_item_line(&lines[idx]) {
+                while idx < lines.len() && !is_item_line(&lines[idx]) {
+                    idx += 1;
+                }
+                trailing_lines = lines[blanks_start..idx].to_vec();
             }
 
             let body = if body_lines.is_empty() {
@@ -113,21 +147,27 @@ pub fn parse_inbox(source: &str) -> (Inbox, Vec<String>) {
                 Some(body_lines.join("\n"))
             };
 
-            let source_text = Some(lines[item_start..idx].to_vec());
+            // Stops before the blanks when they went to `trailing_lines`, so
+            // nothing is emitted twice.
+            let own_end = if trailing_lines.is_empty() {
+                idx
+            } else {
+                blanks_start
+            };
+            let source_text = Some(lines[item_start..own_end].to_vec());
 
             items.push(InboxItem {
                 title,
                 tags,
                 body,
                 source_text,
+                trailing_lines,
                 dirty: false,
             });
-        } else if trimmed.is_empty() {
-            // Skip blank lines
-            idx += 1;
         } else {
-            // Unexpected non-item line — record as dropped
-            dropped_lines.push(lines[idx].clone());
+            // Blank lines before the first item, or anything else that reached
+            // here with no item to carry it. The header loop above takes
+            // everything up to the first item, so this is only ever blanks.
             idx += 1;
         }
     }
@@ -141,6 +181,14 @@ pub fn parse_inbox(source: &str) -> (Inbox, Vec<String>) {
         },
         dropped_lines,
     )
+}
+
+/// Whether a line starts a new top-level item.
+///
+/// The same test the body loop uses to stop: `- ` at column zero. An indented
+/// `- ` is a list inside somebody's body text, not the next item.
+fn is_item_line(line: &str) -> bool {
+    !line.starts_with(' ') && line.trim().starts_with("- ")
 }
 
 /// Check if a line consists entirely of `#tag` words
@@ -381,10 +429,16 @@ mod tests {
         assert!(body.contains("fn main()"));
     }
 
+    /// Lines between items that are neither body nor a new item are carried on
+    /// the item above, not dropped.
+    ///
+    /// This test used to assert the opposite — that they landed in `dropped` and
+    /// went to the recovery log. That is the wrong home for them: the log is a
+    /// last resort for content that could not be kept, and this content can be
+    /// kept. Lines before the first item are header, not stranded, which is what
+    /// makes the item-above anchor total.
     #[test]
-    fn test_parse_inbox_dropped_lines() {
-        // Lines between items that don't start with "- " are dropped.
-        // Note: lines before the first item are collected as header, not dropped.
+    fn test_parse_inbox_keeps_stray_lines_on_the_item_above() {
         let source = "\
 # Inbox
 
@@ -399,9 +453,50 @@ Another stray line
         assert_eq!(inbox.items[0].title, "First item");
         assert_eq!(inbox.items[1].title, "Second item");
 
-        assert_eq!(dropped.len(), 2);
-        assert_eq!(dropped[0], "Stray line between items");
-        assert_eq!(dropped[1], "Another stray line");
+        assert!(
+            dropped.is_empty(),
+            "nothing routine reaches the log: {dropped:?}"
+        );
+        assert_eq!(
+            inbox.items[0].trailing_lines,
+            vec![
+                "".to_string(),
+                "Stray line between items".to_string(),
+                "Another stray line".to_string(),
+            ],
+            "the separating blank travels with the run — without it the next \
+             read takes these lines as the item's body"
+        );
+        assert!(inbox.items[1].trailing_lines.is_empty());
+
+        // And the file comes back byte for byte.
+        assert_eq!(crate::parse::serialize_inbox(&inbox), source);
+    }
+
+    /// The same content, after the carrying item is edited. The stranded lines
+    /// survive a canonical rewrite of their anchor, and the blank that keeps
+    /// them stranded survives with them.
+    #[test]
+    fn a_dirty_item_still_carries_what_was_stranded_under_it() {
+        let source = "# Inbox\n\n- First\n\nstray\n\n- Second\n";
+        let (mut inbox, _) = parse_inbox(source);
+        inbox.items[0].title = "First, edited".to_string();
+        inbox.items[0].dirty = true;
+
+        let written = crate::parse::serialize_inbox(&inbox);
+        assert_eq!(written, "# Inbox\n\n- First, edited\n\nstray\n\n- Second\n");
+
+        // Re-reading finds it stranded again rather than as body, which is the
+        // property the blank is there to hold.
+        let (again, dropped) = parse_inbox(&written);
+        assert!(dropped.is_empty());
+        assert_eq!(again.items[0].body, None, "still not body");
+        // The run reaches to the next item line, so the blank on either side of
+        // `stray` belongs to it. That is what makes the carry lossless.
+        assert_eq!(
+            again.items[0].trailing_lines,
+            vec!["".to_string(), "stray".to_string(), "".to_string()]
+        );
     }
 
     #[test]

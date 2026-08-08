@@ -869,10 +869,13 @@ fn apply_inverse(
             None
         }
         Operation::InboxDelete { index, item } => {
-            // Undo delete = re-insert the item
+            // Undo delete = re-insert the item, and un-re-anchor anything that
+            // was stranded under it. `restore_item` is `take_item`'s exact
+            // inverse; a plain insert leaves the run on the neighbour that
+            // adopted it *and* on the item, which P9 sees as a byte difference.
             if let Some(inbox) = inbox {
                 let idx = (*index).min(inbox.items.len());
-                inbox.items.insert(idx, item.clone());
+                inbox.restore_item(idx, item.clone());
             }
             None
         }
@@ -938,7 +941,11 @@ fn apply_inverse(
             }
             if let Some(inbox) = inbox {
                 let idx = (*inbox_index).min(inbox.items.len());
-                inbox.items.insert(idx, item.clone());
+                // The inverse of the `take_item` triage did — see
+                // `Inbox::restore_item`. A plain insert would leave anything
+                // stranded under this item on both the item and the neighbour
+                // that adopted it.
+                inbox.restore_item(idx, item.clone());
             }
             // Return track_id so caller knows to save
             Some(track_id.clone())
@@ -1316,11 +1323,12 @@ fn apply_forward(
             None
         }
         Operation::InboxDelete { index, .. } => {
-            // Redo delete = remove the item again
+            // Redo delete = remove the item again, re-anchoring as the forward
+            // path did.
             if let Some(inbox) = inbox
                 && *index < inbox.items.len()
             {
-                inbox.items.remove(*index);
+                inbox.take_item(*index);
             }
             None
         }
@@ -1377,11 +1385,12 @@ fn apply_forward(
             item,
             ..
         } => {
-            // Redo triage = remove from inbox, add task to track
+            // Redo triage = remove from inbox, add task to track, re-anchoring
+            // as the forward path did.
             if let Some(inbox) = inbox
                 && *inbox_index < inbox.items.len()
             {
-                inbox.items.remove(*inbox_index);
+                inbox.take_item(*inbox_index);
             }
             // Re-create task in track
             let track = find_track_mut(tracks, track_id);

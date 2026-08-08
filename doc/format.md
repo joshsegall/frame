@@ -284,6 +284,21 @@ Archived task IDs keep the prefix of the track they belong to; `fr track rename 
 
 **Item separation**: Blank lines between items.
 
+**Anything else is kept, not dropped.** A line between two items that is neither body nor a new item — a stray note, a heading somebody added, the residue of a hand edit — is carried on the item **above** it and re-emitted in place, along with the blank lines that separated it. Frame does not understand such a line, but it does not lose it either, and it does not need the recovery log to hold it.
+
+The blank line matters and is part of what gets carried. It is what makes a line stranded rather than body text:
+
+```markdown
+- one
+stray          <- body of "one" (no blank before it)
+
+- two
+
+stray          <- stranded: belongs to no item, carried on "two"
+```
+
+**Spacing may be mixed after an edit**, and that is expected. A clean item is written back verbatim while an edited one is written canonically, so editing one item of a compactly-written inbox leaves a blank line below that item and not below its neighbours. A compact inbox converts to the canonical spacing one item at a time, as each is edited. Every intermediate state is stable: reading and writing it back reproduces it exactly.
+
 ## Selective Rewrite
 
 Frame uses a selective rewrite strategy for round-trip preservation:

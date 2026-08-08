@@ -187,6 +187,9 @@ const INBOX: &str = "\
 # Inbox
 
 - something captured earlier #idea
+
+a stray line between two inbox items
+
 - another thought
 ";
 
@@ -239,6 +242,7 @@ fn build_project(root: &Path) {
 const UNOWNED_LINES: &[&str] = &[
     "a stray line between two tasks",
     "content indented past its metadata",
+    "a stray line between two inbox items",
 ];
 
 // Reading the tree — `all_markdown`, `present`, `all_text`, `tasks_of`, `walk`

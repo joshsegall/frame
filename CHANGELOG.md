@@ -22,6 +22,18 @@ All notable changes to frame will be documented in this file.
 
 - **`fr check` reports unclaimed rescue copies.** `frame/.rescue/` holds work the TUI could not save; the exit message named it once and nothing mentioned it again. A warning, with no `--fix`: moving a copy into place overwrites a live file that may be newer, and deleting it destroys the only copy of that work.
 
+### Fixed
+
+- **A stray line in `inbox.md` is no longer deleted by the next write.** A line between two items that frame does not understand — a note somebody left, a heading, the residue of a hand edit — was dropped on parse and reported to the recovery log, which meant the first `fr inbox`, triage or TUI edit removed it from the file for good.
+
+  It is now carried on the item above it and written back in place, along with the blank line that separates it. Blank line included, because that blank is what makes the line a stray note rather than the item's body text: `- item` followed directly by a line is body, `- item`, blank, line is not. Re-emitting the line without it would quietly turn a preserved note into part of the item above.
+
+  Removing the item that carries it — triage, delete, or a merge where another writer deleted it — re-anchors the note onto whatever still sits above it rather than taking it along. A note separated from an item by a blank line was never part of that item, so triaging the item to a track leaves the note in the inbox.
+
+  Nothing routine reaches the recovery log any more: `parse_inbox` reports no dropped lines for any input, and a property now holds it to that. The reporting path stays for a future format addition this parser does not model.
+
+  **Inbox spacing may be mixed after an edit, and that is expected.** An untouched item is written back exactly as you wrote it while an edited one is written canonically, so editing one item of a compactly-spaced inbox adds a blank line below that item and not below its neighbours. A compact inbox converts to the canonical spacing one item at a time, as each is edited, and every intermediate state is stable — reading and writing it back changes nothing.
+
 ### Changed
 
 - **`fr check` looks for the conflict evidence before pointing at it.** It used to tell every reader "their version is in the recovery log" for any task carrying a `conflict:` marker. The marker is committed and travels to every clone; the log does not — so a marker pulled from someone else's merge, or read after `fr recovery prune`, pointed at an entry that working copy never had. It now checks, and either names the lookup that retrieves it (`fr recovery --for <ID>`) or says plainly that the entry is not here and to recover the other side from version control. `--json` carries the answer as `evidence`.

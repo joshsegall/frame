@@ -333,15 +333,41 @@ pub fn reconcile_inbox(base: &Inbox, ours: &Inbox, theirs: &Inbox) -> Reconciled
     let mut items: Vec<InboxItem> = Vec::new();
     let mut deleted = 0usize;
 
+    // A run of stranded lines whose anchor the merge is dropping, waiting to be
+    // re-anchored. Same rule as `Inbox::take_item`: content frame carries but
+    // does not model never travels with the item that happened to sit above it,
+    // and never disappears because that item did.
+    let mut orphaned: Vec<String> = Vec::new();
+
     for item in &ours.items {
         let key = item_key(item);
         match remaining.get_mut(&key) {
             Some(n) if *n > 0 => {
                 *n -= 1;
-                items.push(item.clone());
+                let mut kept = item.clone();
+                if !orphaned.is_empty() {
+                    // The run sat *above* this item, so it goes on the one
+                    // before it — which is where `orphaned` came from — unless
+                    // there is no such item, handled after the loop.
+                    let mut prefix = std::mem::take(&mut orphaned);
+                    prefix.extend(kept.trailing_lines);
+                    kept.trailing_lines = prefix;
+                }
+                items.push(kept);
             }
-            _ => deleted += 1,
+            _ => {
+                deleted += 1;
+                orphaned.extend(item.trailing_lines.iter().cloned());
+            }
         }
+    }
+
+    // Re-anchor onto the last surviving item, or fall through to the header
+    // below when the merge kept nothing of ours.
+    if !orphaned.is_empty()
+        && let Some(last) = items.last_mut()
+    {
+        last.trailing_lines.extend(std::mem::take(&mut orphaned));
     }
 
     let mut took_theirs = 0usize;
@@ -358,11 +384,14 @@ pub fn reconcile_inbox(base: &Inbox, ours: &Inbox, theirs: &Inbox) -> Reconciled
 
     // Header follows the same rule as a track's literal content: take theirs
     // only when we did not touch it ourselves.
-    let header_lines = if ours.header_lines == base.header_lines {
+    let mut header_lines = if ours.header_lines == base.header_lines {
         theirs.header_lines.clone()
     } else {
         ours.header_lines.clone()
     };
+    // Nothing of ours survived to carry it, so it lands where it now sits:
+    // straight after the header.
+    header_lines.extend(orphaned);
 
     ReconciledInbox {
         inbox: Inbox {
@@ -1466,6 +1495,39 @@ mod tests {
         let r = reconcile_inbox(&base, &ours, &theirs);
         assert_eq!(r.inbox.items.len(), 1);
         assert_eq!(r.inbox.items[0].tags, vec!["b".to_string()]);
+    }
+
+    /// Content frame carries but does not model survives a merge that drops the
+    /// item it was anchored to. The same rule as `Inbox::take_item`: the run is
+    /// re-anchored to whatever still stands above it, and never leaves the file
+    /// because its neighbour did.
+    #[test]
+    fn a_stranded_run_survives_their_deletion_of_its_anchor() {
+        let base = ib("# Inbox\n\n- one\n\nSTRANDED\n\n- two\n");
+        let ours = base.clone();
+        let theirs = ib("# Inbox\n\n- two\n");
+
+        let r = reconcile_inbox(&base, &ours, &theirs);
+        let out = crate::parse::serialize_inbox(&r.inbox);
+        assert!(out.contains("STRANDED"), "{out}");
+        assert!(!out.contains("- one"), "their delete still applies: {out}");
+        // Still stranded rather than absorbed as the surviving item's body.
+        let (reread, _) = crate::parse::parse_inbox(&out);
+        assert_eq!(reread.items.len(), 1);
+        assert_eq!(reread.items[0].body, None, "not body: {out}");
+    }
+
+    /// And when the merge keeps nothing of ours at all, it lands after the
+    /// header — which is where it then sits.
+    #[test]
+    fn a_stranded_run_falls_back_to_the_header() {
+        let base = ib("# Inbox\n\n- one\n\nSTRANDED\n");
+        let ours = base.clone();
+        let theirs = ib("# Inbox\n");
+
+        let r = reconcile_inbox(&base, &ours, &theirs);
+        let out = crate::parse::serialize_inbox(&r.inbox);
+        assert!(out.contains("STRANDED"), "{out}");
     }
 
     #[test]

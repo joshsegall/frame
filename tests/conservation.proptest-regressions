@@ -33,3 +33,4 @@ cc bc56dd50da2f5b3b303b2114308f83909345a7c88ee897fa650e3bacff69b8ff # found: [Se
 # --- eight-op sequence ending RenamePrefix { track: 0 }.
 cc b3b5740db563d27894640e095c00dec1d73cc87593199b64c8cc534ea4afc0ca # covers: a cross-track move with a dep pointing into what it re-keys
 cc d6ce0115faff78dfa3ee6d53583ae2652c7fe1f83a139dd48ad81a4e0226522f # covers: a prefix rename with a dep pointing into what it renames
+cc d905a98f190e9dc9bccf0f43e3d23ffd18394b0deffe5a90b87cc5c53b48b52c # shrinks to ops = [Triage { item: 2, track: 0 }] — triage dropped a stranded inbox line with the item that anchored it; pinned as a fixed case by `model::inbox::tests::taking_an_item_leaves_what_was_stranded_under_it`, so this line is not what holds it

@@ -6,15 +6,23 @@
 //! them lost anything either one acknowledged. Both answers depend on reading
 //! `frame/` correctly, and that is not a one-liner.
 //!
-//! **Three file shapes live under `frame/`, and each has its own pair.**
+//! **Four file shapes live under `frame/`, and each has its own pair.**
 //! `tracks/<id>.md` and `archive/_tracks/<id>.md` are tracks, with `## Section`
 //! headers, and parse with `parse_track`. `archive/<id>.md` is a flat task list
 //! under a `# Archive — <id>` heading with no sections at all, and parses with
-//! `parse_archive`. Reading either as the other is a defect this project has
+//! `parse_archive`. `inbox.md` is neither, and parses with `parse_inbox`.
+//! Reading either of the first two as the other is a defect this project has
 //! shipped in both directions: walking sections in a done-task archive finds
 //! nothing and reports success, and `archive/_tracks/` is skipped entirely by
 //! `load_archives`. A test harness that got this wrong would under-count and
 //! call it conservation.
+//!
+//! **`inbox.md` was read as a track here, and that was worse than wrong — it was
+//! vacuous.** An inbox line is not a task line, so `parse_track` carries the
+//! whole file as literal content and `serialize_track` gives it back verbatim.
+//! The settledness check therefore passed for *every* inbox, including ones the
+//! inbox pair demonstrably lost content from. A check that cannot fail reads
+//! like coverage and is not; both P7 and P8 sat behind this one.
 //!
 //! So [`all_tasks`] goes through `project_io::load_archives` for done-task
 //! archives rather than inventing a second reading of the format, and handles
@@ -28,7 +36,9 @@ use std::path::Path;
 use frame::io::project_io;
 use frame::model::task::Task;
 use frame::model::track::{Track, TrackNode};
-use frame::parse::{parse_archive, parse_track, serialize_archive, serialize_track};
+use frame::parse::{
+    parse_archive, parse_inbox, parse_track, serialize_archive, serialize_inbox, serialize_track,
+};
 
 /// Every `.md` under `frame/`, so content is judged across tracks and archives
 /// together — a task moving into the archive is not a loss.
@@ -157,7 +167,10 @@ pub fn unsettled(frame_dir: &Path) -> Option<String> {
     for (path, text) in all_markdown(frame_dir) {
         let is_archive = path.components().any(|c| c.as_os_str() == "archive");
         let is_whole_track = path.components().any(|c| c.as_os_str() == "_tracks");
-        let rewritten = if is_archive && !is_whole_track {
+        let is_inbox = path.file_name().is_some_and(|n| n == "inbox.md");
+        let rewritten = if is_inbox {
+            serialize_inbox(&parse_inbox(&text).0)
+        } else if is_archive && !is_whole_track {
             serialize_archive(&parse_archive(&text))
         } else {
             serialize_track(&parse_track(&text))

@@ -65,7 +65,7 @@ pub(super) fn confirm_inbox_delete(app: &mut App, index: usize) {
         return;
     }
 
-    let item = inbox.items.remove(index);
+    let item = inbox.take_item(index);
     app.undo_stack.push(Operation::InboxDelete { index, item });
     app.save_inbox_logged();
 

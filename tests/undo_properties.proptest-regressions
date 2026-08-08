@@ -30,3 +30,6 @@ cc 8a78c79216287e68d204833284e019ea147705e65a0835e45744880e032489b3 # shrinks to
 cc 84b9ddb1a5693f45a119ba052b0df7a54ec8dcda23b73997b75bdebe74a20bb8 # shrinks to steps = [Step { action: TrackCcFocus, target: 20, text: 0 }]
 cc e1ee290c162bf3b9b04c4604a00926b99aa12e6273321b885738763ade72f7fd # shrinks to steps = [Step { action: TrackArchive, target: 0, text: 0 }, Step { action: TrackShelve, target: 20, text: 0 }, Step { action: TrackAdd, target: 0, text: 0 }]
 cc a5afb42ac470f10fb9dcb8db154a8e6f1dac749c6ffb362b67f8255ba4f90e38 # shrinks to steps = [Step { action: TrackAdd, target: 0, text: 0 }, Step { action: TrackArchive, target: 43, text: 0 }, Step { action: TrackMoveDown, target: 3, text: 0 }]
+cc 75aaeda812eec6625b082719763edac97fcc6a603aafd40f241ec8f138250aa0 # shrinks to steps = [Step { action: InboxDelete, target: 2, text: 0 }] — undo of a delete re-inserted the item without un-re-anchoring what it had stranded
+cc 4ed93fa477e69be105db82dbdbdcdf37b43d295a1a7ebc358addd880048621c7 # shrinks to steps = [Step { action: InboxTriage, target: 6, text: 0 }] — the same on the triage path
+# Both are pinned as fixed cases by `model::inbox::tests::restoring_an_item_is_the_exact_inverse_of_taking_it`, which cannot be orphaned by a change to ACTIONS; these two lines only re-run the search.

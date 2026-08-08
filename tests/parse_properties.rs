@@ -1174,6 +1174,50 @@ proptest! {
         let written = serialize_track(&parse_track(&damaged));
         prop_assert_eq!(nonblank_lines(&damaged), nonblank_lines(&written));
     }
+
+    /// The third pair, and the one that had no P5 at all until now.
+    ///
+    /// It could not have held before: the inbox parser *deliberately* dropped
+    /// any line between two items that was neither body nor a new item, handing
+    /// it to the caller to write to the recovery log. That is the wrong home for
+    /// content that can simply be kept — the log is a last resort for what could
+    /// not be saved, not the routine answer to a line the parser does not model.
+    /// `InboxItem::trailing_lines` now carries such a line on the item above it,
+    /// which is what lets this be stated as strictly as the other two.
+    #[test]
+    fn p5_an_inbox_write_keeps_every_line(source in arb_soup()) {
+        let written = serialize_inbox(&parse_inbox(&source).0);
+        prop_assert_eq!(nonblank_lines(&source), nonblank_lines(&written));
+    }
+
+    #[test]
+    fn p5_an_inbox_write_keeps_every_line_in_a_damaged_fixture(
+        which in 0usize..64,
+        idx in 0usize..512,
+        mutation in arb_mutation(),
+    ) {
+        let corpus = fixture_sources();
+        let source = &corpus[which % corpus.len()];
+        let damaged = mutate(source, idx, &mutation);
+
+        let written = serialize_inbox(&parse_inbox(&damaged).0);
+        prop_assert_eq!(nonblank_lines(&damaged), nonblank_lines(&written));
+    }
+
+    /// The other half of the same decision, stated as an invariant rather than
+    /// left as an observation: **nothing routine reaches the recovery log.**
+    ///
+    /// `parse_inbox` still returns a dropped-line list and `load_project` still
+    /// reports it, and that plumbing is worth keeping — a shape a future format
+    /// grows and this parser does not model should be reported rather than
+    /// vanish. But it must never fire for anything the parser meets today, and a
+    /// channel nobody checks is how it would quietly start firing again. This is
+    /// the check.
+    #[test]
+    fn nothing_is_ever_dropped(source in arb_soup()) {
+        let (_, dropped) = parse_inbox(&source);
+        prop_assert!(dropped.is_empty(), "dropped {dropped:?} from {source:?}");
+    }
 }
 
 // ---------------------------------------------------------------------------

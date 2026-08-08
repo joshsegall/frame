@@ -191,12 +191,25 @@ side = \"S\"
     // `source_text` model working as designed, and a fixture that started
     // non-canonical would report it as an undo failure on every inbox step.
     // `the_fixture_is_settled` checks for exactly that.
+    // The stray line is content frame carries but does not model — it is
+    // neither body (a blank separates it from the item above) nor a new item.
+    // `InboxItem::trailing_lines` anchors it to the item above, so every inbox
+    // path a generated sequence reaches has to keep it: an edit must not
+    // canonicalise it away, a reorder must not duplicate it onto a neighbour,
+    // and a delete or triage must re-anchor it rather than take it along.
+    //
+    // It costs the consumers nothing. P9 compares the tree byte for byte, so a
+    // run the forward path moved and the undo did not put back is already a
+    // failure under the property as written; P8 gets the same content through
+    // the merge machinery under contention. No new assertion, no new claim.
     fs::write(
         frame.join("inbox.md"),
         "\
 # Inbox
 
 - Bug in parser #bug
+
+reviewed these on Tuesday
 
 - Think about design
 ",

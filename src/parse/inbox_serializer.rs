@@ -2,6 +2,30 @@ use crate::model::inbox::Inbox;
 
 /// Serialize an inbox back to its markdown representation.
 /// Clean items emit verbatim source; dirty items emit canonical format.
+///
+/// # Mixed spacing is accepted output — do not "fix" it
+///
+/// Because a clean item is emitted verbatim and a dirty one canonically, editing
+/// one item of a compactly-written inbox leaves the file with both spellings:
+///
+/// ```text
+/// - one
+/// - two, edited     <- gains a blank below it, being dirty now
+///
+/// - three
+/// ```
+///
+/// That is the selective-rewrite design working, not a bug in it. A compact
+/// inbox migrates to canonical **one item at a time**, as each item is touched,
+/// and every intermediate state is a fixpoint of this pair — re-reading and
+/// re-writing reproduces it exactly, so it is stable rather than churning.
+///
+/// The alternative was rejected on purpose: normalising every item whenever any
+/// one is dirty turns a one-word edit into a whole-file diff, which is the exact
+/// cost `source_text` exists to avoid. Making the separator depend on what the
+/// neighbours look like was rejected too — it makes the output a function of
+/// parse state, which is far harder to state as an invariant than "clean is
+/// verbatim, dirty is canonical".
 pub fn serialize_inbox(inbox: &Inbox) -> String {
     let mut lines = Vec::new();
 
@@ -14,6 +38,7 @@ pub fn serialize_inbox(inbox: &Inbox) -> String {
             && let Some(ref source) = item.source_text
         {
             lines.extend(source.iter().cloned());
+            lines.extend(item.trailing_lines.iter().cloned());
             continue;
         }
 
@@ -34,10 +59,16 @@ pub fn serialize_inbox(inbox: &Inbox) -> String {
             }
         }
 
-        // Add blank line separator between items (not after the last one)
-        if i < inbox.items.len() - 1 {
+        // Add blank line separator between items (not after the last one).
+        //
+        // Skipped when this item carries stranded content, because that content
+        // already begins with the blank lines that separated it from the item —
+        // see `InboxItem::trailing_lines`. Adding another here would insert a
+        // blank the file never had, on every write.
+        if item.trailing_lines.is_empty() && i < inbox.items.len() - 1 {
             lines.push(String::new());
         }
+        lines.extend(item.trailing_lines.iter().cloned());
     }
 
     // Same as the track serializer: with no items left, the blank under the

@@ -67,8 +67,10 @@ pub fn triage(
         }
     }
 
-    // Now safe to remove — destination is validated
-    let item = inbox.items.remove(index);
+    // Now safe to remove — destination is validated. `take_item` rather than
+    // `remove`: anything stranded under this item stays in the inbox rather
+    // than travelling to the track or being dropped.
+    let item = inbox.take_item(index);
 
     // Build the task from the inbox item
     let next_num = mint.next(track);
