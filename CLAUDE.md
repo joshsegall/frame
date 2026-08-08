@@ -112,3 +112,11 @@ Each answers a different question; a new test usually belongs in one of them rat
 **When adding a detector to `fr check`, add a case to `damaged_corpus.rs`** — `every_finding_tag_has_a_case` fails the build until you do, on purpose.
 
 Two suites share helpers under `tests/support/`, included with `#[path]` rather than copied. `tui_steps.rs` drives a real `App` through generated semantic key sequences (P9 and P8); `tree_checks.rs` reads a project off disk the way the code does — three file shapes, three parse/serialize pairs — and answers what is present and what is settled (P7 and P8). Neither is a test target of its own.
+
+### A `.proptest-regressions` seed is not a pin
+
+**Changing a generator orphans every seed recorded before it.** A `cc` line is a seed, not a recorded sequence: it decodes through the generator *as it is now*, so adding an arm to `arb_op` / `arb_event` / `ACTIONS` re-maps the whole random stream and every earlier line silently stops reaching the case its comment names. It still runs, as an extra random case, which is why nothing fails to tell you.
+
+(Two further things a seed is not: it reproduces the **original** failing case, while the comment records what that case **shrank** to — different lengths, always. And a file's seeds are replayed against *every* proptest in that file.)
+
+So: **before adding to a generator, convert anything load-bearing into a fixed-case test** — one that runs the exact sequence and cannot be orphaned. Then relabel the orphaned lines `found:` so nobody reads them as live pins. Each `.proptest-regressions` file states which of its lines are current and which are `found:`, and names the test that actually pins each one.

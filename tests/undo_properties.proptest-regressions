@@ -4,6 +4,24 @@
 #
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
+#
+# ---------------------------------------------------------------------------
+# A `cc` line is a seed for the generator, not a recording of a step sequence.
+# It reproduces the ORIGINAL failing case; the comment records what that case
+# SHRANK to, which is shorter. And it decodes through the generator AS IT IS
+# NOW, so adding an entry to `ACTIONS` re-maps the whole random stream and
+# every line here stops reaching the sequence it names.
+#
+# Every line below is currently good: `ACTIONS` is byte-identical to the list
+# in c98df4e, where the first of these was recorded. 6fe8063 moved the driver
+# into tests/support/tui_steps.rs and changed nothing it generates. Checked by
+# reverting the `reorder_tracks` fix (2ee3ba6) — the last line below then fails
+# on its own at PROPTEST_CASES=1, which is what a pin is supposed to do.
+#
+# BEFORE adding to `ACTIONS`, convert anything load-bearing here into a
+# fixed-case test. See tests/concurrency.proptest-regressions for what a file
+# looks like once that has been skipped.
+# ---------------------------------------------------------------------------
 cc f9559bfd819684f28944aae9b53a6063b4f50f67932f26b4e6ac006008117c7c # shrinks to steps = [Step { action: InboxTriage, target: 0, text: 0 }]
 cc cdef7f4d13ac4048d1d1c86369908fc46848b8fa54a73160fe030681036a4230 # shrinks to steps = [Step { action: InboxEditTitle, target: 2, text: 0 }]
 cc a26c586cb670099900a4a99e34dffcd143b0962315fcdfb6143479aa57458faf # shrinks to steps = [Step { action: DeleteTask, target: 5, text: 0 }, Step { action: TrackArchive, target: 8, text: 0 }]

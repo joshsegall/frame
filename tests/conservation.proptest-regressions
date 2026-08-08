@@ -4,7 +4,32 @@
 #
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
-cc 03d1dc421c7c9749304e63eab9cad9010bfb8bde8cdf96b6235ab744e5471dda # shrinks to ops = [Delete { task: 4 }, AddTask { track: 0, title: "a plain new task" }, Delete { task: 8 }, Clean]
-cc bc56dd50da2f5b3b303b2114308f83909345a7c88ee897fa650e3bacff69b8ff # shrinks to ops = [SetNote { task: 2, text: "a note\nwith two lines" }, SetNote { task: 2, text: "a note" }]
-cc b3b5740db563d27894640e095c00dec1d73cc87593199b64c8cc534ea4afc0ca # shrinks to ops = [MoveToTrack { task: 8, track: 1 }]
-cc d6ce0115faff78dfa3ee6d53583ae2652c7fe1f83a139dd48ad81a4e0226522f # shrinks to ops = [RenamePrefix { track: 0 }]
+#
+# ---------------------------------------------------------------------------
+# What a `cc` line is, and what it is not
+#
+# It is a seed for the generator, not a recording of an operation sequence. A
+# seed reproduces the ORIGINAL failing case; the comment records what that case
+# SHRANK to, which is shorter and always was. And a seed decodes through the
+# generator AS IT IS NOW — adding an arm to `arb_op` re-maps the whole random
+# stream, so a line recorded before that change regenerates something else
+# entirely. Those are marked `found:`.
+#
+# BEFORE adding an arm to `arb_op`, convert anything here that is load-bearing
+# into a fixed-case test. Nothing is today — both `found:` lines below have
+# their own named pins — which is why relabelling was enough.
+# ---------------------------------------------------------------------------
+
+# --- `found:` — recorded before e836d7b added AddDep/MoveToTrack to `arb_op`.
+cc 03d1dc421c7c9749304e63eab9cad9010bfb8bde8cdf96b6235ab744e5471dda # found: [Delete, AddTask, Delete, Clean] — pinned by `clean_does_not_drop_a_line_it_does_not_understand` and `a_cleaned_task_moves_to_the_archive_rather_than_away`
+cc bc56dd50da2f5b3b303b2114308f83909345a7c88ee897fa650e3bacff69b8ff # found: [SetNote, SetNote] on one task (F12) — pinned by `deep_content_survives_a_section_move` and `a_note_absorbs_unowned_content_under_its_own_task`
+
+# --- Current, and not past failures of frame. These two were produced by
+# --- injecting a defect, checking claim 5 caught it, and removing the defect
+# --- again; they are kept because each regenerates an original containing its
+# --- shape, so the shape runs on every invocation instead of waiting on a
+# --- random draw. Both checked in isolation at PROPTEST_CASES=1: the first
+# --- regenerates [EditTitle, MoveToTrack { task: 8, track: 1 }], the second an
+# --- eight-op sequence ending RenamePrefix { track: 0 }.
+cc b3b5740db563d27894640e095c00dec1d73cc87593199b64c8cc534ea4afc0ca # covers: a cross-track move with a dep pointing into what it re-keys
+cc d6ce0115faff78dfa3ee6d53583ae2652c7fe1f83a139dd48ad81a4e0226522f # covers: a prefix rename with a dep pointing into what it renames
