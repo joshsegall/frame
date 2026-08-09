@@ -7682,3 +7682,141 @@ fn clean_human_output_has_no_json() {
     let out = run_fr_ok(tmp.path(), &["clean"]);
     assert!(!out.trim_start().starts_with('{'), "{out}");
 }
+
+// ---------------------------------------------------------------------------
+// `--json` on the write commands
+// ---------------------------------------------------------------------------
+
+/// A creator returns the task it made, in the shape `fr show --json` returns.
+#[test]
+fn write_json_creator_returns_the_new_task() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+
+    let out = run_fr_ok(tmp.path(), &["--json", "add", "main", "a new task"]);
+    let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+    assert_eq!(v["command"], "add");
+    assert_eq!(v["changed"], true);
+    assert_eq!(v["track"], "main");
+    assert_eq!(v["tasks"][0]["title"], "a new task");
+    assert_eq!(v["tasks"][0]["state"], "todo");
+
+    // The same task, looked up — the write surface must not invent a second
+    // task shape alongside the read one.
+    let id = v["tasks"][0]["id"].as_str().unwrap().to_string();
+    let shown = run_fr_ok(tmp.path(), &["--json", "show", &id]);
+    let shown: serde_json::Value = serde_json::from_str(&shown).unwrap();
+    assert_eq!(v["tasks"][0], shown);
+}
+
+/// `changed` is not "did it succeed" — it is "does the project differ".
+///
+/// `fr tag T add x` on a task already tagged `x` succeeds and changes nothing,
+/// and a caller deciding whether to commit needs those told apart. Computed by
+/// comparing the task before and after, so it needs no per-op bookkeeping.
+#[test]
+fn write_json_changed_is_false_for_a_no_op() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+
+    let first = run_fr_ok(tmp.path(), &["--json", "tag", "M-001", "add", "fresh"]);
+    let first: serde_json::Value = serde_json::from_str(&first).unwrap();
+    assert_eq!(first["changed"], true);
+
+    let again = run_fr_ok(tmp.path(), &["--json", "tag", "M-001", "add", "fresh"]);
+    let again: serde_json::Value = serde_json::from_str(&again).unwrap();
+    assert_eq!(again["changed"], false, "re-adding a tag changed nothing");
+    // Still reports the task, so a caller sees the state either way.
+    assert_eq!(again["tasks"][0]["id"], "M-001");
+}
+
+/// `delete` reports the tasks as they were — after it runs there is nothing
+/// left to describe.
+#[test]
+fn write_json_delete_reports_the_pre_delete_snapshot() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+
+    let out = run_fr_ok(tmp.path(), &["--json", "delete", "M-001", "--yes"]);
+    let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+    assert_eq!(v["command"], "delete");
+    assert_eq!(v["tasks"][0]["id"], "M-001");
+    assert!(
+        v["tasks"][0]["title"]
+            .as_str()
+            .is_some_and(|t| !t.is_empty()),
+        "the snapshot should carry the task's content: {v}"
+    );
+
+    let (_, _, still_there) = run_fr(tmp.path(), &["show", "M-001"]);
+    assert!(!still_there, "the task should be gone");
+}
+
+/// **`--json` must never hang on a prompt, and never auto-confirm one.**
+///
+/// `--json` says the caller is a program: a confirmation blocks on a stdin that
+/// will never answer, and confirming for it would let the flag silently escalate
+/// a destructive command. All three prompting commands fail fast instead —
+/// `check --fix` included, which already had a JSON surface and so already had
+/// this defect.
+#[test]
+fn write_json_refuses_to_prompt() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+
+    let (stdout, stderr, ok) = run_fr(tmp.path(), &["--json", "delete", "M-001"]);
+    assert!(!ok, "should have failed rather than prompted");
+    assert!(stderr.contains("--yes"), "{stderr}");
+    assert!(
+        stdout.trim().is_empty(),
+        "no document on a refusal: {stdout}"
+    );
+
+    // And the task is still there — a refusal must not half-do the job.
+    let (_, _, still_there) = run_fr(tmp.path(), &["show", "M-001"]);
+    assert!(still_there);
+}
+
+/// A track write reports the track in the shape `fr tracks --json` lists it.
+#[test]
+fn write_json_track_reports_the_track() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+
+    let out = run_fr_ok(tmp.path(), &["--json", "track", "shelve", "side"]);
+    let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+    assert_eq!(v["command"], "shelve");
+    assert_eq!(v["track"]["id"], "side");
+    assert_eq!(v["track"]["state"], "shelved");
+    assert!(v["track"]["stats"].is_object(), "{v}");
+}
+
+/// `import` creates many, and reports them all.
+#[test]
+fn write_json_import_reports_every_task() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+    fs::write(
+        tmp.path().join("in.md"),
+        "- [ ] first imported\n- [ ] second imported\n",
+    )
+    .unwrap();
+
+    let out = run_fr_ok(
+        tmp.path(),
+        &["--json", "import", "in.md", "--track", "main"],
+    );
+    let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+    assert_eq!(v["command"], "import");
+    assert_eq!(v["tasks"].as_array().unwrap().len(), 2);
+}
+
+/// The human surface is unchanged by the JSON one existing.
+#[test]
+fn write_human_output_is_still_human() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+    let out = run_fr_ok(tmp.path(), &["add", "main", "plain"]);
+    assert!(!out.trim_start().starts_with('{'), "{out}");
+    assert!(out.trim().starts_with("M-"), "{out}");
+}

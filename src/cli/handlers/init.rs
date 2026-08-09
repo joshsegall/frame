@@ -111,7 +111,7 @@ fn update_git_config(cwd: &std::path::Path) -> Vec<String> {
         .collect()
 }
 
-pub fn cmd_init(args: InitArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub fn cmd_init(args: InitArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
     let frame_dir = cwd.join("frame");
 
@@ -194,6 +194,20 @@ pub fn cmd_init(args: InitArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // Configure git, if this is a repo.
     let git_configured = update_git_config(&cwd);
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "command": "init",
+                "changed": true,
+                "frame_dir": frame_dir.display().to_string(),
+                "tracks": track_pairs.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+                "git_configured": git_configured,
+            }))?
+        );
+        return Ok(());
+    }
 
     // Print summary
     println!("[>] frame initialized");

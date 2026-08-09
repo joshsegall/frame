@@ -70,6 +70,40 @@ pub struct CleanJson<'a> {
     pub field_order: &'a crate::ops::clean::NormalizeResult,
 }
 
+/// What a task-writing command did, for `--json`.
+///
+/// `tasks` carries the affected tasks in full, as [`TaskJson`] — the same shape
+/// `fr show --json` returns, so a consumer that creates a task with `fr add` gets
+/// back exactly what it would get by looking the task up afterwards, rather than
+/// a second task shape to learn. A list because `delete` and `import` act on
+/// several; for `delete` it is the snapshot taken *before* the deletion, since
+/// afterwards there is nothing left to describe.
+///
+/// `changed` is whether the project actually differs. Distinct from success:
+/// `fr tag T-1 add cc` on a task already tagged `cc` succeeds and changes
+/// nothing, and a consumer deciding whether to commit needs to tell those apart.
+/// Computed by comparing the task before and after — see [`Task`]'s hand-written
+/// `PartialEq`, which ignores `source_text` and `dirty` and so compares exactly
+/// what a reader would call a change.
+#[derive(Serialize)]
+pub struct TaskWriteJson {
+    /// The subcommand, so a consumer piping several can tell them apart.
+    pub command: &'static str,
+    pub changed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub track: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<TaskJson>,
+}
+
+/// What a track-writing command did. [`TaskWriteJson`]'s rules, one level up.
+#[derive(Serialize)]
+pub struct TrackWriteJson {
+    pub command: &'static str,
+    pub changed: bool,
+    pub track: TrackInfoJson,
+}
+
 #[derive(Serialize)]
 pub struct TaskListJson {
     pub track: String,

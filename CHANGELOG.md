@@ -18,6 +18,19 @@ All notable changes to frame will be documented in this file.
 
 ### Added
 
+- **Every command now has a `--json` surface**, bar `fr merge`, whose interface is an exit status a VCS driver reads. The 24 write commands — task writes, track writes, `inbox`, `projects add/remove`, `recovery prune/path`, `init` — previously accepted the flag and printed human text, because `--json` is global and clap takes it whether or not the handler was ever given it.
+
+  A write reports what it did in the shapes the read commands already use, so `fr add --json` returns exactly what `fr show --json` would for the task it created rather than a second task shape:
+
+  ```json
+  { "command": "add", "changed": true, "track": "main",
+    "tasks": [ { "id": "MAI-042", "title": "write the parser", "state": "todo" } ] }
+  ```
+
+  `changed` is whether the project differs, not whether the command succeeded — `fr tag T-1 add cc` on a task already tagged `cc` reports `changed: false`. It compares the task before and after using `Task`'s own equality, which ignores source text and dirty state, so no operation had to grow bookkeeping for it.
+
+  **`--json` never answers a confirmation prompt.** `fr delete`, `fr track rename --prefix` and `fr check --fix` fail with `confirmation required for …: pass --yes with --json` instead of blocking on a stdin no program will answer. `fr check --fix` already had a JSON surface, so it already had that defect.
+
 - **`fr clean --json`.** The whole report as one document: the finding categories flattened in as arrays the way `fr check --json` reads, plus `field_order`, `dry_run` and `normalize`. The last two carry what the arrays cannot — whether anything was written, and whether `field_order.reordered` names tasks that *were* rewritten or only ones that would be.
 
   `--json` is a global flag, so clean already accepted it and silently printed human text; a consumer got a parse error. That is the shape `fr deps` shipped with once and had to be fixed, which is why this now has a standing guard rather than a fix: `tests/parity.rs` carries a table of every subcommand and whether `--json` gives it a document, checked in both directions — a command declared to have a surface must emit one, and a command declared not to must not have quietly grown one. A new subcommand fails the build until someone decides which it is, the same way `every_subcommand_is_classified` already works for the parity matrix.

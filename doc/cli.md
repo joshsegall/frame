@@ -3,9 +3,31 @@
 The frame CLI binary is `fr`. Run with no arguments to launch the TUI.
 
 **Global flags**:
-- `--json` — output as JSON (on commands that support it)
+- `--json` — output as JSON. Every command has a JSON surface except `fr merge`, whose interface is an exit status a VCS driver reads
 - `-C <path>` / `--project-dir <path>` — run against a different project directory without changing the working directory
 - `-V` / `--version` — version plus the commit the binary was built from (`fr 0.1.6 (ad763b0)`); omits the commit when the build didn't come from a git checkout
+
+### `--json` on a command that writes
+
+A write command reports what it did, in the same shapes the read commands use — so `fr add --json` returns exactly what `fr show --json` would for the task it created, rather than a second task shape to learn:
+
+```json
+{ "command": "add", "changed": true, "track": "main",
+  "tasks": [ { "id": "MAI-042", "title": "write the parser", "state": "todo", "added": "2026-08-09" } ] }
+```
+
+`command` names the subcommand, so a consumer piping several can tell them apart. `tasks` is a list because `delete` and `import` act on several; for `delete` it is the snapshot taken *before* the deletion, since afterwards there is nothing left to describe. A command that acts on a track reports a `track` in the shape `fr tracks --json` lists.
+
+**`changed` is not "did it succeed".** It is whether the project differs: `fr tag T-1 add cc` on a task already tagged `cc` succeeds and reports `changed: false`. A caller deciding whether to commit needs those told apart.
+
+**`--json` never answers a confirmation prompt.** `fr delete`, `fr track rename --prefix` and `fr check --fix` ask before destroying data. Under `--json` the caller is a program, so blocking on a prompt would hang and confirming for it would let the flag silently escalate a destructive command. They fail instead, naming the flag that grants permission:
+
+```
+$ fr --json delete M-001
+error: confirmation required for delete: pass --yes with --json
+```
+
+**Errors are not documents.** They go to stderr as `error: …` with a non-zero exit, and stdout stays empty — so a failed run never prints a result document describing changes that did not land. stdout carries the answer, stderr the error, the exit code the verdict.
 
 ## Project Init
 

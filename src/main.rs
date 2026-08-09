@@ -16,7 +16,7 @@ fn main() {
         }
         Some(Commands::Init(args)) => {
             // Init is handled before project discovery
-            if let Err(e) = handlers::cmd_init(args) {
+            if let Err(e) = handlers::cmd_init(args, cli.json) {
                 eprintln!("error: {}", e);
                 std::process::exit(1);
             }

@@ -52,7 +52,7 @@ pub fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(cmd) => match cmd {
             // Init is handled in main.rs before project discovery
-            Commands::Init(args) => cmd_init(args),
+            Commands::Init(args) => cmd_init(args, json),
 
             // Merge is handled in main.rs too — it owns its exit status, which
             // is how it reports a conflict to the version control system.
@@ -84,7 +84,7 @@ pub fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             Commands::Search(args) => cmd_search(args, json),
             Commands::Inbox(args) => {
                 if args.text.is_some() {
-                    cmd_inbox_add(args)
+                    cmd_inbox_add(args, json)
                 } else {
                     cmd_inbox_list(json)
                 }
@@ -97,28 +97,28 @@ pub fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             Commands::Info => cmd_info(json),
 
             // Write commands
-            Commands::Add(args) => cmd_add(args),
-            Commands::Push(args) => cmd_push(args),
-            Commands::Sub(args) => cmd_sub(args),
-            Commands::State(args) => cmd_state(args),
-            Commands::Start(args) => cmd_start(args),
-            Commands::Done(args) => cmd_done(args),
-            Commands::Tag(args) => cmd_tag(args),
-            Commands::Dep(args) => cmd_dep(args),
-            Commands::Note(args) => cmd_note(args),
-            Commands::Ref(args) => cmd_ref(args),
-            Commands::Spec(args) => cmd_spec(args),
-            Commands::Title(args) => cmd_title(args),
-            Commands::Mv(args) => cmd_mv(args),
-            Commands::Triage(args) => cmd_triage(args),
+            Commands::Add(args) => cmd_add(args, json),
+            Commands::Push(args) => cmd_push(args, json),
+            Commands::Sub(args) => cmd_sub(args, json),
+            Commands::State(args) => cmd_state(args, json),
+            Commands::Start(args) => cmd_start(args, json),
+            Commands::Done(args) => cmd_done(args, json),
+            Commands::Tag(args) => cmd_tag(args, json),
+            Commands::Dep(args) => cmd_dep(args, json),
+            Commands::Note(args) => cmd_note(args, json),
+            Commands::Ref(args) => cmd_ref(args, json),
+            Commands::Spec(args) => cmd_spec(args, json),
+            Commands::Title(args) => cmd_title(args, json),
+            Commands::Mv(args) => cmd_mv(args, json),
+            Commands::Triage(args) => cmd_triage(args, json),
 
             // Track management
-            Commands::Track(args) => cmd_track(args),
+            Commands::Track(args) => cmd_track(args, json),
 
             // Maintenance
             Commands::Clean(args) => cmd_clean(args, json),
-            Commands::Import(args) => cmd_import(args),
-            Commands::Delete(args) => cmd_delete(args),
+            Commands::Import(args) => cmd_import(args, json),
+            Commands::Delete(args) => cmd_delete(args, json),
 
             // Recovery
             Commands::Recovery(args) => cmd_recovery(args, json),
@@ -1798,6 +1798,7 @@ fn cmd_check_fix(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::
 
     let deleting = fix::destructive_count(&plan);
     if deleting > 0 && !args.yes {
+        refuse_to_prompt(json, "repairs that delete data")?;
         eprint!("{deleting} of these delete data. Proceed? [y/n] ");
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
@@ -1939,7 +1940,136 @@ fn resolve_mint_namespace(
     Ok(crate::model::task_id::actor_namespace(&resolved.token))
 }
 
-fn cmd_add(args: AddArgs) -> Result<(), Box<dyn std::error::Error>> {
+/// Report a task-writing command on whichever surface was asked for.
+///
+/// One helper rather than the fork written out in each of sixteen handlers —
+/// `--json` on a write command is a category, not sixteen decisions, and writing
+/// it sixteen times is how the surface drifted into a patchwork before
+/// `JSON_SURFACE` existed to measure it.
+///
+/// `human` is a closure so the human line is still built where the handler knows
+/// its own wording, and is not built at all under `--json`.
+fn report_task_write(
+    json: bool,
+    command: &'static str,
+    changed: bool,
+    track: Option<&str>,
+    tasks: Vec<&Task>,
+    human: impl FnOnce(),
+) -> Result<(), Box<dyn std::error::Error>> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&TaskWriteJson {
+                command,
+                changed,
+                track: track.map(str::to_string),
+                tasks: tasks.into_iter().map(task_to_json).collect(),
+            })?
+        );
+    } else {
+        human();
+    }
+    Ok(())
+}
+
+/// The same, one level up.
+fn report_track_write(
+    json: bool,
+    command: &'static str,
+    changed: bool,
+    track: TrackInfoJson,
+    human: impl FnOnce(),
+) -> Result<(), Box<dyn std::error::Error>> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&TrackWriteJson {
+                command,
+                changed,
+                track,
+            })?
+        );
+    } else {
+        human();
+    }
+    Ok(())
+}
+
+/// One track as `fr tracks --json` describes it.
+///
+/// Shared with the track-writing commands so `fr track shelve --json` reports a
+/// track in the same shape a listing does, rather than a second track shape.
+/// Returns `None` for a track the config no longer names — which is what
+/// `fr track delete` leaves behind, and the caller reports as gone.
+fn track_info_json(project: &Project, track_id: &str) -> Option<TrackInfoJson> {
+    let tc = project.config.tracks.iter().find(|t| t.id == track_id)?;
+    let stats = find_track(project, track_id)
+        .map(track_ops::task_counts)
+        .unwrap_or_default();
+    Some(TrackInfoJson {
+        id: tc.id.clone(),
+        name: tc.name.clone(),
+        state: tc.state.clone(),
+        cc_focus: if project.config.agent.cc_focus.as_deref() == Some(track_id) {
+            Some(true)
+        } else {
+            None
+        },
+        stats: stats_to_json(&stats),
+    })
+}
+
+/// A task as it stands, so a handler can say afterwards whether it changed.
+fn snapshot(project: &Project, track_id: &str, task_id: &str) -> Option<Task> {
+    find_track(project, track_id)
+        .and_then(|t| task_ops::find_task_in_track(t, task_id))
+        .cloned()
+}
+
+/// Report a write that touched one task, comparing it against [`snapshot`].
+///
+/// The comparison is `Task`'s own `PartialEq`, which ignores `source_text` and
+/// `dirty` — so it answers "does the project differ", not "did a byte move".
+/// That is the question `changed` exists for: `fr tag T-1 add cc` on a task
+/// already tagged `cc` succeeds and changes nothing, and a caller deciding
+/// whether to commit needs those distinguished.
+fn report_task_change(
+    json: bool,
+    command: &'static str,
+    project: &Project,
+    track_id: &str,
+    task_id: &str,
+    before: Option<Task>,
+    human: impl FnOnce(),
+) -> Result<(), Box<dyn std::error::Error>> {
+    let after =
+        find_track(project, track_id).and_then(|t| task_ops::find_task_in_track(t, task_id));
+    let changed = before.as_ref() != after;
+    report_task_write(
+        json,
+        command,
+        changed,
+        Some(track_id),
+        after.into_iter().collect(),
+        human,
+    )
+}
+
+/// Refuse to prompt when nobody is there to answer.
+///
+/// `--json` says the caller is a program. A confirmation prompt then blocks on a
+/// stdin that will never carry an answer, and auto-confirming instead would let
+/// `--json` silently escalate a destructive command. Failing fast with the flag
+/// that grants permission is the only option that is neither.
+fn refuse_to_prompt(json: bool, what: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if json {
+        return Err(format!("confirmation required for {what}: pass --yes with --json").into());
+    }
+    Ok(())
+}
+
+fn cmd_add(args: AddArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let (mut project, _lock) = lock_and_load()?;
 
     reject_add_to_shelved(&project, &args.track)?;
@@ -1968,11 +2098,17 @@ fn cmd_add(args: AddArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     save_track(&project, &args.track)?;
-    println!("{}", id);
-    Ok(())
+
+    let created = find_track(&project, &args.track)
+        .and_then(|t| task_ops::find_task_in_track(t, &id))
+        .into_iter()
+        .collect();
+    report_task_write(json, "add", true, Some(&args.track), created, || {
+        println!("{}", id)
+    })
 }
 
-fn cmd_push(args: PushArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_push(args: PushArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let (mut project, _lock) = lock_and_load()?;
 
     reject_add_to_shelved(&project, &args.track)?;
@@ -1994,11 +2130,17 @@ fn cmd_push(args: PushArgs) -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     save_track(&project, &args.track)?;
-    println!("{}", id);
-    Ok(())
+
+    let created = find_track(&project, &args.track)
+        .and_then(|t| task_ops::find_task_in_track(t, &id))
+        .into_iter()
+        .collect();
+    report_task_write(json, "push", true, Some(&args.track), created, || {
+        println!("{}", id)
+    })
 }
 
-fn cmd_sub(args: SubArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_sub(args: SubArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let (mut project, _lock) = lock_and_load()?;
 
     // Find which track the parent task is in
@@ -2014,11 +2156,17 @@ fn cmd_sub(args: SubArgs) -> Result<(), Box<dyn std::error::Error>> {
     let sub_id = task_ops::add_subtask(track, &args.id, args.title, token.as_ref())?;
 
     save_track(&project, &track_id)?;
-    println!("{}", sub_id);
-    Ok(())
+
+    let created = find_track(&project, &track_id)
+        .and_then(|t| task_ops::find_task_in_track(t, &sub_id))
+        .into_iter()
+        .collect();
+    report_task_write(json, "sub", true, Some(&track_id), created, || {
+        println!("{}", sub_id)
+    })
 }
 
-fn cmd_inbox_add(args: InboxCmd) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_inbox_add(args: InboxCmd, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let (mut project, _lock) = lock_and_load()?;
 
     let text = args.text.unwrap(); // We know it's Some from dispatch
@@ -2033,25 +2181,45 @@ fn cmd_inbox_add(args: InboxCmd) -> Result<(), Box<dyn std::error::Error>> {
     inbox_ops::add_inbox_item(inbox, text.clone(), args.tag, args.note);
 
     project_io::save_inbox(&project.frame_dir, inbox)?;
-    println!("added to inbox");
+
+    if json {
+        // The item as `fr inbox --json` lists it, so the two agree. It went in
+        // last, which is where `add_inbox_item` appends.
+        let index = inbox.items.len();
+        let item = inbox.items.last().map(|i| InboxItemJson {
+            index,
+            title: i.title.clone(),
+            tags: i.tags.clone(),
+            body: i.body.clone(),
+        });
+        println!("{}", serde_json::to_string_pretty(&item)?);
+    } else {
+        println!("added to inbox");
+    }
     Ok(())
 }
 
-fn cmd_start(args: StartArgs) -> Result<(), Box<dyn std::error::Error>> {
-    cmd_state(StateArgs {
-        id: args.id,
-        state: "active".to_string(),
-    })
+fn cmd_start(args: StartArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    cmd_state(
+        StateArgs {
+            id: args.id,
+            state: "active".to_string(),
+        },
+        json,
+    )
 }
 
-fn cmd_done(args: DoneArgs) -> Result<(), Box<dyn std::error::Error>> {
-    cmd_state(StateArgs {
-        id: args.id,
-        state: "done".to_string(),
-    })
+fn cmd_done(args: DoneArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    cmd_state(
+        StateArgs {
+            id: args.id,
+            state: "done".to_string(),
+        },
+        json,
+    )
 }
 
-fn cmd_state(args: StateArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_state(args: StateArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let (mut project, _lock) = lock_and_load()?;
 
     let new_state = parse_task_state(&args.state).map_err(Box::<dyn std::error::Error>::from)?;
@@ -2059,6 +2227,9 @@ fn cmd_state(args: StateArgs) -> Result<(), Box<dyn std::error::Error>> {
     let track_id = find_task_track(&project, &args.id)
         .ok_or_else(|| format!("task not found: {}", args.id))?
         .to_string();
+
+    // Taken before the write so the report can say whether anything changed.
+    let before = snapshot(&project, &track_id, &args.id);
 
     // A shelved track is paused work — nothing in it should be marked active.
     if new_state == TaskState::Active && track_state(&project, &track_id) == Some("shelved") {
@@ -2089,16 +2260,20 @@ fn cmd_state(args: StateArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     save_track(&project, &track_id)?;
-    println!("{} → {}", args.id, args.state);
-    Ok(())
+    report_task_change(json, "state", &project, &track_id, &args.id, before, || {
+        println!("{} → {}", args.id, args.state)
+    })
 }
 
-fn cmd_tag(args: TagArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_tag(args: TagArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let (mut project, _lock) = lock_and_load()?;
 
     let track_id = find_task_track(&project, &args.id)
         .ok_or_else(|| format!("task not found: {}", args.id))?
         .to_string();
+
+    // Taken before the write so the report can say whether anything changed.
+    let before = snapshot(&project, &track_id, &args.id);
 
     let track = find_track_mut(&mut project, &track_id)
         .ok_or_else(|| format!("track not found: {}", track_id))?;
@@ -2110,16 +2285,20 @@ fn cmd_tag(args: TagArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     save_track(&project, &track_id)?;
-    println!("{} tag {} {}", args.id, args.action, args.tag);
-    Ok(())
+    report_task_change(json, "tag", &project, &track_id, &args.id, before, || {
+        println!("{} tag {} {}", args.id, args.action, args.tag)
+    })
 }
 
-fn cmd_dep(args: DepArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_dep(args: DepArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let (mut project, _lock) = lock_and_load()?;
 
     let track_id = find_task_track(&project, &args.id)
         .ok_or_else(|| format!("task not found: {}", args.id))?
         .to_string();
+
+    // Taken before the write so the report can say whether anything changed.
+    let before = snapshot(&project, &track_id, &args.id);
 
     match args.action.as_str() {
         "add" => {
@@ -2137,16 +2316,20 @@ fn cmd_dep(args: DepArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     save_track(&project, &track_id)?;
-    println!("{} dep {} {}", args.id, args.action, args.dep_id);
-    Ok(())
+    report_task_change(json, "dep", &project, &track_id, &args.id, before, || {
+        println!("{} dep {} {}", args.id, args.action, args.dep_id)
+    })
 }
 
-fn cmd_note(args: NoteArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_note(args: NoteArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let (mut project, _lock) = lock_and_load()?;
 
     let track_id = find_task_track(&project, &args.id)
         .ok_or_else(|| format!("task not found: {}", args.id))?
         .to_string();
+
+    // Taken before the write so the report can say whether anything changed.
+    let before = snapshot(&project, &track_id, &args.id);
 
     let track = find_track_mut(&mut project, &track_id)
         .ok_or_else(|| format!("track not found: {}", track_id))?;
@@ -2158,8 +2341,9 @@ fn cmd_note(args: NoteArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     save_track(&project, &track_id)?;
-    println!("{} note updated", args.id);
-    Ok(())
+    report_task_change(json, "note", &project, &track_id, &args.id, before, || {
+        println!("{} note updated", args.id)
+    })
 }
 
 /// Refuse paths with no file behind them, naming every one.
@@ -2275,12 +2459,12 @@ fn reject_ignored_paths(
     }
 }
 
-fn cmd_ref(args: PathFieldArgs) -> Result<(), Box<dyn std::error::Error>> {
-    cmd_path_field(PathField::Ref, args)
+fn cmd_ref(args: PathFieldArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    cmd_path_field(PathField::Ref, args, json)
 }
 
-fn cmd_spec(args: PathFieldArgs) -> Result<(), Box<dyn std::error::Error>> {
-    cmd_path_field(PathField::Spec, args)
+fn cmd_spec(args: PathFieldArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    cmd_path_field(PathField::Spec, args, json)
 }
 
 /// `fr ref` and `fr spec`, which differ only in the field they write.
@@ -2290,7 +2474,11 @@ fn cmd_spec(args: PathFieldArgs) -> Result<(), Box<dyn std::error::Error>> {
 /// reach for: it needs no read of the current list, so two writers adding
 /// different paths to one task do not clobber each other, and it cannot
 /// silently discard a list the caller did not know was there.
-fn cmd_path_field(field: PathField, args: PathFieldArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_path_field(
+    field: PathField,
+    args: PathFieldArgs,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let key = field.key();
     let (mut project, _lock) = lock_and_load()?;
 
@@ -2307,6 +2495,9 @@ fn cmd_path_field(field: PathField, args: PathFieldArgs) -> Result<(), Box<dyn s
     let track_id = find_task_track(&project, &args.id)
         .ok_or_else(|| format!("task not found: {}", args.id))?
         .to_string();
+
+    // Taken before the write so the report can say whether anything changed.
+    let before = snapshot(&project, &track_id, &args.id);
 
     let track = find_track_mut(&mut project, &track_id)
         .ok_or_else(|| format!("track not found: {}", track_id))?;
@@ -2340,16 +2531,20 @@ fn cmd_path_field(field: PathField, args: PathFieldArgs) -> Result<(), Box<dyn s
     };
 
     save_track(&project, &track_id)?;
-    println!("{}", message);
-    Ok(())
+    report_task_change(json, key, &project, &track_id, &args.id, before, || {
+        println!("{}", message)
+    })
 }
 
-fn cmd_title(args: TitleArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_title(args: TitleArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let (mut project, _lock) = lock_and_load()?;
 
     let track_id = find_task_track(&project, &args.id)
         .ok_or_else(|| format!("task not found: {}", args.id))?
         .to_string();
+
+    // Taken before the write so the report can say whether anything changed.
+    let before = snapshot(&project, &track_id, &args.id);
 
     let track = find_track_mut(&mut project, &track_id)
         .ok_or_else(|| format!("track not found: {}", track_id))?;
@@ -2357,11 +2552,12 @@ fn cmd_title(args: TitleArgs) -> Result<(), Box<dyn std::error::Error>> {
     task_ops::edit_title(track, &args.id, args.title.clone())?;
 
     save_track(&project, &track_id)?;
-    println!("{} title updated", args.id);
-    Ok(())
+    report_task_change(json, "title", &project, &track_id, &args.id, before, || {
+        println!("{} title updated", args.id)
+    })
 }
 
-fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_mv(args: MvArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let (mut project, _lock) = lock_and_load()?;
     // Taken before the tracks are borrowed mutably below.
     let frame_dir = project.frame_dir.clone();
@@ -2433,8 +2629,13 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
         )?;
 
         save_track(&project, &source_track_id)?;
-        println!("{} → {} (promoted)", args.id, result.new_root_id);
-        return Ok(());
+        let moved = find_track(&project, &source_track_id)
+            .and_then(|t| task_ops::find_task_in_track(t, &result.new_root_id))
+            .into_iter()
+            .collect();
+        return report_task_write(json, "mv", true, Some(&source_track_id), moved, || {
+            println!("{} → {} (promoted)", args.id, result.new_root_id)
+        });
     }
 
     // Handle --parent
@@ -2468,8 +2669,13 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
         )?;
 
         save_track(&project, &source_track_id)?;
-        println!("{} → {} (under {})", args.id, result.new_root_id, parent_id);
-        return Ok(());
+        let moved = find_track(&project, &source_track_id)
+            .and_then(|t| task_ops::find_task_in_track(t, &result.new_root_id))
+            .into_iter()
+            .collect();
+        return report_task_write(json, "mv", true, Some(&source_track_id), moved, || {
+            println!("{} → {} (under {})", args.id, result.new_root_id, parent_id)
+        });
     }
 
     if let Some(ref target_track_id) = args.track {
@@ -2629,7 +2835,13 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         marker.commit();
-        println!("{} → {} ({})", args.id, new_id, target_track_id);
+        let moved = find_track(&project, target_track_id)
+            .and_then(|t| task_ops::find_task_in_track(t, &new_id))
+            .into_iter()
+            .collect();
+        report_task_write(json, "mv", true, Some(target_track_id), moved, || {
+            println!("{} → {} ({})", args.id, new_id, target_track_id)
+        })
     } else {
         // Same-track reorder
         let position = if args.top {
@@ -2678,13 +2890,17 @@ fn cmd_mv(args: MvArgs) -> Result<(), Box<dyn std::error::Error>> {
 
         task_ops::move_task(track, &args.id, position)?;
         save_track(&project, &source_track_id)?;
-        println!("{} moved", args.id);
+        let moved = find_track(&project, &source_track_id)
+            .and_then(|t| task_ops::find_task_in_track(t, &args.id))
+            .into_iter()
+            .collect();
+        report_task_write(json, "mv", true, Some(&source_track_id), moved, || {
+            println!("{} moved", args.id)
+        })
     }
-
-    Ok(())
 }
 
-fn cmd_triage(args: TriageArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_triage(args: TriageArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let (mut project, _lock) = lock_and_load()?;
 
     reject_add_to_shelved(&project, &args.track)?;
@@ -2746,28 +2962,33 @@ fn cmd_triage(args: TriageArgs) -> Result<(), Box<dyn std::error::Error>> {
         project_io::save_inbox(&project.frame_dir, inbox)?;
     }
     marker.commit();
-    println!("{}", task_id);
-    Ok(())
+    let created = find_track(&project, &args.track)
+        .and_then(|t| task_ops::find_task_in_track(t, &task_id))
+        .into_iter()
+        .collect();
+    report_task_write(json, "triage", true, Some(&args.track), created, || {
+        println!("{}", task_id)
+    })
 }
 
 // ---------------------------------------------------------------------------
 // Track management handlers
 // ---------------------------------------------------------------------------
 
-fn cmd_track(args: TrackCmd) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_track(args: TrackCmd, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     match args.action {
-        TrackAction::New(a) => cmd_track_new(a),
-        TrackAction::Shelve(a) => cmd_track_state_change(a.id, "shelve"),
-        TrackAction::Activate(a) => cmd_track_state_change(a.id, "activate"),
-        TrackAction::Archive(a) => cmd_track_state_change(a.id, "archive"),
-        TrackAction::Delete(a) => cmd_track_delete(a.id),
-        TrackAction::Mv(a) => cmd_track_mv(a),
-        TrackAction::CcFocus(a) => cmd_track_cc_focus(a),
-        TrackAction::Rename(a) => cmd_track_rename(a),
+        TrackAction::New(a) => cmd_track_new(a, json),
+        TrackAction::Shelve(a) => cmd_track_state_change(a.id, "shelve", json),
+        TrackAction::Activate(a) => cmd_track_state_change(a.id, "activate", json),
+        TrackAction::Archive(a) => cmd_track_state_change(a.id, "archive", json),
+        TrackAction::Delete(a) => cmd_track_delete(a.id, json),
+        TrackAction::Mv(a) => cmd_track_mv(a, json),
+        TrackAction::CcFocus(a) => cmd_track_cc_focus(a, json),
+        TrackAction::Rename(a) => cmd_track_rename(a, json),
     }
 }
 
-fn cmd_track_new(args: TrackNewArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_track_new(args: TrackNewArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let (mut project, _lock) = lock_and_load()?;
 
     let (mut config, mut doc) = config_io::read_config(&project.frame_dir)?;
@@ -2784,13 +3005,17 @@ fn cmd_track_new(args: TrackNewArgs) -> Result<(), Box<dyn std::error::Error>> {
     project.config = config;
     project.tracks.push((args.id.clone(), track));
 
-    println!("created track: {} ({})", args.name, args.id);
-    Ok(())
+    let info = track_info_json(&project, &args.id)
+        .ok_or_else(|| format!("track not found after creating it: {}", args.id))?;
+    report_track_write(json, "track new", true, info, || {
+        println!("created track: {} ({})", args.name, args.id)
+    })
 }
 
 fn cmd_track_state_change(
     track_id: String,
-    action: &str,
+    action: &'static str,
+    json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (project, _lock) = lock_and_load()?;
 
@@ -2872,11 +3097,16 @@ fn cmd_track_state_change(
         marker.commit();
     }
 
-    println!("{} → {}d", track_id, action);
-    Ok(())
+    // Re-read: the state change went through the config, not this copy.
+    let project = load_project_cwd()?;
+    let info = track_info_json(&project, &track_id)
+        .ok_or_else(|| format!("track not found: {}", track_id))?;
+    report_track_write(json, action, true, info, || {
+        println!("{} → {}d", track_id, action)
+    })
 }
 
-fn cmd_track_mv(args: TrackMvArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_track_mv(args: TrackMvArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let (mut project, _lock) = lock_and_load()?;
 
     track_ops::reorder_tracks(&mut project.config, &args.id, args.position)?;
@@ -2891,31 +3121,50 @@ fn cmd_track_mv(args: TrackMvArgs) -> Result<(), Box<dyn std::error::Error>> {
     config_io::set_track_order(&mut doc, &order);
     config_io::write_config(&project.frame_dir, &doc)?;
 
-    println!("{} moved to position {}", args.id, args.position);
-    Ok(())
+    let project = load_project_cwd()?;
+    let info = track_info_json(&project, &args.id)
+        .ok_or_else(|| format!("track not found: {}", args.id))?;
+    report_track_write(json, "track mv", true, info, || {
+        println!("{} moved to position {}", args.id, args.position)
+    })
 }
 
-fn cmd_track_cc_focus(args: CcFocusArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_track_cc_focus(args: CcFocusArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     if args.clear {
         let (project, _lock) = lock_and_load()?;
         let (mut config, mut doc) = config_io::read_config(&project.frame_dir)?;
         track_ops::clear_cc_focus(&mut doc, &mut config);
         config_io::write_config(&project.frame_dir, &doc)?;
-        println!("cc-focus cleared");
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "command": "track cc-focus",
+                    "changed": true,
+                    "cc_focus": serde_json::Value::Null,
+                }))?
+            );
+        } else {
+            println!("cc-focus cleared");
+        }
         Ok(())
     } else if let Some(id) = args.id {
         let (project, _lock) = lock_and_load()?;
         let (mut config, mut doc) = config_io::read_config(&project.frame_dir)?;
         track_ops::set_cc_focus(&mut doc, &mut config, &id)?;
         config_io::write_config(&project.frame_dir, &doc)?;
-        println!("cc-focus → {}", id);
-        Ok(())
+        let project = load_project_cwd()?;
+        let info =
+            track_info_json(&project, &id).ok_or_else(|| format!("track not found: {}", id))?;
+        report_track_write(json, "track cc-focus", true, info, || {
+            println!("cc-focus → {}", id)
+        })
     } else {
         Err("provide a track ID or use --clear".into())
     }
 }
 
-fn cmd_track_delete(track_id: String) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_track_delete(track_id: String, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let (project, _lock) = lock_and_load()?;
 
     // `find_track` searches the tracks that *loaded*, and `load_project` skips a
@@ -2952,11 +3201,24 @@ fn cmd_track_delete(track_id: String) -> Result<(), Box<dyn std::error::Error>> 
     track_ops::delete_track(&project.frame_dir, &mut doc, &mut config, &track_id)?;
     config_io::write_config(&project.frame_dir, &doc)?;
 
-    println!("deleted track \"{}\"", track_id);
+    if json {
+        // The track is gone, so there is nothing to describe in `TrackInfoJson`
+        // shape — the id and the fact of its removal is the whole result.
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "command": "track delete",
+                "changed": true,
+                "deleted": track_id,
+            }))?
+        );
+    } else {
+        println!("deleted track \"{}\"", track_id);
+    }
     Ok(())
 }
 
-fn cmd_track_rename(args: TrackRenameArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_track_rename(args: TrackRenameArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let (mut project, _lock) = lock_and_load()?;
 
     if args.name.is_none() && args.new_id.is_none() && args.prefix.is_none() {
@@ -2997,7 +3259,9 @@ fn cmd_track_rename(args: TrackRenameArgs) -> Result<(), Box<dyn std::error::Err
             &args.id,
             new_name,
         )?;
-        println!("renamed \"{}\" → \"{}\"", args.id, new_name);
+        if !json {
+            println!("renamed \"{}\" → \"{}\"", args.id, new_name);
+        }
     }
 
     // Handle --id (track ID rename)
@@ -3030,7 +3294,9 @@ fn cmd_track_rename(args: TrackRenameArgs) -> Result<(), Box<dyn std::error::Err
 
     let effective_id = if let Some(ref new_id) = args.new_id {
         track_ops::rename_track_id(&project.frame_dir, &mut doc, &mut config, &args.id, new_id)?;
-        println!("id {} → {}", args.id, new_id);
+        if !json {
+            println!("id {} → {}", args.id, new_id);
+        }
         new_id.clone()
     } else {
         args.id.clone()
@@ -3074,9 +3340,13 @@ fn cmd_track_rename(args: TrackRenameArgs) -> Result<(), Box<dyn std::error::Err
         )
         .task_id_count;
 
-        println!("Renaming prefix {} → {}:", old_prefix, new_prefix);
-        println!("  {} tasks in {}", result.tasks_renamed, effective_id);
-        if archive_id_count > 0 {
+        if !json {
+            println!("Renaming prefix {} → {}:", old_prefix, new_prefix);
+        }
+        if !json {
+            println!("  {} tasks in {}", result.tasks_renamed, effective_id);
+        }
+        if archive_id_count > 0 && !json {
             println!("  {} archived task IDs", archive_id_count);
         }
         if result.deps_updated > 0 {
@@ -3092,6 +3362,7 @@ fn cmd_track_rename(args: TrackRenameArgs) -> Result<(), Box<dyn std::error::Err
         }
 
         if !args.yes && result.tasks_renamed > 0 {
+            refuse_to_prompt(json, "prefix rename")?;
             // Interactive confirmation
             eprint!("Proceed? [y/n] ");
             let mut input = String::new();
@@ -3109,7 +3380,7 @@ fn cmd_track_rename(args: TrackRenameArgs) -> Result<(), Box<dyn std::error::Err
             &old_prefix,
             new_prefix,
         )?;
-        if archive_count > 0 {
+        if archive_count > 0 && !json {
             println!("  {} archived task IDs renamed", archive_count);
         }
 
@@ -3136,7 +3407,12 @@ fn cmd_track_rename(args: TrackRenameArgs) -> Result<(), Box<dyn std::error::Err
     if let Some(marker) = rename_marker {
         marker.commit();
     }
-    Ok(())
+
+    // Re-read under whatever id the track now has: a `--id` rename moved it.
+    let project = load_project_cwd()?;
+    let info = track_info_json(&project, &effective_id)
+        .ok_or_else(|| format!("track not found after rename: {}", effective_id))?;
+    report_track_write(json, "track rename", true, info, || {})
 }
 
 // ---------------------------------------------------------------------------
@@ -3355,8 +3631,8 @@ fn report_clean(
 fn cmd_projects(args: ProjectsCmd, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     match args.action {
         None | Some(ProjectsAction::List) => cmd_projects_list(json),
-        Some(ProjectsAction::Add(a)) => cmd_projects_add(a),
-        Some(ProjectsAction::Remove(a)) => cmd_projects_remove(a),
+        Some(ProjectsAction::Add(a)) => cmd_projects_add(a, json),
+        Some(ProjectsAction::Remove(a)) => cmd_projects_remove(a, json),
         Some(ProjectsAction::Prune(a)) => cmd_projects_prune(a, json),
     }
 }
@@ -3465,7 +3741,7 @@ fn cmd_projects_list(json: bool) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn cmd_projects_add(args: ProjectsAddArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_projects_add(args: ProjectsAddArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let abs_path = std::fs::canonicalize(&args.path)
         .map_err(|e| format!("cannot resolve path '{}': {}", args.path, e))?;
 
@@ -3482,14 +3758,41 @@ fn cmd_projects_add(args: ProjectsAddArgs) -> Result<(), Box<dyn std::error::Err
     let name = config.project.name;
 
     registry::register_project(&name, &abs_path);
-    println!("Added: {} ({})", name, abs_path.display());
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "command": "projects add",
+                "changed": true,
+                "name": name,
+                "path": abs_path.display().to_string(),
+            }))?
+        );
+    } else {
+        println!("Added: {} ({})", name, abs_path.display());
+    }
     Ok(())
 }
 
-fn cmd_projects_remove(args: ProjectsRemoveArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_projects_remove(
+    args: ProjectsRemoveArgs,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     match registry::remove_project(&args.name_or_path) {
         Ok(Some(entry)) => {
-            println!("Removed: {}", entry.name);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "command": "projects remove",
+                        "changed": true,
+                        "name": entry.name,
+                        "path": entry.path,
+                    }))?
+                );
+            } else {
+                println!("Removed: {}", entry.name);
+            }
             Ok(())
         }
         Ok(None) => Err(format!("not found: {}", args.name_or_path).into()),
@@ -3556,7 +3859,7 @@ fn cmd_projects_prune(
     Ok(())
 }
 
-fn cmd_import(args: ImportArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_import(args: ImportArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let (mut project, _lock) = lock_and_load()?;
 
     reject_add_to_shelved(&project, &args.track)?;
@@ -3586,18 +3889,28 @@ fn cmd_import(args: ImportArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     save_track(&project, &args.track)?;
 
-    println!(
-        "imported {} tasks ({} including subtasks)",
-        result.assigned_ids.len(),
-        result.total_count
-    );
-    for id in &result.assigned_ids {
-        println!("  {}", id);
-    }
-    Ok(())
+    let imported: Vec<&Task> = find_track(&project, &args.track)
+        .map(|t| {
+            result
+                .assigned_ids
+                .iter()
+                .filter_map(|id| task_ops::find_task_in_track(t, id))
+                .collect()
+        })
+        .unwrap_or_default();
+    report_task_write(json, "import", true, Some(&args.track), imported, || {
+        println!(
+            "imported {} tasks ({} including subtasks)",
+            result.assigned_ids.len(),
+            result.total_count
+        );
+        for id in &result.assigned_ids {
+            println!("  {}", id);
+        }
+    })
 }
 
-fn cmd_delete(args: DeleteArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_delete(args: DeleteArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     use crate::io::recovery;
 
     let (mut project, _lock) = lock_and_load()?;
@@ -3611,8 +3924,16 @@ fn cmd_delete(args: DeleteArgs) -> Result<(), Box<dyn std::error::Error>> {
         to_delete.push((track_id, task_id.clone()));
     }
 
+    // The tasks as they stand — taken now because after the delete there is
+    // nothing left to describe.
+    let doomed: Vec<Task> = to_delete
+        .iter()
+        .filter_map(|(track_id, task_id)| snapshot(&project, track_id, task_id))
+        .collect();
+
     // Show what will be deleted
     if !args.yes {
+        refuse_to_prompt(json, "delete")?;
         for (track_id, task_id) in &to_delete {
             let track = find_track(&project, track_id)
                 .ok_or_else(|| format!("track not found: {}", track_id))?;
@@ -3663,10 +3984,11 @@ fn cmd_delete(args: DeleteArgs) -> Result<(), Box<dyn std::error::Error>> {
         save_track(&project, track_id)?;
     }
 
-    for (_, task_id) in &to_delete {
-        println!("deleted {}", task_id);
-    }
-    Ok(())
+    report_task_write(json, "delete", true, None, doomed.iter().collect(), || {
+        for (_, task_id) in &to_delete {
+            println!("deleted {}", task_id);
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -4391,13 +4713,34 @@ fn cmd_recovery(args: RecoveryCmd, global_json: bool) -> Result<(), Box<dyn std:
                 None
             };
             let count = recovery::prune_recovery(&project.frame_dir, before, prune_args.all)?;
-            println!("pruned {} entries", count);
+            if args.json || global_json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "command": "recovery prune",
+                        "changed": count > 0,
+                        "pruned": count,
+                    }))?
+                );
+            } else {
+                println!("pruned {} entries", count);
+            }
             Ok(())
         }
         Some(RecoveryAction::Path) => {
             let project = load_project_cwd()?;
             let path = recovery::recovery_log_path(&project.frame_dir);
-            println!("{}", path.display());
+            if args.json || global_json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "command": "recovery path",
+                        "path": path.display().to_string(),
+                    }))?
+                );
+            } else {
+                println!("{}", path.display());
+            }
             Ok(())
         }
         None => {
