@@ -1,4 +1,5 @@
-use crate::model::task::{Metadata, Task};
+use crate::model::task::{Metadata, Task, ordered_metadata};
+use crate::parse::count_indent;
 
 /// Serialize a list of tasks to markdown lines.
 /// `indent` is the number of spaces for the current nesting level.
@@ -57,21 +58,44 @@ fn serialize_task(task: &Task, indent: usize, lines: &mut Vec<String>) {
 
     lines.push(task_line);
 
-    // Metadata lines at indent + 2, in the order the task holds them.
-    //
-    // **Deliberately not `ordered_metadata`.** Writing canonical order here
-    // re-attributes content in a damaged file, and P2 catches it: a note is
-    // terminated by the next metadata line, so moving one to last leaves it
-    // terminated by whatever follows the task instead — which, in a file with
-    // stranded deep content, is content belonging to the next task. It is then
-    // read back as part of the note. Seen with both `Note("")` and a note ending
-    // in an unclosed fence, and `added → note → resolved` — the case worth
-    // fixing — is exactly the move that triggers it.
-    //
-    // Ordering the file needs the note-termination ambiguity solved first. Until
-    // then the ordering lives on the display surfaces, which do not round-trip.
+    // Metadata lines at indent + 2, in canonical order rather than the order the
+    // fields were appended in. Only this path reorders: a clean task returned
+    // above through `source_text`, so a file frame has not touched is never
+    // rewritten, and a task converges the first time it is edited.
     let meta_indent = " ".repeat(indent + 2);
-    for meta in &task.metadata {
+
+    // **Except when this task's stranded lines would be absorbed.** A note block
+    // runs until the first line indented *less* than its block indent, so a note
+    // written last is closed by the next task line, the next section header or
+    // the end of the file — all dedented, all fine. What is not fine is this
+    // task's own `trailing_lines`, emitted immediately below the metadata: those
+    // are lines the parser could not attribute, kept verbatim at whatever indent
+    // they had, and one indented to the note's block indent or deeper would be
+    // read back as note body.
+    //
+    // Ordering is what exposes it. P2 caught a task holding `added, note(""),
+    // added` above four stranded fence lines: the second `added:` line sat
+    // between the note and them and closed it by dedent, and moving the note
+    // last took that away, so the note swallowed all four. Content silently
+    // re-attributed — the same family as the defect in `eff5ec0` that
+    // `parse_properties` was written for.
+    //
+    // Rare, and always damage: a well-formed file has nothing at that indent
+    // after a task's metadata. Such a task keeps the order it came in with,
+    // which is the order that already read back correctly.
+    let note_block_indent = indent + 4;
+    let stranded_would_be_absorbed = task
+        .trailing_lines
+        .iter()
+        .any(|l| !l.trim().is_empty() && count_indent(l) >= note_block_indent);
+
+    let metadata: Vec<&Metadata> = if stranded_would_be_absorbed {
+        task.metadata.iter().collect()
+    } else {
+        ordered_metadata(task)
+    };
+
+    for meta in metadata {
         match meta {
             Metadata::Added(date) => {
                 lines.push(format!("{}- added: {}", meta_indent, date));

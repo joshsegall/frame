@@ -49,7 +49,7 @@ Project-wide search results grouped by source (active tracks, inbox, archive). O
 
 Full view of a single task showing all fields as navigable regions: Title, Tags, Conflict, Added, Resolved, Deps, Spec, Refs, Note, Subtasks. Open with `Enter` on a task in Track view or Recent view.
 
-Conflict, Added and Resolved are read-only, and each appears only when the task carries that field — so Resolved shows on a done task and is absent everywhere else. The metadata regions follow the same fixed order as `fr show` and `--json` (short fields first, the unbounded note last), **not** the order the fields sit in the `.md`. That matters most for Resolved: it is appended when a task is completed, so a task with a long note holds it below the note on disk, where it reads as missing.
+Conflict, Added and Resolved are read-only, and each appears only when the task carries that field — so Resolved shows on a done task and is absent everywhere else. The metadata regions follow the same fixed order as `fr show`, `--json` and the markdown: short fields first, the unbounded note last. That matters most for Resolved, which is added when a task is completed and so used to land after the note, dozens of lines below the fold.
 
 Conflict leads because `fr merge` writes no conflict markers into the file — this row is the only place in the TUI that says a task's other version was set aside into the recovery log. Clear it with `fr merge --resolve <ID>`. A breadcrumb trail always shows the origin (track prefix or "Recent") and any parent tasks when drilling into subtasks.
 

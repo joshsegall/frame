@@ -108,6 +108,26 @@ struct TrackShape {
     sections: Vec<(SectionKind, Vec<Task>)>,
 }
 
+/// Sort every task's metadata into canonical order, in place and recursively.
+///
+/// A canonical rewrite writes metadata in `Metadata::rank` order — short scalar
+/// fields first, the unbounded note last — so a model holding `[Ref, Spec]`
+/// serializes as `spec` then `ref` and parses back as `[Spec, Ref]`. That is the
+/// rewrite doing its job, and it is the same category as the reflowed literal
+/// nodes and header lines these projections already drop.
+///
+/// So the comparisons below hold *up to* canonical metadata order. Applied to
+/// both sides rather than only the model: on the parsed side it is a no-op, and
+/// saying so in one place beats an asymmetry a reader has to reconstruct. What
+/// still fails: a field appearing, vanishing, changing value, or moving between
+/// tasks — every conservation question these properties exist to ask.
+fn sort_metadata(tasks: &mut [Task]) {
+    for task in tasks.iter_mut() {
+        task.metadata.sort_by_key(|m| m.rank());
+        sort_metadata(&mut task.subtasks);
+    }
+}
+
 fn track_shape(track: &Track) -> TrackShape {
     TrackShape {
         title: track.title.clone(),
@@ -115,7 +135,11 @@ fn track_shape(track: &Track) -> TrackShape {
             .nodes
             .iter()
             .filter_map(|node| match node {
-                TrackNode::Section { kind, tasks, .. } => Some((*kind, tasks.clone())),
+                TrackNode::Section { kind, tasks, .. } => {
+                    let mut tasks = tasks.clone();
+                    sort_metadata(&mut tasks);
+                    Some((*kind, tasks))
+                }
                 TrackNode::Literal(_) => None,
             })
             .collect(),
@@ -214,10 +238,13 @@ fn archive_identities(archive: &Archive) -> Vec<(Option<String>, String)> {
     out
 }
 
+/// Compared up to canonical metadata order — see [`sort_metadata`].
 fn archive_metadata(archive: &Archive) -> Vec<Metadata> {
     fn walk(tasks: &[Task], out: &mut Vec<Metadata>) {
         for task in tasks {
-            out.extend(task.metadata.iter().cloned());
+            let mut meta = task.metadata.clone();
+            meta.sort_by_key(|m| m.rank());
+            out.extend(meta);
             walk(&task.subtasks, out);
         }
     }

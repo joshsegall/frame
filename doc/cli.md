@@ -56,9 +56,9 @@ fr show ID [--context]
 |------|-------------|
 | `--context` | Include ancestor context (parent chain, root-first) |
 
-Fields print in a fixed order — `conflict`, `added`, `resolved`, `dep`, `spec`, `ref`, `note` — with `--json` using the same sequence. Short fields first and the note last, because a note has no length bound and anything printed after one is printed past the fold. `--context` and the TUI Detail view use the same order.
+Fields print in a fixed order — `conflict`, `added`, `resolved`, `dep`, `spec`, `ref`, `note` — with `--json` using the same sequence. Short fields first and the note last, because a note has no length bound and anything after one is past the fold. `--context`, the TUI Detail view and the markdown itself all use this order; see [format.md](format.md#field-order).
 
-**This is display order, not file order.** A field's position here says nothing about where it sits in the `.md`: the file keeps whatever order the task accumulated, and a completion date is appended when the task is finished, so a done task with a long note holds `resolved:` below the note on disk while `fr show` prints it beside `added:`.
+An existing file is not rewritten to match. Frame writes a task in canonical order the first time it edits that task, so a project converges task by task rather than in one sweeping diff, and `fr show` reads correctly either way.
 
 With `--context`, each ancestor is shown with a `── Parent ──` separator and all its fields, followed by the target task with a `── Task ──` separator. Useful for subtasks whose parent tasks contain specs, notes, or dependencies that explain the subtask's purpose.
 

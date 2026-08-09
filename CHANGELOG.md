@@ -6,11 +6,13 @@ All notable changes to frame will be documented in this file.
 
 ### Changed
 
-- **`fr show` prints fields in a fixed order**, and `--json` now emits its keys in that same order: `conflict`, `added`, `resolved`, `dep`, `spec`, `ref`, `note`. Short fields first, the note last, because a note has no length bound and everything printed after one is printed past the fold.
+- **Task fields have a canonical order**, used by the markdown, `fr show`, `--json` and the TUI Detail view alike: `conflict`, `added`, `resolved`, `dep`, `spec`, `ref`, `note`. Short fields first, the note last, because a note has no length bound and anything after one is past the fold.
 
-  Both surfaces previously printed in *file* order, and file order is append order — `set_state` appends `resolved:` when a task is finished, and `set_metadata` appends any key the task did not already carry. So a field written after a note prints after the note. Found on a task whose `resolved:` date printed 55 lines down and read as missing; across the project it was found in, 54% of tasks had accumulated some such order, most often `added → note → resolved` and `added → note → ref`.
+  Nothing enforced an order before, and writes append — `set_state` appends `resolved:` when a task is finished, `set_metadata` appends any key the task did not already carry. So a field written after a note landed after the note, and every surface printed it there. Found on a task whose `resolved:` date sat 55 lines down and read as missing; across the project it was found in, 54% of tasks had accumulated some such order, most often `added → note → resolved` and `added → note → ref`.
 
-  Display order only — **the `.md` files are untouched**, and a field's position in `fr show` says nothing about where it sits on disk. Ordering the file itself is a larger change than it appears: a note is terminated by the next metadata line, so writing a note last leaves it terminated by whatever follows the task, and in a file with stranded content the note swallows it on the next read. The property suite catches exactly that, so the file keeps its own order until note termination is unambiguous.
+  **Existing files are not rewritten.** A task is written in canonical order the first time frame edits *that task*, so a project converges task by task rather than in one sweeping diff, and untouched tasks stay byte-identical. Reading is fixed immediately either way.
+
+  One task is left alone: a note block runs until the first line indented less than its body, so a note written last is closed by the next task line — but a task carrying *stranded* lines (content the parser could not attribute, kept verbatim) indented as deep as a note body would have them swallowed by a note moved below them. Those tasks keep the order they already had. Only reachable in a damaged file, and caught by the conservation properties rather than by inspection.
 
   `--json` changes key order only — no keys added, removed or retyped. A consumer using a JSON parser is unaffected; one reading the bytes positionally is not.
 

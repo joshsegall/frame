@@ -102,15 +102,12 @@ impl Metadata {
     /// merge that left it wrote no conflict markers, so this line is the only
     /// mark in the file that ours was kept and theirs went to the recovery log.
     ///
-    /// **This is the one definition, and it is for display.** `fr show` orders
-    /// both its human forms by it, `TaskJson` declares its fields in it, and the
-    /// TUI Detail view builds its regions from it. Three surfaces answering one
-    /// question separately is the drift this codebase keeps paying for —
-    /// `FilteredTasks` in `cli::output` is the same move for a different
-    /// question.
-    ///
-    /// The markdown is **not** ordered by it. See [`ordered_metadata`] for why
-    /// the write path cannot use this yet.
+    /// **This is the one definition.** The serializer writes a dirty task's
+    /// lines in it, `fr show` orders both its human forms by it, `TaskJson`
+    /// declares its fields in it, and the TUI Detail view builds its regions
+    /// from it. Four surfaces answering one question separately is the drift
+    /// this codebase keeps paying for — `FilteredTasks` in `cli::output` is the
+    /// same move for a different question.
     pub fn rank(&self) -> u8 {
         match self {
             Metadata::Conflict(_) => 0,
@@ -136,12 +133,10 @@ impl Metadata {
 /// own `key: value` text, so one task can hold several notes, and reordering
 /// them against each other would scramble text a user wrote.
 ///
-/// **For display only — never for writing the file.** The serializer keeps a
-/// task's own order on purpose: a note is terminated by the next metadata line,
-/// so writing a note last leaves it terminated by whatever follows the task, and
-/// in a damaged file that is stranded content the note then swallows. See the
-/// comment in `parse::task_serializer`. Nothing round-trips through a display
-/// surface, so the same ordering is free here.
+/// Display surfaces call this unconditionally. The **serializer** does not: a
+/// task whose stranded lines would be absorbed by a note moved last keeps its
+/// own order instead. That check needs the task's indent, which only the
+/// serializer knows — see the comment in `parse::task_serializer`.
 pub fn ordered_metadata(task: &Task) -> Vec<&Metadata> {
     let mut ordered: Vec<&Metadata> = task.metadata.iter().collect();
     ordered.sort_by_key(|m| m.rank());
@@ -371,11 +366,11 @@ mod tests {
         assert_eq!(notes, ["first", "second"]);
     }
 
-    /// Ordering is for display. The file keeps the order the task holds, because
-    /// writing a note last leaves it terminated by whatever follows the task —
-    /// see [`ordered_metadata`].
+    /// A dirty task is written in canonical order — this is the shape the whole
+    /// change is for, `added → note → resolved` becoming `added → resolved →
+    /// note`.
     #[test]
-    fn serializing_does_not_reorder() {
+    fn serializing_a_dirty_task_reorders() {
         let mut task = Task::new(TaskState::Done, None, "t".into());
         task.metadata = vec![
             Metadata::Added("2025-05-01".into()),
@@ -386,9 +381,80 @@ mod tests {
 
         let text = crate::parse::serialize_tasks(std::slice::from_ref(&task), 0).join("\n");
         let added = text.find("added:").unwrap();
-        let note = text.find("note:").unwrap();
         let resolved = text.find("resolved:").unwrap();
-        assert!(added < note && note < resolved, "reordered:\n{text}");
+        let note = text.find("note:").unwrap();
+        assert!(added < resolved && resolved < note, "not ordered:\n{text}");
+    }
+
+    /// A **clean** task is written verbatim from `source_text`, so a file frame
+    /// has not touched keeps whatever order it already had. This is what makes
+    /// the change converge per-task instead of rewriting every track at once.
+    #[test]
+    fn serializing_a_clean_task_changes_nothing() {
+        let source = vec![
+            "- [x] `T-1` t".to_string(),
+            "  - added: 2025-05-01".to_string(),
+            "  - note: body".to_string(),
+            "  - resolved: 2025-05-14".to_string(),
+        ];
+        let mut task = Task::new(TaskState::Done, None, "t".into());
+        task.metadata = vec![
+            Metadata::Added("2025-05-01".into()),
+            Metadata::Note("body".into()),
+            Metadata::Resolved("2025-05-14".into()),
+        ];
+        task.source_text = Some(source.clone());
+        task.dirty = false;
+
+        assert_eq!(
+            crate::parse::serialize_tasks(std::slice::from_ref(&task), 0),
+            source
+        );
+    }
+
+    /// A task whose stranded lines sit at the note's block indent keeps its own
+    /// order: moving the note last would put it directly above them and they
+    /// would read back as its body. The `added:` line between the two is what
+    /// closes the note, and reordering would take it away.
+    #[test]
+    fn a_task_whose_stranded_lines_would_be_absorbed_keeps_its_order() {
+        let mut task = Task::new(TaskState::Todo, None, "t".into());
+        task.metadata = vec![
+            Metadata::Note(String::new()),
+            Metadata::Added("2025-05-01".into()),
+        ];
+        task.trailing_lines = vec!["    ```rust".to_string(), "    stranded".to_string()];
+        task.mark_dirty();
+
+        let text = crate::parse::serialize_tasks(std::slice::from_ref(&task), 0).join("\n");
+        let note = text.find("note:").unwrap();
+        let added = text.find("added:").unwrap();
+        assert!(note < added, "order should have been kept:\n{text}");
+
+        // And the round trip proves why: the stranded lines come back as
+        // stranded lines, not as note body.
+        let parsed = crate::parse::parse_track(&format!("# T\n\n## Backlog\n\n{text}\n"));
+        let reserialized = crate::parse::serialize_track(&parsed);
+        assert!(reserialized.contains("stranded"), "{reserialized}");
+    }
+
+    /// Stranded lines that are *dedented* past the note cannot be absorbed, so
+    /// the guard must not fire for them — otherwise it would refuse to order
+    /// most damaged tasks for no reason.
+    #[test]
+    fn shallow_stranded_lines_do_not_block_ordering() {
+        let mut task = Task::new(TaskState::Done, None, "t".into());
+        task.metadata = vec![
+            Metadata::Note("body".into()),
+            Metadata::Resolved("2025-05-14".into()),
+        ];
+        task.trailing_lines = vec!["  not deep enough".to_string()];
+        task.mark_dirty();
+
+        let text = crate::parse::serialize_tasks(std::slice::from_ref(&task), 0).join("\n");
+        let resolved = text.find("resolved:").unwrap();
+        let note = text.find("note:").unwrap();
+        assert!(resolved < note, "should have been ordered:\n{text}");
     }
 
     #[test]

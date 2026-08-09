@@ -3134,6 +3134,11 @@ mod tests {
     /// A task whose fields are all populated and none of which is in the shape
     /// the old editor would have produced: the ref carries prose, the spec holds
     /// two paths, and both sit *above* the note rather than below it.
+    ///
+    /// It must also stay **settled** — written in `Metadata::rank` order — since
+    /// these tests assert an edit leaves the rest of the file byte for byte. A
+    /// task in any other order is reordered the moment it is marked dirty, and
+    /// those diffs would be noise drowning the assertion.
     const TRACK: &str = "\
 # Test
 
@@ -3141,8 +3146,8 @@ mod tests {
 
 - [ ] `T-001` Fix modqual dep record field reds #design #urgent
   - dep: T-002, T-003
-  - ref: compiler/src/module_signature.rs:807, tests/name-resolution/bac178 — this ticket's own red (first fixture)
   - spec: doc/spec.md#anchor, doc/design notes.md
+  - ref: compiler/src/module_signature.rs:807, tests/name-resolution/bac178 — this ticket's own red (first fixture)
   - note:
     Some body text.
 
