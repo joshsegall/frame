@@ -595,7 +595,7 @@ Refusing also replaces three misleading messages. `--new-id` used to report succ
 Run project maintenance — the work frame expects to do for you as tasks come and go.
 
 ```
-fr clean [--dry-run] [--normalize]
+fr clean [--dry-run] [--normalize] [--json]
 ```
 
 Actions performed:
@@ -614,6 +614,23 @@ Actions performed:
 Missing `resolved:` dates are filled *after* archival, deliberately. Archive retention ranks done tasks by that date and treats a missing one as oldest, so stamping it earlier in the run would make the oldest task look like the newest completion — retained over genuinely recent work, and surfacing at the top of `fr recent`.
 
 IDs assigned or reassigned by a real (non-`--dry-run`) clean are minted in this clone's [actor-token namespace](concepts.md#minting-in-a-token-namespace), auto-claiming a token on first use. Archival and thresholds key on task state and `resolved:` dates, not ID structure, so they are unaffected by the token. A `--dry-run` previews without claiming a token or writing anything.
+
+`--json` emits the whole report as one document — the finding categories flattened in as arrays, the way `fr check --json` reads, plus `field_order` and two flags:
+
+```json
+{
+  "dry_run": true,
+  "normalize": false,
+  "ids_assigned": [{ "track_id": "main", "assigned_id": "M-002", "title": "No id at all" }],
+  "dangling_deps": [{ "track_id": "main", "task_id": "M-001", "dep_id": "M-404" }],
+  "field_order": {
+    "reordered": [{ "track_id": "main", "task": "M-001", "was": ["added", "note", "dep"], "now": ["added", "dep", "note"] }],
+    "skipped": []
+  }
+}
+```
+
+The flags carry what the arrays cannot. `dry_run` is whether anything was written. `normalize` is what `field_order.reordered` *means*: with it those tasks were rewritten, without it they were only found. A consumer that ignores it reads a preview as a result. The document is printed after the write succeeds, so a run that failed to save prints nothing.
 
 #### `fr clean --normalize`
 

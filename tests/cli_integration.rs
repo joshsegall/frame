@@ -7602,3 +7602,83 @@ fn clean_normalize_names_both_orders() {
         "{out}"
     );
 }
+
+/// `fr clean --json` describes the same run the human surface does.
+///
+/// The two flags are what the arrays cannot say on their own: `dry_run` is
+/// whether anything was written, and `normalize` is what `field_order.reordered`
+/// *means* — with it those tasks were rewritten, without it they were only
+/// found. A consumer ignoring the flag would read a preview as a result.
+#[test]
+fn clean_json_reports_the_same_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+    let track = tmp.path().join("frame/tracks/main.md");
+    let original = "\
+# Main Track
+
+## Backlog
+
+- [ ] `M-001` Out of order
+  - added: 2026-01-01
+  - note: body
+  - dep: M-404
+- [ ] No id at all
+
+## Parked
+
+## Done
+";
+    fs::write(&track, original).unwrap();
+
+    // Preview: reports, changes nothing, and says so.
+    let out = run_fr_ok(tmp.path(), &["--json", "clean", "--dry-run"]);
+    let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+    assert_eq!(v["dry_run"], true);
+    assert_eq!(v["normalize"], false);
+    assert_eq!(v["ids_assigned"][0]["title"], "No id at all");
+    assert_eq!(v["dangling_deps"][0]["dep_id"], "M-404");
+    assert_eq!(v["field_order"]["reordered"][0]["task"], "M-001");
+    assert_eq!(
+        v["field_order"]["reordered"][0]["now"],
+        serde_json::json!(["added", "dep", "note"])
+    );
+    assert_eq!(fs::read_to_string(&track).unwrap(), original);
+
+    // Real run with the flag: same document shape, `normalize` now true, and
+    // the file actually reordered.
+    let out = run_fr_ok(tmp.path(), &["--json", "clean", "--normalize"]);
+    let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+    assert_eq!(v["dry_run"], false);
+    assert_eq!(v["normalize"], true);
+    assert_eq!(v["field_order"]["reordered"][0]["task"], "M-001");
+
+    let text = fs::read_to_string(&track).unwrap();
+    assert!(
+        text.find("dep:").unwrap() < text.find("note:").unwrap(),
+        "{text}"
+    );
+}
+
+/// A JSON run that cannot write must not print a document saying it did.
+#[test]
+fn clean_json_prints_nothing_when_the_project_will_not_load() {
+    let tmp = tempfile::tempdir().unwrap();
+    // No frame/ directory at all.
+    let (stdout, _stderr, success) = run_fr(tmp.path(), &["--json", "clean"]);
+    assert!(!success);
+    assert!(
+        stdout.trim().is_empty(),
+        "a failed run emitted a result document: {stdout}"
+    );
+}
+
+/// The human surface is unchanged by the JSON one existing — they are a pair,
+/// and `--json` must not leak into the default output.
+#[test]
+fn clean_human_output_has_no_json() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+    let out = run_fr_ok(tmp.path(), &["clean"]);
+    assert!(!out.trim_start().starts_with('{'), "{out}");
+}

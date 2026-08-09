@@ -18,6 +18,12 @@ All notable changes to frame will be documented in this file.
 
 ### Added
 
+- **`fr clean --json`.** The whole report as one document: the finding categories flattened in as arrays the way `fr check --json` reads, plus `field_order`, `dry_run` and `normalize`. The last two carry what the arrays cannot — whether anything was written, and whether `field_order.reordered` names tasks that *were* rewritten or only ones that would be.
+
+  `--json` is a global flag, so clean already accepted it and silently printed human text; a consumer got a parse error. That is the shape `fr deps` shipped with once and had to be fixed, which is why this now has a standing guard rather than a fix: `tests/parity.rs` carries a table of every subcommand and whether `--json` gives it a document, checked in both directions — a command declared to have a surface must emit one, and a command declared not to must not have quietly grown one. A new subcommand fails the build until someone decides which it is, the same way `every_subcommand_is_classified` already works for the parity matrix.
+
+  The table records the surface as it stands: every read command has one, along with `git setup`, `actor claim/set/retire/merge`, `projects list/prune` and now `clean`. The task and track write commands do not, and each says so with a reason.
+
 - **`fr clean` reports tasks whose fields are out of canonical order**, and names the flag that fixes them:
 
   ```

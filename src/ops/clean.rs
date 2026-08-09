@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use chrono::Local;
+use serde::Serialize;
 
 use crate::io::actors::IdScope;
 use crate::model::archive::Archive;
@@ -14,7 +15,7 @@ use crate::ops::refs as refs_ops;
 use crate::ops::task_ops::renumber_subtasks;
 
 /// One task whose fields are out of canonical order.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Normalized {
     pub track_id: String,
     /// The task's ID, or its title when it has none.
@@ -27,7 +28,7 @@ pub struct Normalized {
 }
 
 /// Result of a normalize pass.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize)]
 pub struct NormalizeResult {
     pub reordered: Vec<Normalized>,
     /// Tasks left alone because a note moved last would have swallowed their
@@ -144,7 +145,7 @@ fn normalize_tasks(
 }
 
 /// Result of a clean operation
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize)]
 pub struct CleanResult {
     /// IDs assigned to tasks that were missing them
     pub ids_assigned: Vec<IdAssignment>,
@@ -164,14 +165,14 @@ pub struct CleanResult {
     pub suggestions: Vec<Suggestion>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct IdAssignment {
     pub track_id: String,
     pub assigned_id: String,
     pub title: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DateAssignment {
     pub track_id: String,
     pub task_id: String,
@@ -182,7 +183,8 @@ pub struct DateAssignment {
 /// Which date a [`DateAssignment`] filled in. Both are reported the same way, but
 /// naming the field keeps `T-001 → 2026-07-31` from being ambiguous now that
 /// clean fills two kinds of date.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum DateKind {
     Added,
     Resolved,
@@ -197,7 +199,7 @@ impl DateKind {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DuplicateResolution {
     pub track_id: String,
     pub original_id: String,
@@ -205,21 +207,21 @@ pub struct DuplicateResolution {
     pub title: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ArchiveRecord {
     pub track_id: String,
     pub task_id: String,
     pub title: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DanglingDep {
     pub track_id: String,
     pub task_id: String,
     pub dep_id: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct BrokenRef {
     pub track_id: String,
     pub task_id: String,
@@ -227,13 +229,14 @@ pub struct BrokenRef {
     pub kind: RefKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum RefKind {
     Ref,
     Spec,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SectionReconcile {
     pub track_id: String,
     pub task_id: String,
@@ -241,14 +244,15 @@ pub struct SectionReconcile {
     pub to: SectionKind,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Suggestion {
     pub track_id: String,
     pub task_id: String,
     pub kind: SuggestionKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SuggestionKind {
     /// All subtasks are done — parent could be marked done
     AllSubtasksDone,

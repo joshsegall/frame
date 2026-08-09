@@ -1440,3 +1440,237 @@ fn indent(body: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+// ---------------------------------------------------------------------------
+// The `--json` surface guard
+// ---------------------------------------------------------------------------
+
+/// Whether a command form gives `--json` a machine-readable document.
+///
+/// `--json` is a **global** flag: clap accepts it on every subcommand whether or
+/// not the handler was given it, so a command with no JSON surface does not
+/// reject the flag — it prints human text and a consumer gets a parse error.
+/// That is not hypothetical; `fr deps` shipped exactly that way and had to be
+/// fixed. Nothing in the type system distinguishes "has a JSON surface" from
+/// "silently ignores the flag", so this table does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Json {
+    /// Emits a JSON document, verified by running it.
+    Yes,
+    /// No JSON surface. The reason is what someone reads before adding one.
+    No(&'static str),
+}
+
+struct JsonRow {
+    /// Commands run first, for a row needing state the fixture lacks.
+    setup: &'static [&'static [&'static str]],
+    argv: &'static [&'static str],
+    json: Json,
+}
+
+const fn jrow(argv: &'static [&'static str], json: Json) -> JsonRow {
+    JsonRow {
+        setup: &[],
+        argv,
+        json,
+    }
+}
+
+const WRITE: &str = "task/track write command — no JSON surface yet";
+const REGISTRY_WRITE: &str = "registry write — reports one line, no JSON surface yet";
+
+const JSON_SURFACE: &[JsonRow] = &[
+    // Reads.
+    jrow(&["list"], Json::Yes),
+    jrow(&["show", "M-001"], Json::Yes),
+    jrow(&["ready"], Json::Yes),
+    jrow(&["blocked"], Json::Yes),
+    jrow(&["search", "task"], Json::Yes),
+    jrow(&["inbox"], Json::Yes),
+    jrow(&["tracks"], Json::Yes),
+    jrow(&["stats"], Json::Yes),
+    jrow(&["recent"], Json::Yes),
+    jrow(&["deps", "H-001"], Json::Yes),
+    jrow(&["check"], Json::Yes),
+    jrow(&["info"], Json::Yes),
+    jrow(&["recovery"], Json::Yes),
+    jrow(
+        &["recovery", "path"],
+        Json::No("prints one path, for `$(fr recovery path)`"),
+    ),
+    jrow(&["recovery", "prune"], Json::No(WRITE)),
+    jrow(&["projects", "list"], Json::Yes),
+    jrow(&["projects", "add", "."], Json::No(REGISTRY_WRITE)),
+    JsonRow {
+        setup: &[&["projects", "add", "."]],
+        argv: &["projects", "remove", "parity-fixture"],
+        json: Json::No(REGISTRY_WRITE),
+    },
+    jrow(&["projects", "prune"], Json::Yes),
+    jrow(&["actor", "list"], Json::Yes),
+    jrow(&["actor", "claim"], Json::Yes),
+    jrow(&["actor", "set", "c"], Json::Yes),
+    JsonRow {
+        setup: &[&["actor", "set", "b"], &["actor", "set", "c"]],
+        argv: &["actor", "retire", "b"],
+        json: Json::Yes,
+    },
+    JsonRow {
+        setup: &[&["actor", "set", "b"], &["actor", "set", "c"]],
+        argv: &["actor", "merge", "b", "--into", "c"],
+        json: Json::Yes,
+    },
+    jrow(&["git", "setup"], Json::Yes),
+    // Maintenance.
+    jrow(&["clean"], Json::Yes),
+    jrow(&["clean", "--normalize"], Json::Yes),
+    // Writes with no JSON surface.
+    jrow(&["init"], Json::No("prints an initialization banner")),
+    jrow(&["inbox", "a new item"], Json::No(WRITE)),
+    jrow(&["add", "main", "x"], Json::No(WRITE)),
+    jrow(&["push", "main", "x"], Json::No(WRITE)),
+    jrow(&["sub", "M-001", "x"], Json::No(WRITE)),
+    jrow(&["state", "M-001", "done"], Json::No(WRITE)),
+    jrow(&["start", "M-001"], Json::No(WRITE)),
+    jrow(&["done", "M-001"], Json::No(WRITE)),
+    jrow(&["tag", "M-001", "add", "x"], Json::No(WRITE)),
+    jrow(&["dep", "M-001", "add", "M-005"], Json::No(WRITE)),
+    jrow(&["note", "M-001", "x"], Json::No(WRITE)),
+    jrow(&["ref", "M-001", "add", "frame/inbox.md"], Json::No(WRITE)),
+    jrow(&["spec", "M-001", "add", "frame/inbox.md"], Json::No(WRITE)),
+    jrow(&["title", "M-001", "x"], Json::No(WRITE)),
+    jrow(&["mv", "M-001", "--top"], Json::No(WRITE)),
+    jrow(&["triage", "1", "--track", "main"], Json::No(WRITE)),
+    jrow(&["delete", "M-001", "--yes"], Json::No(WRITE)),
+    jrow(&["import", "import.md", "--track", "main"], Json::No(WRITE)),
+    jrow(&["track", "new", "t2", "T2"], Json::No(WRITE)),
+    jrow(&["track", "shelve", "side"], Json::No(WRITE)),
+    jrow(&["track", "activate", "shelf"], Json::No(WRITE)),
+    jrow(&["track", "mv", "main", "1"], Json::No(WRITE)),
+    jrow(&["track", "cc-focus", "side"], Json::No(WRITE)),
+    jrow(
+        &["track", "rename", "side", "--name", "Renamed"],
+        Json::No(WRITE),
+    ),
+    JsonRow {
+        setup: &[&["track", "new", "tmp", "Tmp"]],
+        argv: &["track", "delete", "tmp"],
+        json: Json::No(WRITE),
+    },
+    JsonRow {
+        setup: &[&["track", "new", "tmp", "Tmp"]],
+        argv: &["track", "archive", "tmp"],
+        json: Json::No(WRITE),
+    },
+    jrow(
+        &["merge"],
+        Json::No("its interface is an exit status for the VCS, not a document"),
+    ),
+];
+
+/// Run `fr` without requiring success — a row may legitimately fail, and what
+/// this test asks is only whether the output is JSON.
+fn run_fr_raw(dir: &Path, args: &[&str]) -> String {
+    let output = Command::new(fr_bin())
+        .args(args)
+        .current_dir(dir)
+        .env("XDG_CONFIG_HOME", dir.join(".xdg-config"))
+        .output()
+        .expect("failed to run fr");
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+/// Every command declared to have a `--json` surface has one, and every command
+/// declared not to still does not.
+///
+/// Both directions matter. The first catches a surface that broke. The second
+/// catches one that was *added* without the table being updated — which is how
+/// the list stays a description of reality rather than a wish.
+#[test]
+fn json_surfaces_are_what_the_table_says() {
+    let mut wrong: Vec<String> = Vec::new();
+
+    for r in JSON_SURFACE {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // `init` is the one row that needs a directory without a project in it.
+        if r.argv != ["init"] {
+            create_fixture(root);
+            fs::write(root.join("import.md"), "- [ ] an imported task\n").unwrap();
+        }
+        for pre in r.setup {
+            run_fr_raw(root, pre);
+        }
+
+        let mut argv = vec!["--json"];
+        argv.extend_from_slice(r.argv);
+        let out = run_fr_raw(root, &argv);
+        let parses = !out.trim().is_empty() && serde_json::from_str::<Value>(&out).is_ok();
+
+        match (r.json, parses) {
+            (Json::Yes, false) => wrong.push(format!(
+                "fr {} is declared Json::Yes but emitted:\n{}",
+                r.argv.join(" "),
+                out.lines().take(3).collect::<Vec<_>>().join("\n")
+            )),
+            (Json::No(_), true) => wrong.push(format!(
+                "fr {} now emits JSON — update JSON_SURFACE to Json::Yes",
+                r.argv.join(" ")
+            )),
+            _ => {}
+        }
+    }
+
+    assert!(wrong.is_empty(), "{}", wrong.join("\n\n"));
+}
+
+/// Every subcommand clap knows about appears in the table.
+///
+/// The same guard as [`every_subcommand_is_classified`], for the other
+/// question: a new command fails the build until someone says whether `--json`
+/// does anything on it. Leaf subcommands are enumerated too, so adding
+/// `fr track split` is caught rather than covered by `fr track new`'s row.
+#[test]
+fn every_subcommand_has_a_json_verdict() {
+    use clap::CommandFactory;
+
+    let cmd = frame::cli::commands::Cli::command();
+    let mut missing: Vec<String> = Vec::new();
+
+    for sub in cmd.get_subcommands() {
+        let name = sub.get_name();
+        if name == "help" {
+            continue;
+        }
+        let leaves: Vec<&str> = sub
+            .get_subcommands()
+            .map(|l| l.get_name())
+            .filter(|n| *n != "help")
+            .collect();
+
+        let paths: Vec<Vec<&str>> = if leaves.is_empty() {
+            vec![vec![name]]
+        } else {
+            // A command with leaves may also be runnable bare (`fr inbox`,
+            // `fr projects`); that form is covered if any row starts with it.
+            leaves.iter().map(|l| vec![name, *l]).collect()
+        };
+
+        for path in paths {
+            let covered = JSON_SURFACE
+                .iter()
+                .any(|r| r.argv.len() >= path.len() && r.argv[..path.len()] == path[..]);
+            if !covered {
+                missing.push(path.join(" "));
+            }
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "subcommand(s) {missing:?} have no row in JSON_SURFACE (tests/parity.rs).\n\
+         Add one saying whether `--json` emits a document there: `Json::Yes` if it \
+         does, or `Json::No(reason)` if it does not. `--json` is a global flag, so \
+         a command with no surface accepts it and silently prints human text."
+    );
+}

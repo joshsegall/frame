@@ -116,7 +116,7 @@ pub fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             Commands::Track(args) => cmd_track(args),
 
             // Maintenance
-            Commands::Clean(args) => cmd_clean(args),
+            Commands::Clean(args) => cmd_clean(args, json),
             Commands::Import(args) => cmd_import(args),
             Commands::Delete(args) => cmd_delete(args),
 
@@ -3148,7 +3148,7 @@ fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
     if n == 1 { one } else { many }
 }
 
-fn cmd_clean(args: CleanArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_clean(args: CleanArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut project = load_project_cwd()?;
 
     // A real clean holds the lock and mints in this clone's namespace (auto-
@@ -3173,6 +3173,43 @@ fn cmd_clean(args: CleanArgs) -> Result<(), Box<dyn std::error::Error>> {
         clean::scan_field_order(&project)
     };
 
+    if !json {
+        report_clean(&args, &result, &normalized);
+    }
+
+    if !args.dry_run {
+        // Save all modified tracks. A clean task serializes verbatim, so saving
+        // one clean did not touch rewrites nothing.
+        for (track_id, track) in &project.tracks {
+            if let Some(file) = track_file(&project, track_id) {
+                project_io::save_track(&project.frame_dir, file, track)?;
+            }
+        }
+    }
+
+    // Emitted after the save, so a document saying what changed is never printed
+    // for a run whose write failed — the `?` above returns first.
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&CleanJson {
+                dry_run: args.dry_run,
+                normalize: args.normalize,
+                result: &result,
+                field_order: &normalized,
+            })?
+        );
+    }
+
+    Ok(())
+}
+
+/// The human surface for [`cmd_clean`].
+fn report_clean(
+    args: &CleanArgs,
+    result: &clean::CleanResult,
+    normalized: &clean::NormalizeResult,
+) {
     if args.normalize {
         if !normalized.reordered.is_empty() {
             println!("Field order normalized:");
@@ -3287,13 +3324,6 @@ fn cmd_clean(args: CleanArgs) -> Result<(), Box<dyn std::error::Error>> {
     if args.dry_run {
         println!("(dry run — no changes written)");
     } else {
-        // Save all modified tracks
-        for (track_id, track) in &project.tracks {
-            if let Some(file) = track_file(&project, track_id) {
-                project_io::save_track(&project.frame_dir, file, track)?;
-            }
-        }
-
         // Without `--normalize`, out-of-order fields were reported but not
         // changed — so they are not counted as changes, but they do mean the
         // project is not clean, the same way a dangling dep does.
@@ -3316,8 +3346,6 @@ fn cmd_clean(args: CleanArgs) -> Result<(), Box<dyn std::error::Error>> {
             println!("✓ project is clean");
         }
     }
-
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------

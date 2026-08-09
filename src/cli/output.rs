@@ -49,6 +49,27 @@ pub struct TaskJson {
     pub ancestors: Vec<TaskJson>,
 }
 
+/// `fr clean --json`.
+///
+/// The clean report is flattened in rather than nested under a key, so the
+/// document reads like `fr check --json` does — one object whose fields are the
+/// finding categories. `field_order` is separate because it is the one category
+/// clean *reports* without acting on.
+///
+/// Two flags carry what the arrays cannot say on their own. `dry_run` is whether
+/// anything was written at all. `normalize` is what `field_order.reordered`
+/// means: with it, those tasks were rewritten; without it, they were merely
+/// found, and running `fr clean --normalize` is what would change them. A
+/// consumer that ignores the flag would read a preview as a result.
+#[derive(Serialize)]
+pub struct CleanJson<'a> {
+    pub dry_run: bool,
+    pub normalize: bool,
+    #[serde(flatten)]
+    pub result: &'a crate::ops::clean::CleanResult,
+    pub field_order: &'a crate::ops::clean::NormalizeResult,
+}
+
 #[derive(Serialize)]
 pub struct TaskListJson {
     pub track: String,
