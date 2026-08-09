@@ -327,6 +327,23 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
+    // --- Resolved region ---
+    for meta in &task.metadata {
+        if let Metadata::Resolved(date) = meta {
+            let is_active = current_region == DetailRegion::Resolved;
+            if is_active {
+                body_active_line = Some(body_lines.len());
+            }
+            let spans: Vec<Span> = vec![
+                region_indicator(is_active, region_indicator_style, bg),
+                Span::styled("resolved: ", dim_style),
+                Span::styled(date.clone(), text_style),
+            ];
+            body_lines.push(Line::from(spans));
+            break;
+        }
+    }
+
     // --- Deps region ---
     {
         let region_start = body_lines.len();
@@ -1779,6 +1796,65 @@ mod tests {
             render_detail_view(frame, &mut app, area);
         });
         assert_snapshot!(output);
+    }
+
+    /// A done task shows its completion date, directly under `added:`.
+    ///
+    /// The note is deliberately between the two dates in the file: `resolved:`
+    /// is appended to the metadata list when the task is completed, so metadata
+    /// order puts it *after* a note that can run to dozens of lines. Rendering
+    /// it in that order is what made the date look absent on a real task.
+    #[test]
+    fn done_task_shows_resolved_date_under_added() {
+        let md = "\
+# Test
+
+## Backlog
+
+## Done
+
+- [x] `T-9` Finished task
+  - added: 2025-05-10
+  - note: A note that sits between the two dates in the file.
+  - resolved: 2025-05-14
+";
+        let mut app = app_in_detail_view(md, "T-9");
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_detail_view(frame, &mut app, area);
+        });
+
+        let added = output
+            .find("added: 2025-05-10")
+            .expect("added date rendered");
+        let resolved = output
+            .find("resolved: 2025-05-14")
+            .expect("resolved date rendered");
+        let note = output.find("A note that sits").expect("note rendered");
+        assert!(
+            added < resolved && resolved < note,
+            "resolved belongs between added and the note:\n{output}"
+        );
+    }
+
+    /// The region is absent — not blank — on a task with no completion date, so
+    /// region navigation never stops on a row that renders nothing.
+    #[test]
+    fn open_task_has_no_resolved_region() {
+        let md = "\
+# Test
+
+## Backlog
+
+- [ ] `T-1` Still open
+  - added: 2025-05-10
+
+## Done
+";
+        let mut app = app_in_detail_view(md, "T-1");
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_detail_view(frame, &mut app, area);
+        });
+        assert!(!output.contains("resolved:"), "no resolved row:\n{output}");
     }
 
     #[test]

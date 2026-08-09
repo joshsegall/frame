@@ -129,6 +129,7 @@ pub enum DetailRegion {
     Title,
     Tags,
     Added,
+    Resolved,
     Deps,
     Spec,
     Refs,
@@ -139,7 +140,10 @@ pub enum DetailRegion {
 impl DetailRegion {
     /// Whether this region is editable
     pub fn is_editable(self) -> bool {
-        !matches!(self, DetailRegion::Added | DetailRegion::Subtasks)
+        !matches!(
+            self,
+            DetailRegion::Added | DetailRegion::Resolved | DetailRegion::Subtasks
+        )
     }
 }
 
@@ -4420,6 +4424,19 @@ impl App {
             regions.push(DetailRegion::Added);
         }
 
+        // Resolved date — present only on a task that has one, which in practice
+        // means a done task. Sits next to `added:` so the two dates read as a
+        // pair, rather than wherever `set_state` happened to append it: it is
+        // pushed onto the metadata list last, so a task with a long note renders
+        // its completion date dozens of lines below the fold.
+        if task
+            .metadata
+            .iter()
+            .any(|m| matches!(m, Metadata::Resolved(_)))
+        {
+            regions.push(DetailRegion::Resolved);
+        }
+
         // Deps
         regions.push(DetailRegion::Deps);
 
@@ -4447,6 +4464,7 @@ impl App {
             DetailRegion::Title => true,
             DetailRegion::Tags => !task.tags.is_empty(),
             DetailRegion::Added => true, // only in regions list if present
+            DetailRegion::Resolved => true, // only in regions list if present
             DetailRegion::Subtasks => true, // only in regions list if present
             DetailRegion::Deps => task
                 .metadata
@@ -6043,6 +6061,46 @@ mod tests {
                 file: "tracks/research.md".to_string(),
             },
         ]
+    }
+
+    // --- build_detail_regions ---
+
+    /// `Resolved` follows `Added`, whatever order the metadata is in. The two
+    /// dates read as a pair, and `set_state` appends `resolved:` last, so
+    /// metadata order alone would file it behind the note.
+    #[test]
+    fn resolved_region_follows_added_regardless_of_metadata_order() {
+        let mut task = crate::model::Task::new(TaskState::Done, None, "Finished".into());
+        task.metadata
+            .push(crate::model::Metadata::Note("a note".into()));
+        task.metadata
+            .push(crate::model::Metadata::Added("2025-05-10".into()));
+        task.metadata
+            .push(crate::model::Metadata::Resolved("2025-05-14".into()));
+
+        let regions = App::build_detail_regions(&task);
+        let added = regions.iter().position(|r| *r == DetailRegion::Added);
+        let resolved = regions.iter().position(|r| *r == DetailRegion::Resolved);
+        assert_eq!(resolved, added.map(|i| i + 1), "regions: {regions:?}");
+    }
+
+    /// A task with no completion date gets no region for one, so `j`/`k` never
+    /// land on a row that renders nothing.
+    #[test]
+    fn no_resolved_region_without_a_resolved_date() {
+        let mut task = crate::model::Task::new(TaskState::Todo, None, "Still open".into());
+        task.metadata
+            .push(crate::model::Metadata::Added("2025-05-10".into()));
+
+        let regions = App::build_detail_regions(&task);
+        assert!(!regions.contains(&DetailRegion::Resolved), "{regions:?}");
+    }
+
+    /// Read-only, like `added:` — there is no keystroke that edits it, and
+    /// `Tab` skips it when jumping between editable regions.
+    #[test]
+    fn resolved_region_is_not_editable() {
+        assert!(!DetailRegion::Resolved.is_editable());
     }
 
     // --- is_inbox_path ---

@@ -6,6 +6,10 @@ All notable changes to frame will be documented in this file.
 
 ### Added
 
+- **The TUI Detail view shows a done task's `resolved:` date**, on its own read-only row directly under `added:` — previously the view rendered `added:` and nothing about when the task was finished, so the one place that shows a task in full omitted half of its dates. The date was already recorded correctly; the Detail view simply never displayed it, and the Recent view's date headers were the only place it surfaced.
+
+  It renders under `added:` rather than in metadata order, because metadata order is not where a reader looks for it. `resolved:` is *appended* to a task's metadata when the task is completed, so on a task carrying a long note the date sits below the whole note — in a real case, 50 lines down, which reads as absent. `fr show` prints in metadata order and has the same effect; the two dates belong together. The row appears only on a task that has the date, so region navigation never stops on a blank one.
+
 - **Git worktrees are listed under the project they are a worktree of**, in `fr projects` and in the TUI picker, labelled by the branch they have checked out:
 
   ```

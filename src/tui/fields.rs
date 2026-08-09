@@ -114,7 +114,7 @@ pub(crate) fn field_to_buffer(task: &Task, region: DetailRegion) -> String {
                 _ => None,
             })
             .unwrap_or_default(),
-        DetailRegion::Added | DetailRegion::Subtasks => String::new(),
+        DetailRegion::Added | DetailRegion::Resolved | DetailRegion::Subtasks => String::new(),
     }
 }
 
@@ -156,7 +156,7 @@ pub(crate) fn apply_buffer(task: &mut Task, region: DetailRegion, buffer: &str) 
             task.mark_dirty();
             true
         }
-        DetailRegion::Added | DetailRegion::Subtasks => false,
+        DetailRegion::Added | DetailRegion::Resolved | DetailRegion::Subtasks => false,
     }
 }
 

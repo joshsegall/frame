@@ -47,7 +47,9 @@ Project-wide search results grouped by source (active tracks, inbox, archive). O
 
 ### Detail View
 
-Full view of a single task showing all fields as navigable regions: Title, Tags, Added, Deps, Spec, Refs, Note, Subtasks. Open with `Enter` on a task in Track view or Recent view. A breadcrumb trail always shows the origin (track prefix or "Recent") and any parent tasks when drilling into subtasks.
+Full view of a single task showing all fields as navigable regions: Title, Tags, Added, Resolved, Deps, Spec, Refs, Note, Subtasks. Open with `Enter` on a task in Track view or Recent view.
+
+Added and Resolved are read-only, and each appears only when the task carries that date — so Resolved shows on a done task and is absent everywhere else. It renders directly under Added rather than in metadata order: `resolved:` is appended to a task's metadata when it is completed, so on a task with a long note the file has it dozens of lines below the note, and the two dates belong together. A breadcrumb trail always shows the origin (track prefix or "Recent") and any parent tasks when drilling into subtasks.
 
 ## Modes
 
