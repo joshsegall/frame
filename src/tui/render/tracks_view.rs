@@ -75,8 +75,13 @@ pub fn render_tracks_view(frame: &mut Frame, app: &mut App, area: Rect) {
     // border(1) + num + "  " + name + "  " + id
     let name_col = 1 + num_width + 2 + max_name_len + 2 + max_id_len;
 
-    // Project name header, with this clone's actor token as a compact dim
-    // suffix (`· actor: a` / `· primary` / `· unclaimed`). Read-only display.
+    // Project name header, with two compact dim suffixes: which working copy this
+    // is when it is a linked worktree (`· worktree: feature-x`), and this clone's
+    // actor token (`· actor: a` / `· primary` / `· unclaimed`). Read-only display.
+    //
+    // The worktree segment is here because the project name cannot carry it:
+    // `project.toml` is committed, so every worktree of a clone reports the same
+    // name and two sessions look identical.
     let project_span = Span::styled(
         format!(" Project: {}", app.project.config.project.name),
         Style::default()
@@ -84,24 +89,32 @@ pub fn render_tracks_view(frame: &mut Frame, app: &mut App, area: Rect) {
             .bg(app.theme.background)
             .add_modifier(Modifier::BOLD),
     );
+    let worktree_text = app
+        .worktree_label
+        .as_ref()
+        .map(|label| format!(" · worktree: {}", label));
     let actor_text = format!(
         " · actor: {}",
         actors::actor_label(app.actor_token.as_deref())
     );
+    let dim = Style::default().fg(app.theme.dim).bg(app.theme.background);
+
     let project_w = unicode::display_width(&project_span.content);
+    let worktree_w = worktree_text.as_deref().map_or(0, unicode::display_width);
     let actor_w = unicode::display_width(&actor_text);
-    // The actor segment is the first thing to drop if the line is tight.
-    if project_w + actor_w <= area.width as usize {
-        lines.push(Line::from(vec![
-            project_span,
-            Span::styled(
-                actor_text,
-                Style::default().fg(app.theme.dim).bg(app.theme.background),
-            ),
-        ]));
-    } else {
-        lines.push(Line::from(project_span));
+    let width = area.width as usize;
+
+    // Under pressure the *actor* tag goes first and the worktree tag second: a
+    // token is bookkeeping, while mistaking which working copy you are looking at
+    // means editing the wrong tree.
+    let mut spans = vec![project_span];
+    if project_w + worktree_w + actor_w <= width {
+        spans.extend(worktree_text.map(|t| Span::styled(t, dim)));
+        spans.push(Span::styled(actor_text, dim));
+    } else if project_w + worktree_w <= width {
+        spans.extend(worktree_text.map(|t| Span::styled(t, dim)));
     }
+    lines.push(Line::from(spans));
 
     // Top header: short state names aligned to stat columns
     lines.push(render_col_names(app, name_col, max_id_len));
@@ -833,13 +846,23 @@ mod tests {
     /// `app_with_track` points at a non-existent frame dir, so the default state
     /// is unclaimed; the tokened/primary cases set the cached token directly.
     fn header_line_for(token: Option<&str>) -> String {
+        header_line_at(TERM_W, token, None)
+    }
+
+    fn header_line_at(width: u16, token: Option<&str>, worktree: Option<&str>) -> String {
         let mut app = app_with_track(SIMPLE_TRACK_MD);
         app.view = crate::tui::app::View::Tracks;
         app.actor_token = token.map(|s| s.to_string());
-        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+        app.worktree_label = worktree.map(|s| s.to_string());
+        let output = render_to_string(width, TERM_H, |frame, area| {
             render_tracks_view(frame, &mut app, area);
         });
-        output.lines().next().unwrap_or_default().to_string()
+        output
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim_end()
+            .to_string()
     }
 
     #[test]
@@ -858,6 +881,38 @@ mod tests {
     #[test]
     fn overview_header_actor_unclaimed() {
         assert_eq!(header_line_for(None), " Project: Test · actor: unclaimed");
+    }
+
+    /// Two worktrees of a clone report the same committed project name, so the
+    /// header says which working copy this is.
+    #[test]
+    fn overview_header_names_the_worktree() {
+        assert_eq!(
+            header_line_at(TERM_W, Some("a"), Some("feature-x")),
+            " Project: Test · worktree: feature-x · actor: a"
+        );
+        // The main working tree has nothing to distinguish, so nothing is added.
+        assert_eq!(
+            header_line_at(TERM_W, Some("a"), None),
+            " Project: Test · actor: a"
+        );
+    }
+
+    /// Squeezed, the actor token goes before the worktree does: a token is
+    /// bookkeeping, while mistaking the working copy means editing the wrong tree.
+    #[test]
+    fn overview_header_drops_the_actor_before_the_worktree() {
+        // Room for the project and the worktree, but not the actor as well.
+        let both = " Project: Test · worktree: feature-x";
+        assert_eq!(
+            header_line_at(both.chars().count() as u16, Some("a"), Some("feature-x")),
+            both
+        );
+        // Room for neither.
+        assert_eq!(
+            header_line_at(20, Some("a"), Some("feature-x")),
+            " Project: Test"
+        );
     }
 
     /// Rendering the overview on an unclaimed clone must not write `.actor` or

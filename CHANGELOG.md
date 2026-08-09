@@ -18,6 +18,10 @@ All notable changes to frame will be documented in this file.
 
   The relationship comes from `git worktree list`, not from the path: a worktree beside its parent (`git worktree add ../lace-alt`) groups exactly like one nested under it, and a nested *sub-project* in a monorepo is not mistaken for a worktree.
 
+- **A TUI session in a worktree says which one it is.** The Tracks overview header gains a `· worktree: feature-x` segment beside the actor tag, and the terminal title reads `frame · frame-dev (feature-x)`. Same cause as the listing change: the project name is committed, so two sessions on two worktrees of a clone were indistinguishable — same header, same tab title. Absent in the main working tree, where there is nothing to distinguish. Squeezed for width, the actor tag drops first and the worktree tag second; a token is bookkeeping, while mistaking the working copy means editing the wrong tree.
+
+  Nothing keyed on the shared name was ever *wrong* — the ID frontier is keyed by the frame directory's repo-relative path, registry lookups are by path, and recovery entries carry `Origin:`. The ambiguity was in what a person could see.
+
 ### Fixed
 
 - **A removed worktree's registry entry no longer hangs around forever.** `git worktree remove` left a `(not found)` row that only a manual `fr projects prune` would clear — and because the row sorted by last use, it sorted *first*. The entry now retires itself when the registry is listed or the picker is opened, which is when it would have been seen, and the listing says how many went rather than silently rewriting the file.

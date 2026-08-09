@@ -1303,6 +1303,16 @@ pub struct App {
     /// `Some("a")` tokened, `Some("null")` primary, `None` unclaimed. Display
     /// only — surfaced compactly on the Tracks overview header.
     pub actor_token: Option<String>,
+    /// Which working copy this is, when it is a linked git worktree rather than
+    /// its clone's main tree: the branch it has checked out. `None` on the main
+    /// tree and outside git.
+    ///
+    /// Every worktree of a clone reports the same project name — `project.toml` is
+    /// committed — so without this the Tracks header and the terminal title cannot
+    /// say which of two open sessions is which. Resolved once, in [`run`], for the
+    /// reason [`probe_unwritable`] is called there: it shells out to `git`, and
+    /// every test fixture builds an `App` against a directory that does not exist.
+    pub worktree_label: Option<String>,
     /// IDs of active tracks (in display order)
     pub active_track_ids: Vec<String>,
     /// Per-track view state
@@ -1582,6 +1592,7 @@ impl App {
             watcher_needs_restart: false,
             theme,
             actor_token,
+            worktree_label: None,
             active_track_ids,
             track_states,
             tracks_cursor: 0,
@@ -5081,8 +5092,16 @@ pub fn save_ui_state(app: &App) {
 }
 
 /// Set the terminal window/tab title via OSC 0.
-pub fn set_window_title(name: &str) {
-    let _ = write!(io::stdout(), "\x1b]0;frame · {}\x07", name);
+///
+/// `worktree` names the linked worktree this session is in, when it is in one.
+/// Without it two tabs open on two worktrees of a clone carry the same title,
+/// since the project name they share is the committed one.
+pub fn set_window_title(name: &str, worktree: Option<&str>) {
+    let title = match worktree {
+        Some(branch) => format!("frame · {} ({})", name, branch),
+        None => format!("frame · {}", name),
+    };
+    let _ = write!(io::stdout(), "\x1b]0;{}\x07", title);
     let _ = io::stdout().flush();
 }
 
@@ -5220,8 +5239,15 @@ pub fn run(project_dir_override: Option<&str>) -> Result<(), Box<dyn std::error:
         app.frame_unwritable = true;
     }
 
+    // Which working copy this is, when the name alone cannot say. Here rather
+    // than in `App::new` for the same reason as the probe above: it shells out.
+    app.worktree_label = crate::io::git::linked_worktree_label(&app.project.frame_dir);
+
     // Set terminal window title
-    set_window_title(&app.project.config.project.name);
+    set_window_title(
+        &app.project.config.project.name,
+        app.worktree_label.as_deref(),
+    );
 
     // Run event loop
     let result = run_event_loop(&mut terminal, &mut app, watcher);

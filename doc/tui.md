@@ -12,7 +12,13 @@ The default view. Shows a single track's tasks as an indented tree with expand/c
 
 Overview of all tracks grouped by state (active, shelved, archived) with task count statistics. Switch to it with `0` or `` ` ``.
 
-The header line shows the project name followed by this clone's actor token as a compact dim suffix — `Project: NAME · actor: a` (the literal token), `· actor: primary` for the null/primary clone, or `· actor: unclaimed` when no token is set. This is a read-only indicator (it never claims a token); see `fr info` and `fr actor` for the full surface.
+The header line shows the project name followed by up to two compact dim suffixes.
+
+**`· worktree: BRANCH`** appears when this session is in a linked git worktree, naming the branch it has checked out (or the directory name when detached). It is absent in the clone's main working tree, where there is nothing to distinguish. This exists because `project.toml` is committed, so every worktree of a clone reports the *same* project name — without it, two sessions on two worktrees look identical. The terminal window title carries it too, as `frame · NAME (BRANCH)`, which is what tells two tabs apart.
+
+**`· actor: a`** is this clone's actor token — the literal token, `· actor: primary` for the null/primary clone, or `· actor: unclaimed` when no token is set. A read-only indicator (it never claims a token); see `fr info` and `fr actor` for the full surface.
+
+On a narrow terminal the actor segment is dropped first and the worktree segment second: a token is bookkeeping, while mistaking which working copy you are looking at means editing the wrong tree.
 
 ### Board View
 

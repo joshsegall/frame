@@ -603,9 +603,17 @@ pub(super) fn handle_project_picker_key(app: &mut App, key: KeyEvent) {
                         // Replace app with a fresh App for the new project
                         *app = App::new(project);
                         app.watcher_needs_restart = true;
+                        // Switching *between* worktrees of one clone is the case
+                        // this exists for, so it has to be re-resolved here and
+                        // not just at startup.
+                        app.worktree_label =
+                            crate::io::git::linked_worktree_label(&app.project.frame_dir);
 
                         // Update terminal window title
-                        crate::tui::app::set_window_title(&app.project.config.project.name);
+                        crate::tui::app::set_window_title(
+                            &app.project.config.project.name,
+                            app.worktree_label.as_deref(),
+                        );
 
                         // Restore UI state for the new project
                         crate::tui::app::restore_ui_state(app);
