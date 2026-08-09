@@ -22,6 +22,6 @@ expression: output
    │ M          Move to track             D          Show deps             │
    │                                      .          Repeat last action    │
    │ Views                                T          Tag colors            │
-   │ 1-9        Track N                   P          Projects              │
-   │ 0/`        Tracks overview           z/u        Undo                  │
+   │                                                                       │
+   │ [>] frame v0.2.0                          github.com/joshsegall/frame │
    └ ▼ ────────────────────────────────────────────────────────────────────┘

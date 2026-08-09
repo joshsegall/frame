@@ -527,6 +527,8 @@ Some actions are **palette-only** (no direct key binding):
 
 Context-sensitive keybinding reference. Scrollable with `j`/`k`, `g`/`G` to jump. Close with `?` or `Esc`.
 
+The frame version and repo link are pinned to the bottom of the overlay and do not scroll — only the bindings above them move, and the `▲`/`▼` border indicators refer to those.
+
 ### Recovery Log Overlay
 
 Shows the most recent recovery log entries. Open from the command palette ("View recovery log").

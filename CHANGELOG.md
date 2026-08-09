@@ -2,6 +2,12 @@
 
 All notable changes to frame will be documented in this file.
 
+## Unreleased
+
+### Fixed
+
+- **The help overlay's version and repo link no longer scroll off.** They were the last two lines of the same scrolling paragraph as the key bindings, so on any terminal short enough to need scrolling — 24 rows, routinely — they opened below the fold, and only someone who already suspected they were there would scroll down to find them. The footer is now pinned to the bottom of the overlay and the bindings scroll above it; the `▲`/`▼` indicators track the bindings alone. Squeezed to the last row or two, the blank spacer above it goes before the text does.
+
 ## v0.2.0 - 2026-08-08
 
 ### Added

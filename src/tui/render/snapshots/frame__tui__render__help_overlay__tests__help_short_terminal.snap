@@ -1,0 +1,11 @@
+---
+source: src/tui/render/help_overlay.rs
+expression: output
+---
+
+   ┌───────────────────────────────────────────────────────────────────────┐
+   │ Key Bindings                                                          │
+   │                                                                       │
+   │                                                                       │
+   │ [>] frame v0.2.0                          github.com/joshsegall/frame │
+   └ ▼ ────────────────────────────────────────────────────────────────────┘

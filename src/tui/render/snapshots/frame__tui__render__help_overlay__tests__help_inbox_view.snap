@@ -22,6 +22,6 @@ expression: output
    │ r          Recent                    >          Command palette       │
    │ K          Board                     J          Jump to task          │
    │ S          Project search            T          Tag colors            │
-   │                                      P          Projects              │
-   │                                      z/u        Undo                  │
+   │                                                                       │
+   │ [>] frame v0.2.0                          github.com/joshsegall/frame │
    └ ▼ ────────────────────────────────────────────────────────────────────┘

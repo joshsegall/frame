@@ -90,12 +90,10 @@ pub fn render_help_overlay(frame: &mut Frame, app: &mut App, area: Rect) {
     let popup_w = ((col_w * 2 + gap) as u16 + 2).min(area.width.saturating_sub(2));
     let inner_w = (popup_w.saturating_sub(2)) as usize;
 
-    // Footer: blank line + version/URL row
+    // Footer: blank spacer + version/URL row. Pinned below the body, so it
+    // stays on screen no matter how far the bindings have scrolled.
     let version_left = format!("[>] frame v{}", env!("CARGO_PKG_VERSION"));
     let url_right = "github.com/joshsegall/frame";
-    let footer_style = desc_style;
-
-    lines.push(Line::from(Span::styled(" ".repeat(inner_w), blank_style)));
     let usable_w = inner_w.saturating_sub(2); // 1 space padding on each side
     let padding = usable_w.saturating_sub(version_left.len() + url_right.len());
     let footer_text = format!(
@@ -105,12 +103,13 @@ pub fn render_help_overlay(frame: &mut Frame, app: &mut App, area: Rect) {
         url_right,
         " ",
     );
-    lines.push(Line::from(Span::styled(footer_text, footer_style)));
+    let spacer = Line::from(Span::styled(" ".repeat(inner_w), blank_style));
+    let footer_row = Line::from(Span::styled(footer_text, desc_style));
 
-    // Dynamic height from content + borders
-    let popup_h = ((lines.len() as u16) + 2).min(area.height.saturating_sub(2));
-    let visible_h = popup_h.saturating_sub(2) as usize; // minus top/bottom border
-    let max_scroll = lines.len().saturating_sub(visible_h);
+    // Dynamic height from content + footer + borders
+    let popup_h = ((lines.len() + FOOTER_H as usize) as u16 + 2).min(area.height.saturating_sub(2));
+    let (body_h, footer_h) = split_inner(popup_h.saturating_sub(2), FOOTER_H);
+    let max_scroll = lines.len().saturating_sub(body_h as usize);
     app.help_scroll = app.help_scroll.min(max_scroll);
 
     let overlay_area = centered_rect_fixed(popup_w, popup_h, area);
@@ -137,12 +136,48 @@ pub fn render_help_overlay(frame: &mut Frame, app: &mut App, area: Rect) {
         block = block.title_bottom(Span::styled(" \u{25BC} ", Style::default().fg(dim).bg(bg)));
     }
 
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .scroll((app.help_scroll as u16, 0))
-        .style(Style::default().bg(bg));
+    let inner = block.inner(overlay_area);
+    frame.render_widget(block, overlay_area);
 
-    frame.render_widget(paragraph, overlay_area);
+    // Body scrolls; footer does not.
+    let body_area = Rect::new(inner.x, inner.y, inner.width, body_h);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .scroll((app.help_scroll as u16, 0))
+            .style(Style::default().bg(bg)),
+        body_area,
+    );
+
+    if footer_h > 0 {
+        // Squeezed to one row, the spacer is what goes — the text is the point.
+        let footer_lines = if footer_h >= FOOTER_H {
+            vec![spacer, footer_row]
+        } else {
+            vec![footer_row]
+        };
+        let footer_area = Rect::new(inner.x, inner.y + body_h, inner.width, footer_h);
+        frame.render_widget(
+            Paragraph::new(footer_lines).style(Style::default().bg(bg)),
+            footer_area,
+        );
+    }
+}
+
+/// Rows the pinned footer wants: blank spacer + version/URL row.
+const FOOTER_H: u16 = 2;
+
+/// Split a block's inner height into (body, footer) rows.
+///
+/// The footer is pinned, so it keeps its rows until the body is down to a
+/// single line; below that there is nothing left worth pinning it against.
+fn split_inner(inner_h: u16, footer_h: u16) -> (u16, u16) {
+    if inner_h > footer_h {
+        (inner_h - footer_h, footer_h)
+    } else if inner_h >= 2 {
+        (inner_h - 1, 1)
+    } else {
+        (inner_h, 0)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -503,6 +538,92 @@ mod tests {
         let output = render_to_string(TERM_W, TERM_H, |frame, area| {
             render_help_overlay(frame, &mut app, area);
         });
+        assert_snapshot!(output);
+    }
+
+    fn help_at(h: u16, scroll: usize) -> (String, usize) {
+        let mut app = app_with_track(SIMPLE_TRACK_MD);
+        app.show_help = true;
+        app.help_scroll = scroll;
+        let output = render_to_string(TERM_W, h, |frame, area| {
+            render_help_overlay(frame, &mut app, area);
+        });
+        (output, app.help_scroll)
+    }
+
+    /// The invariant the pinned footer exists for. Unlike a snapshot, this
+    /// does not decay when someone edits a binding list.
+    #[test]
+    fn footer_stays_visible_at_every_height_and_scroll() {
+        let version = format!("frame v{}", env!("CARGO_PKG_VERSION"));
+        for h in [24u16, 16, 12, 8] {
+            for scroll in [0usize, 5, usize::MAX] {
+                let (output, _) = help_at(h, scroll);
+                let rows: Vec<&str> = output.lines().collect();
+                // Last row is the bottom border; the footer sits just above it.
+                let footer = rows[rows.len() - 2];
+                assert!(
+                    footer.contains(&version) && footer.contains("github.com/joshsegall/frame"),
+                    "h={h} scroll={scroll}: footer row was {footer:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tall_terminal_leaves_nothing_to_scroll() {
+        let (output, help_scroll) = help_at(60, usize::MAX);
+        assert_eq!(help_scroll, 0, "G should be a no-op when everything fits");
+        let rows: Vec<&str> = output.lines().filter(|l| !l.is_empty()).collect();
+        assert!(!rows[0].contains('\u{25B2}'), "top: {:?}", rows[0]);
+        let last = rows[rows.len() - 1];
+        assert!(!last.contains('\u{25BC}'), "bottom: {last:?}");
+    }
+
+    #[test]
+    fn degenerate_heights_do_not_panic() {
+        for h in 0u16..=6 {
+            let _ = help_at(h, usize::MAX);
+        }
+    }
+
+    #[test]
+    fn split_inner_keeps_the_footer_until_the_body_is_gone() {
+        for inner_h in 0u16..=40 {
+            let (body_h, footer_h) = split_inner(inner_h, FOOTER_H);
+            assert_eq!(body_h + footer_h, inner_h, "inner_h={inner_h}");
+            if inner_h >= 3 {
+                assert_eq!(footer_h, FOOTER_H, "inner_h={inner_h}");
+                assert!(body_h > 0, "inner_h={inner_h}");
+            } else if inner_h == 2 {
+                assert_eq!((body_h, footer_h), (1, 1));
+            } else {
+                assert_eq!(footer_h, 0, "inner_h={inner_h}");
+            }
+        }
+    }
+
+    #[test]
+    fn help_footer_pinned_when_scrolled() {
+        let (output, _) = help_at(TERM_H, 5);
+        assert_snapshot!(output);
+    }
+
+    #[test]
+    fn help_footer_pinned_at_bottom() {
+        let (output, _) = help_at(TERM_H, usize::MAX);
+        assert_snapshot!(output);
+    }
+
+    #[test]
+    fn help_fits_without_scroll() {
+        let (output, _) = help_at(60, 0);
+        assert_snapshot!(output);
+    }
+
+    #[test]
+    fn help_short_terminal() {
+        let (output, _) = help_at(8, 0);
         assert_snapshot!(output);
     }
 }

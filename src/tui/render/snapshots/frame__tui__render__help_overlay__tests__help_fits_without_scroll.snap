@@ -3,6 +3,15 @@ source: src/tui/render/help_overlay.rs
 expression: output
 ---
 
+
+
+
+
+
+
+
+
+
    ┌───────────────────────────────────────────────────────────────────────┐
    │ Key Bindings                                                          │
    │                                                                       │
@@ -22,6 +31,24 @@ expression: output
    │ ~          Set parked                V          Range select          │
    │ c          Toggle cc tag             Ctrl+A     Select all            │
    │                                      N          Select none           │
+   │ Filter (f+key)                       x/b/o/~    Bulk state            │
+   │ fa         Active only               t/d/m/M    Bulk tag/dep/move     │
+   │ fo         Todo only                                                  │
+   │ fb         Blocked only              Other                            │
+   │ fp         Parked only               /          Search                │
+   │ fr         Ready (deps met)          >          Command palette       │
+   │ ft         Filter by tag             J          Jump to task          │
+   │ f Space    Clear state filter        D          Show deps             │
+   │ ff         Clear all filters         C          Set cc-focus          │
+   │                                      .          Repeat last action    │
+   │ Views                                T          Tag colors            │
+   │ 1-9        Track N                   P          Projects              │
+   │ Tab/S-Tab  Prev / next view          z/u        Undo                  │
+   │ 0/`        Tracks overview           Z          Redo                  │
+   │ i          Inbox                     ?          Help                  │
+   │ r          Recent                    QQ         Quit                  │
+   │ K          Board                                                      │
+   │ S          Project search                                             │
    │                                                                       │
    │ [>] frame v0.2.0                          github.com/joshsegall/frame │
-   └ ▼ ────────────────────────────────────────────────────────────────────┘
+   └───────────────────────────────────────────────────────────────────────┘
