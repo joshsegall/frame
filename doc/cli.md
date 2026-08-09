@@ -595,7 +595,7 @@ Refusing also replaces three misleading messages. `--new-id` used to report succ
 Run project maintenance — the work frame expects to do for you as tasks come and go.
 
 ```
-fr clean [--dry-run]
+fr clean [--dry-run] [--normalize]
 ```
 
 Actions performed:
@@ -613,6 +613,25 @@ Actions performed:
 Missing `resolved:` dates are filled *after* archival, deliberately. Archive retention ranks done tasks by that date and treats a missing one as oldest, so stamping it earlier in the run would make the oldest task look like the newest completion — retained over genuinely recent work, and surfacing at the top of `fr recent`.
 
 IDs assigned or reassigned by a real (non-`--dry-run`) clean are minted in this clone's [actor-token namespace](concepts.md#minting-in-a-token-namespace), auto-claiming a token on first use. Archival and thresholds key on task state and `resolved:` dates, not ID structure, so they are unaffected by the token. A `--dry-run` previews without claiming a token or writing anything.
+
+#### `fr clean --normalize`
+
+Rewrite every task whose fields are out of [canonical order](format.md#field-order).
+
+Frame writes a task in canonical order the first time it edits that task, so a project converges on its own — over as long as it takes to touch every task. `--normalize` is that convergence asked for at once, for the tasks nobody is about to touch.
+
+**Off by default, and not something clean does on its own.** Everything else `fr clean` does has to be correct unattended, because the TUI runs it after every reload. Reordering every task in a project is a large, boring diff, and this project has already paid for one: a clean run that rewrote a whole track to fill one `resolved:` date, with a one-line deletion hidden inside it that got committed unread. So this one is asked for explicitly, and `--dry-run` shows you the list first.
+
+Only tasks actually out of order are rewritten; the rest stay byte-identical, so the diff is exactly the tasks reported. Running it twice changes nothing the second time. Marking a task for rewrite re-canonicalizes all of that task's own lines, not just the order — checkbox spacing, the note block form, and the `", "` join on `dep:`/`ref:`/`spec:` — which is the same form the task would reach the next time anyone edited it.
+
+One task is reported but left alone:
+
+```
+Left as they are (stranded lines a note would absorb):
+  [main] M-014 is added, note, resolved
+```
+
+That task carries stranded lines — content the parser could not attribute — indented as deep as a note body, so moving its note last would swallow them ([format.md](format.md#field-order)). It is named rather than skipped silently, because the file has damage worth looking at by hand.
 
 ### `fr import FILE --track TRACK`
 

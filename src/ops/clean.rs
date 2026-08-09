@@ -13,6 +13,100 @@ use crate::ops::ids::Mint;
 use crate::ops::refs as refs_ops;
 use crate::ops::task_ops::renumber_subtasks;
 
+/// One task rewritten by [`normalize_project`].
+#[derive(Debug, Clone)]
+pub struct Normalized {
+    pub track_id: String,
+    /// The task's ID, or its title when it has none.
+    pub task: String,
+    /// Field keys before, in the order the file held them.
+    pub was: Vec<&'static str>,
+}
+
+/// Result of a normalize pass.
+#[derive(Debug, Default)]
+pub struct NormalizeResult {
+    pub reordered: Vec<Normalized>,
+    /// Tasks left alone because a note moved last would have swallowed their
+    /// stranded lines. Reported rather than skipped silently: the file keeps a
+    /// field order the rest of the project no longer uses, and the reason is
+    /// damage the reader may want to fix by hand.
+    pub skipped: Vec<Normalized>,
+}
+
+/// Rewrite every task whose fields are out of canonical order.
+///
+/// The serializer already writes a task in canonical order the first time frame
+/// edits it, so a project converges on its own — task by task, over as long as
+/// it takes to touch every task. This is the same convergence asked for at once.
+///
+/// **Deliberately not part of [`clean_project`], and not reachable from the
+/// TUI's auto-clean.** Clean runs unattended after every file reload when
+/// `auto_clean` is on, so it may only do what is correct with nobody watching
+/// (`doc/cli.md`). Reordering every task in a project is a large, boring diff,
+/// and this codebase has already paid for one of those: a `fr clean` run that
+/// rewrote a whole track to fill one `resolved:` date, with a one-line deletion
+/// hidden inside it that got committed unread. A separate function is what makes
+/// "auto-clean cannot reach this" a fact about the call graph rather than a
+/// promise.
+///
+/// Only tasks that are actually out of order are marked dirty. The rest stay
+/// clean and serialize verbatim from `source_text`, so the diff is exactly the
+/// tasks named in the result and nothing else. That also makes the pass
+/// idempotent: a second run finds nothing.
+///
+/// Marking a task dirty re-canonicalizes **all** of that task's own lines, not
+/// only the order — checkbox spacing, tag placement, the note block form, and
+/// the `", "` join on `dep:`/`ref:`/`spec:`. That is the same canonical form the
+/// task would have reached anyway the next time anyone edited it.
+pub fn normalize_project(project: &mut Project) -> NormalizeResult {
+    let mut result = NormalizeResult::default();
+    for (track_id, track) in &mut project.tracks {
+        for node in &mut track.nodes {
+            if let TrackNode::Section { tasks, .. } = node {
+                normalize_tasks(tasks, track_id, 0, &mut result);
+            }
+        }
+    }
+    result
+}
+
+fn normalize_tasks(
+    tasks: &mut [Task],
+    track_id: &str,
+    indent: usize,
+    result: &mut NormalizeResult,
+) {
+    for task in tasks.iter_mut() {
+        if !crate::model::task::metadata_is_ordered(task) {
+            let record = Normalized {
+                track_id: track_id.to_string(),
+                task: task
+                    .id
+                    .as_ref()
+                    .map(|i| i.to_string())
+                    .unwrap_or_else(|| task.title.clone()),
+                was: task.metadata.iter().map(|m| m.key()).collect(),
+            };
+            // Ask the writer, rather than re-deriving its rule here: a task it
+            // would leave alone must not be marked dirty, or the pass would
+            // report a change the file never receives.
+            if crate::parse::stranded_would_be_absorbed(task, indent) {
+                result.skipped.push(record);
+            } else {
+                // Order the model too, not only the file the serializer is about
+                // to write. Leaving the two disagreeing would keep this task
+                // reported as out of order for the rest of the process, and a
+                // second pass would rewrite what the first already fixed.
+                crate::model::task::sort_metadata(task);
+                task.mark_dirty();
+                result.reordered.push(record);
+            }
+        }
+        normalize_tasks(&mut task.subtasks, track_id, indent + 2, result);
+    }
+}
+
 /// Result of a clean operation
 #[derive(Debug, Default)]
 pub struct CleanResult {
@@ -3255,5 +3349,154 @@ mod tests {
             !track.contains("**Shape."),
             "the line was left behind in the track as well: {track}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // normalize_project
+    // -----------------------------------------------------------------------
+
+    /// The shape the whole thing exists for: `resolved:` appended after a note,
+    /// where it reads as missing.
+    #[test]
+    fn normalize_reorders_a_task_whose_fields_are_out_of_order() {
+        let mut project = make_project(
+            "\
+# Main
+
+## Backlog
+
+## Done
+
+- [x] `M-001` Finished
+  - added: 2026-01-01
+  - note: some body
+  - resolved: 2026-01-02
+",
+            vec![("main", "M")],
+        );
+
+        let result = normalize_project(&mut project);
+        assert_eq!(result.reordered.len(), 1);
+        assert_eq!(result.reordered[0].task, "M-001");
+        assert_eq!(result.reordered[0].was, ["added", "note", "resolved"]);
+        assert!(result.skipped.is_empty());
+
+        let text = crate::parse::serialize_track(&project.tracks[0].1);
+        let added = text.find("added:").unwrap();
+        let resolved = text.find("resolved:").unwrap();
+        let note = text.find("note:").unwrap();
+        assert!(added < resolved && resolved < note, "{text}");
+    }
+
+    /// A task already in order is left **clean**, so it serializes verbatim and
+    /// the pass produces no diff for it. This is what keeps the rewrite to the
+    /// tasks the report names rather than every task in the project.
+    #[test]
+    fn normalize_leaves_an_ordered_task_byte_for_byte() {
+        let src = "\
+# Main
+
+## Backlog
+
+- [ ]  `M-001`   Odd   spacing kept
+  - added: 2026-01-01
+  - note: body
+
+## Done
+";
+        let mut project = make_project(src, vec![("main", "M")]);
+
+        let result = normalize_project(&mut project);
+        assert!(result.reordered.is_empty(), "{:?}", result.reordered);
+        assert_eq!(crate::parse::serialize_track(&project.tracks[0].1), src);
+    }
+
+    /// Running it twice changes nothing the second time.
+    #[test]
+    fn normalize_is_idempotent() {
+        let mut project = make_project(
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` A task
+  - added: 2026-01-01
+  - note: body
+  - ref: src/a.rs
+
+## Done
+",
+            vec![("main", "M")],
+        );
+
+        assert_eq!(normalize_project(&mut project).reordered.len(), 1);
+        let once = crate::parse::serialize_track(&project.tracks[0].1);
+
+        let second = normalize_project(&mut project);
+        assert!(second.reordered.is_empty(), "{:?}", second.reordered);
+        assert_eq!(crate::parse::serialize_track(&project.tracks[0].1), once);
+    }
+
+    /// A task whose stranded lines a note would swallow is reported, not
+    /// rewritten — and the report is what tells the reader the file has damage
+    /// worth a look, rather than the pass skipping it in silence.
+    #[test]
+    fn normalize_reports_the_task_it_must_not_touch() {
+        let mut project = make_project(
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Has stranded lines
+  - note:
+  - added: 2026-01-01
+    ```rust
+    stranded
+- [ ] `M-002` Next
+
+## Done
+",
+            vec![("main", "M")],
+        );
+
+        let before = crate::parse::serialize_track(&project.tracks[0].1);
+        let result = normalize_project(&mut project);
+
+        assert_eq!(result.skipped.len(), 1, "{result:?}");
+        assert_eq!(result.skipped[0].task, "M-001");
+        assert!(result.reordered.is_empty(), "{:?}", result.reordered);
+        assert_eq!(
+            crate::parse::serialize_track(&project.tracks[0].1),
+            before,
+            "the task must be left exactly as it was"
+        );
+    }
+
+    /// Subtasks are reached too, and reported under their own id.
+    #[test]
+    fn normalize_reaches_subtasks() {
+        let mut project = make_project(
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Parent
+  - added: 2026-01-01
+  - [x] `M-001.1` Child
+    - added: 2026-01-01
+    - note: body
+    - resolved: 2026-01-02
+
+## Done
+",
+            vec![("main", "M")],
+        );
+
+        let result = normalize_project(&mut project);
+        assert_eq!(result.reordered.len(), 1);
+        assert_eq!(result.reordered[0].task, "M-001.1");
     }
 }

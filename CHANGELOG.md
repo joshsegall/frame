@@ -18,6 +18,14 @@ All notable changes to frame will be documented in this file.
 
 ### Added
 
+- **`fr clean --normalize`** rewrites every task whose fields are out of canonical order, converging a whole project at once instead of task by task as they are touched. `--dry-run` lists what it would change first.
+
+  Off by default and not something `fr clean` does on its own: everything else clean does must be correct unattended, since the TUI runs it after every reload, and reordering every task is a large boring diff — the kind that hid a one-line deletion here once already. It is a separate function from `clean_project`, so "auto-clean cannot reach this" is a fact about the call graph rather than a promise.
+
+  Only tasks actually out of order are rewritten; the rest stay byte-identical, so the diff is exactly the tasks reported, and a second run does nothing. A task carrying stranded lines a note would swallow is named in the output and left alone.
+
+  Measured on a real project of ~1,000 tasks: 599 reordered, every note body byte-identical afterwards, and `fr stats`, the task set and `fr check`'s findings unchanged.
+
 - **The TUI Detail view shows an unresolved merge conflict.** It had no region for one at all, so a `conflict:` line was invisible in the TUI — and since `fr merge` deliberately writes no conflict markers into the file, that row is the only thing there to say a task's other version was set aside into the recovery log. Read-only, and first, above the dates.
 
 - **The TUI Detail view shows a done task's `resolved:` date**, on its own read-only row directly under `added:` — previously the view rendered `added:` and nothing about when the task was finished, so the one place that shows a task in full omitted half of its dates. The date was already recorded correctly; the Detail view simply never displayed it, and the Recent view's date headers were the only place it surfaced.

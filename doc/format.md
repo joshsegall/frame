@@ -128,7 +128,7 @@ conflict, added, resolved, dep, spec, ref, note
 
 Short scalar fields first, `note` last. A note is the only field with no length bound, so anything written after one is written past it — a `resolved:` date below a fifty-line note reads as though the task had none. `fr show`, `--json` and the TUI Detail view all present fields in this order too.
 
-The parser accepts any order; a hand-edited file is never wrong for using one. Frame rewrites a task's fields into this order the first time it edits *that task*, so an existing project converges task by task instead of in one large diff, and untouched tasks stay byte-identical.
+The parser accepts any order; a hand-edited file is never wrong for using one. Frame rewrites a task's fields into this order the first time it edits *that task*, so an existing project converges task by task instead of in one large diff, and untouched tasks stay byte-identical. To converge a whole project at once, run [`fr clean --normalize`](cli.md#fr-clean---normalize).
 
 One exception, and it only arises in a damaged file: a note block runs until the first line indented less than its body, so a note written last is closed by the next task line. If a task carries stranded lines — content the parser could not attribute, kept verbatim — indented as deep as a note body, a note moved last would absorb them. Such a task keeps the order it already had, which is the order that reads back correctly.
 

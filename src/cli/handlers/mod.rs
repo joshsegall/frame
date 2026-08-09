@@ -3160,6 +3160,27 @@ fn cmd_clean(args: CleanArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let result = clean::clean_project(&mut project, scope);
 
+    // After clean, so a task clean has just edited is already in canonical order
+    // and is not reported twice for the same rewrite.
+    let normalized = if args.normalize {
+        clean::normalize_project(&mut project)
+    } else {
+        clean::NormalizeResult::default()
+    };
+
+    if !normalized.reordered.is_empty() {
+        println!("Fields reordered:");
+        for n in &normalized.reordered {
+            println!("  [{}] {} was {}", n.track_id, n.task, n.was.join(", "));
+        }
+    }
+    if !normalized.skipped.is_empty() {
+        println!("Left as they are (stranded lines a note would absorb):");
+        for n in &normalized.skipped {
+            println!("  [{}] {} is {}", n.track_id, n.task, n.was.join(", "));
+        }
+    }
+
     // Report results
     if !result.ids_assigned.is_empty() {
         println!("IDs assigned:");
@@ -3243,11 +3264,13 @@ fn cmd_clean(args: CleanArgs) -> Result<(), Box<dyn std::error::Error>> {
         let total_changes = result.ids_assigned.len()
             + result.dates_assigned.len()
             + result.duplicates_resolved.len()
-            + result.tasks_archived.len();
+            + result.tasks_archived.len()
+            + normalized.reordered.len();
         if total_changes == 0
             && result.dangling_deps.is_empty()
             && result.broken_refs.is_empty()
             && result.suggestions.is_empty()
+            && normalized.skipped.is_empty()
         {
             println!("✓ project is clean");
         }

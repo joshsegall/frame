@@ -517,6 +517,9 @@ pub struct CleanArgs {
     /// Show what would be done without making changes
     #[arg(long)]
     pub dry_run: bool,
+    /// Also rewrite every task whose fields are out of canonical order
+    #[arg(long)]
+    pub normalize: bool,
 }
 
 #[derive(Args)]

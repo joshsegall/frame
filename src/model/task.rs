@@ -143,6 +143,31 @@ pub fn ordered_metadata(task: &Task) -> Vec<&Metadata> {
     ordered
 }
 
+/// Put `task`'s metadata into canonical order, in place.
+///
+/// The write path does not need this — the serializer orders as it emits. This
+/// is for `fr clean --normalize`, which has to leave the model agreeing with the
+/// file it just wrote: otherwise `metadata_is_ordered` keeps reporting the task
+/// as out of order for the rest of the process, and anything that re-ran the
+/// pass would rewrite it again.
+///
+/// Same stable sort as [`ordered_metadata`], so entries sharing a key keep their
+/// relative order here too.
+pub fn sort_metadata(task: &mut Task) {
+    task.metadata.sort_by_key(|m| m.rank());
+}
+
+/// Whether `task`'s metadata is already in canonical order.
+///
+/// What `fr clean --normalize` selects on: a task already in order is left
+/// clean, so it serializes verbatim from `source_text` and the pass produces no
+/// diff for it. Ranks are compared rather than the entries themselves, so two
+/// entries sharing a key never count as out of order — the stable sort would
+/// not move them either.
+pub fn metadata_is_ordered(task: &Task) -> bool {
+    task.metadata.windows(2).all(|w| w[0].rank() <= w[1].rank())
+}
+
 /// A task with all its parsed fields and source tracking
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {

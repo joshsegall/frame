@@ -7313,3 +7313,154 @@ fn an_unclaimed_archived_track_file_is_reported_as_a_warning() {
          what to move: {out}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `fr clean --normalize`
+// ---------------------------------------------------------------------------
+
+/// A project written before the canonical order existed converges on request.
+///
+/// The serializer already orders a task the first time frame edits it, so a
+/// project gets there on its own eventually; this is that convergence asked for
+/// at once, for the tasks nobody is about to touch.
+#[test]
+fn clean_normalize_reorders_and_reports() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+    let track = tmp.path().join("frame/tracks/main.md");
+    fs::write(
+        &track,
+        "\
+# Main Track
+
+## Backlog
+
+- [ ] `M-001` Untouched and already in order
+  - added: 2026-01-01
+  - note: body
+
+## Parked
+
+## Done
+
+- [x] `M-002` Date appended after the note
+  - added: 2026-01-01
+  - note: a note long enough to hide what follows it
+  - resolved: 2026-01-02
+",
+    )
+    .unwrap();
+
+    let out = run_fr_ok(tmp.path(), &["clean", "--normalize"]);
+    assert!(out.contains("Fields reordered:"), "{out}");
+    assert!(out.contains("M-002"), "{out}");
+    assert!(
+        !out.contains("M-001"),
+        "a task already in order should not be reported: {out}"
+    );
+
+    let text = fs::read_to_string(&track).unwrap();
+    let resolved = text.find("resolved:").unwrap();
+    let note = text.find("a note long enough").unwrap();
+    assert!(resolved < note, "not reordered:\n{text}");
+
+    // The task that was already in order keeps its bytes.
+    assert!(
+        text.contains(
+            "- [ ] `M-001` Untouched and already in order\n  - added: 2026-01-01\n  - note: body\n"
+        ),
+        "an ordered task was rewritten anyway:\n{text}"
+    );
+}
+
+/// `--dry-run` composes with it and writes nothing.
+#[test]
+fn clean_normalize_dry_run_writes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+    let track = tmp.path().join("frame/tracks/main.md");
+    let original = "\
+# Main Track
+
+## Backlog
+
+## Parked
+
+## Done
+
+- [x] `M-002` Out of order
+  - added: 2026-01-01
+  - note: body
+  - resolved: 2026-01-02
+";
+    fs::write(&track, original).unwrap();
+
+    let out = run_fr_ok(tmp.path(), &["clean", "--normalize", "--dry-run"]);
+    assert!(out.contains("Fields reordered:"), "{out}");
+    assert!(out.contains("(dry run — no changes written)"), "{out}");
+    assert_eq!(fs::read_to_string(&track).unwrap(), original);
+}
+
+/// **A plain `fr clean` does not reorder.** This is the guarantee that matters:
+/// clean runs unattended after every reload when the TUI's `auto_clean` is on,
+/// so it may only do what is correct with nobody watching, and rewriting every
+/// task in a project is not that — `fr clean` filling one `resolved:` date has
+/// already hidden a one-line deletion inside a large boring diff once.
+#[test]
+fn clean_without_normalize_leaves_field_order_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+    let track = tmp.path().join("frame/tracks/main.md");
+    let original = "\
+# Main Track
+
+## Backlog
+
+## Parked
+
+## Done
+
+- [x] `M-002` Out of order
+  - added: 2026-01-01
+  - note: body
+  - resolved: 2026-01-02
+";
+    fs::write(&track, original).unwrap();
+
+    let out = run_fr_ok(tmp.path(), &["clean"]);
+    assert!(!out.contains("Fields reordered"), "{out}");
+    assert_eq!(fs::read_to_string(&track).unwrap(), original);
+}
+
+/// Running it twice changes nothing the second time.
+#[test]
+fn clean_normalize_is_idempotent() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+    let track = tmp.path().join("frame/tracks/main.md");
+    fs::write(
+        &track,
+        "\
+# Main Track
+
+## Backlog
+
+- [ ] `M-001` Task
+  - added: 2026-01-01
+  - note: body
+  - ref: src/a.rs
+
+## Parked
+
+## Done
+",
+    )
+    .unwrap();
+
+    run_fr_ok(tmp.path(), &["clean", "--normalize"]);
+    let once = fs::read_to_string(&track).unwrap();
+
+    let out = run_fr_ok(tmp.path(), &["clean", "--normalize"]);
+    assert!(!out.contains("Fields reordered"), "{out}");
+    assert_eq!(fs::read_to_string(&track).unwrap(), once);
+}
