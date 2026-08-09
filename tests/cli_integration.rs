@@ -262,6 +262,219 @@ fn test_projects_prune_removes_not_found() {
     assert!(again.contains("No not-found projects"));
 }
 
+/// Run `fr` against a registry shared with the other calls in a test, rather
+/// than the per-directory one `run_fr` anchors on the cwd. A worktree test has to
+/// run `fr` from two directories and see one registry.
+fn run_fr_registry(dir: &Path, args: &[&str], xdg: &Path) -> String {
+    let (stdout, stderr, success) =
+        run_fr_env(dir, args, &[("XDG_CONFIG_HOME", &xdg.to_string_lossy())]);
+    if !success {
+        panic!("fr {args:?} failed:\nstdout: {stdout}\nstderr: {stderr}");
+    }
+    stdout
+}
+
+/// A committed project in a git repo, ready for `git worktree add`. The
+/// working-copy-local frame files are gitignored exactly as `fr init` leaves
+/// them, so `git worktree remove` does not refuse over them later.
+/// `None` when git is unavailable, in which case the caller skips.
+fn repo_project(root: &Path) -> Option<()> {
+    create_test_project(root);
+    let ignore: String = frame::io::project_io::LOCAL_ONLY_FRAME_FILES
+        .iter()
+        .map(|name| format!("frame/{}\n", name))
+        .collect();
+    fs::write(root.join(".gitignore"), ignore).unwrap();
+    if !git(root, &["init", "-q"]) {
+        return None;
+    }
+    git(root, &["add", "-A"]);
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=frame-test",
+            "-c",
+            "user.email=frame@test.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+    )
+    .then_some(())
+}
+
+/// The whole worktree lifecycle: a worktree registers itself, lists under its
+/// project labelled by branch, and its row retires itself once the worktree is
+/// gone — with no `fr projects prune` in the story.
+#[test]
+fn test_worktree_registers_nests_and_self_heals() {
+    let base = tempfile::TempDir::new().unwrap();
+    let main = base.path().join("main");
+    let Some(()) = repo_project(&main) else {
+        return; // git unavailable
+    };
+    // A worktree beside its parent, not nested under it — the relationship is
+    // git's answer, not a path prefix.
+    let wt = base.path().join("wt-feature");
+    assert!(git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            wt.to_str().unwrap()
+        ]
+    ));
+
+    // Touching each one from the CLI registers it, exactly as an agent would.
+    let xdg = base.path().join(".xdg-shared");
+    run_fr_registry(&main, &["list"], &xdg);
+    run_fr_registry(&wt, &["list"], &xdg);
+
+    let json = run_fr_registry(base.path(), &["projects", "list", "--json"], &xdg);
+    assert!(
+        json.contains("worktree_of"),
+        "the worktree's provenance is recorded: {json}"
+    );
+    assert!(
+        json.contains("\"branch\": \"feature\""),
+        "the branch is reported: {json}"
+    );
+
+    // Human output nests the worktree under its project and labels it by branch,
+    // because both rows carry the project's committed name.
+    let human = run_fr_registry(base.path(), &["projects", "list"], &xdg);
+    let lines: Vec<&str> = human
+        .lines()
+        .filter(|l| l.contains("test-project"))
+        .collect();
+    assert_eq!(lines.len(), 1, "one project row: {human}");
+    let nested = human
+        .lines()
+        .find(|l| l.contains("\u{2514} feature"))
+        .unwrap_or_else(|| panic!("a branch-labelled worktree row: {human}"));
+    assert!(
+        nested.starts_with("    "),
+        "the worktree row is indented under its project: {nested:?}"
+    );
+
+    // The worktree goes away. Nothing is run against it; the next listing is
+    // where the row is noticed, and it retires itself there.
+    assert!(git(&main, &["worktree", "remove", wt.to_str().unwrap()]));
+    let healed = run_fr_registry(base.path(), &["projects", "list"], &xdg);
+    assert!(
+        !healed.contains("wt-feature") && !healed.contains("\u{2514} feature"),
+        "the removed worktree's row is gone: {healed}"
+    );
+    assert!(
+        healed.contains("Retired 1 worktree entry"),
+        "and says so rather than silently rewriting the registry: {healed}"
+    );
+    assert!(
+        healed.contains("main"),
+        "the project itself stays: {healed}"
+    );
+
+    // Nothing left for prune to do — the point of the exercise.
+    let prune = run_fr_registry(base.path(), &["projects", "prune"], &xdg);
+    assert!(prune.contains("No not-found projects"), "{prune}");
+}
+
+/// An entry registered before frame recorded provenance — or by another `fr` on
+/// the machine — is stamped by the next listing, so it groups and, once the
+/// worktree dies, retires itself. Without this, the entries already in a user's
+/// registry would never get either.
+#[test]
+fn test_listing_backfills_provenance_on_an_older_entry() {
+    let base = tempfile::TempDir::new().unwrap();
+    let main = base.path().join("main");
+    let Some(()) = repo_project(&main) else {
+        return; // git unavailable
+    };
+    let wt = base.path().join("wt-old");
+    assert!(git(
+        &main,
+        &["worktree", "add", "-q", "-b", "old", wt.to_str().unwrap()]
+    ));
+
+    // A registry written by a frame that knew nothing about worktrees.
+    let xdg = base.path().join(".xdg-shared");
+    let reg_path = xdg.join("frame").join("projects.toml");
+    fs::create_dir_all(reg_path.parent().unwrap()).unwrap();
+    fs::write(
+        &reg_path,
+        format!(
+            "[[projects]]\nname = \"test-project\"\npath = {:?}\n\n\
+             [[projects]]\nname = \"test-project\"\npath = {:?}\n",
+            main.to_str().unwrap(),
+            wt.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    assert!(
+        !fs::read_to_string(&reg_path)
+            .unwrap()
+            .contains("worktree_of")
+    );
+
+    // Listing asks git, stamps what it learns, and nests the row.
+    let human = run_fr_registry(base.path(), &["projects", "list"], &xdg);
+    assert!(
+        human.contains("\u{2514} old"),
+        "the older entry groups under its project: {human}"
+    );
+    let stamped = fs::read_to_string(&reg_path).unwrap();
+    assert!(
+        stamped.contains("worktree_of"),
+        "and the registry now records why: {stamped}"
+    );
+
+    // Which is what lets it retire itself when the worktree goes.
+    assert!(git(&main, &["worktree", "remove", wt.to_str().unwrap()]));
+    let healed = run_fr_registry(base.path(), &["projects", "list"], &xdg);
+    assert!(
+        !healed.contains("wt-old"),
+        "the dead row goes without being asked: {healed}"
+    );
+}
+
+/// A live worktree checked out to a branch with no `frame/` still exists, so
+/// neither the self-heal nor `prune` may take its row.
+#[test]
+fn test_prune_keeps_a_live_worktree_without_a_frame_dir() {
+    let base = tempfile::TempDir::new().unwrap();
+    let main = base.path().join("main");
+    let Some(()) = repo_project(&main) else {
+        return; // git unavailable
+    };
+    let wt = base.path().join("wt-empty");
+    assert!(git(
+        &main,
+        &["worktree", "add", "-q", "-b", "empty", wt.to_str().unwrap()]
+    ));
+
+    // Registered while `frame/` was there; then the branch it switches to does
+    // not have one, so the directory stays and the project inside it goes.
+    let xdg = base.path().join(".xdg-shared");
+    run_fr_registry(&wt, &["list"], &xdg);
+    fs::remove_dir_all(wt.join("frame")).unwrap();
+
+    let listed = run_fr_registry(base.path(), &["projects", "list", "--json"], &xdg);
+    assert!(
+        listed.contains("wt-empty"),
+        "a live worktree keeps its row even with no frame/: {listed}"
+    );
+    let prune = run_fr_registry(base.path(), &["projects", "prune"], &xdg);
+    assert!(
+        prune.contains("No not-found projects"),
+        "prune must not remove a directory that is right there: {prune}"
+    );
+}
+
 #[test]
 fn test_list_specific_track() {
     let tmp = tempfile::TempDir::new().unwrap();

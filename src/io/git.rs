@@ -113,6 +113,64 @@ pub fn worktree_kind(frame_dir: &Path) -> WorktreeKind {
     }
 }
 
+/// One working tree of a clone, as `git worktree list` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeInfo {
+    /// The working tree's root, absolute and canonicalized where possible.
+    pub path: PathBuf,
+    /// The short name of the checked-out branch, or `None` when the working tree
+    /// is detached or bare.
+    pub branch: Option<String>,
+}
+
+/// Every working tree of the clone containing `root` — the main one first, then
+/// each linked worktree, in git's order. `None` when `root` is not inside a git
+/// repository, or git is unavailable.
+///
+/// One call answers two questions a project listing needs: which registered
+/// paths are live worktrees of this clone (git's own answer, so it holds for a
+/// worktree beside its parent as well as one nested under it), and what each has
+/// checked out — the branch being what identifies a worktree to a person, far
+/// more than its path.
+pub fn worktree_list(root: &Path) -> Option<Vec<WorktreeInfo>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+
+    // Porcelain format: blank-line-separated records, each opening with
+    // `worktree <path>`. `branch refs/heads/<name>` is absent for a detached or
+    // bare tree, which is exactly the `None` case.
+    let mut trees = Vec::new();
+    let mut current: Option<WorktreeInfo> = None;
+    for line in text.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            trees.extend(current.take());
+            let path = PathBuf::from(path.trim());
+            let path = path.canonicalize().unwrap_or(path);
+            current = Some(WorktreeInfo { path, branch: None });
+        } else if let Some(git_ref) = line.strip_prefix("branch ")
+            && let Some(tree) = current.as_mut()
+        {
+            let git_ref = git_ref.trim();
+            tree.branch = Some(
+                git_ref
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(git_ref)
+                    .to_string(),
+            );
+        }
+    }
+    trees.extend(current);
+    Some(trees)
+}
+
 /// The *main* working tree's copy of this project's frame directory, when
 /// `frame_dir` is inside a linked worktree. `None` from the main worktree
 /// itself, outside git, or when the main tree has no frame directory at the same
@@ -304,6 +362,12 @@ pub(crate) mod testutil {
         Some((main_frame, wt_frame))
     }
 
+    /// Add a linked worktree at `at`, checking out a new branch `branch`.
+    pub(crate) fn add_worktree(main_root: &Path, at: &Path, branch: &str) -> bool {
+        let Some(at) = at.to_str() else { return false };
+        git(main_root, &["worktree", "add", "-q", "-b", branch, at])
+    }
+
     /// Build `<tmp>/repo` as a git repo whose `frame/tracks/main.md` is committed
     /// at HEAD with no working-tree changes. Returns the frame dir, or `None`
     /// when git is unavailable.
@@ -376,6 +440,48 @@ mod tests {
                 assert_eq!(main_root.map(|r| r.canonicalize().unwrap()), Some(expected));
             }
             other => panic!("expected Linked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn worktree_list_reports_every_tree_of_the_clone_with_its_branch() {
+        let tmp = TempDir::new().unwrap();
+        let Some((main_frame, wt_frame)) = testutil::repo_with_worktree(tmp.path()) else {
+            return; // git unavailable
+        };
+        let main_root = main_frame.parent().unwrap().canonicalize().unwrap();
+        let wt_root = wt_frame.parent().unwrap().canonicalize().unwrap();
+
+        // The same list from either tree — the clone is what is being described,
+        // not the tree the question was asked from.
+        for asked_from in [&main_root, &wt_root] {
+            let trees = worktree_list(asked_from).expect("in a repo");
+            let paths: Vec<_> = trees.iter().map(|t| t.path.clone()).collect();
+            assert_eq!(paths, vec![main_root.clone(), wt_root.clone()]);
+            // The main tree is on a branch; the linked one was added detached,
+            // which is the `None` case rather than a missing record.
+            assert!(trees[0].branch.is_some(), "main tree branch");
+            assert_eq!(trees[1].branch, None, "detached worktree");
+        }
+
+        // A named branch comes back short, not as `refs/heads/<name>`.
+        assert!(testutil::add_worktree(
+            &main_root,
+            &tmp.path().join("wt2"),
+            "feature"
+        ));
+        let trees = worktree_list(&main_root).expect("in a repo");
+        assert!(
+            trees.iter().any(|t| t.branch.as_deref() == Some("feature")),
+            "named branch reported short: {trees:?}"
+        );
+    }
+
+    #[test]
+    fn worktree_list_is_none_outside_a_repo() {
+        let tmp = TempDir::new().unwrap();
+        if repo_paths(&tmp.path().join("frame")).is_none() {
+            assert_eq!(worktree_list(tmp.path()), None);
         }
     }
 

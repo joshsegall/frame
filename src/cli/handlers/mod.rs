@@ -3240,7 +3240,16 @@ fn cmd_projects(args: ProjectsCmd, json: bool) -> Result<(), Box<dyn std::error:
 }
 
 fn cmd_projects_list(json: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let reg = registry::read_registry();
+    // Listing is where a stale worktree row would be seen, so it is where the
+    // row is retired — no separate command, and nothing to notice and clean up.
+    let healed = registry::heal_worktrees();
+    let mut entries = registry::read_registry().projects;
+    // Ask git which of these are worktrees of which clone. This is what lets an
+    // entry registered before frame recorded provenance group and, once it dies,
+    // retire itself.
+    let survey = registry::survey_worktrees(&registry::registry_path(), &mut entries);
+    let mut rows = registry::arrange(entries, registry::ProjectSort::RecentCli);
+    registry::label_branches(&mut rows, &survey);
 
     if json {
         #[derive(serde::Serialize)]
@@ -3250,22 +3259,29 @@ fn cmd_projects_list(json: bool) -> Result<(), Box<dyn std::error::Error>> {
             exists: bool,
             #[serde(skip_serializing_if = "Option::is_none")]
             last_accessed: Option<String>,
+            /// The main working tree's root, when this is a linked git worktree.
+            #[serde(skip_serializing_if = "Option::is_none")]
+            worktree_of: Option<String>,
+            /// The branch a worktree has checked out, when git could say.
+            #[serde(skip_serializing_if = "Option::is_none")]
+            branch: Option<String>,
         }
-        let items: Vec<ProjectJson> = reg
-            .projects
+        let items: Vec<ProjectJson> = rows
             .iter()
-            .map(|e| ProjectJson {
-                name: e.name.clone(),
-                path: e.path.clone(),
-                exists: std::path::Path::new(&e.path).join("frame").exists(),
-                last_accessed: e.last_accessed_cli.map(|dt| dt.to_rfc3339()),
+            .map(|row| ProjectJson {
+                name: row.entry.name.clone(),
+                path: row.entry.path.clone(),
+                exists: std::path::Path::new(&row.entry.path).join("frame").exists(),
+                last_accessed: row.entry.last_accessed_cli.map(|dt| dt.to_rfc3339()),
+                worktree_of: row.entry.worktree_of.clone(),
+                branch: row.branch.clone(),
             })
             .collect();
         println!("{}", serde_json::to_string_pretty(&items)?);
         return Ok(());
     }
 
-    if reg.projects.is_empty() {
+    if rows.is_empty() {
         println!("No projects registered.");
         println!();
         println!("Run `fr init` in a project directory to get started,");
@@ -3273,35 +3289,55 @@ fn cmd_projects_list(json: bool) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Sort by last_accessed_cli (most recent first)
-    let mut sorted = reg.projects.clone();
-    sorted.sort_by(|a, b| {
-        let ta = a.last_accessed_cli.unwrap_or_default();
-        let tb = b.last_accessed_cli.unwrap_or_default();
-        tb.cmp(&ta)
-    });
+    // A worktree row is indented under its project, so its indent counts toward
+    // the column the paths line up after.
+    let labels: Vec<String> = rows
+        .iter()
+        .map(|row| {
+            if row.nested {
+                format!("  {}", row.label())
+            } else {
+                row.label()
+            }
+        })
+        .collect();
+    let name_w = labels
+        .iter()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(4);
 
-    // Compute column widths
-    let max_name = sorted.iter().map(|e| e.name.len()).max().unwrap_or(0);
-    let name_w = max_name.max(4);
-
-    for entry in &sorted {
-        let exists = std::path::Path::new(&entry.path).join("frame").exists();
+    for (row, label) in rows.iter().zip(&labels) {
+        let exists = std::path::Path::new(&row.entry.path).join("frame").exists();
         let path_display = if exists {
-            registry::abbreviate_path(&entry.path)
+            registry::abbreviate_path(&row.entry.path)
         } else {
             "(not found)".to_string()
         };
-        let time_str = match entry.last_accessed_cli {
+        let time_str = match row.entry.last_accessed_cli {
             Some(dt) => registry::relative_time(&dt),
             None => String::new(),
         };
         println!(
             "  {:<width$}  {:<30}  {}",
-            entry.name,
+            label,
             path_display,
             time_str,
             width = name_w
+        );
+    }
+
+    if !healed.is_empty() {
+        println!();
+        println!(
+            "Retired {} worktree {} whose worktree no longer exists.",
+            healed.len(),
+            if healed.len() == 1 {
+                "entry"
+            } else {
+                "entries"
+            }
         );
     }
     Ok(())
@@ -3349,7 +3385,7 @@ fn cmd_projects_prune(
         registry::read_registry()
             .projects
             .into_iter()
-            .filter(|e| !registry::entry_exists(e))
+            .filter(registry::is_prunable)
             .collect::<Vec<_>>()
     } else {
         registry::prune_missing()
