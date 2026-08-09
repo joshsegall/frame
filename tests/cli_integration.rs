@@ -7352,7 +7352,7 @@ fn clean_normalize_reorders_and_reports() {
     .unwrap();
 
     let out = run_fr_ok(tmp.path(), &["clean", "--normalize"]);
-    assert!(out.contains("Fields reordered:"), "{out}");
+    assert!(out.contains("Field order normalized:"), "{out}");
     assert!(out.contains("M-002"), "{out}");
     assert!(
         !out.contains("M-001"),
@@ -7396,7 +7396,7 @@ fn clean_normalize_dry_run_writes_nothing() {
     fs::write(&track, original).unwrap();
 
     let out = run_fr_ok(tmp.path(), &["clean", "--normalize", "--dry-run"]);
-    assert!(out.contains("Fields reordered:"), "{out}");
+    assert!(out.contains("Field order normalized:"), "{out}");
     assert!(out.contains("(dry run — no changes written)"), "{out}");
     assert_eq!(fs::read_to_string(&track).unwrap(), original);
 }
@@ -7428,7 +7428,7 @@ fn clean_without_normalize_leaves_field_order_alone() {
     fs::write(&track, original).unwrap();
 
     let out = run_fr_ok(tmp.path(), &["clean"]);
-    assert!(!out.contains("Fields reordered"), "{out}");
+    assert!(!out.contains("Field order normalized"), "{out}");
     assert_eq!(fs::read_to_string(&track).unwrap(), original);
 }
 
@@ -7461,6 +7461,144 @@ fn clean_normalize_is_idempotent() {
     let once = fs::read_to_string(&track).unwrap();
 
     let out = run_fr_ok(tmp.path(), &["clean", "--normalize"]);
-    assert!(!out.contains("Fields reordered"), "{out}");
+    assert!(!out.contains("Field order normalized"), "{out}");
     assert_eq!(fs::read_to_string(&track).unwrap(), once);
+}
+
+/// A plain `fr clean` says a legacy project has fields out of order, and names
+/// the flag that fixes them.
+///
+/// Field order is not damage, so it is not an `fr check` finding — without this
+/// line there is nowhere to learn that `--normalize` exists, and clean would
+/// call a project "clean" while holding hundreds of tasks it would rewrite the
+/// moment anyone asked. A summary rather than a row per task: this is the
+/// report-only path, and it must not bury clean's other findings.
+#[test]
+fn clean_reports_out_of_order_fields_without_changing_them() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+    let track = tmp.path().join("frame/tracks/main.md");
+    let original = "\
+# Main Track
+
+## Backlog
+
+- [ ] `M-001` One
+  - added: 2026-01-01
+  - note: body
+  - ref: src/a.rs
+- [ ] `M-003` Two
+  - added: 2026-01-01
+  - note: body
+  - ref: src/b.rs
+
+## Parked
+
+## Done
+";
+    fs::write(&track, original).unwrap();
+
+    let out = run_fr_ok(tmp.path(), &["clean", "--dry-run"]);
+    assert!(out.contains("Field order:"), "{out}");
+    assert!(
+        out.contains("2 tasks have fields out of canonical order"),
+        "{out}"
+    );
+    assert!(out.contains("fr clean --normalize"), "{out}");
+    // Report only — not the per-task list, and not a rewrite.
+    assert!(!out.contains("Field order normalized"), "{out}");
+    assert_eq!(fs::read_to_string(&track).unwrap(), original);
+}
+
+/// One task reads as one task.
+#[test]
+fn clean_field_order_summary_is_singular_for_one_task() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+    fs::write(
+        tmp.path().join("frame/tracks/main.md"),
+        "\
+# Main Track
+
+## Backlog
+
+- [ ] `M-001` Only one
+  - added: 2026-01-01
+  - note: body
+  - ref: src/a.rs
+
+## Parked
+
+## Done
+",
+    )
+    .unwrap();
+
+    let out = run_fr_ok(tmp.path(), &["clean", "--dry-run"]);
+    assert!(
+        out.contains("1 task has fields out of canonical order"),
+        "{out}"
+    );
+    assert!(out.contains("to rewrite it"), "{out}");
+}
+
+/// An already-ordered project still reports itself clean — the new report must
+/// not fire on every project forever.
+#[test]
+fn clean_says_nothing_about_field_order_when_there_is_nothing_to_say() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+    fs::write(
+        tmp.path().join("frame/tracks/main.md"),
+        "\
+# Main Track
+
+## Backlog
+
+- [ ] `M-001` In order
+  - added: 2026-01-01
+  - note: body
+
+## Parked
+
+## Done
+",
+    )
+    .unwrap();
+
+    let out = run_fr_ok(tmp.path(), &["clean"]);
+    assert!(!out.contains("Field order"), "{out}");
+    assert!(out.contains("✓ project is clean"), "{out}");
+}
+
+/// The per-task line says what the order was and what it became. It used to
+/// read `M-001 was added, ref, note`, which parses as the verb "was added".
+#[test]
+fn clean_normalize_names_both_orders() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+    fs::write(
+        tmp.path().join("frame/tracks/main.md"),
+        "\
+# Main Track
+
+## Backlog
+
+## Parked
+
+## Done
+
+- [x] `M-002` Out of order
+  - added: 2026-01-01
+  - note: body
+  - resolved: 2026-01-02
+",
+    )
+    .unwrap();
+
+    let out = run_fr_ok(tmp.path(), &["clean", "--normalize"]);
+    assert!(
+        out.contains("[main] M-002: added, note, resolved → added, resolved, note"),
+        "{out}"
+    );
 }

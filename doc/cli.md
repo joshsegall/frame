@@ -606,6 +606,7 @@ Actions performed:
 - Archive done tasks exceeding the threshold
 - Move top-level tasks into the section matching their state
 - Report dangling dependencies and broken refs
+- Report tasks whose fields are out of [canonical order](format.md#field-order) — counted, not changed, unless `--normalize` is given
 - Suggest actions (e.g., "all subtasks done — consider marking done")
 
 **Clean runs unattended**, not only when you ask: with `auto_clean` on (the default) the TUI runs it after every file reload. So everything above must be correct with nobody watching and no output read — that constraint is what decides whether a repair belongs here or behind [`fr check --fix`](#fr-check---fix), which is invoked deliberately after a diagnosis has been read. Destructiveness is not the line: clean already archives tasks and renumbers IDs.
@@ -620,6 +621,20 @@ Rewrite every task whose fields are out of [canonical order](format.md#field-ord
 
 Frame writes a task in canonical order the first time it edits that task, so a project converges on its own — over as long as it takes to touch every task. `--normalize` is that convergence asked for at once, for the tasks nobody is about to touch.
 
+A plain `fr clean` counts them and stops there, so a project written before the canonical order existed says so without being rewritten behind your back:
+
+```
+Field order:
+  599 tasks have fields out of canonical order — run `fr clean --normalize` to rewrite them
+```
+
+With the flag, each task is named with the order it had and the order it got:
+
+```
+Field order normalized:
+  [main] MAI-137.6: added, note, spec, resolved → added, resolved, spec, note
+```
+
 **Off by default, and not something clean does on its own.** Everything else `fr clean` does has to be correct unattended, because the TUI runs it after every reload. Reordering every task in a project is a large, boring diff, and this project has already paid for one: a clean run that rewrote a whole track to fill one `resolved:` date, with a one-line deletion hidden inside it that got committed unread. So this one is asked for explicitly, and `--dry-run` shows you the list first.
 
 Only tasks actually out of order are rewritten; the rest stay byte-identical, so the diff is exactly the tasks reported. Running it twice changes nothing the second time. Marking a task for rewrite re-canonicalizes all of that task's own lines, not just the order — checkbox spacing, the note block form, and the `", "` join on `dep:`/`ref:`/`spec:` — which is the same form the task would reach the next time anyone edited it.
@@ -627,8 +642,8 @@ Only tasks actually out of order are rewritten; the rest stay byte-identical, so
 One task is reported but left alone:
 
 ```
-Left as they are (stranded lines a note would absorb):
-  [main] M-014 is added, note, resolved
+Field order left alone (stranded lines a note would absorb):
+  [main] M-014: added, note, resolved
 ```
 
 That task carries stranded lines — content the parser could not attribute — indented as deep as a note body, so moving its note last would swallow them ([format.md](format.md#field-order)). It is named rather than skipped silently, because the file has damage worth looking at by hand.

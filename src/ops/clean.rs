@@ -13,14 +13,17 @@ use crate::ops::ids::Mint;
 use crate::ops::refs as refs_ops;
 use crate::ops::task_ops::renumber_subtasks;
 
-/// One task rewritten by [`normalize_project`].
+/// One task whose fields are out of canonical order.
 #[derive(Debug, Clone)]
 pub struct Normalized {
     pub track_id: String,
     /// The task's ID, or its title when it has none.
     pub task: String,
-    /// Field keys before, in the order the file held them.
+    /// Field keys in the order the file holds them.
     pub was: Vec<&'static str>,
+    /// Field keys in canonical order — what the task was rewritten to, or for a
+    /// task in [`NormalizeResult::skipped`] what it would have become.
+    pub now: Vec<&'static str>,
 }
 
 /// Result of a normalize pass.
@@ -64,7 +67,32 @@ pub fn normalize_project(project: &mut Project) -> NormalizeResult {
     for (track_id, track) in &mut project.tracks {
         for node in &mut track.nodes {
             if let TrackNode::Section { tasks, .. } = node {
-                normalize_tasks(tasks, track_id, 0, &mut result);
+                normalize_tasks(tasks, track_id, 0, true, &mut result);
+            }
+        }
+    }
+    result
+}
+
+/// The same survey, without touching anything.
+///
+/// What a plain `fr clean` reports. Field order is not damage and not a `fr
+/// check` finding, so without this a user has nowhere to learn that their
+/// project predates the canonical order or that [`normalize_project`] exists —
+/// clean would say "project is clean" about a project with 599 tasks it would
+/// rewrite the moment anyone asked. It sits with clean's other report-only
+/// findings (dangling deps, broken refs, suggestions): named, not acted on.
+pub fn scan_field_order(project: &Project) -> NormalizeResult {
+    let mut result = NormalizeResult::default();
+    for (track_id, track) in &project.tracks {
+        for node in &track.nodes {
+            if let TrackNode::Section { tasks, .. } = node {
+                // Surveying cannot mutate, and the walk below takes `&mut` so
+                // the applying caller can. Cloning the tasks is what lets one
+                // rule serve both rather than two walks drifting apart; a survey
+                // is not on any hot path.
+                let mut copy = tasks.clone();
+                normalize_tasks(&mut copy, track_id, 0, false, &mut result);
             }
         }
     }
@@ -75,6 +103,7 @@ fn normalize_tasks(
     tasks: &mut [Task],
     track_id: &str,
     indent: usize,
+    apply: bool,
     result: &mut NormalizeResult,
 ) {
     for task in tasks.iter_mut() {
@@ -87,6 +116,10 @@ fn normalize_tasks(
                     .map(|i| i.to_string())
                     .unwrap_or_else(|| task.title.clone()),
                 was: task.metadata.iter().map(|m| m.key()).collect(),
+                now: crate::model::task::ordered_metadata(task)
+                    .iter()
+                    .map(|m| m.key())
+                    .collect(),
             };
             // Ask the writer, rather than re-deriving its rule here: a task it
             // would leave alone must not be marked dirty, or the pass would
@@ -94,16 +127,19 @@ fn normalize_tasks(
             if crate::parse::stranded_would_be_absorbed(task, indent) {
                 result.skipped.push(record);
             } else {
-                // Order the model too, not only the file the serializer is about
-                // to write. Leaving the two disagreeing would keep this task
-                // reported as out of order for the rest of the process, and a
-                // second pass would rewrite what the first already fixed.
-                crate::model::task::sort_metadata(task);
-                task.mark_dirty();
+                if apply {
+                    // Order the model too, not only the file the serializer is
+                    // about to write. Leaving the two disagreeing would keep this
+                    // task reported as out of order for the rest of the process,
+                    // and a second pass would rewrite what the first already
+                    // fixed.
+                    crate::model::task::sort_metadata(task);
+                    task.mark_dirty();
+                }
                 result.reordered.push(record);
             }
         }
-        normalize_tasks(&mut task.subtasks, track_id, indent + 2, result);
+        normalize_tasks(&mut task.subtasks, track_id, indent + 2, apply, result);
     }
 }
 

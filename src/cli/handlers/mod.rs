@@ -3143,6 +3143,11 @@ fn cmd_track_rename(args: TrackRenameArgs) -> Result<(), Box<dyn std::error::Err
 // Maintenance handlers
 // ---------------------------------------------------------------------------
 
+/// Pick the singular or plural wording for `n`.
+fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
+    if n == 1 { one } else { many }
+}
+
 fn cmd_clean(args: CleanArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut project = load_project_cwd()?;
 
@@ -3165,19 +3170,47 @@ fn cmd_clean(args: CleanArgs) -> Result<(), Box<dyn std::error::Error>> {
     let normalized = if args.normalize {
         clean::normalize_project(&mut project)
     } else {
-        clean::NormalizeResult::default()
+        clean::scan_field_order(&project)
     };
 
-    if !normalized.reordered.is_empty() {
-        println!("Fields reordered:");
-        for n in &normalized.reordered {
-            println!("  [{}] {} was {}", n.track_id, n.task, n.was.join(", "));
+    if args.normalize {
+        if !normalized.reordered.is_empty() {
+            println!("Field order normalized:");
+            for n in &normalized.reordered {
+                println!(
+                    "  [{}] {}: {} → {}",
+                    n.track_id,
+                    n.task,
+                    n.was.join(", "),
+                    n.now.join(", ")
+                );
+            }
         }
-    }
-    if !normalized.skipped.is_empty() {
-        println!("Left as they are (stranded lines a note would absorb):");
-        for n in &normalized.skipped {
-            println!("  [{}] {} is {}", n.track_id, n.task, n.was.join(", "));
+        if !normalized.skipped.is_empty() {
+            println!("Field order left alone (stranded lines a note would absorb):");
+            for n in &normalized.skipped {
+                println!("  [{}] {}: {}", n.track_id, n.task, n.was.join(", "));
+            }
+        }
+    } else if !normalized.reordered.is_empty() || !normalized.skipped.is_empty() {
+        // Report-only, and a summary rather than a line per task: this is the
+        // path a user runs to see what clean would do, and several hundred rows
+        // about something clean is not going to touch would bury the rest.
+        println!("Field order:");
+        if !normalized.reordered.is_empty() {
+            println!(
+                "  {} {} fields out of canonical order — run `fr clean --normalize` to rewrite {}",
+                normalized.reordered.len(),
+                plural(normalized.reordered.len(), "task has", "tasks have"),
+                plural(normalized.reordered.len(), "it", "them"),
+            );
+        }
+        if !normalized.skipped.is_empty() {
+            println!(
+                "  {} {} be reordered — stranded lines a note would absorb",
+                normalized.skipped.len(),
+                plural(normalized.skipped.len(), "task cannot", "tasks cannot"),
+            );
         }
     }
 
@@ -3261,15 +3294,23 @@ fn cmd_clean(args: CleanArgs) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        // Without `--normalize`, out-of-order fields were reported but not
+        // changed — so they are not counted as changes, but they do mean the
+        // project is not clean, the same way a dangling dep does.
         let total_changes = result.ids_assigned.len()
             + result.dates_assigned.len()
             + result.duplicates_resolved.len()
             + result.tasks_archived.len()
-            + normalized.reordered.len();
+            + if args.normalize {
+                normalized.reordered.len()
+            } else {
+                0
+            };
         if total_changes == 0
             && result.dangling_deps.is_empty()
             && result.broken_refs.is_empty()
             && result.suggestions.is_empty()
+            && normalized.reordered.is_empty()
             && normalized.skipped.is_empty()
         {
             println!("✓ project is clean");

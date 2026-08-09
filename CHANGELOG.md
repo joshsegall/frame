@@ -18,7 +18,18 @@ All notable changes to frame will be documented in this file.
 
 ### Added
 
+- **`fr clean` reports tasks whose fields are out of canonical order**, and names the flag that fixes them:
+
+  ```
+  Field order:
+    599 tasks have fields out of canonical order — run `fr clean --normalize` to rewrite them
+  ```
+
+  Counted, not changed. Field order is not damage, so it is not an `fr check` finding, and without this a project written before the canonical order existed had nowhere to say so — clean would call it clean while holding hundreds of tasks it would rewrite the moment anyone asked. It joins clean's other report-only findings (dangling deps, broken refs, suggestions).
+
 - **`fr clean --normalize`** rewrites every task whose fields are out of canonical order, converging a whole project at once instead of task by task as they are touched. `--dry-run` lists what it would change first.
+
+  Each task names the order it had and the order it got — `[main] MAI-137.6: added, note, spec, resolved → added, resolved, spec, note`.
 
   Off by default and not something `fr clean` does on its own: everything else clean does must be correct unattended, since the TUI runs it after every reload, and reordering every task is a large boring diff — the kind that hid a one-line deletion here once already. It is a separate function from `clean_project`, so "auto-clean cannot reach this" is a fact about the call graph rather than a promise.
 

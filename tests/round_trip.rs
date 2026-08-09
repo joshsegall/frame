@@ -432,3 +432,59 @@ fn inbox_parse_correctness() {
     // Fifth: multiline body
     assert!(inbox.items[4].body.is_some());
 }
+
+/// A file written before the canonical field order existed survives a write
+/// that does not touch it, byte for byte.
+///
+/// This is the load-bearing case for "no mass rewrite". The serializer orders a
+/// task's fields, but only on the dirty path — a clean task comes back from its
+/// `source_text` verbatim. Without that, the first write of any kind to a legacy
+/// project would reorder every task in it, and this fixture is what says it does
+/// not.
+#[test]
+fn unordered_metadata_survives_an_untouched_write() {
+    assert_track_round_trip("unordered_metadata_track.md");
+}
+
+/// And once a task *is* touched, that task — and only that task — is written in
+/// canonical order.
+#[test]
+fn touching_one_task_orders_only_that_task() {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/unordered_metadata_track.md");
+    let source = fs::read_to_string(&path).unwrap();
+    let mut track = parse_track(&source);
+
+    // Dirty exactly one task: the done one whose `resolved:` sits under the note.
+    let done = track
+        .nodes
+        .iter_mut()
+        .find_map(|n| match n {
+            frame::model::TrackNode::Section { tasks, .. } if !tasks.is_empty() => tasks
+                .iter_mut()
+                .find(|t| t.id.as_deref() == Some("LEG-004")),
+            _ => None,
+        })
+        .expect("LEG-004 is in the fixture");
+    done.mark_dirty();
+
+    let output = serialize_track(&track);
+
+    // That task is ordered...
+    let resolved = output.find("resolved: 2025-04-25").unwrap();
+    let note = output.find("A note long enough").unwrap();
+    assert!(resolved < note, "LEG-004 was not ordered:\n{output}");
+
+    // ...and every other task is untouched, including the two whose `ref:` and
+    // `dep:` still follow the fields the canonical order puts them before.
+    for untouched in [
+        "  - note:\n    `fr ref add` appends when the task has no `ref:` yet, so it lands here.\n  - ref: src/legacy.rs\n",
+        "  - spec: doc/legacy.md#anchor\n  - dep: LEG-001\n",
+        "  - note: shelved until the parser lands\n  - added: 2025-05-03\n  - ref: src/parked.rs\n",
+    ] {
+        assert!(
+            output.contains(untouched),
+            "a task nobody touched was rewritten; expected to still find:\n{untouched}\nin:\n{output}"
+        );
+    }
+}
