@@ -604,27 +604,45 @@ fn check_track(
     }
 }
 
-/// `parent` is the task this one is nested under, or `None` at top level — the
-/// subtask-ID rule is the one check that a task cannot be judged against alone.
-#[allow(clippy::too_many_arguments)]
 /// Fill in `evidence` on every unresolved-conflict error by looking the entry up.
 ///
-/// The lookup is the marker's own timestamp first — `doc/format.md` documents
-/// it as identifying the recovery entry, and it is exact — falling back to the
-/// task ID, which catches an entry whose timestamp was rewritten by a prune or
-/// a hand edit but whose content still names the task.
+/// **An entry counts when it names the task, not when its timestamp matches.**
+/// The marker's stamp identifies the *merge run*, not the entry: `fr merge` takes
+/// one `Utc::now()` per invocation, writes it onto every task it marks, and
+/// stamps every recovery entry it logs with the same instant. So a stamp hit says
+/// only that some conflict from that run reached this log — which is not the
+/// question, and the two answers come apart for real reasons. `log_recovery` is
+/// best-effort per entry, so a failure partway through the run's loop leaves the
+/// earlier siblings behind and the rest unlogged; git invokes the merge driver
+/// once per file, so two runs land in one second and share a stamp truncated to
+/// seconds, while only one of them may have found a project to log into. Either
+/// way an unlogged task borrows a logged sibling's stamp and this reports
+/// evidence that is not here, which is the single thing the field exists to
+/// prevent.
+///
+/// Naming the task loses nothing by comparison: the entry's description carries
+/// the conflict key, so an entry that was really written for a task with an ID
+/// always names it. The stamp survives only for a marker on a task with **no**
+/// ID — an `ambiguous-title` conflict is by definition on one — where there is no
+/// ID to look for and the run is the most that can be established.
+///
+/// Resolved by position rather than through a set keyed by task ID, so no two
+/// markers can answer for each other. Two keys collide in practice: `""`, shared
+/// by every ID-less marker, and an ID that is genuinely duplicated — itself a
+/// [`CheckError::DuplicateId`], so it is a state this runs against.
 ///
 /// Reading the log once for all markers rather than once per marker: a project
 /// recovering from a large rebase can carry a dozen, and the log is the one file
 /// here that is unbounded in size.
 fn resolve_conflict_evidence(frame_dir: &Path, result: &mut CheckResult) {
-    let markers: Vec<(String, String)> = result
+    let markers: Vec<(usize, String, String)> = result
         .errors
         .iter()
-        .filter_map(|e| match e {
+        .enumerate()
+        .filter_map(|(i, e)| match e {
             CheckError::UnresolvedMergeConflict {
                 task_id, detail, ..
-            } => Some((task_id.clone(), detail.clone())),
+            } => Some((i, task_id.clone(), detail.clone())),
             _ => None,
         })
         .collect();
@@ -633,33 +651,29 @@ fn resolve_conflict_evidence(frame_dir: &Path, result: &mut CheckResult) {
     }
 
     let entries = crate::io::recovery::read_recovery_entries(frame_dir, None, None);
-    let found: std::collections::HashSet<String> = markers
-        .into_iter()
-        .filter(|(task_id, detail)| {
-            // The marker reads `<reason-slug> <timestamp>`; the stamp is last.
-            let stamp = detail.split_whitespace().next_back().unwrap_or_default();
-            entries.iter().any(|entry| {
-                let by_stamp = !stamp.is_empty()
+    for (i, task_id, detail) in markers {
+        let found = entries.iter().any(|entry| {
+            if task_id.is_empty() {
+                // The marker reads `<reason-slug> <timestamp>`; the stamp is last.
+                let stamp = detail.split_whitespace().next_back().unwrap_or_default();
+                !stamp.is_empty()
                     && entry
                         .timestamp
                         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-                        == stamp;
-                by_stamp || crate::io::recovery::entry_names(entry, task_id)
-            })
-        })
-        .map(|(task_id, _)| task_id)
-        .collect();
-
-    for error in &mut result.errors {
-        if let CheckError::UnresolvedMergeConflict {
-            task_id, evidence, ..
-        } = error
-        {
-            *evidence = found.contains(task_id);
+                        == stamp
+            } else {
+                crate::io::recovery::entry_names(entry, &task_id)
+            }
+        });
+        if let CheckError::UnresolvedMergeConflict { evidence, .. } = &mut result.errors[i] {
+            *evidence = found;
         }
     }
 }
 
+/// `parent` is the task this one is nested under, or `None` at top level — the
+/// subtask-ID rule is the one check that a task cannot be judged against alone.
+#[allow(clippy::too_many_arguments)]
 fn check_task(
     task: &Task,
     parent: Option<&Task>,

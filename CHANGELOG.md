@@ -14,7 +14,7 @@ All notable changes to frame will be documented in this file.
 
   **Every entry now carries `Origin:`**, the absolute frame directory it was written from — `Target: tracks/main.md` identifies nothing once one log serves several working copies. A log left in a working copy by an older frame is read alongside the shared one immediately and moved into it on the next write, merged by timestamp.
 
-- **`fr recovery` says how much it is hiding, and can find one entry.** A truncated listing ends with `showing 10 of 18 — see all with 'fr recovery --limit 18'`; a complete one still says nothing. `--for <ID>` shows only the entries naming one task, with no default limit, and also accepts the RFC 3339 timestamp a `conflict:` marker carries — which `doc/format.md` has always documented as identifying the entry, and which nothing until now could follow. `--here` narrows a shared log to the current working tree.
+- **`fr recovery` says how much it is hiding, and can find one entry.** A truncated listing ends with `showing 10 of 18 — see all with 'fr recovery --limit 18'`; a complete one still says nothing. `--for <ID>` shows only the entries naming one task, with no default limit, and also accepts the RFC 3339 timestamp a `conflict:` marker carries, which nothing until now could follow — that shows everything the marker's merge run set aside, since one run stamps every entry it writes with the same instant. `--here` narrows a shared log to the current working tree.
 
 - **`[recovery]` in `project.toml`** — `max_size` (default `"5MB"`, up from a hard-coded 1MB), `prune_age_days` (default 30, also the default cutoff for `fr recovery prune`), and `path` to override where the log lives. `FRAME_RECOVERY_LOG` overrides `path` for one machine.
 
@@ -27,6 +27,14 @@ All notable changes to frame will be documented in this file.
   A warning rather than an error, unlike its `tracks/` counterpart: this is archived content, absent from views that would not have shown it anyway, so it does not fail a build. The message distinguishes a file no config entry claims from one whose entry exists but is `active` or `shelved` — the second is a copy left behind after an unarchive, and it pairs with the missing-file error to say exactly what to move where. No `--fix`: adopting it invents an id, a name and a prefix, deleting it discards content, and only the person who renamed it knows which id it should answer to.
 
 ### Fixed
+
+- **`fr check` no longer lets one merge conflict vouch for its siblings.** When a marker's recovery entry is not in this working copy, `fr check` says so instead of printing a pointer it cannot honour — but it decided that on the marker's timestamp, and a timestamp identifies the *merge run*, not one entry. `fr merge` takes one instant per invocation and stamps every task it marks and every entry it logs with it, so a stamp hit only ever proved that the run had logged *something* here. A task whose own version never reached the log borrowed a logged sibling's stamp and got `their version is in the recovery log (fr recovery --for <ID>)` — a lookup that then returns nothing, which is the one confusion the message exists to prevent.
+
+  The two come apart for ordinary reasons: the log write is best-effort per entry, so a failure partway through a run leaves the earlier siblings behind; and git invokes the merge driver once per file, so two runs share a stamp truncated to seconds while only one of them may have found a project to log into.
+
+  Evidence is now a task the log actually names, which loses nothing — an entry written for a task carries its key in the description. The stamp still answers for a marker on a task with **no** ID, where an `ambiguous-title` conflict leaves nothing else to look for. Each marker is also resolved on its own rather than through a set keyed by task ID, where `""` and a duplicated ID both let one marker answer for another.
+
+  `doc/format.md` described `conflict:`'s timestamp as the recovery entry's; it is the merge run's, and now says so.
 
 - **An archived track can no longer be renamed, on either surface.** Archived is frozen — shelving, reordering, cc-focus and adding a task all refuse an archived track — and rename was the one exception. It did not work, either, in three different ways:
 

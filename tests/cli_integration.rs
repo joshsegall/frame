@@ -3709,6 +3709,55 @@ Reason: both sides edited it differently; kept ours
     );
 }
 
+/// One merge run stamps every task it marks and every entry it logs with the
+/// same instant, so a marker's stamp cannot say whether *this* task's version is
+/// in the log — only that the run logged something. When the two come apart (a
+/// per-entry log write that failed partway through the run, a second driver
+/// invocation in the same second that found no project to log into), the
+/// unlogged task must not borrow its sibling's stamp and claim evidence.
+#[test]
+fn check_does_not_let_one_conflict_vouch_for_its_merge_siblings() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    // Two tasks marked by one run: same reason, same stamp, as `fr merge` writes.
+    let path = tmp.path().join("frame/tracks/main.md");
+    let before = fs::read_to_string(&path).unwrap();
+    let after = before
+        .replace(
+            "- [ ] `M-001` First task #core\n",
+            "- [ ] `M-001` First task #core\n  - conflict: both-edited 2026-08-06T06:18:30Z\n",
+        )
+        .replace(
+            "- [>] `M-002` Second task #core #cc\n",
+            "- [>] `M-002` Second task #core #cc\n  - conflict: both-edited 2026-08-06T06:18:30Z\n",
+        );
+    assert_ne!(before, after, "fixture shape changed");
+    fs::write(&path, after).unwrap();
+
+    // Only M-001's version reached the log.
+    write_matching_conflict_entry(tmp.path());
+
+    let (out, _, _) = run_fr(tmp.path(), &["check"]);
+    let line = |id: &str| {
+        out.lines()
+            .find(|l| l.contains(&format!("{id} has an unresolved merge conflict")))
+            .unwrap_or_else(|| panic!("no conflict line for {id}:\n{out}"))
+            .to_string()
+    };
+
+    assert!(
+        line("M-001").contains("their version is in the recovery log"),
+        "the logged task still has its pointer:\n{}",
+        line("M-001")
+    );
+    assert!(
+        line("M-002").contains("NOT in this working copy's recovery log"),
+        "a shared stamp is not evidence for a task the log never names:\n{}",
+        line("M-002")
+    );
+}
+
 #[test]
 fn recovery_says_how_many_entries_it_is_hiding() {
     let tmp = tempfile::TempDir::new().unwrap();

@@ -145,12 +145,14 @@ Metadata lines are indented under their task (task indent + 2 spaces) and start 
 
 **The separator is the comma and only the comma**, so a path may contain spaces (`doc/design notes.md`). None may contain a comma, since nothing can quote one.
 
-**`conflict: reason timestamp`** — An unresolved merge conflict, written by `fr merge`. The value is a reason slug (`both-edited`, `edited-and-deleted`, `deleted-and-edited`, `ambiguous-title`) and the RFC 3339 timestamp of the recovery-log entry holding the other side's version:
+**`conflict: reason timestamp`** — An unresolved merge conflict, written by `fr merge`. The value is a reason slug (`both-edited`, `edited-and-deleted`, `deleted-and-edited`, `ambiguous-title`) and the RFC 3339 timestamp of the merge run that set the other side's version aside:
 
 ```markdown
 - [ ] `EFF-014` Task title
   - conflict: both-edited 2026-08-03T04:08:38Z
 ```
+
+The timestamp identifies the run, not one entry: a run takes it once and stamps every task it marks and every recovery entry it logs with the same instant, so several markers and several entries routinely share it. It is there to match a marker to its merge by eye — to find *this task's* version in the log, search for the task rather than the stamp (`fr recovery --for EFF-014`), which is what `fr check` does.
 
 It exists because `fr merge` deliberately writes no `<<<<<<<` markers — those would make the file unparseable — so this line is the only record in the file that a decision is outstanding. `fr check` reports it as an error; `fr merge --resolve EFF-014` removes it. Nothing else writes or reads it.
 
