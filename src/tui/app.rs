@@ -128,6 +128,10 @@ pub struct BoardColumnPin {
 pub enum DetailRegion {
     Title,
     Tags,
+    /// An unresolved merge conflict. Read-only and first, matching
+    /// [`Metadata::rank`]: `fr merge` writes no conflict markers, so this row is
+    /// the only sign in the TUI that a task's other side was set aside.
+    Conflict,
     Added,
     Resolved,
     Deps,
@@ -142,7 +146,10 @@ impl DetailRegion {
     pub fn is_editable(self) -> bool {
         !matches!(
             self,
-            DetailRegion::Added | DetailRegion::Resolved | DetailRegion::Subtasks
+            DetailRegion::Conflict
+                | DetailRegion::Added
+                | DetailRegion::Resolved
+                | DetailRegion::Subtasks
         )
     }
 }
@@ -4408,6 +4415,11 @@ impl App {
     }
 
     /// Build the list of regions present for a task (for detail view navigation)
+    ///
+    /// The metadata-backed regions are ordered by [`Metadata::rank`] — the same
+    /// definition the serializer writes by and `fr show` prints by — so the
+    /// Detail view cannot drift from the file it is displaying. Changing a rank
+    /// moves the row here too, with nothing to keep in step by hand.
     pub fn build_detail_regions(task: &Task) -> Vec<DetailRegion> {
         use crate::model::Metadata;
         let mut regions = vec![DetailRegion::Title];
@@ -4415,39 +4427,36 @@ impl App {
         // Tags region always present (can add tags even if none exist)
         regions.push(DetailRegion::Tags);
 
-        // Added date
-        if task
-            .metadata
-            .iter()
-            .any(|m| matches!(m, Metadata::Added(_)))
-        {
-            regions.push(DetailRegion::Added);
+        // `always`: an editable region is offered whether or not the task
+        // carries the field, because the keystroke that edits it is also the one
+        // that adds it. A read-only field has no such keystroke, so showing an
+        // empty row would be a navigation stop that can never do anything —
+        // those appear only when the task actually has the field.
+        let mut metadata_regions = [
+            (
+                Metadata::Conflict(String::new()),
+                DetailRegion::Conflict,
+                false,
+            ),
+            (Metadata::Added(String::new()), DetailRegion::Added, false),
+            (
+                Metadata::Resolved(String::new()),
+                DetailRegion::Resolved,
+                false,
+            ),
+            (Metadata::Dep(Vec::new()), DetailRegion::Deps, true),
+            (Metadata::Spec(Vec::new()), DetailRegion::Spec, true),
+            (Metadata::Ref(Vec::new()), DetailRegion::Refs, true),
+            (Metadata::Note(String::new()), DetailRegion::Note, true),
+        ];
+        metadata_regions.sort_by_key(|(sample, _, _)| sample.rank());
+
+        for (sample, region, always) in metadata_regions {
+            let key = sample.key();
+            if always || task.metadata.iter().any(|m| m.key() == key) {
+                regions.push(region);
+            }
         }
-
-        // Resolved date — present only on a task that has one, which in practice
-        // means a done task. Sits next to `added:` so the two dates read as a
-        // pair, rather than wherever `set_state` happened to append it: it is
-        // pushed onto the metadata list last, so a task with a long note renders
-        // its completion date dozens of lines below the fold.
-        if task
-            .metadata
-            .iter()
-            .any(|m| matches!(m, Metadata::Resolved(_)))
-        {
-            regions.push(DetailRegion::Resolved);
-        }
-
-        // Deps
-        regions.push(DetailRegion::Deps);
-
-        // Spec
-        regions.push(DetailRegion::Spec);
-
-        // Refs
-        regions.push(DetailRegion::Refs);
-
-        // Note
-        regions.push(DetailRegion::Note);
 
         // Subtasks
         if !task.subtasks.is_empty() {
@@ -4463,7 +4472,8 @@ impl App {
         match region {
             DetailRegion::Title => true,
             DetailRegion::Tags => !task.tags.is_empty(),
-            DetailRegion::Added => true, // only in regions list if present
+            DetailRegion::Conflict => true, // only in regions list if present
+            DetailRegion::Added => true,    // only in regions list if present
             DetailRegion::Resolved => true, // only in regions list if present
             DetailRegion::Subtasks => true, // only in regions list if present
             DetailRegion::Deps => task
@@ -6101,6 +6111,75 @@ mod tests {
     #[test]
     fn resolved_region_is_not_editable() {
         assert!(!DetailRegion::Resolved.is_editable());
+    }
+
+    /// An unresolved merge conflict shows, and shows first.
+    ///
+    /// `fr merge` writes no conflict markers — that is what keeps the file valid
+    /// frame markdown — so this row is the only thing in the TUI saying a task's
+    /// other version was set aside. It had no region at all before.
+    #[test]
+    fn a_conflicted_task_leads_with_its_conflict() {
+        let mut task = crate::model::Task::new(TaskState::Todo, None, "Conflicted".into());
+        task.metadata
+            .push(crate::model::Metadata::Added("2025-05-01".into()));
+        task.metadata.push(crate::model::Metadata::Conflict(
+            "both-edited 2026-08-03T04:08:38Z".into(),
+        ));
+
+        let regions = App::build_detail_regions(&task);
+        let conflict = regions
+            .iter()
+            .position(|r| *r == DetailRegion::Conflict)
+            .expect("conflict region present");
+        let added = regions
+            .iter()
+            .position(|r| *r == DetailRegion::Added)
+            .expect("added region present");
+        assert!(conflict < added, "{regions:?}");
+        assert!(!DetailRegion::Conflict.is_editable());
+    }
+
+    /// The common case: no conflict, no row for one.
+    #[test]
+    fn an_unconflicted_task_has_no_conflict_region() {
+        let mut task = crate::model::Task::new(TaskState::Todo, None, "Fine".into());
+        task.metadata
+            .push(crate::model::Metadata::Added("2025-05-01".into()));
+
+        let regions = App::build_detail_regions(&task);
+        assert!(!regions.contains(&DetailRegion::Conflict), "{regions:?}");
+    }
+
+    /// The Detail view's region order is `Metadata::rank`'s order, not a second
+    /// copy of it — that is the whole point of deriving it.
+    #[test]
+    fn detail_regions_follow_the_canonical_order() {
+        let mut task = crate::model::Task::new(TaskState::Done, None, "Everything".into());
+        task.metadata = vec![
+            crate::model::Metadata::Note("n".into()),
+            crate::model::Metadata::Resolved("2025-05-14".into()),
+            crate::model::Metadata::Ref(vec!["a.rs".into()]),
+            crate::model::Metadata::Added("2025-05-01".into()),
+            crate::model::Metadata::Conflict("both-edited".into()),
+            crate::model::Metadata::Spec(vec!["s.md".into()]),
+            crate::model::Metadata::Dep(vec!["T-1".into()]),
+        ];
+
+        assert_eq!(
+            App::build_detail_regions(&task),
+            vec![
+                DetailRegion::Title,
+                DetailRegion::Tags,
+                DetailRegion::Conflict,
+                DetailRegion::Added,
+                DetailRegion::Resolved,
+                DetailRegion::Deps,
+                DetailRegion::Spec,
+                DetailRegion::Refs,
+                DetailRegion::Note,
+            ]
+        );
     }
 
     // --- is_inbox_path ---

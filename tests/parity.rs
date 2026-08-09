@@ -637,6 +637,102 @@ const ROWS: &[Row] = &[
     row(&["inbox"], INBOX_TITLES, Projection::Field("title")),
 ];
 
+/// The field order of `fr show` and `fr show --json` is the same order.
+///
+/// Not a [`ROWS`] entry: the matrix compares *identifier sequences* and is
+/// deliberately immune to cosmetic changes, which field order is. This is the
+/// complementary assertion, and it needs to exist because the two orders are
+/// held in different places and neither can see the other — the human order is
+/// a runtime sort over [`Metadata::rank`], the JSON order is the sequence
+/// `TaskJson`'s fields happen to be declared in. Nothing but this test fails
+/// when someone adds a field to one and not the other.
+///
+/// The fixture writes the note **first**, so file order and display order
+/// genuinely differ and a surface that simply echoes the file is caught. That
+/// is the real defect this came from: `resolved:` is appended when a task is
+/// completed, so a task with a long note printed its completion date past the
+/// end of the note, and read as though it had none.
+#[test]
+fn human_and_json_agree_on_field_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    create_fixture(root);
+
+    // Every metadata kind on one task, written in an order that is not the
+    // display order. `conflict:` is included: it is the one field with no TUI
+    // region until recently and the one most likely to be forgotten.
+    fs::write(
+        root.join("frame/tracks/side.md"),
+        "\
+# Side Track
+
+## Backlog
+
+- [ ] `S-001` Every field #cc
+  - note:
+    A note written first, so file order is not display order.
+  - ref: src/a.rs
+  - resolved: 2025-05-09
+  - spec: doc/s.md#x
+  - dep: S-002
+  - added: 2025-05-01
+  - conflict: both-edited 2026-08-03T04:08:38Z
+- [ ] `S-002` Dep target
+  - added: 2025-05-02
+
+## Parked
+
+## Done
+",
+    )
+    .unwrap();
+
+    let human = run_fr(root, &["show", "S-001"]);
+    let human_fields: Vec<&str> = human
+        .lines()
+        .filter_map(|l| l.split_once(':').map(|(k, _)| k.trim()))
+        .filter(|k| FIELDS.contains(k))
+        .collect();
+
+    // Read key order off the raw text, not a parsed `Value`: `serde_json::Map`
+    // is a `BTreeMap` unless the `preserve_order` feature is on, so parsing
+    // re-sorts the keys alphabetically and would compare a fiction. What ships
+    // is the byte order, which is `TaskJson`'s declaration order.
+    let raw = run_fr(root, &["--json", "show", "S-001"]);
+    serde_json::from_str::<Value>(&raw).expect("valid JSON");
+    let mut found: Vec<(usize, &str)> = FIELDS
+        .iter()
+        .filter_map(|human| {
+            let json_key = JSON_TO_HUMAN
+                .iter()
+                .find(|(_, h)| h == human)
+                .map_or(*human, |(j, _)| *j);
+            raw.find(&format!("\"{json_key}\":")).map(|at| (at, *human))
+        })
+        .collect();
+    found.sort();
+    let json_fields: Vec<&str> = found.into_iter().map(|(_, k)| k).collect();
+
+    assert_eq!(
+        human_fields, json_fields,
+        "field order differs.\n  human: {human_fields:?}\n   json: {json_fields:?}\n\n{human}"
+    );
+    assert_eq!(
+        human_fields, FIELDS,
+        "neither surface is in canonical order"
+    );
+}
+
+/// The canonical order, as `fr show` labels it. `Metadata::rank`'s order, named
+/// once here so a rank change that nobody propagated fails with a diff a reader
+/// can act on rather than a bare inequality.
+const FIELDS: &[&str] = &[
+    "conflict", "added", "resolved", "dep", "spec", "ref", "note",
+];
+
+/// `--json` pluralises two keys and the human surface does not.
+const JSON_TO_HUMAN: &[(&str, &str)] = &[("deps", "dep"), ("refs", "ref")];
+
 #[test]
 fn human_and_json_name_the_same_things() {
     let dir = tempfile::tempdir().unwrap();

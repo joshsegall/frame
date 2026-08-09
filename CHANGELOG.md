@@ -4,7 +4,19 @@ All notable changes to frame will be documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- **`fr show` prints fields in a fixed order**, and `--json` now emits its keys in that same order: `conflict`, `added`, `resolved`, `dep`, `spec`, `ref`, `note`. Short fields first, the note last, because a note has no length bound and everything printed after one is printed past the fold.
+
+  Both surfaces previously printed in *file* order, and file order is append order — `set_state` appends `resolved:` when a task is finished, and `set_metadata` appends any key the task did not already carry. So a field written after a note prints after the note. Found on a task whose `resolved:` date printed 55 lines down and read as missing; across the project it was found in, 54% of tasks had accumulated some such order, most often `added → note → resolved` and `added → note → ref`.
+
+  Display order only — **the `.md` files are untouched**, and a field's position in `fr show` says nothing about where it sits on disk. Ordering the file itself is a larger change than it appears: a note is terminated by the next metadata line, so writing a note last leaves it terminated by whatever follows the task, and in a file with stranded content the note swallows it on the next read. The property suite catches exactly that, so the file keeps its own order until note termination is unambiguous.
+
+  `--json` changes key order only — no keys added, removed or retyped. A consumer using a JSON parser is unaffected; one reading the bytes positionally is not.
+
 ### Added
+
+- **The TUI Detail view shows an unresolved merge conflict.** It had no region for one at all, so a `conflict:` line was invisible in the TUI — and since `fr merge` deliberately writes no conflict markers into the file, that row is the only thing there to say a task's other version was set aside into the recovery log. Read-only, and first, above the dates.
 
 - **The TUI Detail view shows a done task's `resolved:` date**, on its own read-only row directly under `added:` — previously the view rendered `added:` and nothing about when the task was finished, so the one place that shows a task in full omitted half of its dates. The date was already recorded correctly; the Detail view simply never displayed it, and the Recent view's date headers were the only place it surfaced.
 

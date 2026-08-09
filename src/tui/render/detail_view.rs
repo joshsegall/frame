@@ -310,6 +310,23 @@ pub fn render_detail_view(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
+    // --- Conflict region ---
+    for meta in &task.metadata {
+        if let Metadata::Conflict(detail) = meta {
+            let is_active = current_region == DetailRegion::Conflict;
+            if is_active {
+                body_active_line = Some(body_lines.len());
+            }
+            let spans: Vec<Span> = vec![
+                region_indicator(is_active, region_indicator_style, bg),
+                Span::styled("conflict: ", dim_style),
+                Span::styled(detail.clone(), text_style),
+            ];
+            body_lines.push(Line::from(spans));
+            break;
+        }
+    }
+
     // --- Added region ---
     for meta in &task.metadata {
         if let Metadata::Added(date) = meta {

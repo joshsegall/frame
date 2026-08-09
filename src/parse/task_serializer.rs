@@ -57,7 +57,19 @@ fn serialize_task(task: &Task, indent: usize, lines: &mut Vec<String>) {
 
     lines.push(task_line);
 
-    // Metadata lines at indent + 2
+    // Metadata lines at indent + 2, in the order the task holds them.
+    //
+    // **Deliberately not `ordered_metadata`.** Writing canonical order here
+    // re-attributes content in a damaged file, and P2 catches it: a note is
+    // terminated by the next metadata line, so moving one to last leaves it
+    // terminated by whatever follows the task instead — which, in a file with
+    // stranded deep content, is content belonging to the next task. It is then
+    // read back as part of the note. Seen with both `Note("")` and a note ending
+    // in an unclosed fence, and `added → note → resolved` — the case worth
+    // fixing — is exactly the move that triggers it.
+    //
+    // Ordering the file needs the note-termination ambiguity solved first. Until
+    // then the ordering lives on the display surfaces, which do not round-trip.
     let meta_indent = " ".repeat(indent + 2);
     for meta in &task.metadata {
         match meta {

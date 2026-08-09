@@ -56,6 +56,10 @@ fr show ID [--context]
 |------|-------------|
 | `--context` | Include ancestor context (parent chain, root-first) |
 
+Fields print in a fixed order — `conflict`, `added`, `resolved`, `dep`, `spec`, `ref`, `note` — with `--json` using the same sequence. Short fields first and the note last, because a note has no length bound and anything printed after one is printed past the fold. `--context` and the TUI Detail view use the same order.
+
+**This is display order, not file order.** A field's position here says nothing about where it sits in the `.md`: the file keeps whatever order the task accumulated, and a completion date is appended when the task is finished, so a done task with a long note holds `resolved:` below the note on disk while `fr show` prints it beside `added:`.
+
 With `--context`, each ancestor is shown with a `── Parent ──` separator and all its fields, followed by the target task with a `── Task ──` separator. Useful for subtasks whose parent tasks contain specs, notes, or dependencies that explain the subtask's purpose.
 
 In JSON mode (`--json`), an `ancestors` array is always included regardless of `--context`. The array is ordered root-first and is empty for top-level tasks.

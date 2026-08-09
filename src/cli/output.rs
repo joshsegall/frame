@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::model::task::{Metadata, Task, TaskState};
+use crate::model::task::{Metadata, Task, TaskState, ordered_metadata};
 use crate::model::track::Track;
 use crate::ops::deps::{DepNode, DepStatus};
 use crate::ops::track_ops::TrackStats;
@@ -9,12 +9,30 @@ use crate::ops::track_ops::TrackStats;
 // JSON output structs
 // ---------------------------------------------------------------------------
 
+/// **Field declaration order is output order.** These structs are serialized
+/// straight through `serde_json::to_string_pretty` with no `Value` round-trip,
+/// so serde emits keys in the order they are declared here. The order below is
+/// [`Metadata::rank`]'s, so `--json` reads in the same sequence as `fr show` and
+/// the TUI Detail view. (The markdown is not ordered — see [`ordered_metadata`].)
+///
+/// Nothing but a test can hold that: this order is fixed at compile time by the
+/// declarations while the other two are computed from `rank` at run time.
+/// `tests/parity.rs::human_and_json_agree_on_field_order` is what fails when
+/// these drift apart.
 #[derive(Serialize)]
 pub struct TaskJson {
     pub id: Option<String>,
     pub title: String,
     pub state: TaskState,
     pub tags: Vec<String>,
+    /// An unresolved merge conflict left by `fr merge`. Present only while the
+    /// task still carries one, so a consumer can gate on it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub added: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub deps: Vec<String>,
     /// Spec paths. An array since 0.1.8 — a task may carry several, the same way
@@ -25,14 +43,6 @@ pub struct TaskJson {
     pub refs: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub added: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub resolved: Option<String>,
-    /// An unresolved merge conflict left by `fr merge`. Present only while the
-    /// task still carries one, so a consumer can gate on it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub conflict: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub subtasks: Vec<TaskJson>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -307,31 +317,7 @@ pub fn format_task_detail(task: &Task) -> Vec<String> {
         ));
     }
 
-    // Metadata
-    for m in &task.metadata {
-        match m {
-            Metadata::Added(d) => lines.push(format!("added: {}", d)),
-            Metadata::Resolved(d) => lines.push(format!("resolved: {}", d)),
-            Metadata::Conflict(c) => lines.push(format!("conflict: {}", c)),
-            Metadata::Dep(deps) => lines.push(format!("dep: {}", deps.join(", "))),
-            Metadata::Spec(specs) => {
-                for s in specs {
-                    lines.push(format!("spec: {}", s));
-                }
-            }
-            Metadata::Ref(refs) => {
-                for r in refs {
-                    lines.push(format!("ref: {}", r));
-                }
-            }
-            Metadata::Note(n) => {
-                lines.push("note:".to_string());
-                for line in n.lines() {
-                    lines.push(format!("  {}", line));
-                }
-            }
-        }
-    }
+    lines.extend(format_metadata_lines(task, ""));
 
     // Subtasks
     if !task.subtasks.is_empty() {
@@ -408,31 +394,48 @@ fn format_context_fields(task: &Task) -> Vec<String> {
         ));
     }
 
-    for m in &task.metadata {
+    lines.extend(format_metadata_lines(task, "  "));
+
+    lines
+}
+
+/// A task's metadata as display lines, in canonical order, each prefixed with
+/// `indent`.
+///
+/// **One implementation, two consumers** — [`format_task_detail`] passes `""`
+/// and [`format_context_fields`] passes `"  "`. They were the same match written
+/// twice, differing in nothing but that indent, which is the shape
+/// `FilteredTasks` further down this file exists to stop repeating: two code
+/// paths answering one question drift, and `b664a3e` is what that costs.
+///
+/// Order comes from [`ordered_metadata`], not from the file: a field appended
+/// after a note otherwise renders past the end of it.
+fn format_metadata_lines(task: &Task, indent: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    for m in ordered_metadata(task) {
         match m {
-            Metadata::Added(d) => lines.push(format!("  added: {}", d)),
-            Metadata::Resolved(d) => lines.push(format!("  resolved: {}", d)),
-            Metadata::Conflict(c) => lines.push(format!("  conflict: {}", c)),
-            Metadata::Dep(deps) => lines.push(format!("  dep: {}", deps.join(", "))),
+            Metadata::Conflict(c) => lines.push(format!("{indent}conflict: {c}")),
+            Metadata::Added(d) => lines.push(format!("{indent}added: {d}")),
+            Metadata::Resolved(d) => lines.push(format!("{indent}resolved: {d}")),
+            Metadata::Dep(deps) => lines.push(format!("{indent}dep: {}", deps.join(", "))),
             Metadata::Spec(specs) => {
                 for s in specs {
-                    lines.push(format!("  spec: {}", s));
+                    lines.push(format!("{indent}spec: {s}"));
                 }
             }
             Metadata::Ref(refs) => {
                 for r in refs {
-                    lines.push(format!("  ref: {}", r));
+                    lines.push(format!("{indent}ref: {r}"));
                 }
             }
             Metadata::Note(n) => {
-                lines.push("  note:".to_string());
+                lines.push(format!("{indent}note:"));
                 for line in n.lines() {
-                    lines.push(format!("    {}", line));
+                    lines.push(format!("{indent}  {line}"));
                 }
             }
         }
     }
-
     lines
 }
 
@@ -616,5 +619,78 @@ pub fn parse_task_state(s: &str) -> Result<TaskState, String> {
             "unknown state '{}' (expected: todo, active, blocked, done, parked)",
             s
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::TaskId;
+
+    fn task_with(metadata: Vec<Metadata>) -> Task {
+        let mut task = Task::new(
+            TaskState::Done,
+            Some(TaskId::parse("M-001")),
+            "A task".into(),
+        );
+        task.metadata = metadata;
+        task
+    }
+
+    /// The defect this came from: `resolved:` is appended when a task is
+    /// completed, so a task carrying a long note printed its completion date
+    /// after the whole note — 55 lines down on the task that surfaced it, which
+    /// reads as though the date were missing.
+    #[test]
+    fn a_note_written_first_still_renders_last() {
+        let task = task_with(vec![
+            Metadata::Note("body".into()),
+            Metadata::Resolved("2025-05-14".into()),
+            Metadata::Added("2025-05-01".into()),
+        ]);
+        let lines = format_task_detail(&task);
+        let keys: Vec<&str> = lines
+            .iter()
+            .filter_map(|l| l.split_once(':').map(|(k, _)| k))
+            .filter(|k| ["added", "resolved", "note"].contains(k))
+            .collect();
+        assert_eq!(keys, ["added", "resolved", "note"], "{lines:?}");
+    }
+
+    /// Both human forms order the same way — they are one implementation, and
+    /// this is what says so if someone splits them again.
+    #[test]
+    fn the_context_form_orders_identically() {
+        let task = task_with(vec![
+            Metadata::Note("body".into()),
+            Metadata::Added("2025-05-01".into()),
+            Metadata::Conflict("both-edited 2026-08-03T04:08:38Z".into()),
+        ]);
+        let plain: Vec<String> = format_task_detail(&task)
+            .iter()
+            .filter_map(|l| l.split_once(':').map(|(k, _)| k.trim().to_string()))
+            .collect();
+        let context: Vec<String> = format_context_fields(&task)
+            .iter()
+            .filter_map(|l| l.split_once(':').map(|(k, _)| k.trim().to_string()))
+            .collect();
+        assert!(context.starts_with(&["state".to_string()]), "{context:?}");
+        assert_eq!(plain, context[1..], "{plain:?} vs {context:?}");
+    }
+
+    /// Ordering must not drop a field, and must not shuffle two entries that
+    /// share a key. An *unknown* metadata key parses to a `Note` carrying its own
+    /// `key: value` text, so a task really can hold several notes, and their
+    /// order is text a user wrote.
+    #[test]
+    fn duplicate_keys_keep_their_relative_order() {
+        let task = task_with(vec![
+            Metadata::Note("first".into()),
+            Metadata::Added("2025-05-01".into()),
+            Metadata::Note("second".into()),
+        ]);
+        let lines = format_task_detail(&task);
+        let bodies: Vec<&String> = lines.iter().filter(|l| l.starts_with("  ")).collect();
+        assert_eq!(bodies, ["  first", "  second"], "{lines:?}");
     }
 }

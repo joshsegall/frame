@@ -86,6 +86,66 @@ impl Metadata {
             Metadata::Conflict(_) => "conflict",
         }
     }
+
+    /// Where this field sits in the canonical order, low first.
+    ///
+    /// One rule: short scalar fields first, the one unbounded field last. A note
+    /// has no length bound, so anything written after it is written past the
+    /// fold — on a real task, a `resolved:` date 55 lines down, which reads as
+    /// missing. Nothing enforced an order before this, and writes append:
+    /// `set_state` pushes `resolved:` and `set_metadata` pushes any key the task
+    /// did not already carry, so `added → note → resolved` and
+    /// `added → note → ref` are what a working project accumulates. 54% of the
+    /// tasks in the project this was found on were in some such order.
+    ///
+    /// `conflict:` leads because it is the most urgent thing a task can say: the
+    /// merge that left it wrote no conflict markers, so this line is the only
+    /// mark in the file that ours was kept and theirs went to the recovery log.
+    ///
+    /// **This is the one definition, and it is for display.** `fr show` orders
+    /// both its human forms by it, `TaskJson` declares its fields in it, and the
+    /// TUI Detail view builds its regions from it. Three surfaces answering one
+    /// question separately is the drift this codebase keeps paying for —
+    /// `FilteredTasks` in `cli::output` is the same move for a different
+    /// question.
+    ///
+    /// The markdown is **not** ordered by it. See [`ordered_metadata`] for why
+    /// the write path cannot use this yet.
+    pub fn rank(&self) -> u8 {
+        match self {
+            Metadata::Conflict(_) => 0,
+            Metadata::Added(_) => 1,
+            Metadata::Resolved(_) => 2,
+            Metadata::Dep(_) => 3,
+            Metadata::Spec(_) => 4,
+            Metadata::Ref(_) => 5,
+            Metadata::Note(_) => 6,
+        }
+    }
+}
+
+/// A task's metadata in canonical order, borrowed — the task is not touched.
+///
+/// **Partitions, never filters.** The rank match is exhaustive and every entry
+/// is emitted exactly once, so this cannot drop a field: a new [`Metadata`]
+/// variant fails the build until it is ranked, rather than silently vanishing
+/// from every surface at once.
+///
+/// **Stable, so duplicate keys keep their relative order.** That is reachable,
+/// not theoretical — an *unknown* metadata key parses to a `Note` carrying its
+/// own `key: value` text, so one task can hold several notes, and reordering
+/// them against each other would scramble text a user wrote.
+///
+/// **For display only — never for writing the file.** The serializer keeps a
+/// task's own order on purpose: a note is terminated by the next metadata line,
+/// so writing a note last leaves it terminated by whatever follows the task, and
+/// in a damaged file that is stranded content the note then swallows. See the
+/// comment in `parse::task_serializer`. Nothing round-trips through a display
+/// surface, so the same ordering is free here.
+pub fn ordered_metadata(task: &Task) -> Vec<&Metadata> {
+    let mut ordered: Vec<&Metadata> = task.metadata.iter().collect();
+    ordered.sort_by_key(|m| m.rank());
+    ordered
 }
 
 /// A task with all its parsed fields and source tracking
@@ -262,6 +322,73 @@ mod tests {
     fn task_new_no_id() {
         let task = Task::new(TaskState::Todo, None, "No ID".into());
         assert!(task.id.is_none());
+    }
+
+    /// Ordering partitions rather than filters: every entry comes back, exactly
+    /// once, whatever order it went in as.
+    #[test]
+    fn ordering_keeps_every_entry() {
+        let mut task = Task::new(TaskState::Done, None, "t".into());
+        task.metadata = vec![
+            Metadata::Note("n".into()),
+            Metadata::Resolved("2025-05-14".into()),
+            Metadata::Ref(vec!["a.rs".into()]),
+            Metadata::Added("2025-05-01".into()),
+            Metadata::Conflict("both-edited".into()),
+            Metadata::Spec(vec!["s.md".into()]),
+            Metadata::Dep(vec!["T-1".into()]),
+        ];
+
+        let keys: Vec<&str> = ordered_metadata(&task).iter().map(|m| m.key()).collect();
+        assert_eq!(
+            keys,
+            [
+                "conflict", "added", "resolved", "dep", "spec", "ref", "note"
+            ]
+        );
+        assert_eq!(ordered_metadata(&task).len(), task.metadata.len());
+    }
+
+    /// Two entries sharing a key keep their relative order — an unknown metadata
+    /// key parses to a `Note`, so a task can hold several, and they are text
+    /// somebody wrote in an order they chose.
+    #[test]
+    fn ordering_is_stable_within_a_key() {
+        let mut task = Task::new(TaskState::Todo, None, "t".into());
+        task.metadata = vec![
+            Metadata::Note("first".into()),
+            Metadata::Added("2025-05-01".into()),
+            Metadata::Note("second".into()),
+        ];
+
+        let notes: Vec<&str> = ordered_metadata(&task)
+            .iter()
+            .filter_map(|m| match m {
+                Metadata::Note(n) => Some(n.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notes, ["first", "second"]);
+    }
+
+    /// Ordering is for display. The file keeps the order the task holds, because
+    /// writing a note last leaves it terminated by whatever follows the task —
+    /// see [`ordered_metadata`].
+    #[test]
+    fn serializing_does_not_reorder() {
+        let mut task = Task::new(TaskState::Done, None, "t".into());
+        task.metadata = vec![
+            Metadata::Added("2025-05-01".into()),
+            Metadata::Note("body".into()),
+            Metadata::Resolved("2025-05-14".into()),
+        ];
+        task.mark_dirty();
+
+        let text = crate::parse::serialize_tasks(std::slice::from_ref(&task), 0).join("\n");
+        let added = text.find("added:").unwrap();
+        let note = text.find("note:").unwrap();
+        let resolved = text.find("resolved:").unwrap();
+        assert!(added < note && note < resolved, "reordered:\n{text}");
     }
 
     #[test]
