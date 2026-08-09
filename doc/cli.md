@@ -746,6 +746,22 @@ fr projects
 
 Output includes project name, path (abbreviated with `~`), and relative time since last access. Missing projects (directory no longer exists) show `(not found)`.
 
+**Git worktrees are listed under the project they are a worktree of**, labelled by the branch they have checked out:
+
+```
+  Lace              ~/dev/lang/lace                        2 min ago
+    └ alt-work      ~/dev/lang/lace/.claude/worktrees/alt   just now
+    └ sibling-work  ~/dev/lang/lace-sibling                 5 min ago
+```
+
+Every worktree of a clone carries the same project name — `project.toml` is committed — so the branch is what tells them apart, and it is what a person calls the worktree anyway. A worktree sorts with its project rather than among the projects, so it never floats to the top away from the row that explains it. One whose clone is not itself registered is listed at the top level, since there is nothing to nest it under.
+
+**A worktree's entry retires itself when the worktree is removed.** Listing is when a dead row would be seen, so listing is when it goes — no `fr projects prune`, and a note says how many went. This is safe for a worktree specifically, and only for a worktree: its row is derivative (the project has its own) and everything a removed worktree held that exists nowhere else — the [ID frontier](architecture.md#id-frontier-durable-mint), the [recovery log](concepts.md#recovery) — lives in the git common directory, which the removal does not touch. Two guards keep it to that case: the entry must be recorded as a worktree, and the clone's main working tree must still be present, so an unmounted volume takes nothing with it.
+
+Provenance is recorded when an entry is **created**, and a listing re-asks git for any entry that does not have it — so an entry written by an older frame is stamped the first time you list, which is what lets it group and, later, retire itself. Recording it before the worktree dies is the whole point: `git worktree remove` deletes the directory *and* prunes git's own record of it, so afterwards nothing can say whose worktree the path was. The listing costs one `git worktree list` per clone, since asking from any working tree of a clone returns the whole set.
+
+The picker (`p` in the TUI) groups and retires on exactly the same terms.
+
 ### `fr projects add PATH`
 
 Register a project by path. The path must contain a `frame/project.toml`.
@@ -764,7 +780,7 @@ Remove a project from the registry by name or path. This only removes the regist
 fr projects remove design-system
 ```
 
-If the name is ambiguous (multiple projects share the same name), specify by path instead.
+If the name is ambiguous (multiple projects share the same name — which every worktree of a clone does), the error lists the candidate paths so you can pick one.
 
 ### `fr projects prune`
 
@@ -776,6 +792,8 @@ fr projects prune --dry-run  # list what would be removed, change nothing
 ```
 
 Add `--json` for machine-readable output (an array of `{name, path}`). Only registry entries are removed — no project files are touched.
+
+For a **worktree** the test is its own directory rather than the `frame/` inside it: a live worktree checked out to a branch that predates the project has no `frame/`, shows `(not found)`, and must not be pruned — it is sitting right there. Removed worktrees rarely reach this command at all, since a listing retires them first.
 
 ### The `-C` Flag
 

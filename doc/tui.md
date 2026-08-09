@@ -589,6 +589,12 @@ Switch between registered frame projects without leaving the TUI. If `fr` is lau
 
 Projects are listed with their name and abbreviated path. The current project is highlighted. Missing projects (directory no longer exists) are shown dimmed with "(not found)".
 
+**Git worktrees appear indented under the project they belong to**, labelled by the branch they have checked out rather than by the project name every worktree of a clone shares. They sort with their project rather than among the projects, and a worktree whose entry is dead — the worktree has been removed — is retired when the picker opens, so the list is what exists. See [`fr projects`](cli.md#fr-projects) for what makes that safe.
+
+**The picker is also where a deleted project lands you.** If the `frame/` directory of the open project disappears mid-session — a `git worktree remove` on the worktree you were looking at, an `rm -rf` elsewhere — the session drops to the picker with a line naming what went away. A brief disappearance does not count: `git checkout`, `stash` and rebase can remove `frame/` on their way to putting a different version there, so the directory has to stay missing, and a git operation in progress suppresses it entirely.
+
+A deleted project gets **no exit writes**: no `.state.json`, and no `.rescue/` copies of work that never reached disk. Both would write into the directory that just went away, and a rescue copy of a project someone deleted on purpose reinstates exactly what the deletion meant to remove — at whatever size the project was. So the session is wound up as though nothing were outstanding, whether or not something was; the notice says how many files went with it rather than leaving that to be discovered later.
+
 ### Prefix Rename (via Command Palette)
 
 3-step flow for renaming a track's ID prefix (e.g., `EFF` to `FX`):

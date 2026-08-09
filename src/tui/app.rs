@@ -715,8 +715,8 @@ pub struct PrefixRenameState {
 /// State for the project picker popup
 #[derive(Debug, Clone)]
 pub struct ProjectPickerState {
-    /// List of project entries
-    pub entries: Vec<crate::io::registry::ProjectEntry>,
+    /// Rows in display order: each project, then its worktrees.
+    pub rows: Vec<crate::io::registry::ProjectRow>,
     /// Cursor index
     pub cursor: usize,
     /// Scroll offset
@@ -727,33 +727,41 @@ pub struct ProjectPickerState {
     pub current_project_path: Option<String>,
     /// Entry pending removal confirmation
     pub confirm_remove: Option<usize>,
+    /// A line to show above the list — how the picker came to be open, when it
+    /// was not opened on purpose (see [`LoopExit::ProjectGone`]).
+    pub notice: Option<String>,
 }
 
 impl ProjectPickerState {
     pub fn new(
-        mut entries: Vec<crate::io::registry::ProjectEntry>,
+        entries: Vec<crate::io::registry::ProjectEntry>,
         current_path: Option<String>,
     ) -> Self {
-        // Default: sort by last_accessed_tui, most recent first
-        entries.sort_by(|a, b| {
-            let ta = a.last_accessed_tui.unwrap_or_default();
-            let tb = b.last_accessed_tui.unwrap_or_default();
-            tb.cmp(&ta)
-        });
+        let mut entries = entries;
+        // Same as `fr projects list`: ask git which of these are worktrees, which
+        // both stamps provenance and gives the branch each row is labelled with.
+        let survey = crate::io::registry::survey_worktrees(
+            &crate::io::registry::registry_path(),
+            &mut entries,
+        );
+        let mut rows =
+            crate::io::registry::arrange(entries, crate::io::registry::ProjectSort::RecentTui);
+        crate::io::registry::label_branches(&mut rows, &survey);
         Self {
-            entries,
+            rows,
             cursor: 0,
             scroll_offset: 0,
             sort_alpha: false,
             current_project_path: current_path,
             confirm_remove: None,
+            notice: None,
         }
     }
 
     pub fn move_up(&mut self) {
-        if !self.entries.is_empty() {
+        if !self.rows.is_empty() {
             if self.cursor == 0 {
-                self.cursor = self.entries.len() - 1;
+                self.cursor = self.rows.len() - 1;
             } else {
                 self.cursor -= 1;
             }
@@ -762,42 +770,65 @@ impl ProjectPickerState {
     }
 
     pub fn move_down(&mut self) {
-        if !self.entries.is_empty() {
-            self.cursor = (self.cursor + 1) % self.entries.len();
+        if !self.rows.is_empty() {
+            self.cursor = (self.cursor + 1) % self.rows.len();
         }
         self.confirm_remove = None;
     }
 
     pub fn selected_entry(&self) -> Option<&crate::io::registry::ProjectEntry> {
-        self.entries.get(self.cursor)
+        self.rows.get(self.cursor).map(|row| &row.entry)
     }
 
     pub fn toggle_sort(&mut self) {
         self.sort_alpha = !self.sort_alpha;
-        if self.sort_alpha {
-            self.entries.sort_by_key(|a| a.name.to_lowercase());
+        let sort = if self.sort_alpha {
+            crate::io::registry::ProjectSort::Name
         } else {
-            self.entries.sort_by(|a, b| {
-                let ta = a.last_accessed_tui.unwrap_or_default();
-                let tb = b.last_accessed_tui.unwrap_or_default();
-                tb.cmp(&ta)
-            });
-        }
+            crate::io::registry::ProjectSort::RecentTui
+        };
+        self.rearrange(sort);
         self.cursor = 0;
         self.scroll_offset = 0;
         self.confirm_remove = None;
     }
 
+    /// Re-order the rows, keeping the branch labels already resolved rather than
+    /// spawning `git` again on a keypress.
+    fn rearrange(&mut self, sort: crate::io::registry::ProjectSort) {
+        let branches: Vec<(String, Option<String>)> = self
+            .rows
+            .iter()
+            .map(|row| (row.entry.path.clone(), row.branch.clone()))
+            .collect();
+        let entries = self.rows.iter().map(|row| row.entry.clone()).collect();
+        self.rows = crate::io::registry::arrange(entries, sort);
+        for row in self.rows.iter_mut() {
+            if let Some((_, branch)) = branches.iter().find(|(path, _)| *path == row.entry.path) {
+                row.branch = branch.clone();
+            }
+        }
+    }
+
     pub fn remove_selected(&mut self) {
-        if self.entries.is_empty() {
+        if self.rows.is_empty() {
             return;
         }
         // If already confirming this index, do the removal
         if self.confirm_remove == Some(self.cursor) {
-            let entry = &self.entries[self.cursor];
-            crate::io::registry::remove_by_path(&entry.path);
-            self.entries.remove(self.cursor);
-            if self.cursor >= self.entries.len() && self.cursor > 0 {
+            let path = self.rows[self.cursor].entry.path.clone();
+            crate::io::registry::remove_by_path(&path);
+            self.rows.remove(self.cursor);
+            // Removing a project leaves its worktrees with no row to sit under,
+            // so the nesting is worked out again rather than left pointing at a
+            // row that is gone.
+            let sort = if self.sort_alpha {
+                crate::io::registry::ProjectSort::Name
+            } else {
+                crate::io::registry::ProjectSort::RecentTui
+            };
+            self.rearrange(sort);
+            if self.cursor >= self.rows.len() && self.cursor > 0 {
                 self.cursor -= 1;
             }
             self.confirm_remove = None;
@@ -1358,6 +1389,10 @@ pub struct App {
     /// successful save, so a project that becomes writable mid-session recovers
     /// without a restart.
     pub frame_unwritable: bool,
+    /// When `frame/` was first seen to be missing, for the confirmation delay in
+    /// [`project_vanished`]. Cleared the moment it comes back, so a checkout that
+    /// replaces the directory costs nothing.
+    pub project_gone_since: Option<Instant>,
     /// The last content known to be on disk for each file: what we loaded, or
     /// what we last successfully wrote.
     ///
@@ -1586,6 +1621,7 @@ impl App {
             ref_ignored_key: Vec::new(),
             unsaved: BTreeMap::new(),
             frame_unwritable: false,
+            project_gone_since: None,
             baselines: HashMap::new(),
             detail_state: None,
             detail_stack: Vec::new(),
@@ -5071,7 +5107,7 @@ pub fn run(project_dir_override: Option<&str>) -> Result<(), Box<dyn std::error:
         Ok(root) => root,
         Err(_) => {
             // No project found — launch project picker
-            return run_project_picker();
+            return run_project_picker(None);
         }
     };
     let mut project = load_project(&root)?;
@@ -5190,14 +5226,28 @@ pub fn run(project_dir_override: Option<&str>) -> Result<(), Box<dyn std::error:
     // Run event loop
     let result = run_event_loop(&mut terminal, &mut app, watcher);
 
+    // A project that has been deleted gets neither of the two exit writes. Both
+    // would land inside the directory that just went away, and a rescue copy of
+    // a project somebody deleted on purpose is not a rescue — it reinstates, at
+    // whatever size the project was, exactly what the deletion meant to remove.
+    // So a vanished project is treated as a session with nothing outstanding,
+    // whether or not something was.
+    let gone = matches!(result, Ok(LoopExit::ProjectGone));
+
     // Save UI state before exit
-    save_ui_state(&app);
+    if !gone {
+        save_ui_state(&app);
+    }
 
     // Copy anything that never reached disk while the in-memory copy still
     // exists. Must happen before the terminal is restored so the report below
     // can say where it went.
-    let rescued = app.dump_unsaved();
-    let unsaved_report = unsaved_exit_report(&app, &rescued);
+    let unsaved_report = (!gone)
+        .then(|| {
+            let rescued = app.dump_unsaved();
+            unsaved_exit_report(&app, &rescued)
+        })
+        .flatten();
 
     // Restore terminal
     clear_window_title();
@@ -5207,7 +5257,7 @@ pub fn run(project_dir_override: Option<&str>) -> Result<(), Box<dyn std::error:
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
-    result?;
+    let exit = result?;
 
     // Only now, with the alternate screen gone, is there anywhere for this to be
     // read. Exiting silently is the failure item 9 was written about: the user
@@ -5222,7 +5272,36 @@ pub fn run(project_dir_override: Option<&str>) -> Result<(), Box<dyn std::error:
         .into());
     }
 
+    if exit == LoopExit::ProjectGone {
+        // The row goes before the picker reads the registry, so the project that
+        // just disappeared is not offered as somewhere to go.
+        crate::io::registry::remove_by_path(&app.project.root.to_string_lossy());
+        return run_project_picker(Some(project_gone_notice(&app)));
+    }
+
     Ok(())
+}
+
+/// What the picker says about the project it just dropped out of.
+///
+/// It states the discard rather than hiding it: the session held work that will
+/// not be anywhere, and finding that out later from an empty file is worse than
+/// reading it here.
+fn project_gone_notice(app: &App) -> String {
+    let mut notice = format!(
+        "{} is gone — {} no longer exists.",
+        app.project.config.project.name,
+        crate::io::registry::abbreviate_path(&app.project.root.to_string_lossy())
+    );
+    let outstanding = app.unsaved.len();
+    if outstanding > 0 {
+        notice.push_str(&format!(
+            " {} unsaved file{} discarded with it.",
+            outstanding,
+            if outstanding == 1 { "" } else { "s" }
+        ));
+    }
+    notice
 }
 
 /// The exit report for work that never reached disk, or `None` when all is well.
@@ -5320,10 +5399,18 @@ fn absolute(path: &std::path::Path) -> std::path::PathBuf {
     }
 }
 
-/// Launch the TUI in project-picker-only mode (when no project is found).
-fn run_project_picker() -> Result<(), Box<dyn std::error::Error>> {
+/// Launch the TUI in project-picker-only mode (when no project is found, or when
+/// the open one disappeared and `notice` says so).
+fn run_project_picker(notice: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+    // Same reasoning as `fr projects list`: this is where a stale worktree row
+    // would be seen, so it is where it is retired.
+    crate::io::registry::heal_worktrees();
     let reg = crate::io::registry::read_registry();
     if reg.projects.is_empty() {
+        if let Some(notice) = &notice {
+            println!("{notice}");
+            println!();
+        }
         println!("No projects registered.");
         println!();
         println!("Run `fr init` in a project directory to get started,");
@@ -5348,6 +5435,7 @@ fn run_project_picker() -> Result<(), Box<dyn std::error::Error>> {
     }));
 
     let mut picker = ProjectPickerState::new(reg.projects, None);
+    picker.notice = notice;
     let theme = super::theme::Theme::default();
 
     let selected_path = loop {
@@ -5443,11 +5531,51 @@ fn format_key_debug(key: &crossterm::event::KeyEvent) -> String {
     format!("{} mod={} state={:?}", code, mod_str, key.state)
 }
 
+/// Why the event loop stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopExit {
+    /// The user quit.
+    Quit,
+    /// The project directory went away underneath the session. Nothing may be
+    /// written to it afterwards — see [`run`]'s exit path.
+    ProjectGone,
+}
+
+/// How long the project directory must stay missing before the session gives up
+/// on it.
+///
+/// A `git checkout`, `stash` or rebase can remove `frame/` for an instant on its
+/// way to putting a different version there, and ejecting the user over that
+/// would be worse than the problem. The loop wakes at least every 250ms, so this
+/// is a handful of ticks.
+const PROJECT_GONE_CONFIRM: Duration = Duration::from_millis(750);
+
+/// Whether the project this session is editing has been deleted for good.
+///
+/// Deliberately *not* keyed on the watcher reporting a removal: a track file
+/// legitimately disappears when it is archived, renamed, or checked out from
+/// another branch. The question is whether the `frame/` directory itself is
+/// still there.
+fn project_vanished(app: &mut App) -> bool {
+    if app.project.frame_dir.is_dir() {
+        app.project_gone_since = None;
+        return false;
+    }
+    // Mid-operation, more rewrites are still coming — the same signal
+    // `git_write_back_block` uses to keep auto-clean out of git's way.
+    if crate::io::git::operation_in_progress(&app.project.frame_dir) {
+        app.project_gone_since = None;
+        return false;
+    }
+    let since = *app.project_gone_since.get_or_insert_with(Instant::now);
+    since.elapsed() >= PROJECT_GONE_CONFIRM
+}
+
 fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
     mut watcher: Option<FrameWatcher>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<LoopExit, Box<dyn std::error::Error>> {
     let mut save_counter = 0u32;
     loop {
         // Reinitialize file watcher after project switch
@@ -5455,6 +5583,13 @@ fn run_event_loop(
             app.watcher_needs_restart = false;
             watcher = FrameWatcher::start(&app.project.frame_dir).ok();
         }
+
+        // Before anything that would write, and before drawing a project that is
+        // not there.
+        if project_vanished(app) {
+            return Ok(LoopExit::ProjectGone);
+        }
+
         app.clear_expired_flash();
 
         // Flush expired pending moves and column pins (only in Navigate mode)
@@ -5584,7 +5719,7 @@ fn run_event_loop(
             break;
         }
     }
-    Ok(())
+    Ok(LoopExit::Quit)
 }
 
 /// Whether a key repeat event should be processed. In typing modes all keys
@@ -6270,6 +6405,81 @@ mod tests {
     /// and `Esc` rebinds in a session where nobody had searched for anything --
     /// and without the match index or count, so it was not even the search you
     /// left. The rest of the restore has to keep working.
+    /// A project that is there is never mistaken for one that is gone, and a
+    /// missing one is not acted on until it has stayed missing.
+    #[test]
+    fn project_vanished_needs_the_directory_to_stay_gone() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+
+        assert!(!project_vanished(&mut app), "the project is right there");
+        assert!(app.project_gone_since.is_none());
+
+        std::fs::remove_dir_all(&app.project.frame_dir).unwrap();
+
+        // First sighting starts the clock rather than ejecting the session: a
+        // checkout or rebase can remove `frame/` on its way to replacing it.
+        assert!(!project_vanished(&mut app), "not on the first tick");
+        let first = app.project_gone_since.expect("clock started");
+
+        // Still gone on the next tick, and still inside the window.
+        assert!(!project_vanished(&mut app));
+        assert_eq!(app.project_gone_since, Some(first), "clock not restarted");
+
+        // Once the window has passed, it is gone for good.
+        app.project_gone_since = Some(first - PROJECT_GONE_CONFIRM);
+        assert!(project_vanished(&mut app));
+    }
+
+    /// The case the delay exists for: `frame/` comes back, and the session carries
+    /// on with no memory of the gap.
+    #[test]
+    fn project_vanished_forgets_a_directory_that_comes_back() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+        let frame_dir = app.project.frame_dir.clone();
+
+        std::fs::remove_dir_all(&frame_dir).unwrap();
+        assert!(!project_vanished(&mut app));
+        assert!(app.project_gone_since.is_some(), "clock running");
+
+        std::fs::create_dir_all(frame_dir.join("tracks")).unwrap();
+        assert!(!project_vanished(&mut app));
+        assert!(app.project_gone_since.is_none(), "clock cleared");
+    }
+
+    /// The notice states the discard rather than leaving it to be discovered
+    /// later from an empty file.
+    #[test]
+    fn the_gone_notice_names_the_project_and_any_discarded_work() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = app_on_disk(tmp.path());
+
+        let quiet = project_gone_notice(&app);
+        assert!(quiet.contains("saves"), "names the project: {quiet}");
+        assert!(quiet.contains("no longer exists"), "{quiet}");
+        assert!(
+            !quiet.contains("unsaved"),
+            "nothing was outstanding: {quiet}"
+        );
+
+        app.unsaved.insert(
+            SaveTarget::Track("a".into()),
+            UnsavedFile {
+                error: "No such file or directory".into(),
+                attempts: 1,
+                next_retry_at: Instant::now(),
+                permanent: true,
+                surfaced: true,
+            },
+        );
+        let loud = project_gone_notice(&app);
+        assert!(
+            loud.contains("1 unsaved file discarded"),
+            "says what went with it: {loud}"
+        );
+    }
+
     #[test]
     fn restore_drops_a_persisted_search_but_keeps_the_view() {
         let tmp = tempfile::TempDir::new().unwrap();

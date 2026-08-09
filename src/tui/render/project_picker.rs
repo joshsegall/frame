@@ -54,7 +54,20 @@ fn render_project_picker_inner(
     // Blank line at top
     lines.push(Line::from(Span::styled(" ".repeat(inner_w), bg_style)));
 
-    if picker.entries.is_empty() {
+    // Why the picker is open, when it was not opened on purpose. Wrapped, because
+    // it names a path and a truncated path is not one.
+    if let Some(notice) = &picker.notice {
+        let notice_style = Style::default().fg(highlight).bg(bg);
+        for visual in crate::tui::wrap::wrap_line(notice, content_w.max(1), 0) {
+            let text = format!(" {}", &notice[visual.byte_start..visual.byte_end]);
+            let mut spans = vec![Span::styled(text.clone(), notice_style)];
+            pad_to_width(&mut spans, inner_w, bg_style);
+            lines.push(Line::from(spans));
+        }
+        lines.push(Line::from(Span::styled(" ".repeat(inner_w), bg_style)));
+    }
+
+    if picker.rows.is_empty() {
         let empty_lines = [
             " No projects registered.",
             "",
@@ -74,17 +87,29 @@ fn render_project_picker_inner(
             lines.push(Line::from(spans));
         }
     } else {
-        // Compute max name length for column alignment
-        let max_name = picker
-            .entries
+        // A worktree row is indented under its project, so the indent counts
+        // toward the column the paths line up after.
+        let labels: Vec<String> = picker
+            .rows
             .iter()
-            .map(|e| unicode::display_width(&e.name))
+            .map(|row| {
+                if row.nested {
+                    format!("  {}", row.label())
+                } else {
+                    row.label()
+                }
+            })
+            .collect();
+        let max_name = labels
+            .iter()
+            .map(|l| unicode::display_width(l))
             .max()
             .unwrap_or(0)
             .min(content_w / 3);
         let name_col = max_name + 2; // +2 for padding after name
 
-        for (i, entry) in picker.entries.iter().enumerate() {
+        for (i, (row, label)) in picker.rows.iter().zip(&labels).enumerate() {
+            let entry = &row.entry;
             let is_selected = i == picker.cursor;
             let is_current = picker
                 .current_project_path
@@ -109,18 +134,21 @@ fn render_project_picker_inner(
             let indicator = if is_selected { " \u{25B6} " } else { "   " };
             spans.push(Span::styled(indicator, row_style));
 
-            // Project name
-            let name_display: String = if unicode::display_width(&entry.name) > max_name {
-                let truncated: String = entry.name.chars().take(max_name - 1).collect();
+            // Project name, or a worktree's branch under it
+            let name_display: String = if unicode::display_width(label) > max_name {
+                let truncated: String = label.chars().take(max_name.saturating_sub(1)).collect();
                 format!("{}\u{2026}", truncated)
             } else {
-                entry.name.clone()
+                label.clone()
             };
 
             let name_color = if !exists {
                 dim
             } else if is_current {
                 highlight
+            } else if row.nested {
+                // Subordinate to the project row above it, which carries the name.
+                text_color
             } else {
                 bright
             };
@@ -270,35 +298,86 @@ fn pad_to_width<'a>(spans: &mut Vec<Span<'a>>, target_width: usize, pad_style: S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::registry::ProjectEntry;
+    use crate::io::registry::{ProjectEntry, ProjectRow};
     use crate::tui::app::ProjectPickerState;
     use crate::tui::render::test_helpers::*;
     use insta::assert_snapshot;
 
-    #[test]
-    fn picker_with_entries() {
-        let mut app = app_with_track(SIMPLE_TRACK_MD);
-        app.project_picker = Some(ProjectPickerState {
-            entries: vec![
-                ProjectEntry {
-                    name: "Project Alpha".into(),
-                    path: "/home/user/alpha".into(),
-                    last_accessed_tui: None,
-                    last_accessed_cli: None,
-                },
-                ProjectEntry {
-                    name: "Project Beta".into(),
-                    path: "/home/user/beta".into(),
-                    last_accessed_tui: None,
-                    last_accessed_cli: None,
-                },
-            ],
+    fn row(name: &str, path: &str, branch: Option<&str>, nested: bool) -> ProjectRow {
+        ProjectRow {
+            entry: ProjectEntry {
+                name: name.into(),
+                path: path.into(),
+                last_accessed_tui: None,
+                last_accessed_cli: None,
+                worktree_of: nested.then(|| "/home/user/alpha".to_string()),
+            },
+            branch: branch.map(|b| b.to_string()),
+            nested,
+        }
+    }
+
+    fn picker(rows: Vec<ProjectRow>, notice: Option<&str>) -> ProjectPickerState {
+        ProjectPickerState {
+            rows,
             cursor: 0,
             scroll_offset: 0,
             sort_alpha: false,
             current_project_path: Some("/home/user/alpha".into()),
             confirm_remove: None,
+            notice: notice.map(|n| n.to_string()),
+        }
+    }
+
+    #[test]
+    fn picker_with_entries() {
+        let mut app = app_with_track(SIMPLE_TRACK_MD);
+        app.project_picker = Some(picker(
+            vec![
+                row("Project Alpha", "/home/user/alpha", None, false),
+                row("Project Beta", "/home/user/beta", None, false),
+            ],
+            None,
+        ));
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_project_picker(frame, &app, area);
         });
+        assert_snapshot!(output);
+    }
+
+    /// A worktree sits under its project, labelled by the branch — the project
+    /// name is committed, so every row of a clone would otherwise read the same.
+    #[test]
+    fn picker_nests_worktrees_under_their_project() {
+        let mut app = app_with_track(SIMPLE_TRACK_MD);
+        app.project_picker = Some(picker(
+            vec![
+                row("Project Alpha", "/home/user/alpha", None, false),
+                row(
+                    "Project Alpha",
+                    "/home/user/alpha/.claude/worktrees/wt",
+                    Some("feature-x"),
+                    true,
+                ),
+                row("Project Beta", "/home/user/beta", None, false),
+            ],
+            None,
+        ));
+        let output = render_to_string(TERM_W, TERM_H, |frame, area| {
+            render_project_picker(frame, &app, area);
+        });
+        assert_snapshot!(output);
+    }
+
+    #[test]
+    fn picker_shows_a_notice_when_the_project_vanished() {
+        let mut app = app_with_track(SIMPLE_TRACK_MD);
+        app.project_picker = Some(picker(
+            vec![row("Project Beta", "/home/user/beta", None, false)],
+            Some(
+                "Project Alpha is gone — ~/alpha no longer exists. 2 unsaved files discarded with it.",
+            ),
+        ));
         let output = render_to_string(TERM_W, TERM_H, |frame, area| {
             render_project_picker(frame, &app, area);
         });

@@ -1,0 +1,21 @@
+---
+source: src/tui/render/project_picker.rs
+expression: output
+---
+
+
+
+
+
+
+                ┌ Projects ────────────────────────────────────┐
+                │                                              │
+                │ Project Alpha is gone — ~/alpha no longer    │
+                │ exists. 2 unsaved files discarded with it.   │
+                │                                              │
+                │ ▶ Project Beta  (not found)                  │
+                │                                              │
+                │ sorted by: recent                            │
+                │ ↑↓/jk navigate  Enter open  s sort           │
+                │ X remove  Esc close                          │
+                └──────────────────────────────────────────────┘

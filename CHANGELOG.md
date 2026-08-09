@@ -4,7 +4,35 @@ All notable changes to frame will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- **Git worktrees are listed under the project they are a worktree of**, in `fr projects` and in the TUI picker, labelled by the branch they have checked out:
+
+  ```
+    Lace              ~/dev/lang/lace                        2 min ago
+      └ alt-work      ~/dev/lang/lace/.claude/worktrees/alt   just now
+      └ sibling-work  ~/dev/lang/lace-sibling                 5 min ago
+  ```
+
+  Before this they were three top-level rows all reading `Lace` — `project.toml` is committed, so every worktree of a clone carries the same project name, and the name was no use for telling them apart. The branch is what a person calls the worktree. A worktree now sorts *with* its project instead of among the projects, so a worktree used more recently no longer floats to the top away from the row that explains it, and `fr projects remove Lace` lists the candidate paths instead of only saying to specify one.
+
+  The relationship comes from `git worktree list`, not from the path: a worktree beside its parent (`git worktree add ../lace-alt`) groups exactly like one nested under it, and a nested *sub-project* in a monorepo is not mistaken for a worktree.
+
 ### Fixed
+
+- **A removed worktree's registry entry no longer hangs around forever.** `git worktree remove` left a `(not found)` row that only a manual `fr projects prune` would clear — and because the row sorted by last use, it sorted *first*. The entry now retires itself when the registry is listed or the picker is opened, which is when it would have been seen, and the listing says how many went rather than silently rewriting the file.
+
+  This is safe for a worktree specifically. Its row is derivative — the project has its own — and everything a removed worktree held that exists nowhere else, the ID frontier and the recovery log, lives in the git common directory that the removal does not touch. Two guards keep it to that case: the entry must be recorded as a worktree, and the clone's main working tree must still be present, so an unmounted volume does not take the rows with it. A missing *project* is still left for `fr projects prune` to ask about, since its row may be the only record of where it was.
+
+  Provenance is recorded when an entry is created — one `git rev-parse` the first time a path is seen — and a listing re-asks git for any entry that lacks it, so the entries already in your registry are stamped the first time you run `fr projects` and need no migration. Recording it while the worktree is alive is the whole point: `git worktree remove` prunes git's own record of the worktree along with the directory, so afterwards nothing can say whose worktree the path was. Listing costs one `git worktree list` per clone, since asking from any working tree returns the whole set.
+
+- **`fr projects prune` no longer removes a live worktree.** It tested for `frame/` inside the directory, so a worktree checked out to a branch that predates the project — no `frame/`, directory sitting right there — read as not-found and was pruned. For a worktree the test is now its own directory.
+
+- **The TUI drops to the project picker when its project is deleted underneath it.** It used to keep rendering the vanished project from memory: reloads read a file that was not there and skipped it in silence, saves failed as `not found`, which counts as permanent, so the retry timer stopped and the unsaved indicator parked with no explanation — and the exit report then correctly announced that everything was lost, because both places it could write were inside the directory that had gone. The session now notices, names what disappeared, drops its registry row, and hands off to the picker.
+
+  A brief disappearance does not count: `git checkout`, `stash` and rebase can remove `frame/` on the way to putting a different version there, so the directory must stay missing for three quarters of a second, and a git operation in progress suppresses the check entirely — the same signal that already keeps auto-clean out of git's way.
+
+  A deleted project gets **no exit writes** — no `.state.json`, no `.rescue/` copies. A rescue copy of a project someone deleted on purpose reinstates, at whatever size the project was, exactly what the deletion meant to remove. So the session is wound up as though nothing were outstanding, whether or not something was; the notice states how many files went with it rather than leaving that to be found later in an empty directory.
 
 - **The help overlay's version and repo link no longer scroll off.** They were the last two lines of the same scrolling paragraph as the key bindings, so on any terminal short enough to need scrolling — 24 rows, routinely — they opened below the fold, and only someone who already suspected they were there would scroll down to find them. The footer is now pinned to the bottom of the overlay and the bindings scroll above it; the `▲`/`▼` indicators track the bindings alone. Squeezed to the last row or two, the blank spacer above it goes before the text does.
 

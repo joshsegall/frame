@@ -503,6 +503,9 @@ pub(super) fn tag_color_clear(app: &mut App) {
 // Project picker
 
 pub(super) fn open_project_picker(app: &mut App) {
+    // Retire rows for worktrees that are gone before showing the list, so the
+    // clutter never has to be noticed and cleaned up by hand.
+    crate::io::registry::heal_worktrees();
     let reg = crate::io::registry::read_registry();
     let current_path = Some(app.project.root.to_string_lossy().to_string());
     app.project_picker = Some(crate::tui::app::ProjectPickerState::new(
