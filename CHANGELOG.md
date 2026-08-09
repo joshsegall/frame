@@ -2,7 +2,7 @@
 
 All notable changes to frame will be documented in this file.
 
-## Unreleased
+## v0.2.0 - 2026-08-08
 
 ### Added
 
@@ -25,6 +25,98 @@ All notable changes to frame will be documented in this file.
 - **`fr check` reports an unclaimed archived track file** — a `.md` in `archive/_tracks/` that no archived `[[tracks]]` entry claims. The roster check only ever scanned `tracks/`, so a stray file one directory over was invisible; anyone whose archived track was renamed by an older frame (see below) has one on disk right now and no way to have learned it.
 
   A warning rather than an error, unlike its `tracks/` counterpart: this is archived content, absent from views that would not have shown it anyway, so it does not fail a build. The message distinguishes a file no config entry claims from one whose entry exists but is `active` or `shelved` — the second is a copy left behind after an unarchive, and it pairs with the missing-file error to say exactly what to move where. No `--fix`: adopting it invents an id, a name and a prefix, deleting it discards content, and only the person who renamed it knows which id it should answer to.
+
+- **`fr merge` — a version control merge driver for frame files.** Track files are generated artifacts whose structure carries meaning, and a line-based merge gets one case badly wrong: `fr done` *relocates* a task from `## Backlog` to `## Done`, which git reads as a deletion in one region plus an unrelated insertion. It conflicts, and resolving that by keeping both sides — the obvious move, and the right one when both sides genuinely appended — leaves two tasks holding one ID, one `[ ]` and one `[x]`, in a file that still looks plausible and that `fr show` disagrees with.
+
+  Frame merges by **task identity** instead, reusing the same three-way merge the TUI already runs when a save collides with another process. The relocation stops being a conflict at all: it is one task whose section changed. Additions from both sides land, a change to a task the other side did not touch is taken, and subtasks merge independently of their parent. This is sound across branches because IDs cannot collide across them — actor tokens namespace mints per working copy, and the ID frontier is shared by every worktree of a clone.
+
+  Nothing in it is git-specific; git is one caller. The three file arguments and the result path are what every VCS with a custom-merge hook passes.
+
+  **On conflict, no conflict markers are written.** A file full of `<<<<<<<` is not valid frame markdown, so it disables the parser, `fr check` and `fr show` at the moment you need them — and hand-repairing line ranges in a file whose structure is already broken is how a `## Parked` header gets deleted. Instead your version stays in the file, theirs goes to the recovery log, the task gets a `conflict:` line that `fr check` reports as an error, and the merge exits non-zero so git stops with the path unmerged. `fr merge --resolve <ID>` clears the marker once you have applied what was missing. Which side should win has no automatic answer, so there is no `--fix` for it.
+- **`fr git setup` — make a clone frame-ready, idempotently.** Ensures the `.gitignore` pattern, writes the `.gitattributes` entries routing frame markdown to the merge driver, and registers the driver in `.git/config`. `fr init` runs it for you inside a repo.
+
+  It also **collapses legacy per-file `.gitignore` entries** into the blanket `frame/.*` pattern. Only lines it can name are removed — an exact match for a working-copy-local frame file, in any of its usual spellings, that the pattern genuinely covers. Unrecognised entries, nested ones like `frame/archive/.keep`, and negations are left alone. Outside a git repository it reports that there is nothing to configure and writes nothing.
+- **The TUI's ref/spec editor folds paths the same way, and colours the ones that will not travel.** Editing a `ref:` or `spec:` field stores the folded spelling (`./sub/../real.md` → `real.md`), so both surfaces write one spelling per file and the field's duplicate-collapsing works by file rather than by string. The detail view's error colour, until now reserved for a path with no file behind it, also covers a path that leaves the project or that git ignores.
+
+  The editor does **not** refuse them, unlike `fr ref add`: there is no `--force` to offer in a text field, and throwing away what someone just typed is worse than storing it and saying it is wrong. `tests/parity.rs` carries that as a stated divergence, and fails if the two surfaces ever quietly agree again.
+
+- **`fr check` reports `ref:`/`spec:` paths that resolve here and nowhere else** — `ref_outside_project` for an absolute or escaping path, `ref_gitignored` for one git is ignoring. The same rule `fr ref add` enforces, applied to values already in a file: written before the rule existed, past it with `--force`, in the TUI, or by hand.
+
+  **Warnings, not errors.** These paths resolve — nothing about the project is invalid on this machine, and errors exit non-zero, so a project that passed yesterday should not fail because a rule was added today. No `--fix`: which file inside the project was meant is a guess, and un-ignoring one is a decision about the repository, not the task.
+
+  The gitignore half makes one batched `git check-ignore` call for the whole project rather than one per reference, and is silent outside a repo or when a file is tracked despite a rule.
+
+- **`fr check` warns when the merge driver is not registered in this clone.** `.gitattributes` is committed and arrives with a clone; the driver is in `.git/config`, which cannot be. So a teammate who clones a correctly-configured project silently falls back to line-based merges. This warning is the only thing that tells a fresh clone to run `fr git setup`. Like the existing local-file leak guard, it is a no-op outside git or when `git` cannot be run.
+- **`conflict:` task metadata**, written by `fr merge` and cleared by `fr merge --resolve`. Reported by `fr check` as an error and exposed as `conflict` in `--json` task output.
+
+- **`fr check` reports archived task IDs left on a prefix their track no longer uses**, with a repair that puts them back on the current one. This is the damage the `fr track rename --prefix` fix below stops creating, but projects renamed before it still carry it on disk with nothing to say so. It is a warning, not an error: the archived tasks are readable and unique, and what makes it worth reporting is what happens if the abandoned prefix is ever given to another track — that track mints from its own files, cannot see this archive, and reissues numbers it already holds. The repair refuses outright if any ID would land on one that already exists, rather than half-renaming a file.
+
+### Changed
+
+> **Breaking, in one place each — read these three if you script `fr` or parse its JSON:**
+> 1. `fr ref` and `fr spec` now require an action: `fr ref ID add|rm|set PATH...`. `fr ref ID PATH` and `fr spec ID PATH` no longer parse.
+> 2. `--json` `spec` is an array of strings, not a string.
+> 3. `fr ref` and `fr spec` exit non-zero on a path with no file behind it, on one that leaves the project root or is absolute, and on one git is ignoring. Add `--force` to keep the old behaviour.
+>
+> Each is detailed below.
+
+- **`fr check` looks for the conflict evidence before pointing at it.** It used to tell every reader "their version is in the recovery log" for any task carrying a `conflict:` marker. The marker is committed and travels to every clone; the log does not — so a marker pulled from someone else's merge, or read after `fr recovery prune`, pointed at an entry that working copy never had. It now checks, and either names the lookup that retrieves it (`fr recovery --for <ID>`) or says plainly that the entry is not here and to recover the other side from version control. `--json` carries the answer as `evidence`.
+
+- **`fr merge` names the log it wrote to, by absolute path**, and warns loudly when it could not write one at all — the two are now mutually exclusive, so the reader is never sent to read something that was not written. It also locates the project from the file being merged rather than from the working directory, and declines to log into a project that does not hold that file: merging files kept elsewhere used to file the discarded side under whatever unrelated project sat above the current directory.
+
+- **`fr check`'s recovery-log summary names the log**, which is no longer a location the reader can assume.
+
+- **`--json` shape**: `unresolved_merge_conflict` gains `evidence`; the `recovery_log` info entry gains `path`.
+
+
+
+- **BREAKING: `fr ref` and `fr spec` take an explicit action**, the same `add`/`rm` shape as `fr tag` and `fr dep`, plus `set`:
+
+  ```
+  fr ref EFF-014 add src/parser.rs:807      # was: fr ref EFF-014 src/parser.rs:807
+  fr ref EFF-014 rm src/parser.rs:807       # was: not possible
+  fr spec EFF-014 set doc/spec.md           # was: fr spec EFF-014 doc/spec.md
+  ```
+
+  The two commands used to disagree about what they did with the value: `fr ref` appended, `fr spec` replaced. Nothing in either command said so, and once both took several paths the difference stopped being a detail — `fr spec ID a.md` silently discarded a list the caller may not have known was there. Naming the action fixes that in the obvious way, and matches the two other list-valued fields, which have always worked this way.
+
+  It also fills a real gap: **there was no way to remove a ref from the CLI at all**. A stale one could only be cleared in the TUI or by hand-editing the file.
+
+  **Prefer `add`.** It needs no read of the current list, so two agents adding different paths to one task no longer clobber each other — under replace-everything semantics, each would have. It is idempotent: adding a path already present reports `unchanged` and writes nothing. `rm` of an absent path does the same. `set` is the deliberate destructive form, and `rm` alone skips the existence check, since a path is most worth removing exactly when the file behind it is gone.
+
+- **`ref:` and `spec:` resolve by one rule, and it understands where-in-the-file suffixes.** They hold the same kind of value — a path relative to the project root — but only `spec:` stripped a `#anchor` before looking on disk, so `doc/design.md#rationale` was a valid spec and a broken ref: the same string, the same file, two answers, from two copies of the rule that had drifted apart in `check` and in `clean`. Neither knew about `src/parser.rs:807` at all, which is how most refs to code get written, so every one of them was reported broken.
+
+  A path may now carry `#anchor`, `:line`, `:line-range` or `:line:col`, on either key. **Only the file is validated** — frame does not open the target, so an anchor whose heading moved and a line number gone stale are not errors. The literal path is tried before any suffix is stripped, so a filename genuinely containing `#` or `:` still resolves.
+
+- **BREAKING: `fr ref add|set` and `fr spec add|set` refuse a path with no file behind it**, naming every bad one and writing nothing — an exit code where there used to be none. `--force` writes it anyway, for the file you are about to create. `fr check` calls a broken ref an error, so accepting one silently was frame creating work for itself, and a typo is cheapest to fix at the moment it is typed. Both commands also take several paths at once now.
+
+- **BREAKING: `fr ref add|set` and `fr spec add|set` refuse a path that leaves the project**, whether it escapes upward (`../outside.md`) or names the filesystem root (`/etc/hosts`). Help has always said paths are relative to the project root; nothing enforced it, so all of these were accepted and `fr check` then reported the project valid.
+
+  These are the opposite failure from a broken ref: the file *is* there, which is exactly what makes the reference look fine until someone else clones the project — where the absolute path names a different machine and whatever sat outside the root is not the same. So the refusal is checked before the existence check, and reports the greater of the two problems for a path like `../typo.md`. An absolute path pointing *into* the project is refused too: it still names this machine.
+
+  The check runs on the folded value, so `doc/../../outside.md` is caught as readily as a leading `..`, while a path that dips out of a subdirectory and comes back (`doc/../src/parser.rs`) is fine. `--force` writes it anyway — one flag, one meaning. `rm` is never refused, since an uncontained ref already in a file is exactly what someone needs to be able to take out.
+
+- **BREAKING: `fr ref add|set` and `fr spec add|set` refuse a path git is ignoring.** A gitignored file is in your working copy and will be in nobody else's, so a ref to `scratch/notes.md` resolves here and nowhere else — the same failure as an escaping path, reached a different way.
+
+  Decided by `git check-ignore` rather than a configured prefix list, because git already owns this rule and a second copy of it would drift. One batched call covers the whole list, and paths are passed relative to the project root, so a project living in a subdirectory of its repo needs no special handling. The **resolved** path is what git is asked about, not the raw value: `doc/draft.tmp:12` is not a filename, and a `*.tmp` rule would not match it.
+
+  Two deliberate non-refusals. A **tracked** file is accepted even when a rule covers it — ignore rules do not apply to what is already in the index, so it does travel. And **outside a git repository, or with `git` unavailable, nothing is checked**: frame cannot tell, so it allows rather than guessing. `--force` overrides, and `rm` is never refused.
+
+- **`ref:` and `spec:` paths are stored in normal form, and matched in it.** One file has many spellings — `real.md`, `./real.md`, `sub/../real.md` — and every one of them resolves, so a list could hold the same file twice while `rm` failed to find what was plainly there. Both went wrong in practice: with `./sub/../real.md` stored, `fr ref ID rm real.md` reported `unchanged (not present)`, and `fr ref ID add real.md` appended a second entry for the same file.
+
+  Values are now stored with `.` and `..` folded away, and `add`, `rm` and `set` compare by that normal form. Folding runs over whole `/`-separated path segments, so a `#anchor` or `:line` suffix rides through untouched and a filename that genuinely contains `..`, `#` or `:` is left alone. It is purely lexical — nothing is read from disk, so a symlink cannot change the answer.
+
+  **No existing file is rewritten.** Matching by normal form is what reaches values written by older versions instead: `rm real.md` finds a stored `./sub/../real.md` and reports the spelling that actually left the file. The suffix stays part of a reference's identity, so `rm src/parser.rs` does not take `src/parser.rs:807` with it — a reference to a file and a reference to a line in it are different references.
+
+- **The TUI detail view shows a ref or spec path with no file behind it in the error colour**, which makes a reference that went stale when its file moved visible without running `fr check`. Editing still accepts whatever you type.
+
+- **BREAKING: `spec:` accepts several paths, comma-separated, like `ref:`.** A task can have more than one spec worth pointing at, and there was no way to say so. `fr check` validates each path and reports them individually; the detail view lists them one per line.
+
+  **This changes `--json` output**: `spec` is now an array of strings, and absent rather than `null` when empty — the shape `refs` already had. A consumer reading `.spec` as a string needs `.spec[0]` or `.spec | join(", ")`. Existing files need no migration: a single-path `spec:` line parses into a one-element list and serializes back byte-identical.
+
+- **Ref and spec fields are comma-separated in the TUI editor**, matching the file format. Typing two paths by hand needs a comma between them; accepting an autocomplete suggestion inserts it for you. Whitespace is no longer a separator there, which is what stops a value containing spaces from being torn apart. Deps and tags are unaffected — an ID or a tag cannot contain a space, so their lenient splitting is still lossless.
+
+- **`fr check` exits non-zero when the project has errors.** It printed `✗ project has errors` and exited 0, so `fr check && git commit` committed anyway and a CI step had to grep stdout to find out. Warnings still exit 0 — the status answers "is this project sound", and gating on something frame is willing to live with would make the signal useless. `--json` agrees with its own `valid` field, and `--fix` follows the same rule on the state it leaves behind, including the "nothing to repair" case: most errors have no repair by design, so that is the common way a broken project leaves `--fix`.
 
 ### Fixed
 
@@ -86,101 +178,6 @@ All notable changes to frame will be documented in this file.
 
   **Inbox spacing may be mixed after an edit, and that is expected.** An untouched item is written back exactly as you wrote it while an edited one is written canonically, so editing one item of a compactly-spaced inbox adds a blank line below that item and not below its neighbours. A compact inbox converts to the canonical spacing one item at a time, as each is edited, and every intermediate state is stable — reading and writing it back changes nothing.
 
-### Changed
-
-- **`fr check` looks for the conflict evidence before pointing at it.** It used to tell every reader "their version is in the recovery log" for any task carrying a `conflict:` marker. The marker is committed and travels to every clone; the log does not — so a marker pulled from someone else's merge, or read after `fr recovery prune`, pointed at an entry that working copy never had. It now checks, and either names the lookup that retrieves it (`fr recovery --for <ID>`) or says plainly that the entry is not here and to recover the other side from version control. `--json` carries the answer as `evidence`.
-
-- **`fr merge` names the log it wrote to, by absolute path**, and warns loudly when it could not write one at all — the two are now mutually exclusive, so the reader is never sent to read something that was not written. It also locates the project from the file being merged rather than from the working directory, and declines to log into a project that does not hold that file: merging files kept elsewhere used to file the discarded side under whatever unrelated project sat above the current directory.
-
-- **`fr check`'s recovery-log summary names the log**, which is no longer a location the reader can assume.
-
-- **`--json` shape**: `unresolved_merge_conflict` gains `evidence`; the `recovery_log` info entry gains `path`.
-
-### Added
-- **`fr merge` — a version control merge driver for frame files.** Track files are generated artifacts whose structure carries meaning, and a line-based merge gets one case badly wrong: `fr done` *relocates* a task from `## Backlog` to `## Done`, which git reads as a deletion in one region plus an unrelated insertion. It conflicts, and resolving that by keeping both sides — the obvious move, and the right one when both sides genuinely appended — leaves two tasks holding one ID, one `[ ]` and one `[x]`, in a file that still looks plausible and that `fr show` disagrees with.
-
-  Frame merges by **task identity** instead, reusing the same three-way merge the TUI already runs when a save collides with another process. The relocation stops being a conflict at all: it is one task whose section changed. Additions from both sides land, a change to a task the other side did not touch is taken, and subtasks merge independently of their parent. This is sound across branches because IDs cannot collide across them — actor tokens namespace mints per working copy, and the ID frontier is shared by every worktree of a clone.
-
-  Nothing in it is git-specific; git is one caller. The three file arguments and the result path are what every VCS with a custom-merge hook passes.
-
-  **On conflict, no conflict markers are written.** A file full of `<<<<<<<` is not valid frame markdown, so it disables the parser, `fr check` and `fr show` at the moment you need them — and hand-repairing line ranges in a file whose structure is already broken is how a `## Parked` header gets deleted. Instead your version stays in the file, theirs goes to the recovery log, the task gets a `conflict:` line that `fr check` reports as an error, and the merge exits non-zero so git stops with the path unmerged. `fr merge --resolve <ID>` clears the marker once you have applied what was missing. Which side should win has no automatic answer, so there is no `--fix` for it.
-- **`fr git setup` — make a clone frame-ready, idempotently.** Ensures the `.gitignore` pattern, writes the `.gitattributes` entries routing frame markdown to the merge driver, and registers the driver in `.git/config`. `fr init` runs it for you inside a repo.
-
-  It also **collapses legacy per-file `.gitignore` entries** into the blanket `frame/.*` pattern. Only lines it can name are removed — an exact match for a working-copy-local frame file, in any of its usual spellings, that the pattern genuinely covers. Unrecognised entries, nested ones like `frame/archive/.keep`, and negations are left alone. Outside a git repository it reports that there is nothing to configure and writes nothing.
-- **The TUI's ref/spec editor folds paths the same way, and colours the ones that will not travel.** Editing a `ref:` or `spec:` field stores the folded spelling (`./sub/../real.md` → `real.md`), so both surfaces write one spelling per file and the field's duplicate-collapsing works by file rather than by string. The detail view's error colour, until now reserved for a path with no file behind it, also covers a path that leaves the project or that git ignores.
-
-  The editor does **not** refuse them, unlike `fr ref add`: there is no `--force` to offer in a text field, and throwing away what someone just typed is worse than storing it and saying it is wrong. `tests/parity.rs` carries that as a stated divergence, and fails if the two surfaces ever quietly agree again.
-
-- **`fr check` reports `ref:`/`spec:` paths that resolve here and nowhere else** — `ref_outside_project` for an absolute or escaping path, `ref_gitignored` for one git is ignoring. The same rule `fr ref add` enforces, applied to values already in a file: written before the rule existed, past it with `--force`, in the TUI, or by hand.
-
-  **Warnings, not errors.** These paths resolve — nothing about the project is invalid on this machine, and errors exit non-zero, so a project that passed yesterday should not fail because a rule was added today. No `--fix`: which file inside the project was meant is a guess, and un-ignoring one is a decision about the repository, not the task.
-
-  The gitignore half makes one batched `git check-ignore` call for the whole project rather than one per reference, and is silent outside a repo or when a file is tracked despite a rule.
-
-- **`fr check` warns when the merge driver is not registered in this clone.** `.gitattributes` is committed and arrives with a clone; the driver is in `.git/config`, which cannot be. So a teammate who clones a correctly-configured project silently falls back to line-based merges. This warning is the only thing that tells a fresh clone to run `fr git setup`. Like the existing local-file leak guard, it is a no-op outside git or when `git` cannot be run.
-- **`conflict:` task metadata**, written by `fr merge` and cleared by `fr merge --resolve`. Reported by `fr check` as an error and exposed as `conflict` in `--json` task output.
-
-### Changed
-
-> **Breaking, in one place each — read these three if you script `fr` or parse its JSON:**
-> 1. `fr ref` and `fr spec` now require an action: `fr ref ID add|rm|set PATH...`. `fr ref ID PATH` and `fr spec ID PATH` no longer parse.
-> 2. `--json` `spec` is an array of strings, not a string.
-> 3. `fr ref` and `fr spec` exit non-zero on a path with no file behind it, on one that leaves the project root or is absolute, and on one git is ignoring. Add `--force` to keep the old behaviour.
->
-> Each is detailed below.
-
-- **BREAKING: `fr ref` and `fr spec` take an explicit action**, the same `add`/`rm` shape as `fr tag` and `fr dep`, plus `set`:
-
-  ```
-  fr ref EFF-014 add src/parser.rs:807      # was: fr ref EFF-014 src/parser.rs:807
-  fr ref EFF-014 rm src/parser.rs:807       # was: not possible
-  fr spec EFF-014 set doc/spec.md           # was: fr spec EFF-014 doc/spec.md
-  ```
-
-  The two commands used to disagree about what they did with the value: `fr ref` appended, `fr spec` replaced. Nothing in either command said so, and once both took several paths the difference stopped being a detail — `fr spec ID a.md` silently discarded a list the caller may not have known was there. Naming the action fixes that in the obvious way, and matches the two other list-valued fields, which have always worked this way.
-
-  It also fills a real gap: **there was no way to remove a ref from the CLI at all**. A stale one could only be cleared in the TUI or by hand-editing the file.
-
-  **Prefer `add`.** It needs no read of the current list, so two agents adding different paths to one task no longer clobber each other — under replace-everything semantics, each would have. It is idempotent: adding a path already present reports `unchanged` and writes nothing. `rm` of an absent path does the same. `set` is the deliberate destructive form, and `rm` alone skips the existence check, since a path is most worth removing exactly when the file behind it is gone.
-
-- **`ref:` and `spec:` resolve by one rule, and it understands where-in-the-file suffixes.** They hold the same kind of value — a path relative to the project root — but only `spec:` stripped a `#anchor` before looking on disk, so `doc/design.md#rationale` was a valid spec and a broken ref: the same string, the same file, two answers, from two copies of the rule that had drifted apart in `check` and in `clean`. Neither knew about `src/parser.rs:807` at all, which is how most refs to code get written, so every one of them was reported broken.
-
-  A path may now carry `#anchor`, `:line`, `:line-range` or `:line:col`, on either key. **Only the file is validated** — frame does not open the target, so an anchor whose heading moved and a line number gone stale are not errors. The literal path is tried before any suffix is stripped, so a filename genuinely containing `#` or `:` still resolves.
-
-- **BREAKING: `fr ref add|set` and `fr spec add|set` refuse a path with no file behind it**, naming every bad one and writing nothing — an exit code where there used to be none. `--force` writes it anyway, for the file you are about to create. `fr check` calls a broken ref an error, so accepting one silently was frame creating work for itself, and a typo is cheapest to fix at the moment it is typed. Both commands also take several paths at once now.
-
-- **BREAKING: `fr ref add|set` and `fr spec add|set` refuse a path that leaves the project**, whether it escapes upward (`../outside.md`) or names the filesystem root (`/etc/hosts`). Help has always said paths are relative to the project root; nothing enforced it, so all of these were accepted and `fr check` then reported the project valid.
-
-  These are the opposite failure from a broken ref: the file *is* there, which is exactly what makes the reference look fine until someone else clones the project — where the absolute path names a different machine and whatever sat outside the root is not the same. So the refusal is checked before the existence check, and reports the greater of the two problems for a path like `../typo.md`. An absolute path pointing *into* the project is refused too: it still names this machine.
-
-  The check runs on the folded value, so `doc/../../outside.md` is caught as readily as a leading `..`, while a path that dips out of a subdirectory and comes back (`doc/../src/parser.rs`) is fine. `--force` writes it anyway — one flag, one meaning. `rm` is never refused, since an uncontained ref already in a file is exactly what someone needs to be able to take out.
-
-- **BREAKING: `fr ref add|set` and `fr spec add|set` refuse a path git is ignoring.** A gitignored file is in your working copy and will be in nobody else's, so a ref to `scratch/notes.md` resolves here and nowhere else — the same failure as an escaping path, reached a different way.
-
-  Decided by `git check-ignore` rather than a configured prefix list, because git already owns this rule and a second copy of it would drift. One batched call covers the whole list, and paths are passed relative to the project root, so a project living in a subdirectory of its repo needs no special handling. The **resolved** path is what git is asked about, not the raw value: `doc/draft.tmp:12` is not a filename, and a `*.tmp` rule would not match it.
-
-  Two deliberate non-refusals. A **tracked** file is accepted even when a rule covers it — ignore rules do not apply to what is already in the index, so it does travel. And **outside a git repository, or with `git` unavailable, nothing is checked**: frame cannot tell, so it allows rather than guessing. `--force` overrides, and `rm` is never refused.
-
-- **`ref:` and `spec:` paths are stored in normal form, and matched in it.** One file has many spellings — `real.md`, `./real.md`, `sub/../real.md` — and every one of them resolves, so a list could hold the same file twice while `rm` failed to find what was plainly there. Both went wrong in practice: with `./sub/../real.md` stored, `fr ref ID rm real.md` reported `unchanged (not present)`, and `fr ref ID add real.md` appended a second entry for the same file.
-
-  Values are now stored with `.` and `..` folded away, and `add`, `rm` and `set` compare by that normal form. Folding runs over whole `/`-separated path segments, so a `#anchor` or `:line` suffix rides through untouched and a filename that genuinely contains `..`, `#` or `:` is left alone. It is purely lexical — nothing is read from disk, so a symlink cannot change the answer.
-
-  **No existing file is rewritten.** Matching by normal form is what reaches values written by older versions instead: `rm real.md` finds a stored `./sub/../real.md` and reports the spelling that actually left the file. The suffix stays part of a reference's identity, so `rm src/parser.rs` does not take `src/parser.rs:807` with it — a reference to a file and a reference to a line in it are different references.
-
-- **The TUI detail view shows a ref or spec path with no file behind it in the error colour**, which makes a reference that went stale when its file moved visible without running `fr check`. Editing still accepts whatever you type.
-
-- **BREAKING: `spec:` accepts several paths, comma-separated, like `ref:`.** A task can have more than one spec worth pointing at, and there was no way to say so. `fr check` validates each path and reports them individually; the detail view lists them one per line.
-
-  **This changes `--json` output**: `spec` is now an array of strings, and absent rather than `null` when empty — the shape `refs` already had. A consumer reading `.spec` as a string needs `.spec[0]` or `.spec | join(", ")`. Existing files need no migration: a single-path `spec:` line parses into a one-element list and serializes back byte-identical.
-
-- **Ref and spec fields are comma-separated in the TUI editor**, matching the file format. Typing two paths by hand needs a comma between them; accepting an autocomplete suggestion inserts it for you. Whitespace is no longer a separator there, which is what stops a value containing spaces from being torn apart. Deps and tags are unaffected — an ID or a tag cannot contain a space, so their lenient splitting is still lossless.
-
-- **`fr check` exits non-zero when the project has errors.** It printed `✗ project has errors` and exited 0, so `fr check && git commit` committed anyway and a CI step had to grep stdout to find out. Warnings still exit 0 — the status answers "is this project sound", and gating on something frame is willing to live with would make the signal useless. `--json` agrees with its own `valid` field, and `--fix` follows the same rule on the state it leaves behind, including the "nothing to repair" case: most errors have no repair by design, so that is the common way a broken project leaves `--fix`.
-
-### Added
-- **`fr check` reports archived task IDs left on a prefix their track no longer uses**, with a repair that puts them back on the current one. This is the damage the `fr track rename --prefix` fix below stops creating, but projects renamed before it still carry it on disk with nothing to say so. It is a warning, not an error: the archived tasks are readable and unique, and what makes it worth reporting is what happens if the abandoned prefix is ever given to another track — that track mints from its own files, cannot see this archive, and reissues numbers it already holds. The repair refuses outright if any ID would land on one that already exists, rather than half-renaming a file.
-
-### Fixed
 
 - **Moving a task to another track no longer breaks `dep:` references to its subtasks.** The move renumbers the whole subtree, but only the moved task's own rename was applied to dependencies — so a `dep:` on any of its children was left pointing at an id the move had just retired. All three places such a dep can live were affected: another track, the track the subtree left, and *inside the moved subtree itself*, where a subtask depending on its own sibling broke even though both travelled together in the one operation.
 
@@ -309,6 +306,7 @@ All notable changes to frame will be documented in this file.
 - **Emptying the last section no longer strands a blank row at end of file.** The blank line under a section header belongs to that header, so when `fr clean` archived away the final `## Done` task the blank had nothing left to separate and stayed put — every clean re-added a trailing blank row that someone then stripped, and the diff came back on the next run. Blank lines that follow real content are still preserved; only a trailing section drained of its tasks is trimmed. The inbox serializer had the same defect, reachable by removing the last inbox item.
 
 ### Removed
+
 - **`fr check --fix` no longer adds the `.gitignore` pattern.** It was the only part of git readiness `--fix` repaired, out of four, which left no way to predict what it would touch: the `.gitattributes` entries, the merge driver, and untracking an already-committed local file were all somebody else's job. `fr git setup` now owns that whole surface and `--fix` points at it. The check itself is unchanged — a leaking local-only file is still reported, with `fr git setup` as the remedy.
 
 ## v0.1.7 - 2026-08-02
