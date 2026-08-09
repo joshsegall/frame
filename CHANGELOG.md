@@ -22,6 +22,14 @@ All notable changes to frame will be documented in this file.
 
   Nothing keyed on the shared name was ever *wrong* — the ID frontier is keyed by the frame directory's repo-relative path, registry lookups are by path, and recovery entries carry `Origin:`. The ambiguity was in what a person could see.
 
+- **`fr info` reports the worktree explicitly**, naming the branch and the clone's main working tree:
+
+  ```
+  worktree   feature-x  (linked worktree; main tree ~/dev/lang/lace)
+  ```
+
+  Nothing else in the output could say it. `project` is the committed name, identical across a clone's worktrees, and `frame_dir` only implied the answer by being a path you had to recognise. Naming the main tree also explains why the `frontier` line points somewhere other than the directory you are standing in: that is where the clone's shared state lives. Omitted in the main working tree. `--json` gains `worktree` and `main_worktree`, always present and `null` in the main tree, so a consumer can tell that apart from an older frame that did not report it.
+
 ### Fixed
 
 - **A removed worktree's registry entry no longer hangs around forever.** `git worktree remove` left a `(not found)` row that only a manual `fr projects prune` would clear — and because the row sorted by last use, it sorted *first*. The entry now retires itself when the registry is listed or the picker is opened, which is when it would have been seen, and the listing says how many went rather than silently rewriting the file.

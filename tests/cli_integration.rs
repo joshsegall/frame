@@ -4781,6 +4781,82 @@ fn test_info_human_primary() {
     assert!(out.contains('2'), "out: {out}");
 }
 
+/// `fr info` says outright which working copy it is in. The project name cannot
+/// — it is committed, so every worktree of a clone reports the same one — and
+/// `frame_dir` only implies it.
+#[test]
+fn test_info_names_the_worktree_and_its_main_tree() {
+    let base = tempfile::TempDir::new().unwrap();
+    let main = base.path().join("main");
+    let Some(()) = repo_project(&main) else {
+        return; // git unavailable
+    };
+    let wt = base.path().join("wt-info");
+    assert!(git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "info-branch",
+            wt.to_str().unwrap()
+        ]
+    ));
+
+    let human = run_fr_ok(&wt, &["info"]);
+    assert!(
+        human.contains("worktree   info-branch"),
+        "names the branch: {human}"
+    );
+    assert!(
+        human.contains("linked worktree; main tree"),
+        "and where the clone's shared state lives: {human}"
+    );
+
+    let json: serde_json::Value =
+        serde_json::from_str(&run_fr_ok(&wt, &["info", "--json"])).unwrap();
+    assert_eq!(json["worktree"], "info-branch");
+    let main_tree = json["main_worktree"].as_str().unwrap();
+    assert!(
+        Path::new(main_tree).ends_with("main"),
+        "main_worktree: {main_tree}"
+    );
+
+    // The main working tree has nothing to distinguish, so it says nothing —
+    // and the JSON keys are present-but-null rather than absent, so a consumer
+    // can tell "main tree" from "old frame that did not report this".
+    let from_main = run_fr_ok(&main, &["info"]);
+    assert!(
+        !from_main.contains("worktree"),
+        "no worktree line in the main tree: {from_main}"
+    );
+    let main_json: serde_json::Value =
+        serde_json::from_str(&run_fr_ok(&main, &["info", "--json"])).unwrap();
+    assert!(main_json["worktree"].is_null(), "{main_json}");
+    assert!(main_json["main_worktree"].is_null(), "{main_json}");
+}
+
+/// A detached worktree has no branch to name, so it falls back to its directory
+/// name — which still differs between the worktrees of one clone.
+#[test]
+fn test_info_labels_a_detached_worktree_by_directory() {
+    let base = tempfile::TempDir::new().unwrap();
+    let main = base.path().join("main");
+    let Some(()) = repo_project(&main) else {
+        return; // git unavailable
+    };
+    let wt = base.path().join("wt-detached");
+    assert!(git(
+        &main,
+        &["worktree", "add", "-q", "--detach", wt.to_str().unwrap()]
+    ));
+
+    let json: serde_json::Value =
+        serde_json::from_str(&run_fr_ok(&wt, &["info", "--json"])).unwrap();
+    assert_eq!(json["worktree"], "wt-detached");
+}
+
 #[test]
 fn test_info_json_primary() {
     let tmp = tempfile::TempDir::new().unwrap();

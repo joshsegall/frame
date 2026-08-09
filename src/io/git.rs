@@ -103,14 +103,25 @@ pub fn worktree_kind(frame_dir: &Path) -> WorktreeKind {
     if paths.git_dir == paths.common_dir {
         return WorktreeKind::Main;
     }
-    let main_root = paths.common_dir.parent().filter(|root| {
-        root.join(".git")
-            .canonicalize()
-            .is_ok_and(|g| g == paths.common_dir)
-    });
     WorktreeKind::Linked {
-        main_root: main_root.map(|r| r.to_path_buf()),
+        main_root: main_root_of(&paths),
     }
+}
+
+/// The clone's main working tree, derived from the common dir (`<main>/.git` →
+/// `<main>`) and confirmed by checking that the candidate's `.git` *is* that
+/// common dir — so a bare or `--separate-git-dir` repo yields `None` rather than a
+/// guessed path.
+fn main_root_of(paths: &RepoPaths) -> Option<PathBuf> {
+    paths
+        .common_dir
+        .parent()
+        .filter(|root| {
+            root.join(".git")
+                .canonicalize()
+                .is_ok_and(|g| g == paths.common_dir)
+        })
+        .map(|root| root.to_path_buf())
 }
 
 /// One working tree of a clone, as `git worktree list` reports it.
@@ -171,33 +182,57 @@ pub fn worktree_list(root: &Path) -> Option<Vec<WorktreeInfo>> {
     Some(trees)
 }
 
-/// How this working tree should name itself when it is *not* its clone's main
-/// one: the branch it has checked out, or its directory name when detached.
+/// This working tree's standing within its clone, when it is a linked worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkedWorktree {
+    /// How a person refers to this working copy: the branch it has checked out,
+    /// or its directory name when detached.
+    pub label: String,
+    /// The clone's main working tree, when there is one to name (see
+    /// [`main_root_of`]). This is also where the clone's shared state lives, which
+    /// is why it is worth reporting rather than merely implying.
+    pub main_root: Option<PathBuf>,
+}
+
+/// This working tree's standing within its clone, or `None` from the clone's main
+/// working tree and outside git — there, nothing needs distinguishing.
 ///
-/// `None` from the main working tree and outside git — there, nothing needs
-/// distinguishing. This exists because every worktree of a clone reports the same
-/// project name (`project.toml` is committed), so a display showing only the name
-/// cannot say which working copy it is showing.
+/// This exists because every worktree of a clone reports the same project name
+/// (`project.toml` is committed), so anything showing only the name cannot say
+/// which working copy it is showing.
 ///
 /// One `git` call from the main working tree, which is the common case; a linked
 /// one pays a second to learn its branch.
-pub fn linked_worktree_label(frame_dir: &Path) -> Option<String> {
+pub fn linked_worktree(frame_dir: &Path) -> Option<LinkedWorktree> {
     let paths = repo_paths(frame_dir)?;
     if paths.git_dir == paths.common_dir {
         return None; // the main working tree
     }
-    let branch = worktree_list(&paths.toplevel)?
-        .into_iter()
-        .find(|tree| tree.path == paths.toplevel)
+    let branch = worktree_list(&paths.toplevel)
+        .and_then(|trees| trees.into_iter().find(|tree| tree.path == paths.toplevel))
         .and_then(|tree| tree.branch);
-    // Detached, or a tree git did not list: the directory name at least differs
-    // between the worktrees of one clone.
-    branch.or_else(|| {
-        paths
-            .toplevel
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
+    // Detached, or a tree git declined to list: the directory name at least
+    // differs between the worktrees of one clone. Note the fallbacks never turn
+    // into `None` — that answer is reserved for "not a linked worktree", so a
+    // caller can trust it.
+    let label = branch
+        .or_else(|| {
+            paths
+                .toplevel
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+        })
+        .unwrap_or_else(|| "detached".to_string());
+    Some(LinkedWorktree {
+        label,
+        main_root: main_root_of(&paths),
     })
+}
+
+/// How this working tree should name itself when it is not its clone's main one.
+/// See [`linked_worktree`], of which this is the label alone.
+pub fn linked_worktree_label(frame_dir: &Path) -> Option<String> {
+    linked_worktree(frame_dir).map(|w| w.label)
 }
 
 /// The *main* working tree's copy of this project's frame directory, when

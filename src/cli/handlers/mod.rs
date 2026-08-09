@@ -955,6 +955,13 @@ fn cmd_info(json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let name = &project.config.project.name;
     let frame_dir_str = frame_dir.display().to_string();
 
+    // Which working copy this is. The project name cannot say — it is committed,
+    // so every worktree of a clone reports the same one — and `frame_dir` only
+    // implies it, by being a path someone has to recognise. Reported outright,
+    // with the main working tree named, because that is also where this clone's
+    // shared state (actor token, ID frontier, recovery log) lives.
+    let worktree = crate::io::git::linked_worktree(frame_dir);
+
     // The ID frontier this clone mints against, in its own namespace: what the
     // durable store has recorded, per track prefix. Read-only.
     // `"null"` (the primary) and an unclaimed clone both map to the null
@@ -1001,6 +1008,13 @@ fn cmd_info(json: bool) -> Result<(), Box<dyn std::error::Error>> {
             commit: Option<String>,
             project: String,
             frame_dir: String,
+            /// The branch this linked git worktree has checked out (its directory
+            /// name when detached), or `null` in the clone's main working tree and
+            /// outside git.
+            worktree: Option<String>,
+            /// The clone's main working tree, when this is a linked worktree and
+            /// there is one to name. `null` otherwise.
+            main_worktree: Option<String>,
             /// Literal token (`"a"`), `"null"` for primary, or JSON `null` when
             /// unclaimed — so consumers can distinguish all three states.
             actor: Option<String>,
@@ -1014,6 +1028,11 @@ fn cmd_info(json: bool) -> Result<(), Box<dyn std::error::Error>> {
             commit: crate::version::COMMIT.map(str::to_string),
             project: name.clone(),
             frame_dir: frame_dir_str,
+            worktree: worktree.as_ref().map(|w| w.label.clone()),
+            main_worktree: worktree
+                .as_ref()
+                .and_then(|w| w.main_root.as_ref())
+                .map(|root| root.display().to_string()),
             actor: token.clone(),
             tracks: active,
             shelved_tracks: shelved,
@@ -1038,6 +1057,17 @@ fn cmd_info(json: bool) -> Result<(), Box<dyn std::error::Error>> {
     println!("{:<10} {}", "version", crate::version::LONG);
     println!("{:<10} {}", "project", name);
     println!("{:<10} {}", "frame_dir", frame_dir_str);
+    if let Some(w) = &worktree {
+        match &w.main_root {
+            Some(root) => println!(
+                "{:<10} {}  (linked worktree; main tree {})",
+                "worktree",
+                w.label,
+                root.display()
+            ),
+            None => println!("{:<10} {}  (linked worktree)", "worktree", w.label),
+        }
+    }
     println!("{:<10} {}", "actor", actors::actor_label(token.as_deref()));
     if shelved > 0 || archived > 0 {
         println!(

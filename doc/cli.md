@@ -254,6 +254,7 @@ Show project identity at a glance (read-only — never claims a token):
 | `version`  | `fr` crate version, plus the commit the binary was built from       |
 | `project`  | project name from `project.toml`                                   |
 | `frame_dir`| absolute path to the discovered `frame/` directory                 |
+| `worktree` | the branch this **linked git worktree** has checked out, and the clone's main working tree. Omitted in the main tree, where there is nothing to distinguish |
 | `actor`    | this clone's token — the literal token, `primary` (null), or `unclaimed` |
 | `tracks`   | count of active tracks                                             |
 | `frontier` | last ID number handed out per prefix in this clone's namespace, and the [frontier store](architecture.md#id-frontier-durable-mint) it came from |
@@ -266,7 +267,13 @@ fr info [--json]
 
 `frontier` is normally invisible; it's what to look at when a minted ID isn't the number you expected. It reads `none recorded` before this clone has minted anything, and `unreadable` when the store is corrupt (which `fr check` explains).
 
-With `--json`, the `actor` field distinguishes all three states for machine consumers: a literal token string (`"a"`), `"null"` for the primary clone, and JSON `null` when unclaimed. The JSON object also includes `shelved_tracks` and `archived_tracks` counts, and an `id_frontier` object (`path`, `state`, `namespace`, and `recorded` as a prefix → number map).
+`worktree` is stated outright rather than left to be inferred, because nothing else in the output can say it: `project` is the *committed* name, so every worktree of a clone reports the same one, and `frame_dir` only implies the answer by being a path you have to recognise. It names the clone's main working tree too — that is where this clone's shared state lives (the [actor token](concepts.md#actors), the [ID frontier](architecture.md#id-frontier-durable-mint), the [recovery log](concepts.md#recovery)), which is why the `frontier` line below it points somewhere other than here. A detached worktree has no branch to name and falls back to its directory name.
+
+```
+worktree   feature-x  (linked worktree; main tree /Users/you/dev/lace)
+```
+
+With `--json`, the `actor` field distinguishes all three states for machine consumers: a literal token string (`"a"`), `"null"` for the primary clone, and JSON `null` when unclaimed. `worktree` and `main_worktree` are always present, and `null` in the main working tree — present-but-null rather than absent, so a consumer can tell "the main tree" from "a frame too old to report it". The JSON object also includes `shelved_tracks` and `archived_tracks` counts, and an `id_frontier` object (`path`, `state`, `namespace`, and `recorded` as a prefix → number map).
 
 ## Task Creation
 
