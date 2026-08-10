@@ -4,9 +4,18 @@ All notable changes to frame will be documented in this file.
 
 ## Unreleased
 
+> **Breaking, in one place each — read these five if you script `fr`, parse its JSON, or run `fr check` unattended:**
+> 1. `fr note` exits non-zero on an append that would leave a note over `limits.note_max_bytes` (16 KB) and longer than it was, or that repeats a paragraph the note already holds. There is no `--force`; set the limit to `"off"` for the old behaviour.
+> 2. `fr check` exits non-zero on two new errors — a duplicate section, and a `##` heading frame does not recognise. A project that passed on 0.2.0 can fail on this release with nothing on disk having changed.
+> 3. `fr clean` archives on a size trigger as well as a count one, `clean.done_bytes_threshold` (256 KB). The first clean after upgrading may move a large batch, and the TUI cleans on its own, so it can happen unattended. `"off"` keeps the count trigger alone.
+> 4. `--json` on the 24 write commands emits a document where it used to print human text, and refuses to answer a confirmation prompt: `fr delete`, `fr track rename --prefix` and `fr check --fix` need `--yes` alongside it.
+> 5. `--json` task output changes key order, and a task's metadata lines are reordered in the markdown the first time frame edits that task. No keys added, removed or retyped.
+>
+> Each is detailed below.
+
 ### Added
 
-- **A hard limit on note size, `limits.note_max_bytes` (16 KB).** Frame's own commands will not grow a note past it. Found on a project whose largest track file had reached 3 MB: 93% of it was note bodies, no single task dominated, and there was no bug — notes had simply accumulated, most of the largest being per-task copies of standing process rather than anything about the task.
+- **BREAKING: A hard limit on note size, `limits.note_max_bytes` (16 KB).** Frame's own commands will not grow a note past it. Found on a project whose largest track file had reached 3 MB: 93% of it was note bodies, no single task dominated, and there was no bug — notes had simply accumulated, most of the largest being per-task copies of standing process rather than anything about the task.
 
   **Enforced non-increasing rather than absolutely.** A write is refused only if it would leave the note both over the limit *and* larger than it already was. So a note that predates the limit is never touched, never truncated, and never blocks operations that do not lengthen it — and it can still be edited down, in as many passes as it takes, because a shrinking write is always legal. An absolute check would make the only legal edit to a 148 KB note one landing under the limit in a single shot, trapping exactly the notes the limit exists to discourage.
 
@@ -14,7 +23,7 @@ All notable changes to frame will be documented in this file.
 
   There is no `--force`; `note_max_bytes = "off"` is the escape hatch. `fr import` is exempt, because importing is how content that predates a limit gets in, and `fr check` does not report an oversize note as damage: this is a guardrail on authoring, not an invariant on the file.
 
-- **Size-based archiving, `clean.done_bytes_threshold` (256 KB) and `done_bytes_retain` (64 KB).** A second, independent trigger alongside `done_threshold`. The count trigger cannot tell 173 done tasks averaging 9 KB from 173 one-liners, which is how a track carrying 1.5 MB of finished work sat under a threshold of 250 and never archived anything.
+- **BREAKING: Size-based archiving, `clean.done_bytes_threshold` (256 KB) and `done_bytes_retain` (64 KB).** A second, independent trigger alongside `done_threshold`. The count trigger cannot tell 173 done tasks averaging 9 KB from 173 one-liners, which is how a track carrying 1.5 MB of finished work sat under a threshold of 250 and never archived anything.
 
   The defaults are close to the same statement for ordinary notes — at a typical note length 100 done tasks is roughly 256 KB — so they agree on a healthy track and diverge only where the count was blind. Whichever trips, the drain goes to the retain level rather than back to the trigger; that gap is hysteresis, and without it a track archives one task per clean for ever. `done_retain` floors the byte drain, so if a retained task is on its own larger than `done_bytes_retain` the section stays over budget and clean says so.
 
@@ -24,41 +33,19 @@ All notable changes to frame will be documented in this file.
 
   It measures `## Backlog` plus `## Parked`, not file size. Done is excluded because `[clean]` already bounds it, and bounds it by oscillating between the two `done_bytes` settings: a whole-file measure would inherit that swing, warning just before a clean and going quiet just after one with the open work untouched.
 
-- **`fr check` errors on a duplicate section, and the next write merges it.** A track carrying two `## Done` headings hides everything in the second: `Track::section_tasks` returns the first, and about a hundred call sites are built on it — archiving, section reconciliation, the byte accounting, the TUI's section rendering. The tasks stay findable by ID, so the file looks fine while 150 done tasks quietly stop being archivable, and it round-trips byte-identically so it never heals on its own.
+- **BREAKING: `fr check` errors on a duplicate section, and the next write merges it.** A track carrying two `## Done` headings hides everything in the second: `Track::section_tasks` returns the first, and about a hundred call sites are built on it — archiving, section reconciliation, the byte accounting, the TUI's section rendering. The tasks stay findable by ID, so the file looks fine while 150 done tasks quietly stop being archivable, and it round-trips byte-identically so it never heals on its own.
 
   Found in a real project and traced: a merge commit six weeks before frame's merge driver existed, whose two parents each had one `## Done`. Re-running that merge reproduces it exactly.
 
   The repair is on the write path rather than in `serialize_track` — which stays a pure function of the model, so the parse/serialize pair keeps round-tripping — and not at parse, so `fr check` can still report what is actually on disk. Tasks move in file order; the redundant heading goes; literal content between the sections stays where it is.
 
-- **`fr check` errors on a `##` heading frame does not recognise**, in tracks, archives and the inbox alike. Reported even when nothing is behind it: in a track file the parser sends an unknown heading to literal text and every task line after it too, so the heading is a trapdoor rather than a decoration. `frame/archive/_tracks/` is exempt, being whole archived track files whose `## Backlog` is correct.
+- **BREAKING: `fr check` errors on a `##` heading frame does not recognise**, in tracks, archives and the inbox alike. Reported even when nothing is behind it: in a track file the parser sends an unknown heading to literal text and every task line after it too, so the heading is a trapdoor rather than a decoration. `frame/archive/_tracks/` is exempt, being whole archived track files whose `## Backlog` is correct.
 
-- **`limits.note_repeat_bytes` (120) refuses an append that repeats text the note already holds.** `fr note` appends, and an agent that believes it replaces writes the whole note out again each round, so the note accumulates N copies of everything unchanged. Measured on a real project: one note reached eight copies of itself, 110 KB of its 139 KB, and 5.4% of all note text was duplication of this kind.
+- **BREAKING: `limits.note_repeat_bytes` (120) refuses an append that repeats text the note already holds.** `fr note` appends, and an agent that believes it replaces writes the whole note out again each round, so the note accumulates N copies of everything unchanged. Measured on a real project: one note reached eight copies of itself, 110 KB of its 139 KB, and 5.4% of all note text was duplication of this kind.
 
   Paragraph blocks, exact text. Exact rather than fuzzy because the repetition is literally re-pasted, and because the failure mode of a similarity threshold is refusing a write that was fine. The error names `--replace`.
 
-### Fixed
-
-- **`fr clean --dry-run` wrote the archive file.** The dry run skipped saving track files, but archiving writes the archive from inside its walk — deliberately, before the Done section is emptied, so a crash between the two loses nothing — and nothing about "don't save afterwards" reached that write. A preview therefore created `frame/archive/`, appended every task it was only supposed to be reporting, and logged recovery entries. The TUI's clean preview had it worse: it cloned the project to avoid mutating the real one, which does nothing about a write that goes straight to disk.
-
-  Latent until now because archiving rarely triggered; the byte trigger above would have made it routine, on the command you would reach for first to see what the new trigger was about to do.
-
-### Changed
-
-- **Dependencies refreshed, including three major bumps**: `ratatui` 0.29 → 0.30, `crossterm` 0.28 → 0.29, `notify` 7 → 8. No source change was needed for any of them, and the suite passes unchanged — noted here only because ratatui is what draws every TUI frame, so it is the first thing to look at if a rendering oddity appears in this release and not the last.
-
-- **Task fields have a canonical order**, used by the markdown, `fr show`, `--json` and the TUI Detail view alike: `conflict`, `added`, `resolved`, `dep`, `spec`, `ref`, `note`. Short fields first, the note last, because a note has no length bound and anything after one is past the fold.
-
-  Nothing enforced an order before, and writes append — `set_state` appends `resolved:` when a task is finished, `set_metadata` appends any key the task did not already carry. So a field written after a note landed after the note, and every surface printed it there. Found on a task whose `resolved:` date sat 55 lines down and read as missing; across the project it was found in, 54% of tasks had accumulated some such order, most often `added → note → resolved` and `added → note → ref`.
-
-  **Existing files are not rewritten.** A task is written in canonical order the first time frame edits *that task*, so a project converges task by task rather than in one sweeping diff, and untouched tasks stay byte-identical. Reading is fixed immediately either way.
-
-  One task is left alone: a note block runs until the first line indented less than its body, so a note written last is closed by the next task line — but a task carrying *stranded* lines (content the parser could not attribute, kept verbatim) indented as deep as a note body would have them swallowed by a note moved below them. Those tasks keep the order they already had. Only reachable in a damaged file, and caught by the conservation properties rather than by inspection.
-
-  `--json` changes key order only — no keys added, removed or retyped. A consumer using a JSON parser is unaffected; one reading the bytes positionally is not.
-
-### Added
-
-- **Every command now has a `--json` surface**, bar `fr merge`, whose interface is an exit status a VCS driver reads. The 24 write commands — task writes, track writes, `inbox`, `projects add/remove`, `recovery prune/path`, `init` — previously accepted the flag and printed human text, because `--json` is global and clap takes it whether or not the handler was ever given it.
+- **BREAKING: Every command now has a `--json` surface**, bar `fr merge`, whose interface is an exit status a VCS driver reads. The 24 write commands — task writes, track writes, `inbox`, `projects add/remove`, `recovery prune/path`, `init` — previously accepted the flag and printed human text, because `--json` is global and clap takes it whether or not the handler was ever given it.
 
   A write reports what it did in the shapes the read commands already use, so `fr add --json` returns exactly what `fr show --json` would for the task it created rather than a second task shape:
 
@@ -71,7 +58,7 @@ All notable changes to frame will be documented in this file.
 
   **`--json` never answers a confirmation prompt.** `fr delete`, `fr track rename --prefix` and `fr check --fix` fail with `confirmation required for …: pass --yes with --json` instead of blocking on a stdin no program will answer. `fr check --fix` already had a JSON surface, so it already had that defect.
 
-- **`fr clean --json`.** The whole report as one document: the finding categories flattened in as arrays the way `fr check --json` reads, plus `field_order`, `dry_run` and `normalize`. The last two carry what the arrays cannot — whether anything was written, and whether `field_order.reordered` names tasks that *were* rewritten or only ones that would be.
+- **BREAKING: `fr clean --json`.** The whole report as one document: the finding categories flattened in as arrays the way `fr check --json` reads, plus `field_order`, `dry_run` and `normalize`. The last two carry what the arrays cannot — whether anything was written, and whether `field_order.reordered` names tasks that *were* rewritten or only ones that would be.
 
   `--json` is a global flag, so clean already accepted it and silently printed human text; a consumer got a parse error. That is the shape `fr deps` shipped with once and had to be fixed, which is why this now has a standing guard rather than a fix: `tests/parity.rs` carries a table of every subcommand and whether `--json` gives it a document, checked in both directions — a command declared to have a surface must emit one, and a command declared not to must not have quietly grown one. A new subcommand fails the build until someone decides which it is, the same way `every_subcommand_is_classified` already works for the parity matrix.
 
@@ -126,7 +113,25 @@ All notable changes to frame will be documented in this file.
 
   Nothing else in the output could say it. `project` is the committed name, identical across a clone's worktrees, and `frame_dir` only implied the answer by being a path you had to recognise. Naming the main tree also explains why the `frontier` line points somewhere other than the directory you are standing in: that is where the clone's shared state lives. Omitted in the main working tree. `--json` gains `worktree` and `main_worktree`, always present and `null` in the main tree, so a consumer can tell that apart from an older frame that did not report it.
 
+### Changed
+
+- **Dependencies refreshed, including three major bumps**: `ratatui` 0.29 → 0.30, `crossterm` 0.28 → 0.29, `notify` 7 → 8. No source change was needed for any of them, and the suite passes unchanged — noted here only because ratatui is what draws every TUI frame, so it is the first thing to look at if a rendering oddity appears in this release and not the last.
+
+- **BREAKING: Task fields have a canonical order**, used by the markdown, `fr show`, `--json` and the TUI Detail view alike: `conflict`, `added`, `resolved`, `dep`, `spec`, `ref`, `note`. Short fields first, the note last, because a note has no length bound and anything after one is past the fold.
+
+  Nothing enforced an order before, and writes append — `set_state` appends `resolved:` when a task is finished, `set_metadata` appends any key the task did not already carry. So a field written after a note landed after the note, and every surface printed it there. Found on a task whose `resolved:` date sat 55 lines down and read as missing; across the project it was found in, 54% of tasks had accumulated some such order, most often `added → note → resolved` and `added → note → ref`.
+
+  **Existing files are not rewritten.** A task is written in canonical order the first time frame edits *that task*, so a project converges task by task rather than in one sweeping diff, and untouched tasks stay byte-identical. Reading is fixed immediately either way.
+
+  One task is left alone: a note block runs until the first line indented less than its body, so a note written last is closed by the next task line — but a task carrying *stranded* lines (content the parser could not attribute, kept verbatim) indented as deep as a note body would have them swallowed by a note moved below them. Those tasks keep the order they already had. Only reachable in a damaged file, and caught by the conservation properties rather than by inspection.
+
+  `--json` changes key order only — no keys added, removed or retyped. A consumer using a JSON parser is unaffected; one reading the bytes positionally is not.
+
 ### Fixed
+
+- **`fr clean --dry-run` wrote the archive file.** The dry run skipped saving track files, but archiving writes the archive from inside its walk — deliberately, before the Done section is emptied, so a crash between the two loses nothing — and nothing about "don't save afterwards" reached that write. A preview therefore created `frame/archive/`, appended every task it was only supposed to be reporting, and logged recovery entries. The TUI's clean preview had it worse: it cloned the project to avoid mutating the real one, which does nothing about a write that goes straight to disk.
+
+  Latent until now because archiving rarely triggered; the byte trigger above would have made it routine, on the command you would reach for first to see what the new trigger was about to do.
 
 - **A removed worktree's registry entry no longer hangs around forever.** `git worktree remove` left a `(not found)` row that only a manual `fr projects prune` would clear — and because the row sorted by last use, it sorted *first*. The entry now retires itself when the registry is listed or the picker is opened, which is when it would have been seen, and the listing says how many went rather than silently rewriting the file.
 
