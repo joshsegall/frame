@@ -57,7 +57,8 @@ here sort first in `fr ready --cc`.
 - **dep:** — IDs of blocking tasks
 - **spec:** — paths to the docs this task implements
 - **ref:** — paths to the files it touches
-- **note:** — freeform text (can include code blocks)
+- **note:** — freeform text (can include code blocks). **One note per task, and
+  `fr note` appends to it** — see [Notes](#notes) before writing one.
 - **added:** / **resolved:** — dates (auto-set)
 
 `spec:` and `ref:` both hold **file paths relative to the project root**,
@@ -155,6 +156,7 @@ fr state EFF-014 active
 
 ```bash
 fr state EFF-014.1 done
+# appends a new finding — use --replace if you are updating what you said before
 fr note EFF-014 "Row unification needs special handling for polymorphic effects"
 fr ref EFF-014 add src/effects/infer.rs src/effects/solve.rs:142
 fr state EFF-014 done
@@ -198,6 +200,65 @@ fr sub EFF-014 "Test with nested closures"
 - **Task is too large** → Break it down with `fr sub` before starting.
 - **Conflicting or unclear spec** → Add a note with `fr note` explaining
   the ambiguity, tag `#needs-input`, and pick up different work.
+
+---
+
+## Notes
+
+A task has **one** `note:`, and **`fr note` appends to it** — a blank line, then
+your text. It does not replace. `--replace` does.
+
+```bash
+fr note EFF-014 "Row unification needs the polymorphic case"   # appends
+fr note EFF-014 "Superseded: see the design doc" --replace     # replaces
+```
+
+Getting this backwards is the single most expensive mistake available here.
+Re-running a command that "sets" the note instead stacks another copy of the
+same text onto the end, and because nothing errors, it compounds silently: a
+project has been found whose largest track file reached 3 MB, 93% of it note
+bodies.
+
+**Read the note before writing one.** `fr show <id>` tells you whether what you
+are about to say is already there. If you are updating a status you wrote
+earlier, `--replace` is almost always what you want; append is for adding a new
+finding beside the old ones.
+
+### What belongs in a note
+
+A note records **what was found and what is left** — the state of the work, so
+the next person (or the next session) does not have to rediscover it. A dated
+investigation record with file:line citations and a recommendation is the ideal
+shape, and it runs a few hundred words.
+
+What does **not** belong in a note:
+
+- Process, protocol, or standing instructions — how to run the tests, what the
+  reporting discipline is, what to do at each stage. That is the same in every
+  task, so a copy in each one is duplication by construction.
+- Briefing material restating a design document the task already `spec:`s or
+  `ref:`s. Reference it; do not inline it.
+- Transcripts, full command output, or long code listings.
+
+### Size limit
+
+`fr note` refuses a write that would push the note past
+`limits.note_max_bytes` (16 KB by default):
+
+```
+error: EFF-014 note would be 19.5KB; limit is 16KB (limits.note_max_bytes)
+       nothing was written
+```
+
+Nothing is written when this happens — shorten what you were going to say and
+retry. There is no `--force`, and **do not work around it** by moving the text
+into a new file and referencing that, or by splitting it across several notes;
+both defeat the point. If the material genuinely cannot be shortened, say so to
+the human rather than routing around the limit.
+
+A note that predates the limit keeps working and can be shortened in stages: any
+write that leaves it shorter than it already is will be accepted, whether or not
+the result is under the limit yet.
 
 ---
 
@@ -277,7 +338,8 @@ the track ID is wrong.
 | `fr tag <id> rm <tag>` | Remove a tag |
 | `fr dep <id> add <dep-id>` | Add a dependency |
 | `fr dep <id> rm <dep-id>` | Remove a dependency |
-| `fr note <id> "text"` | Set task note |
+| `fr note <id> "text"` | **Append** to the task note (see [Notes](#notes)) |
+| `fr note <id> "text" --replace` | Replace the task note instead |
 | `fr ref <id> add <path>...` | Add file references (`src/x.rs`, `src/x.rs:807`) |
 | `fr ref <id> rm <path>...` | Remove file references |
 | `fr ref <id> set <path>...` | Replace the whole ref list |
