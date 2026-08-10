@@ -223,6 +223,38 @@ fn stranded_lines(track: &Track) -> Vec<String> {
     out
 }
 
+/// Did `meta` survive the rewrite?
+///
+/// Equality for every field but the note, and containment for the note. A note is
+/// the one metadata entry whose extent is decided by a *boundary* rather than by
+/// its own line: it runs until something ends it. Damage can move that boundary,
+/// and a rewrite that normalizes the damage moves it again.
+///
+/// The shape this exists for: a note whose fence is left unclosed by a bad edit
+/// stops at the next metadata line, so the lines below it are read as stranded.
+/// The rewrite emits the note verbatim — still unclosed, because inventing a
+/// closing fence would be putting a line in the user's file — and re-emits those
+/// stranded lines under it. On the next parse the still-open fence reaches
+/// further and the note comes back longer.
+///
+/// Nothing is lost there: no line vanished, the file settles on the next write,
+/// and the note's own text is still in the note. Demanding equality would call
+/// that a loss, which is the same mistake `stranded_lines` avoids by checking the
+/// rewritten text rather than where the line landed — being re-associated is not
+/// being lost. Growth is allowed; a note losing any of its own text is not, and a
+/// scalar field appearing, vanishing or changing value is not.
+fn metadata_survived(meta: &Metadata, after: &[Metadata]) -> bool {
+    if after.contains(meta) {
+        return true;
+    }
+    match meta {
+        Metadata::Note(text) => after
+            .iter()
+            .any(|m| matches!(m, Metadata::Note(grown) if grown.contains(text))),
+        _ => false,
+    }
+}
+
 /// Every archived task, flattened. An archive has no sections, so unlike
 /// `task_identities` there is nothing to tag them with — the id and title are the
 /// whole identity.
@@ -366,14 +398,24 @@ fn fixture_dir() -> PathBuf {
 /// round-trip tests too, and a CRLF file in git is its own kind of trouble. The
 /// copies are made here instead, which doubles the corpus for the properties
 /// that mutate it without putting a `\r` in the repository.
+///
+/// Sorted by file name, because the mutation properties index this list with
+/// `which % corpus.len()`. `read_dir` order is unspecified and differs between a
+/// developer's machine and CI, so an unsorted corpus makes `which` mean a
+/// different fixture in each place — and a `cc` seed CI reports would then
+/// reproduce a different case locally, or none at all.
 fn fixture_sources() -> Vec<String> {
-    let mut out = Vec::new();
-    for entry in fs::read_dir(fixture_dir()).expect("fixtures dir readable") {
-        let path = entry.expect("readable dir entry").path();
-        if path.extension().is_some_and(|e| e == "md") {
-            out.push(fs::read_to_string(&path).expect("fixture readable"));
-        }
-    }
+    let mut paths: Vec<PathBuf> = fs::read_dir(fixture_dir())
+        .expect("fixtures dir readable")
+        .map(|entry| entry.expect("readable dir entry").path())
+        .filter(|path| path.extension().is_some_and(|e| e == "md"))
+        .collect();
+    paths.sort();
+
+    let mut out: Vec<String> = paths
+        .iter()
+        .map(|path| fs::read_to_string(path).expect("fixture readable"))
+        .collect();
     assert!(!out.is_empty(), "no .md fixtures found");
     let crlf: Vec<String> = out.iter().map(|s| s.replace('\n', "\r\n")).collect();
     out.extend(crlf);
@@ -897,7 +939,7 @@ proptest! {
         let after_meta = metadata_entries(&after);
         for meta in metadata_entries(&before) {
             prop_assert!(
-                after_meta.contains(&meta),
+                metadata_survived(&meta, &after_meta),
                 "metadata lost by the rewrite: {:?}\nsurvivors: {:?}",
                 meta,
                 after_meta
@@ -949,7 +991,7 @@ proptest! {
         let after_meta = archive_metadata(&after);
         for meta in archive_metadata(&before) {
             prop_assert!(
-                after_meta.contains(&meta),
+                metadata_survived(&meta, &after_meta),
                 "metadata lost by the rewrite: {:?}\nsurvivors: {:?}",
                 meta,
                 after_meta
@@ -1349,6 +1391,70 @@ fn unclosed_fence_does_not_swallow_the_rest_of_the_file() {
     assert_eq!(track.done().len(), 1, "done task was swallowed");
     assert_eq!(track.backlog()[1].id.as_deref(), Some("T-002"));
     assert_eq!(track.done()[0].id.as_deref(), Some("T-003"));
+}
+
+/// The other half of that shape, found by P2 in CI: when the unclosed fence is
+/// followed by a metadata line, the note stops there and the lines below it are
+/// read as stranded — and the rewrite hands them back to the note.
+///
+/// `code_in_notes.md` with the first block's closing fence replaced by an
+/// `added:` line. What must hold is what P2 now states: every line still there,
+/// the note's own text still in a note, and the file settled after one write. The
+/// note coming back longer is the boundary moving, not content going missing —
+/// see `metadata_survived`.
+///
+/// Pinned because P2 reaches this through `which`/`idx`/`mutation`, and a `cc`
+/// seed is not a recording: it decodes through the generators as they are now.
+#[test]
+fn an_unclosed_fence_cut_short_by_metadata_settles_without_loss() {
+    let source = "\
+# Track
+
+## Backlog
+
+- [ ] `T-001` Task with multiple code blocks
+  - note:
+    First block:
+    ```python
+    def foo():
+        return 42
+  - added: 2025-05-14
+
+    Second block:
+    ```
+    plain code
+    End of note.
+- [ ] `T-002` Task after";
+
+    let before = parse_track(source);
+    let rewritten = canon_track(source);
+    let after = parse_track(&rewritten);
+
+    for line in source.lines().filter(|l| !l.trim().is_empty()) {
+        assert!(
+            rewritten.lines().any(|l| l.trim() == line.trim()),
+            "line lost by the rewrite: {line:?}\nrewritten: {rewritten:?}"
+        );
+    }
+
+    let after_meta = metadata_entries(&after);
+    for meta in metadata_entries(&before) {
+        assert!(
+            metadata_survived(&meta, &after_meta),
+            "metadata lost by the rewrite: {meta:?}\nsurvivors: {after_meta:?}"
+        );
+    }
+    assert!(
+        after_meta.contains(&Metadata::Added("2025-05-14".to_string())),
+        "the metadata line that cut the note short must stay a scalar field: \
+         {after_meta:?}"
+    );
+
+    assert_eq!(
+        rewritten,
+        canon_track(&rewritten),
+        "a second rewrite changed the file again"
+    );
 }
 
 /// Regression: an orphaned task line must survive a write.
