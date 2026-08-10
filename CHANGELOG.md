@@ -46,8 +46,6 @@ All notable changes to frame will be documented in this file.
 
 - **Dependencies refreshed, including three major bumps**: `ratatui` 0.29 → 0.30, `crossterm` 0.28 → 0.29, `notify` 7 → 8. No source change was needed for any of them, and the suite passes unchanged — noted here only because ratatui is what draws every TUI frame, so it is the first thing to look at if a rendering oddity appears in this release and not the last.
 
-  `toml` 1.x is deliberately **not** taken. It sorts map keys on serialize, and frame holds `[ids.prefixes]` and `[ui.tag_colors]` in an `IndexMap` precisely so a config comes back in the order it was written; four round-trip tests fail on the bump. `toml_edit` stays on 0.22 with it, since the two move together.
-
 - **Task fields have a canonical order**, used by the markdown, `fr show`, `--json` and the TUI Detail view alike: `conflict`, `added`, `resolved`, `dep`, `spec`, `ref`, `note`. Short fields first, the note last, because a note has no length bound and anything after one is past the fold.
 
   Nothing enforced an order before, and writes append — `set_state` appends `resolved:` when a task is finished, `set_metadata` appends any key the task did not already carry. So a field written after a note landed after the note, and every surface printed it there. Found on a task whose `resolved:` date sat 55 lines down and read as missing; across the project it was found in, 54% of tasks had accumulated some such order, most often `added → note → resolved` and `added → note → ref`.
