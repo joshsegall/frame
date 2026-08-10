@@ -27,13 +27,23 @@
 # corpus is sorted by file name as of this commit, so seeds are portable from now
 # on; any recorded before it is not.
 #
-# One change to `arb_mutation` is worth having costed, since it would orphan
-# every mutation seed here and is therefore cheapest to make while none is live:
-# `prop_oneof!` weights ARMS equally, so each `Replace(n)` draws 5x less often
-# than `Delete` and each `Indent(n)` 7x less, even though `Replace` is the arm
-# that finds things. Weighting the arms by cardinality would raise the mutation
-# properties' catch rate from 38% to 91% per run at no runtime cost. Not done
-# here; see `MUTATION_CASES` in parse_properties.rs.
+# `arb_mutation` HAS now been changed: its `prop_oneof!` arms are weighted by
+# cardinality, so that all 42 mutations are equally likely rather than each
+# `Replace(n)` drawing 5x less often than `Delete`. That took the mutation
+# properties from 38% to 91% per run at no runtime cost — see `MUTATION_CASES`
+# in parse_properties.rs.
+#
+# It was done at the one moment it was free: no mutation seed was live. The CI
+# seed below was already `found:`, and its case is pinned as a fixed test. So the
+# usual cost of touching a generator — orphaning seeds that silently keep passing
+# as something else — was not being paid by anything.
+#
+# The three seeds below are NOT orphaned by it. Each names a case from `arb_soup`
+# or `arb_archive_model`, and the tests those seeds are for never draw from
+# `arb_mutation`, so their streams are untouched. (They are also replayed against
+# the mutation properties, per proptest's per-file behaviour; those replays do
+# re-map, and never named anything.) The second seed's case has a fixed pin
+# either way, in `a_stranded_run_settles_in_one_write`.
 #
 # found: cc 3865415bc19bec00e1387474e51e8d0395c0a8ade4ef867791be5af2baac3c52
 #   P2 in CI, on the unsorted corpus: which = 32, idx = 276, mutation =

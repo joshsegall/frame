@@ -520,26 +520,20 @@ fn arb_soup() -> impl Strategy<Value = String> {
 /// CI is reachable from 40 of those points, and was being caught 2.9% of the
 /// time: it did surface eventually, but on an arbitrary commit rather than the
 /// one that introduced it, with nothing in the diff to explain it. 2048 makes
-/// that 38%. The point is less detection than *attribution* — the sooner it
+/// that 91%. The point is less detection than *attribution* — the sooner it
 /// fires, the likelier the diff in front of you is the one that caused it.
 ///
-/// **38%, not the 98% a flat model predicts, and the gap is worth understanding
-/// before trusting any number here.** `prop_oneof!` weights its *arms* equally,
-/// not its values. `arb_mutation` has seven arms, so `Delete` — one input — draws
-/// with probability 1/7, while each specific `Replace(n)` draws with 1/7 ÷ 30, and
-/// each `Indent(n)` with 1/7 ÷ 7. `Replace` is the richest and most productive
-/// mutation family and every one of its values is 5× rarer than the most trivial
-/// arm. Together with `which`/`idx` folding unevenly (`% 20` over `0..64`, `%
-/// lines` over `0..512`), the failing set's true probability mass is 7.95× below
-/// its share of the space. Measured, not modelled.
+/// That 91% depends on [`arb_mutation`] weighting its arms by cardinality, and
+/// the two numbers should be read together. Unweighted, the same 2048 cases
+/// caught this shape 38% of the time: `prop_oneof!` splits evenly between arms
+/// rather than values, which made every `Replace(n)` 5× rarer than a `Dedent` and
+/// cost a factor of about 8 in the failing set's probability mass. A count here
+/// only means what it appears to mean while a draw is a uniform sample of the
+/// space.
 ///
-/// So this constant buys less than its size suggests, and raising it further has
-/// a poor exchange rate: 98% needs 16,384, by which point the space could have
-/// been *enumerated* — 21,758 points, guaranteed — for comparable work. Weighting
-/// the arms by cardinality would recover most of the loss for free (2048 would
-/// then be 91%), but that changes a generator and re-maps every seed, so it is a
-/// deliberate move rather than a tweak; see the note in
-/// `parse_properties.proptest-regressions`.
+/// Even so, the exchange rate above 2048 is poor: 99% needs 4096 and certainty
+/// needs enumerating the space outright — 21,758 points, which is affordable and
+/// is the honest alternative if this is ever raised much further.
 ///
 /// Whatever the count, a shape reachable from only one or two points stays a
 /// lottery. Those are what the fixed-case pins at the bottom of this file are for.
@@ -560,15 +554,35 @@ enum Mutation {
     AppendMultibyte,
 }
 
+/// Weighted by how many inputs each arm stands for, so that every one of the 42
+/// mutations is equally likely.
+///
+/// Unweighted, `prop_oneof!` splits evenly between *arms*: `Delete` is a single
+/// input drawn 1/7 of the time, while each `Replace(n)` is drawn 1/7 ÷ 30 and
+/// each `Indent(n)` 1/7 ÷ 7. That put the least search effort exactly where the
+/// most was wanted — `Replace` is the arm that swaps in the lines chosen to
+/// collide with every decision the parser makes, and each of them was 5× rarer
+/// than a plain `Dedent`. Measured against the note-growth shape P2 found in CI,
+/// the skew cost a factor of about 8 in the failing set's probability mass, and
+/// so most of what [`MUTATION_CASES`] was buying.
+///
+/// The weights are the arms' cardinalities and must stay that way if an arm's
+/// range changes — that is the whole content of the fix.
+///
+/// Uniform-over-values is also what makes the coverage arithmetic around
+/// [`MUTATION_CASES`] mean anything: a draw is then a uniform sample of the
+/// finite space those properties search, so "k cases" is a sampling fraction of
+/// it rather than a number with no denominator.
 fn arb_mutation() -> impl Strategy<Value = Mutation> {
     prop_oneof![
-        Just(Mutation::Delete),
-        Just(Mutation::Duplicate),
-        Just(Mutation::Truncate),
-        (1usize..8).prop_map(Mutation::Indent),
-        Just(Mutation::Dedent),
-        (0usize..INTERESTING_LINES.len()).prop_map(Mutation::Replace),
-        Just(Mutation::AppendMultibyte),
+        1 => Just(Mutation::Delete),
+        1 => Just(Mutation::Duplicate),
+        1 => Just(Mutation::Truncate),
+        7 => (1usize..8).prop_map(Mutation::Indent),
+        1 => Just(Mutation::Dedent),
+        INTERESTING_LINES.len() as u32
+            => (0usize..INTERESTING_LINES.len()).prop_map(Mutation::Replace),
+        1 => Just(Mutation::AppendMultibyte),
     ]
 }
 
