@@ -506,6 +506,48 @@ fn arb_soup() -> impl Strategy<Value = String> {
         .prop_map(|(lines, crlf)| lines.join(if crlf { "\r\n" } else { "\n" }))
 }
 
+/// Case count for the properties that mutate a fixture, as opposed to the ones
+/// that draw from `arb_soup` or from a model.
+///
+/// Those two families search spaces of very different sizes, and the same case
+/// count means very different things in each. A mutation is a point in a *finite*
+/// space — corpus entry × line × mutation kind, 21,758 of them as this is
+/// written — so a case count is a sampling fraction of a space that could in
+/// principle be enumerated. `arb_soup` and the model generators are unbounded,
+/// and no count exhausts them.
+///
+/// At 128 the odds were poor enough to hurt. The note-growth shape P2 found in
+/// CI is reachable from 40 of those points, and was being caught 2.9% of the
+/// time: it did surface eventually, but on an arbitrary commit rather than the
+/// one that introduced it, with nothing in the diff to explain it. 2048 makes
+/// that 38%. The point is less detection than *attribution* — the sooner it
+/// fires, the likelier the diff in front of you is the one that caused it.
+///
+/// **38%, not the 98% a flat model predicts, and the gap is worth understanding
+/// before trusting any number here.** `prop_oneof!` weights its *arms* equally,
+/// not its values. `arb_mutation` has seven arms, so `Delete` — one input — draws
+/// with probability 1/7, while each specific `Replace(n)` draws with 1/7 ÷ 30, and
+/// each `Indent(n)` with 1/7 ÷ 7. `Replace` is the richest and most productive
+/// mutation family and every one of its values is 5× rarer than the most trivial
+/// arm. Together with `which`/`idx` folding unevenly (`% 20` over `0..64`, `%
+/// lines` over `0..512`), the failing set's true probability mass is 7.95× below
+/// its share of the space. Measured, not modelled.
+///
+/// So this constant buys less than its size suggests, and raising it further has
+/// a poor exchange rate: 98% needs 16,384, by which point the space could have
+/// been *enumerated* — 21,758 points, guaranteed — for comparable work. Weighting
+/// the arms by cardinality would recover most of the loss for free (2048 would
+/// then be 91%), but that changes a generator and re-maps every seed, so it is a
+/// deliberate move rather than a tweak; see the note in
+/// `parse_properties.proptest-regressions`.
+///
+/// Whatever the count, a shape reachable from only one or two points stays a
+/// lottery. Those are what the fixed-case pins at the bottom of this file are for.
+///
+/// Costs about half a second, and stays flat as fixtures are added — a bigger
+/// corpus thins the sampling rather than lengthening the run.
+const MUTATION_CASES: u32 = 2048;
+
 /// A mutation applied to one line of a real fixture.
 #[derive(Debug, Clone)]
 enum Mutation {
@@ -879,9 +921,17 @@ proptest! {
         let _ = serialize_inbox(&inbox);
     }
 
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(MUTATION_CASES))]
+
     /// Same, but starting from real fixtures and damaging them one edit at a
     /// time — closer to the shapes a half-finished hand edit or a bad merge
     /// actually produces.
+    ///
+    /// In its own block because it searches a finite space; see
+    /// [`MUTATION_CASES`].
     #[test]
     fn p1_mutated_fixtures_never_panic(
         which in 0usize..64,
@@ -903,8 +953,10 @@ proptest! {
 // P2 — canonical re-serialization preserves what was parsed
 // ---------------------------------------------------------------------------
 
+// Every property here mutates a fixture, so the whole block takes the higher
+// count; see [`MUTATION_CASES`].
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(128))]
+    #![proptest_config(ProptestConfig::with_cases(MUTATION_CASES))]
 
     /// Parse, force every task through the canonical path, reparse. Whatever the
     /// first parse understood must survive being written back out. This is the
@@ -1140,6 +1192,13 @@ proptest! {
         }
     }
 
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(MUTATION_CASES))]
+
+    /// In its own block because it searches a finite space; see
+    /// [`MUTATION_CASES`].
     #[test]
     fn p4_mutated_fixture_rewrites_converge(
         which in 0usize..64,
@@ -1211,37 +1270,6 @@ proptest! {
         prop_assert_eq!(nonblank_lines(&source), nonblank_lines(&written));
     }
 
-    #[test]
-    fn p5_an_archive_write_keeps_every_line_in_a_damaged_fixture(
-        which in 0usize..64,
-        idx in 0usize..512,
-        mutation in arb_mutation(),
-    ) {
-        let corpus = fixture_sources();
-        let source = &corpus[which % corpus.len()];
-        let damaged = mutate(source, idx, &mutation);
-
-        let written = serialize_archive(&parse_archive(&damaged));
-        prop_assert_eq!(nonblank_lines(&damaged), nonblank_lines(&written));
-    }
-
-    /// Same property against damaged real fixtures, which is where the shapes
-    /// that trip it actually come from: a half-finished hand edit, a merge that
-    /// left a line at the wrong indent, a metadata key that lost its colon.
-    #[test]
-    fn p5_a_plain_write_keeps_every_line_in_a_damaged_fixture(
-        which in 0usize..64,
-        idx in 0usize..512,
-        mutation in arb_mutation(),
-    ) {
-        let corpus = fixture_sources();
-        let source = &corpus[which % corpus.len()];
-        let damaged = mutate(source, idx, &mutation);
-
-        let written = serialize_track(&parse_track(&damaged));
-        prop_assert_eq!(nonblank_lines(&damaged), nonblank_lines(&written));
-    }
-
     /// The third pair, and the one that had no P5 at all until now.
     ///
     /// It could not have held before: the inbox parser *deliberately* dropped
@@ -1257,20 +1285,6 @@ proptest! {
         prop_assert_eq!(nonblank_lines(&source), nonblank_lines(&written));
     }
 
-    #[test]
-    fn p5_an_inbox_write_keeps_every_line_in_a_damaged_fixture(
-        which in 0usize..64,
-        idx in 0usize..512,
-        mutation in arb_mutation(),
-    ) {
-        let corpus = fixture_sources();
-        let source = &corpus[which % corpus.len()];
-        let damaged = mutate(source, idx, &mutation);
-
-        let written = serialize_inbox(&parse_inbox(&damaged).0);
-        prop_assert_eq!(nonblank_lines(&damaged), nonblank_lines(&written));
-    }
-
     /// The other half of the same decision, stated as an invariant rather than
     /// left as an observation: **nothing routine reaches the recovery log.**
     ///
@@ -1284,6 +1298,56 @@ proptest! {
     fn nothing_is_ever_dropped(source in arb_soup()) {
         let (_, dropped) = parse_inbox(&source);
         prop_assert!(dropped.is_empty(), "dropped {dropped:?} from {source:?}");
+    }
+}
+
+// The same three claims against damaged real fixtures, which is where the shapes
+// that trip them actually come from: a half-finished hand edit, a merge that left
+// a line at the wrong indent, a metadata key that lost its colon. Split into
+// their own block because they search a finite space; see [`MUTATION_CASES`].
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(MUTATION_CASES))]
+
+    #[test]
+    fn p5_a_plain_write_keeps_every_line_in_a_damaged_fixture(
+        which in 0usize..64,
+        idx in 0usize..512,
+        mutation in arb_mutation(),
+    ) {
+        let corpus = fixture_sources();
+        let source = &corpus[which % corpus.len()];
+        let damaged = mutate(source, idx, &mutation);
+
+        let written = serialize_track(&parse_track(&damaged));
+        prop_assert_eq!(nonblank_lines(&damaged), nonblank_lines(&written));
+    }
+
+    #[test]
+    fn p5_an_archive_write_keeps_every_line_in_a_damaged_fixture(
+        which in 0usize..64,
+        idx in 0usize..512,
+        mutation in arb_mutation(),
+    ) {
+        let corpus = fixture_sources();
+        let source = &corpus[which % corpus.len()];
+        let damaged = mutate(source, idx, &mutation);
+
+        let written = serialize_archive(&parse_archive(&damaged));
+        prop_assert_eq!(nonblank_lines(&damaged), nonblank_lines(&written));
+    }
+
+    #[test]
+    fn p5_an_inbox_write_keeps_every_line_in_a_damaged_fixture(
+        which in 0usize..64,
+        idx in 0usize..512,
+        mutation in arb_mutation(),
+    ) {
+        let corpus = fixture_sources();
+        let source = &corpus[which % corpus.len()];
+        let damaged = mutate(source, idx, &mutation);
+
+        let written = serialize_inbox(&parse_inbox(&damaged).0);
+        prop_assert_eq!(nonblank_lines(&damaged), nonblank_lines(&written));
     }
 }
 

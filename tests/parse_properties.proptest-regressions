@@ -27,6 +27,14 @@
 # corpus is sorted by file name as of this commit, so seeds are portable from now
 # on; any recorded before it is not.
 #
+# One change to `arb_mutation` is worth having costed, since it would orphan
+# every mutation seed here and is therefore cheapest to make while none is live:
+# `prop_oneof!` weights ARMS equally, so each `Replace(n)` draws 5x less often
+# than `Delete` and each `Indent(n)` 7x less, even though `Replace` is the arm
+# that finds things. Weighting the arms by cardinality would raise the mutation
+# properties' catch rate from 38% to 91% per run at no runtime cost. Not done
+# here; see `MUTATION_CASES` in parse_properties.rs.
+#
 # found: cc 3865415bc19bec00e1387474e51e8d0395c0a8ade4ef867791be5af2baac3c52
 #   P2 in CI, on the unsorted corpus: which = 32, idx = 276, mutation =
 #   Replace(15) — `code_in_notes.md` with the first block's closing fence
