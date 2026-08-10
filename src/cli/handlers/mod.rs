@@ -1312,6 +1312,43 @@ fn cmd_check(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
             println!("Errors:");
             for err in &result.errors {
                 match err {
+                    check::CheckError::DuplicateSection {
+                        track_id,
+                        section,
+                        count,
+                        hidden_tasks,
+                    } => {
+                        println!(
+                            "  [{}] {} '## {}' sections — the later {} {} {} from archiving and every section operation; the next write merges them",
+                            track_id,
+                            count,
+                            section,
+                            plural(count - 1, "one hides", "ones hide"),
+                            hidden_tasks,
+                            plural(*hidden_tasks, "task", "tasks"),
+                        );
+                    }
+                    check::CheckError::UnknownSectionHeading {
+                        track_id,
+                        heading,
+                        stranded_tasks,
+                    } => {
+                        if *stranded_tasks > 0 {
+                            println!(
+                                "  [{}] frame does not recognise '## {}' — the {} {} under it {} not tasks, only text",
+                                track_id,
+                                heading,
+                                stranded_tasks,
+                                plural(*stranded_tasks, "line", "lines"),
+                                plural(*stranded_tasks, "is", "are"),
+                            );
+                        } else {
+                            println!(
+                                "  [{}] frame does not recognise '## {}' — anything written under it becomes text rather than a task",
+                                track_id, heading,
+                            );
+                        }
+                    }
                     check::CheckError::DanglingDep {
                         track_id,
                         task_id,
@@ -2369,13 +2406,13 @@ fn cmd_note(args: NoteArgs, json: bool) -> Result<(), Box<dyn std::error::Error>
     })
 }
 
-/// `limits.note_max_bytes` as the ops layer wants it.
-fn note_limit(project: &crate::model::project::Project) -> Option<usize> {
-    project
-        .config
-        .limits
-        .note_max_bytes
-        .map(|b| b.bytes() as usize)
+/// `[limits]`' note settings as the ops layer wants them.
+fn note_limit(project: &crate::model::project::Project) -> task_ops::NoteLimits {
+    let limits = &project.config.limits;
+    task_ops::NoteLimits {
+        max_bytes: limits.note_max_bytes.map(|b| b.bytes() as usize),
+        repeat_bytes: limits.note_repeat_bytes.map(|b| b.bytes() as usize),
+    }
 }
 
 /// Render a refused note write in the units a human reads.
@@ -2388,6 +2425,21 @@ fn note_limit(project: &crate::model::project::Project) -> Option<usize> {
 fn explain_note_limit(err: task_ops::TaskError) -> Box<dyn std::error::Error> {
     use crate::model::config::ByteSize;
     match err {
+        task_ops::TaskError::NoteRepeatsExisting {
+            task_id,
+            excerpt,
+            block_len,
+        } => format!(
+            "{} note already contains this text ({}):\n         \"{}…\"\n       \
+             nothing was written — `fr note` appends. If you meant to replace the \
+             note, use `fr note {} \"…\" --replace`; if you meant to add to it, \
+             leave out what is already there",
+            task_id,
+            ByteSize(block_len as u64).human(),
+            excerpt.replace('\n', " "),
+            task_id,
+        )
+        .into(),
         task_ops::TaskError::NoteTooLarge {
             task_id,
             would_be,

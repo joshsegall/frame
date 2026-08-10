@@ -295,6 +295,7 @@ What frame's own commands will not do:
 ```toml
 [limits]
 note_max_bytes = "16KB"    # largest note frame will grow a note to (default: 16KB; 0/"off" disables)
+note_repeat_bytes = 120    # shortest paragraph an append may not repeat into a note (default: 120)
 track_warn_bytes = "512KB" # `fr check` warns past this much open work in one track (default: 512KB)
 ```
 
@@ -305,6 +306,10 @@ There is no `--force`. Setting `note_max_bytes = 0` (or `"off"`) is the escape h
 In the TUI the same rule is enforced at the keystroke: the note field caps at `max(note_max_bytes, the note's length when opened)`, so an oversize note opens intact and can only shrink, and a paste that will not fit is rejected whole rather than clipped to fit — keeping its first N bytes would silently discard the tail.
 
 **A guardrail on authoring, not an invariant on the file.** Markdown is the source of truth and stays hand-editable, and `fr import` is exempt, because importing is how content that predates a limit gets in. `fr check` does not report an oversize note as damage.
+
+**`note_repeat_bytes` refuses an append that repeats text the note already holds.** `fr note` appends, and an agent that believes it replaces writes the whole note out again each time — so the note ends up holding N copies of everything that did not change that round. Measured on a real project: one note reached eight copies of itself, 110 KB of its 139 KB, and 5.4% of all note text across the project was duplication of this kind.
+
+The comparison is paragraph blocks, exact text, at or above the configured length. Exact rather than fuzzy because the repetition is literally re-pasted, so exact matching finds it — and because the failure mode of a similarity threshold is refusing a write that was fine. The refusal names `--replace`, which is almost always what was meant.
 
 **`track_warn_bytes` measures open work — `## Backlog` plus `## Parked` — not file size.** Done is excluded because `[clean]` already bounds it, and bounds it by oscillating between `done_bytes_retain` and `done_bytes_threshold`. Folding that swing into the measurement would mean the same track warns just before a clean and goes quiet just after one with its open work untouched: a warning that answers to the archiver's schedule rather than to anything its reader did. The warning is one line per track and names no individual task, because no individual task is the problem — the aggregate is, and the remedy is splitting the track or closing work.
 

@@ -152,6 +152,22 @@ pub struct LimitsConfig {
     /// `"off"` (or `0`) disables the warning.
     #[serde(default = "default_track_warn_bytes", deserialize_with = "de_limit")]
     pub track_warn_bytes: Option<ByteSize>,
+    /// Shortest paragraph an append may not repeat verbatim into a note.
+    ///
+    /// `fr note` appends, and an agent that believes it replaces will write the
+    /// whole note out again each time. The note then holds N copies of
+    /// everything that did not change that round. Measured on a real project:
+    /// one note reached eight copies of itself, 110 KB of its 139 KB, and
+    /// across the project 5.4% of all note text was duplication of this kind.
+    ///
+    /// Compared block by block on exact text. The repetition it is after is
+    /// literally re-pasted, so exact matching finds it, and unlike a similarity
+    /// score it cannot refuse a write that was fine — the failure mode of a
+    /// guess here is blocking someone's legitimate note.
+    ///
+    /// `"off"` (or `0`) disables the check.
+    #[serde(default = "default_note_repeat_bytes", deserialize_with = "de_limit")]
+    pub note_repeat_bytes: Option<ByteSize>,
 }
 
 impl Default for LimitsConfig {
@@ -159,6 +175,7 @@ impl Default for LimitsConfig {
         LimitsConfig {
             note_max_bytes: default_note_max_bytes(),
             track_warn_bytes: default_track_warn_bytes(),
+            note_repeat_bytes: default_note_repeat_bytes(),
         }
     }
 }
@@ -176,6 +193,15 @@ fn default_note_max_bytes() -> Option<ByteSize> {
 /// own terms rather than a fit to any one project's numbers.
 fn default_track_warn_bytes() -> Option<ByteSize> {
     Some(ByteSize(512 * 1024))
+}
+
+/// 120 bytes. The sensitivity curve is almost flat either side of it — over a
+/// real corpus, 40 bytes flags 19 notes and 120 flags 16, for 95% of the same
+/// duplicated text — so the value is chosen for the end that matters: high
+/// enough that a repeated one-line code fragment or error string, which a note
+/// may legitimately quote twice, is not a refused write.
+fn default_note_repeat_bytes() -> Option<ByteSize> {
+    Some(ByteSize(120))
 }
 
 /// 256 KB. See [`CleanConfig::done_bytes_threshold`].

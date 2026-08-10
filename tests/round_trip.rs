@@ -186,7 +186,7 @@ fn rewriting_a_task_with_an_unclosed_fence_note_preserves_the_track() {
         &mut track,
         "UF-001",
         "Example:\n```\nand more".to_string(),
-        None,
+        frame::ops::task_ops::NoteLimits::default(),
     )
     .unwrap();
 

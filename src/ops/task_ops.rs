@@ -29,6 +29,15 @@ pub enum TaskError {
     /// The write would leave a note both over `limits.note_max_bytes` and
     /// larger than it already was. Carries the sizes so the caller can say what
     /// happened without recomputing them.
+    /// The appended text repeats a paragraph the note already holds — the
+    /// signature of an append that was meant to be a replacement.
+    #[error("{task_id} note already contains this text ({block_len} bytes)")]
+    NoteRepeatsExisting {
+        task_id: String,
+        /// The start of the repeated paragraph, for the message.
+        excerpt: String,
+        block_len: usize,
+    },
     #[error("{task_id} note would be {would_be} bytes; limit is {limit} (limits.note_max_bytes)")]
     NoteTooLarge {
         task_id: String,
@@ -337,6 +346,18 @@ pub fn remove_dep(track: &mut Track, task_id: &str, dep_id: &str) -> Result<(), 
     Ok(())
 }
 
+/// The two things `[limits]` says about a note write, travelling together so
+/// the ops layer keeps taking one argument as more of them arrive.
+///
+/// `Default` is both switched off, which is what test and import paths want.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoteLimits {
+    /// `limits.note_max_bytes`.
+    pub max_bytes: Option<usize>,
+    /// `limits.note_repeat_bytes`.
+    pub repeat_bytes: Option<usize>,
+}
+
 /// Whether a note of `would_be` bytes may replace one of `current` bytes.
 ///
 /// The rule is **non-increasing**, not absolute: legal if the result is within
@@ -369,6 +390,44 @@ pub fn note_input_cap(current: usize, limit: Option<usize>) -> usize {
     }
 }
 
+/// The paragraph blocks of a note, at or above `min_len`, trimmed.
+///
+/// Paragraphs rather than lines, because that is the unit an append re-pastes:
+/// `append_note` joins with a blank line, so text written twice comes back as
+/// the same blocks twice.
+fn note_blocks(text: &str, min_len: usize) -> Vec<&str> {
+    let mut out = Vec::new();
+    for block in text.split("\n\n") {
+        let trimmed = block.trim();
+        if trimmed.len() >= min_len {
+            out.push(trimmed);
+        }
+    }
+    out
+}
+
+/// The first paragraph of `addition` that the note already holds verbatim.
+///
+/// This is the whole-note re-append, caught at the moment it happens. An agent
+/// that thinks `fr note` replaces writes the full note out again; every
+/// paragraph that did not change this round is already there, so the first one
+/// of them trips this. Left to run, the note ends up holding N copies of
+/// itself — eight, in the case this was written for.
+pub fn repeated_note_block<'a>(
+    existing: &str,
+    addition: &'a str,
+    min_len: Option<usize>,
+) -> Option<&'a str> {
+    let min_len = min_len?;
+    if existing.is_empty() {
+        return None;
+    }
+    let present = note_blocks(existing, min_len);
+    note_blocks(addition, min_len)
+        .into_iter()
+        .find(|block| present.contains(block))
+}
+
 fn current_note_len(task: &Task) -> usize {
     task.metadata
         .iter()
@@ -383,8 +442,9 @@ pub fn set_note(
     track: &mut Track,
     task_id: &str,
     note_text: String,
-    limit: Option<usize>,
+    limits: NoteLimits,
 ) -> Result<(), TaskError> {
+    let limit = limits.max_bytes;
     let task = find_task_mut_in_track(track, task_id)
         .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
     let current = current_note_len(task);
@@ -409,8 +469,9 @@ pub fn append_note(
     track: &mut Track,
     task_id: &str,
     note_text: String,
-    limit: Option<usize>,
+    limits: NoteLimits,
 ) -> Result<(), TaskError> {
+    let limit = limits.max_bytes;
     let task = find_task_mut_in_track(track, task_id)
         .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
     let existing = task.metadata.iter().find_map(|m| match m {
@@ -418,6 +479,20 @@ pub fn append_note(
         _ => None,
     });
     let current = existing.as_ref().map(|n| n.len()).unwrap_or(0);
+
+    // Checked before the size limit, because it is the more specific diagnosis
+    // and the more useful one: a re-append is usually meant to be a replacement,
+    // and saying so is what stops the next one.
+    if let Some(old) = &existing
+        && let Some(block) = repeated_note_block(old, &note_text, limits.repeat_bytes)
+    {
+        return Err(TaskError::NoteRepeatsExisting {
+            task_id: task_id.to_string(),
+            excerpt: block.chars().take(120).collect(),
+            block_len: block.len(),
+        });
+    }
+
     let new_note = match existing {
         Some(old) if !old.is_empty() => format!("{}\n\n{}", old, note_text),
         _ => note_text,
@@ -1765,7 +1840,13 @@ mod tests {
     #[test]
     fn test_set_note() {
         let mut track = sample_track();
-        set_note(&mut track, "T-001", "This is a note.".into(), None).unwrap();
+        set_note(
+            &mut track,
+            "T-001",
+            "This is a note.".into(),
+            NoteLimits::default(),
+        )
+        .unwrap();
         let task = find_task_in_track(&track, "T-001").unwrap();
         assert!(
             task.metadata
@@ -1777,7 +1858,13 @@ mod tests {
     #[test]
     fn test_append_note_no_existing() {
         let mut track = sample_track();
-        append_note(&mut track, "T-001", "First note.".into(), None).unwrap();
+        append_note(
+            &mut track,
+            "T-001",
+            "First note.".into(),
+            NoteLimits::default(),
+        )
+        .unwrap();
         let task = find_task_in_track(&track, "T-001").unwrap();
         assert!(
             task.metadata
@@ -1789,8 +1876,20 @@ mod tests {
     #[test]
     fn test_append_note_with_existing() {
         let mut track = sample_track();
-        set_note(&mut track, "T-001", "First note.".into(), None).unwrap();
-        append_note(&mut track, "T-001", "Second note.".into(), None).unwrap();
+        set_note(
+            &mut track,
+            "T-001",
+            "First note.".into(),
+            NoteLimits::default(),
+        )
+        .unwrap();
+        append_note(
+            &mut track,
+            "T-001",
+            "Second note.".into(),
+            NoteLimits::default(),
+        )
+        .unwrap();
         let task = find_task_in_track(&track, "T-001").unwrap();
         assert!(
             task.metadata
@@ -1917,7 +2016,13 @@ mod tests {
             vec!["doc/new.md".into()],
         )
         .unwrap();
-        set_note(&mut track, "T-001", "a different note".into(), None).unwrap();
+        set_note(
+            &mut track,
+            "T-001",
+            "a different note".into(),
+            NoteLimits::default(),
+        )
+        .unwrap();
 
         let task = find_task_in_track(&track, "T-001").unwrap();
         assert_eq!(task.metadata[0], Metadata::Spec(vec!["doc/new.md".into()]));

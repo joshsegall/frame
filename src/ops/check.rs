@@ -22,6 +22,52 @@ pub struct CheckResult {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum CheckError {
+    /// A track has two or more sections of one kind — two `## Done`, say.
+    ///
+    /// **How it happens: a line-by-line git merge of a track file.** Found in a
+    /// real project, introduced by a merge commit six weeks before frame's
+    /// merge driver existed; both parents had one `## Done` and the merge
+    /// produced two. Re-running that merge reproduces it exactly.
+    ///
+    /// **Why it is an error rather than cosmetic.** `Track::section_tasks`
+    /// returns the *first* section of a kind, and roughly a hundred call sites
+    /// are built on it — archiving, section reconciliation, the byte
+    /// accounting, the TUI's section rendering. Everything in the second
+    /// section is invisible to all of them while remaining findable by ID, so
+    /// the file looks fine and 150 done tasks quietly stop being archivable.
+    /// It also round-trips byte-identically, so it never heals on its own and
+    /// never gets worse — it simply stays.
+    ///
+    /// Repaired by the next write, not by `--fix`: see
+    /// [`crate::io::project_io::save_track`].
+    #[serde(rename = "duplicate_section")]
+    DuplicateSection {
+        track_id: String,
+        section: crate::model::track::SectionKind,
+        count: usize,
+        /// Tasks in the second and later sections.
+        hidden_tasks: usize,
+    },
+    /// A `##` heading frame does not recognise, in a file frame owns.
+    ///
+    /// Reported even when nothing is behind it yet. In a track file an unknown
+    /// heading does not merely get ignored: the parser sends it to literal
+    /// text, and every task line after it goes the same way, until the next
+    /// heading frame does know. So the heading is a trapdoor — anything written
+    /// under it stops being a task. In an archive or the inbox, which have no
+    /// sections at all, a heading below the title ends the task list and turns
+    /// the remainder into trailing text.
+    ///
+    /// No automatic repair. Where the content was meant to go is a guess, and
+    /// the heading may be deliberate; deleting it or promoting it are both
+    /// decisions about someone else's writing.
+    #[serde(rename = "unknown_section_heading")]
+    UnknownSectionHeading {
+        /// The track this is in, or the file name for an archive or the inbox.
+        track_id: String,
+        heading: String,
+        stranded_tasks: usize,
+    },
     /// A dep references a task ID that doesn't exist anywhere
     #[serde(rename = "dangling_dep")]
     DanglingDep {
@@ -527,6 +573,112 @@ pub enum CheckInfo {
 // Main check entry point
 // ---------------------------------------------------------------------------
 
+/// Duplicate sections and unrecognised headings, in tracks and in the
+/// section-less files (archives, the inbox) alike.
+///
+/// The archive and inbox halves read raw lines rather than a parsed model,
+/// because their models have nowhere to put a heading: `Archive` is a header, a
+/// flat task list and whatever trailed the last task, so a heading in the
+/// middle is indistinguishable from prose once parsed. The raw scan is what can
+/// still see it.
+fn check_headings(project: &Project, result: &mut CheckResult) {
+    for (track_id, track) in &project.tracks {
+        for dup in track.duplicate_sections() {
+            result.errors.push(CheckError::DuplicateSection {
+                track_id: track_id.clone(),
+                section: dup.kind,
+                count: dup.count,
+                hidden_tasks: dup.hidden_tasks,
+            });
+        }
+        for unknown in track.unknown_headings() {
+            result.errors.push(CheckError::UnknownSectionHeading {
+                track_id: track_id.clone(),
+                heading: unknown.heading,
+                stranded_tasks: unknown.stranded_tasks,
+            });
+        }
+    }
+
+    // `archive/_tracks/` holds whole archived **track** files, headings and all,
+    // so `## Backlog` there is correct rather than unrecognised — they get the
+    // track rules. `archive/*.md` (per-track done archives) and `inbox.md` have
+    // no section concept, so any `##` in one is a heading frame cannot read.
+    if let Ok(entries) = std::fs::read_dir(project.frame_dir.join("archive/_tracks")) {
+        for path in entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "md"))
+        {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let track = crate::parse::parse_track(&text);
+            for dup in track.duplicate_sections() {
+                result.errors.push(CheckError::DuplicateSection {
+                    track_id: name.clone(),
+                    section: dup.kind,
+                    count: dup.count,
+                    hidden_tasks: dup.hidden_tasks,
+                });
+            }
+            for unknown in track.unknown_headings() {
+                result.errors.push(CheckError::UnknownSectionHeading {
+                    track_id: name.clone(),
+                    heading: unknown.heading,
+                    stranded_tasks: unknown.stranded_tasks,
+                });
+            }
+        }
+    }
+
+    // Through the parsed models, not a raw line scan. An inbox item's body and a
+    // task's note are freeform markdown and may perfectly well contain a `##`
+    // heading — a real project's inbox has five, all of them prose inside item
+    // bodies, and a raw scan reported every one. The models put body text out of
+    // reach: only what surrounds the content can hold a structural heading.
+    let flag = |file: &str, lines: &[String], result: &mut CheckResult| {
+        for line in lines {
+            if let Some(rest) = line.strip_prefix("## ") {
+                result.errors.push(CheckError::UnknownSectionHeading {
+                    track_id: file.to_string(),
+                    heading: rest.trim().to_string(),
+                    // Nothing is *stranded* in these files: they have no sections,
+                    // so a heading below the title ends the task list and the
+                    // remainder is already carried as trailing text.
+                    stranded_tasks: 0,
+                });
+            }
+        }
+    };
+
+    if let Some(inbox) = &project.inbox {
+        flag("inbox.md", &inbox.header_lines, result);
+    }
+    if let Ok(entries) = std::fs::read_dir(project.frame_dir.join("archive")) {
+        for path in entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "md"))
+        {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let archive = crate::parse::parse_archive(&text);
+            flag(&name, &archive.header, result);
+            flag(&name, &archive.trailing, result);
+        }
+    }
+}
+
 /// Warn on tracks holding more open work than `limits.track_warn_bytes`.
 ///
 /// See [`CheckWarning::OversizeTrack`] for why this measures live content and
@@ -625,6 +777,9 @@ pub fn check_project(project: &Project) -> CheckResult {
     if let Some(ref inbox) = project.inbox {
         check_inbox(inbox, &mut result);
     }
+
+    // Sections duplicated by a text merge, and headings frame cannot read.
+    check_headings(project, &mut result);
 
     // Tracks carrying more open work than one track should.
     check_track_sizes(project, &mut result);

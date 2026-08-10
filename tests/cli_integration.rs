@@ -1290,6 +1290,179 @@ fn set_note_limit(root: &Path, value: &str) {
     .unwrap();
 }
 
+/// A duplicate `## Done` is reported as an error, and healed by the next write
+/// with every task kept and in order.
+#[test]
+fn a_duplicate_section_is_reported_then_merged_by_the_next_write() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    let path = tmp.path().join("frame/tracks/main.md");
+    let text = fs::read_to_string(&path).unwrap();
+    fs::write(
+        &path,
+        format!(
+            "{text}\n## Done\n\n- [x] `M-900` First hidden\n  - resolved: 2026-01-01\n\
+             - [x] `M-901` Second hidden\n  - resolved: 2026-01-02\n"
+        ),
+    )
+    .unwrap();
+
+    let (stdout, _, ok) = run_fr(tmp.path(), &["check"]);
+    assert!(
+        !ok,
+        "a duplicate section is an error, so check should exit 1"
+    );
+    assert!(
+        stdout.contains("'## Done' sections"),
+        "check should name it: {stdout}"
+    );
+
+    // Read-only: check must not have repaired anything.
+    assert_eq!(
+        fs::read_to_string(&path)
+            .unwrap()
+            .matches("## Done")
+            .count(),
+        2,
+        "check is read-only"
+    );
+
+    // Any write heals it.
+    run_fr_ok(tmp.path(), &["clean"]);
+    let healed = fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        healed.matches("## Done").count(),
+        1,
+        "the write should merge"
+    );
+    assert!(
+        healed.contains("M-900") && healed.contains("M-901"),
+        "no task lost"
+    );
+    assert!(
+        healed.find("M-900").unwrap() < healed.find("M-901").unwrap(),
+        "relative order preserved"
+    );
+    run_fr_ok(tmp.path(), &["check"]);
+}
+
+/// A heading frame cannot read is an error even when nothing is behind it —
+/// anything written under it would stop being a task.
+#[test]
+fn an_unknown_heading_is_an_error() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    let path = tmp.path().join("frame/tracks/main.md");
+    let text = fs::read_to_string(&path).unwrap();
+    fs::write(&path, format!("{text}\n## Someday\n")).unwrap();
+
+    let (stdout, _, ok) = run_fr(tmp.path(), &["check"]);
+    assert!(!ok, "an unknown heading is an error");
+    assert!(
+        stdout.contains("Someday"),
+        "check should name the heading: {stdout}"
+    );
+}
+
+/// A `##` inside an inbox item body or a task note is prose, not a heading.
+///
+/// The first cut of this scanned raw lines with a `trim()`, and reported five
+/// findings against a real project's inbox — every one of them a markdown
+/// heading someone had written inside an item body, indented two spaces. Body
+/// text is freeform and frame does not get to object to what is in it.
+#[test]
+fn a_heading_inside_a_body_is_not_an_unknown_heading() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    let inbox = tmp.path().join("frame/inbox.md");
+    let text = fs::read_to_string(&inbox).unwrap();
+    fs::write(
+        &inbox,
+        format!(
+            "{text}\n- An item with a structured body\n  ## Reproducer (minimal)\n  some detail\n"
+        ),
+    )
+    .unwrap();
+
+    run_fr_ok(
+        tmp.path(),
+        &["note", "M-001", "See below.\n\n## Findings\n\nDetail."],
+    );
+
+    let (stdout, _, ok) = run_fr(tmp.path(), &["check"]);
+    assert!(
+        ok,
+        "a heading inside body text must not be reported: {stdout}"
+    );
+    assert!(!stdout.contains("Reproducer"), "{stdout}");
+    assert!(!stdout.contains("Findings"), "{stdout}");
+}
+
+/// The whole-note re-append, caught on the second one. This is the shape that
+/// took a real note to eight copies of itself.
+#[test]
+fn appending_text_the_note_already_holds_is_refused() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    let para = "A".repeat(200);
+
+    run_fr_ok(tmp.path(), &["note", "M-001", &para]);
+    let (_, stderr, ok) = run_fr(tmp.path(), &["note", "M-001", &para]);
+
+    assert!(!ok, "re-appending the same paragraph should be refused");
+    assert!(
+        stderr.contains("--replace"),
+        "the message must point at --replace: {stderr}"
+    );
+    let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    assert_eq!(
+        track.matches(&para).count(),
+        1,
+        "the paragraph should appear exactly once"
+    );
+}
+
+/// The realistic case: the agent rewrites the note, keeping most of it and
+/// adding a paragraph, then appends the lot. The unchanged part is what trips.
+#[test]
+fn appending_a_grown_copy_of_the_note_is_refused() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    let first = "B".repeat(200);
+
+    run_fr_ok(tmp.path(), &["note", "M-001", &first]);
+    let grown = format!("{first}\n\nAnd here is what I learned since.");
+    let (_, _, ok) = run_fr(tmp.path(), &["note", "M-001", &grown]);
+    assert!(!ok, "a grown copy of the note should be refused");
+
+    // --replace is the way through, and it lands.
+    run_fr_ok(tmp.path(), &["note", "M-001", &grown, "--replace"]);
+    let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    assert_eq!(track.matches(&first).count(), 1);
+    assert!(track.contains("what I learned since"));
+}
+
+/// Genuinely new text still appends, and a short repeated fragment — a code
+/// line, an error string — is not enough to refuse a write.
+#[test]
+fn new_text_and_short_repeats_still_append() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    run_fr_ok(tmp.path(), &["note", "M-001", &"C".repeat(200)]);
+    run_fr_ok(
+        tmp.path(),
+        &["note", "M-001", "A genuinely different finding."],
+    );
+    // Below limits.note_repeat_bytes (120), so not a repeat as far as this cares.
+    run_fr_ok(tmp.path(), &["note", "M-001", "short line"]);
+    run_fr_ok(tmp.path(), &["note", "M-001", "short line"]);
+
+    let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    assert_eq!(track.matches("short line").count(), 2);
+}
+
 #[test]
 fn note_over_the_limit_is_refused_and_writes_nothing() {
     let tmp = tempfile::TempDir::new().unwrap();

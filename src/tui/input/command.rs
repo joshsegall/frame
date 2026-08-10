@@ -688,6 +688,23 @@ pub(super) fn palette_check_project(app: &mut App) {
         )));
         for err in &result.errors {
             let msg = match err {
+                check::CheckError::DuplicateSection {
+                    track_id,
+                    section,
+                    count,
+                    hidden_tasks,
+                } => format!(
+                    "  [{}] {} '## {}' sections — {} tasks hidden; the next write merges them",
+                    track_id, count, section, hidden_tasks
+                ),
+                check::CheckError::UnknownSectionHeading {
+                    track_id,
+                    heading,
+                    stranded_tasks,
+                } => format!(
+                    "  [{}] unrecognised heading '## {}' — {} task lines became text",
+                    track_id, heading, stranded_tasks
+                ),
                 check::CheckError::DanglingDep {
                     track_id,
                     task_id,

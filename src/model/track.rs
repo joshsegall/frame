@@ -61,8 +61,35 @@ pub struct Track {
     pub eol: crate::parse::LineEnding,
 }
 
+/// A section kind appearing more than once in one track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DuplicateSection {
+    pub kind: SectionKind,
+    /// How many sections of this kind the file has.
+    pub count: usize,
+    /// Tasks in the second and later sections — the ones
+    /// [`Track::section_tasks`] cannot see.
+    pub hidden_tasks: usize,
+}
+
+/// A `##` heading in a track file that frame does not recognise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownHeading {
+    /// The heading text, trimmed.
+    pub heading: String,
+    /// Task lines that fell in behind it and became literal text.
+    pub stranded_tasks: usize,
+}
+
 impl Track {
     /// Get tasks from a specific section
+    ///
+    /// **The first section of that kind, and a track is only supposed to have
+    /// one.** A file carrying two `## Done` headings — which a line-by-line git
+    /// merge of a track file will produce — silently hides everything in the
+    /// second from this and from the hundred-odd call sites built on it. See
+    /// [`Track::duplicate_sections`], which reports it, and
+    /// [`Track::merge_duplicate_sections`], which is applied on every write.
     pub fn section_tasks(&self, kind: SectionKind) -> &[Task] {
         for node in &self.nodes {
             if let TrackNode::Section { kind: k, tasks, .. } = node
@@ -72,6 +99,124 @@ impl Track {
             }
         }
         &[]
+    }
+
+    /// Section kinds this track has more than one of.
+    ///
+    /// Cheap — a walk of the node list — so callers on the write path can ask
+    /// before deciding whether any repair is needed at all.
+    pub fn duplicate_sections(&self) -> Vec<DuplicateSection> {
+        let mut seen: Vec<(SectionKind, usize, usize)> = Vec::new();
+        for node in &self.nodes {
+            if let TrackNode::Section { kind, tasks, .. } = node {
+                match seen.iter_mut().find(|(k, _, _)| k == kind) {
+                    Some(entry) => {
+                        entry.1 += 1;
+                        entry.2 += tasks.len();
+                    }
+                    None => seen.push((*kind, 1, 0)),
+                }
+            }
+        }
+        seen.into_iter()
+            .filter(|(_, count, _)| *count > 1)
+            .map(|(kind, count, hidden_tasks)| DuplicateSection {
+                kind,
+                count,
+                hidden_tasks,
+            })
+            .collect()
+    }
+
+    pub fn has_duplicate_sections(&self) -> bool {
+        !self.duplicate_sections().is_empty()
+    }
+
+    /// `##` headings frame does not recognise, with the task lines each one
+    /// swallowed.
+    ///
+    /// The parser sends an unknown heading to a literal node — and then
+    /// *everything after it* too, until the next heading it does know, because
+    /// task lines are only parsed inside a section. So a stray heading does not
+    /// merely sit there being ignored; the tasks behind it stop being tasks.
+    /// That is why this is reported even when it stranded nothing: the next
+    /// task written under it would vanish.
+    pub fn unknown_headings(&self) -> Vec<UnknownHeading> {
+        let mut out = Vec::new();
+        for node in &self.nodes {
+            let TrackNode::Literal(lines) = node else {
+                continue;
+            };
+            let mut current: Option<UnknownHeading> = None;
+            for line in lines {
+                // Column zero, untrimmed — an indented `## ` is body text inside
+                // someone's note or a fenced block, and the parser treats it that
+                // way too. Trimming first is how this reported five headings in a
+                // real project's inbox that were all prose.
+                let trimmed = line.trim_end();
+                if let Some(rest) = line.strip_prefix("## ") {
+                    if let Some(h) = current.take() {
+                        out.push(h);
+                    }
+                    current = Some(UnknownHeading {
+                        heading: rest.trim().to_string(),
+                        stranded_tasks: 0,
+                    });
+                } else if let Some(h) = &mut current
+                    && trimmed.starts_with("- [")
+                {
+                    h.stranded_tasks += 1;
+                }
+            }
+            if let Some(h) = current {
+                out.push(h);
+            }
+        }
+        out
+    }
+
+    /// Fold every later section of a kind into the first one of that kind.
+    ///
+    /// Tasks move in node order, so their relative order is exactly what the
+    /// file already showed. The redundant heading and the blank lines around it
+    /// are dropped — lines frame owns and writes itself — while literal nodes
+    /// between the sections stay where they are, because frame does not know
+    /// what they are and never gets to decide they are expendable.
+    ///
+    /// Returns what it merged, for the caller to report. Idempotent: running it
+    /// on a healthy track changes nothing and returns empty.
+    pub fn merge_duplicate_sections(&mut self) -> Vec<DuplicateSection> {
+        let found = self.duplicate_sections();
+        if found.is_empty() {
+            return found;
+        }
+        for dup in &found {
+            // Collect the later sections' tasks, dropping those nodes as we go.
+            let mut first: Option<usize> = None;
+            let mut moved: Vec<Task> = Vec::new();
+            let mut drop_at: Vec<usize> = Vec::new();
+            for (i, node) in self.nodes.iter_mut().enumerate() {
+                if let TrackNode::Section { kind, tasks, .. } = node
+                    && *kind == dup.kind
+                {
+                    if first.is_none() {
+                        first = Some(i);
+                    } else {
+                        moved.append(tasks);
+                        drop_at.push(i);
+                    }
+                }
+            }
+            if let Some(i) = first
+                && let Some(TrackNode::Section { tasks, .. }) = self.nodes.get_mut(i)
+            {
+                tasks.append(&mut moved);
+            }
+            for i in drop_at.into_iter().rev() {
+                self.nodes.remove(i);
+            }
+        }
+        found
     }
 
     /// Bytes a section's tasks occupy once written out, newlines included.

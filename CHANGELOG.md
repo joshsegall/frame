@@ -24,6 +24,18 @@ All notable changes to frame will be documented in this file.
 
   It measures `## Backlog` plus `## Parked`, not file size. Done is excluded because `[clean]` already bounds it, and bounds it by oscillating between the two `done_bytes` settings: a whole-file measure would inherit that swing, warning just before a clean and going quiet just after one with the open work untouched.
 
+- **`fr check` errors on a duplicate section, and the next write merges it.** A track carrying two `## Done` headings hides everything in the second: `Track::section_tasks` returns the first, and about a hundred call sites are built on it — archiving, section reconciliation, the byte accounting, the TUI's section rendering. The tasks stay findable by ID, so the file looks fine while 150 done tasks quietly stop being archivable, and it round-trips byte-identically so it never heals on its own.
+
+  Found in a real project and traced: a merge commit six weeks before frame's merge driver existed, whose two parents each had one `## Done`. Re-running that merge reproduces it exactly.
+
+  The repair is on the write path rather than in `serialize_track` — which stays a pure function of the model, so the parse/serialize pair keeps round-tripping — and not at parse, so `fr check` can still report what is actually on disk. Tasks move in file order; the redundant heading goes; literal content between the sections stays where it is.
+
+- **`fr check` errors on a `##` heading frame does not recognise**, in tracks, archives and the inbox alike. Reported even when nothing is behind it: in a track file the parser sends an unknown heading to literal text and every task line after it too, so the heading is a trapdoor rather than a decoration. `frame/archive/_tracks/` is exempt, being whole archived track files whose `## Backlog` is correct.
+
+- **`limits.note_repeat_bytes` (120) refuses an append that repeats text the note already holds.** `fr note` appends, and an agent that believes it replaces writes the whole note out again each round, so the note accumulates N copies of everything unchanged. Measured on a real project: one note reached eight copies of itself, 110 KB of its 139 KB, and 5.4% of all note text was duplication of this kind.
+
+  Paragraph blocks, exact text. Exact rather than fuzzy because the repetition is literally re-pasted, and because the failure mode of a similarity threshold is refusing a write that was fine. The error names `--replace`.
+
 ### Fixed
 
 - **`fr clean --dry-run` wrote the archive file.** The dry run skipped saving track files, but archiving writes the archive from inside its walk — deliberately, before the Done section is emptied, so a crash between the two loses nothing — and nothing about "don't save afterwards" reached that write. A preview therefore created `frame/archive/`, appended every task it was only supposed to be reporting, and logged recovery entries. The TUI's clean preview had it worse: it cloned the project to avoid mutating the real one, which does nothing about a write that goes straight to disk.

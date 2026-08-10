@@ -210,6 +210,10 @@ It flags **working-copy-local frame files leaking into git** — `frame/.state.j
 
 Check reports a file that git already **tracks** (needs `git rm --cached <path>` as well as a `.gitignore` line — ignore rules don't apply to files already in the index) and one that exists but **isn't ignored** (the next `git add -A` commits it). Projects outside git are skipped.
 
+It reports **a track with two sections of one kind** — two `## Done`, say — as an **error**. A line-by-line git merge of a track file produces this, and `Track::section_tasks` returns only the first, so everything in the second becomes invisible to archiving, section reconciliation and the roughly hundred call sites built on it, while remaining findable by ID. The file round-trips byte-identically, so it never heals on its own. **The next write merges the sections**, keeping every task in order — `fr check` itself is read-only and only reports it.
+
+It reports **a `##` heading frame does not recognise** as an error, even when nothing is behind it. In a track file the parser sends an unknown heading to literal text, and every task line after it goes the same way until the next heading frame knows — so the heading is a trapdoor, and the next task written under it stops being a task. In an archive or the inbox, which have no sections, a heading below the title ends the task list. `frame/archive/_tracks/` is exempt from the second rule: those are whole archived track files and their `## Backlog` is correct. No `--fix`: whether the heading is a mistake or the content behind it belongs somewhere else are both decisions about someone's writing.
+
 It flags **a track holding more open work than [`limits.track_warn_bytes`](concepts.md#limits)**, as one line per track:
 
 ```
@@ -419,6 +423,16 @@ fr note EFF-014 "Superseded by the design doc" --replace
 ```
 
 Refused if the result would exceed [`limits.note_max_bytes`](concepts.md#limits) (16 KB by default) *and* be longer than the note already is. Since appending can only lengthen a note, an append onto a note that is already over the limit is always refused — which is the point, as appending is how notes get that size. Nothing is written when a write is refused; the text is still yours to shorten and retry.
+
+Also refused if the appended text repeats a paragraph the note already holds (`limits.note_repeat_bytes`, 120 bytes by default) — the signature of an append that was meant to be a replacement:
+
+```
+error: MAI-b7 note already contains this text (663B):
+         "Spec unique-types.md §3.4a: `val y* = x` (x owned unique) moves x…"
+       nothing was written — `fr note` appends. If you meant to replace the note,
+       use `fr note MAI-b7 "…" --replace`; if you meant to add to it, leave out
+       what is already there
+```
 
 A note that predates the limit keeps working and can be edited down in as many passes as you like: any write that leaves it shorter than it was is allowed, whether or not the result is under the limit. There is no `--force` — set `note_max_bytes = "off"` if you do not want the limit.
 

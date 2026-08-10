@@ -245,6 +245,26 @@ pub fn load_archives(
 /// Save a track file back to disk
 pub fn save_track(frame_dir: &Path, file_path: &str, track: &Track) -> Result<(), ProjectError> {
     let full_path = frame_dir.join(file_path);
+    // A track carrying two sections of one kind is healed on its way out, by
+    // whatever write happens to come next.
+    //
+    // **Here and not in `serialize_track`**, which stays a pure function of the
+    // model so the parse/serialize pair keeps round-tripping — the property
+    // suites test that pair, and a repair hidden inside it would mean a damaged
+    // fixture no longer survives parse → serialize. **Here and not at parse**,
+    // so `fr check` still sees, and can report, what is actually on disk.
+    //
+    // The clone is paid only by a damaged track; the check is a walk of the
+    // node list.
+    let healed;
+    let track = if track.has_duplicate_sections() {
+        let mut copy = track.clone();
+        copy.merge_duplicate_sections();
+        healed = copy;
+        &healed
+    } else {
+        track
+    };
     let content = crate::parse::serialize_track(track);
     if let Err(e) = crate::io::recovery::atomic_write(&full_path, content.as_bytes()) {
         crate::io::recovery::log_recovery(

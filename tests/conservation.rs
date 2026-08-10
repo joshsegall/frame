@@ -487,7 +487,8 @@ fn apply_op(project: &mut Project, op: &Op, step: usize) -> Licensed {
             }
             let (track_id, id) = all[task % all.len()].clone();
             if let Some((_, track)) = project.tracks.iter_mut().find(|(t, _)| *t == track_id) {
-                let _ = task_ops::set_note(track, &id, text.clone(), None);
+                let _ =
+                    task_ops::set_note(track, &id, text.clone(), task_ops::NoteLimits::default());
             }
         }
         Op::EditTitle { task, title } => {

@@ -341,6 +341,73 @@ const CASES: &[Case] = &[
         repair: Repair::None,
     },
     Case {
+        name: "duplicate-section",
+        provenance: "a line-by-line git merge of a track file. Observed in a real \
+                     project: a merge commit six weeks before frame's merge driver \
+                     existed, whose two parents each had one `## Done`, produced a \
+                     file with two — re-running that merge reproduces it exactly. \
+                     The second section's tasks stay findable by ID but vanish from \
+                     `section_tasks`, so archiving and every section operation stop \
+                     seeing them",
+        covers: &["duplicate_section"],
+        build: |root| {
+            let path = track_path(root);
+            let text = fs::read_to_string(&path).unwrap();
+            fs::write(
+                &path,
+                format!(
+                    "{text}\n## Done\n\n- [x] `M-004` Hidden behind a second heading\n  \
+                     - added: 2026-01-01\n  - resolved: 2026-01-02\n"
+                ),
+            )
+            .unwrap();
+            Built::Ok
+        },
+        expect: &[error(
+            "duplicate_section",
+            &[
+                ("track_id", Match::Eq("main")),
+                ("section", Match::Eq("done")),
+                ("count", Match::Eq("2")),
+                ("hidden_tasks", Match::Eq("1")),
+            ],
+        )],
+        // Repaired by the next write rather than by `--fix`: see
+        // `io::project_io::save_track`. `--fix` writes nothing for it, so from
+        // this table's point of view it repairs nothing.
+        repair: Repair::None,
+    },
+    Case {
+        name: "unknown-section-heading",
+        provenance: "a heading someone added by hand, or one a merge invented. The \
+                     parser has nowhere to put it, so it becomes literal text — and \
+                     so does every task line behind it, until the next heading frame \
+                     recognises. The heading is a trapdoor rather than a decoration",
+        covers: &["unknown_section_heading"],
+        build: |root| {
+            let path = track_path(root);
+            let text = fs::read_to_string(&path).unwrap();
+            fs::write(
+                &path,
+                format!(
+                    "{text}\n## Someday\n\n- [ ] `M-004` Swallowed by the heading above\n  \
+                     - added: 2026-01-01\n"
+                ),
+            )
+            .unwrap();
+            Built::Ok
+        },
+        expect: &[error(
+            "unknown_section_heading",
+            &[
+                ("track_id", Match::Eq("main")),
+                ("heading", Match::Eq("Someday")),
+                ("stranded_tasks", Match::Eq("1")),
+            ],
+        )],
+        repair: Repair::None,
+    },
+    Case {
         name: "oversize-track",
         provenance: "a track accumulated more open work than one track should hold \
                      — not damage, and nothing here is malformed: the finding is \
