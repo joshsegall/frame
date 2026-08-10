@@ -210,6 +210,16 @@ It flags **working-copy-local frame files leaking into git** — `frame/.state.j
 
 Check reports a file that git already **tracks** (needs `git rm --cached <path>` as well as a `.gitignore` line — ignore rules don't apply to files already in the index) and one that exists but **isn't ignored** (the next `git add -A` commits it). Projects outside git are skipped.
 
+It flags **a track holding more open work than [`limits.track_warn_bytes`](concepts.md#limits)**, as one line per track:
+
+```
+warning: backend — 1.5MB of open work exceeds the 512KB limit (file is 3.0MB) — consider splitting the track or closing work
+```
+
+It names no individual task, deliberately: no single task is the problem, the aggregate is, and the remedy is splitting the track or closing work rather than editing any one of them. The measure is `## Backlog` plus `## Parked` — Done is excluded because [`[clean]`](concepts.md#clean) already bounds it automatically, and does so by swinging between `done_bytes_retain` and `done_bytes_threshold`; a warning that counted that swing would fire before a clean and clear after one with the open work untouched. The file size is shown for context and decides nothing. No `--fix`: open work cannot be archived, and how much of it belongs in one track is not frame's judgement to make.
+
+An **oversize note is not reported at all.** `limits.note_max_bytes` is a guardrail on frame's own commands, not an invariant on the file, and a note that predates the limit is a supported state rather than damage.
+
 It reports **unclaimed rescue copies**: files the TUI could not save and dumped into `frame/.rescue/` at exit (see [TUI save failures](tui.md)). The exit message names that directory once, on a terminal that is usually closed shortly afterwards — so without this the copies sit there being the only version of that work with nobody looking. A warning, and with no repair: moving a copy into place would overwrite a live file that may be newer, and deleting it destroys the thing the directory exists to protect. Clearing the directory clears the warning.
 
 It reports an **interrupted operation**: a multi-file operation that started and did not finish, recorded in `frame/.inflight`. Normally the next write command completes it and clears the marker, so seeing this means either nothing has been written since, or recovery declined to act because a precondition no longer held. See [Multi-file writes](architecture.md) and `fr recovery` for the detail.
@@ -401,11 +411,16 @@ Adding validates the dependency task exists.
 
 ### `fr note ID TEXT`
 
-Set a task's note (replaces existing).
+Add to a task's note. **Appends by default**, separated by a blank line; `--replace` overwrites instead.
 
 ```
 fr note EFF-014 "Found while working on closures"
+fr note EFF-014 "Superseded by the design doc" --replace
 ```
+
+Refused if the result would exceed [`limits.note_max_bytes`](concepts.md#limits) (16 KB by default) *and* be longer than the note already is. Since appending can only lengthen a note, an append onto a note that is already over the limit is always refused — which is the point, as appending is how notes get that size. Nothing is written when a write is refused; the text is still yours to shorten and retry.
+
+A note that predates the limit keeps working and can be edited down in as many passes as you like: any write that leaves it shorter than it was is allowed, whether or not the result is under the limit. There is no `--force` — set `note_max_bytes = "off"` if you do not want the limit.
 
 ### `fr ref ID ACTION PATH...`
 ### `fr spec ID ACTION PATH...`
@@ -625,7 +640,7 @@ Actions performed:
 - Add missing `added` dates
 - Add missing `resolved` dates to done tasks
 - Resolve duplicate IDs — the first occurrence in track order keeps the ID. A duplicated **subtask** is renumbered under its own parent (`M-003.3` → `M-003.4`), not given a top-level number, so its ID keeps saying where it lives. This is the resolution path for the one ID collision the frontier doesn't prevent: two worktrees of a clone adding a subtask to the same parent.
-- Archive done tasks exceeding the threshold
+- Archive done tasks exceeding either archival threshold — `done_threshold` (how many) or `done_bytes_threshold` (how much text). Whichever trips, the drain goes down to the corresponding retain level rather than back to the trigger; see [`[clean]`](concepts.md#clean).
 - Move top-level tasks into the section matching their state
 - Report dangling dependencies and broken refs
 - Report tasks whose fields are out of [canonical order](format.md#field-order) — counted, not changed, unless `--normalize` is given
@@ -645,6 +660,16 @@ IDs assigned or reassigned by a real (non-`--dry-run`) clean are minted in this 
   "normalize": false,
   "ids_assigned": [{ "track_id": "main", "assigned_id": "M-002", "title": "No id at all" }],
   "dangling_deps": [{ "track_id": "main", "task_id": "M-001", "dep_id": "M-404" }],
+  "tasks_archived": [{ "track_id": "main", "task_id": "M-007", "title": "Old work" }],
+  "archived_by_track": [{
+    "track_id": "main",
+    "reason": "bytes",
+    "tasks": 163,
+    "done_bytes_before": 1582399,
+    "done_bytes_after": 62410,
+    "done_bytes_threshold": 262144,
+    "archive_path": "frame/archive/main.md"
+  }],
   "field_order": {
     "reordered": [{ "track_id": "main", "task": "M-001", "was": ["added", "note", "dep"], "now": ["added", "dep", "note"] }],
     "skipped": []
@@ -653,6 +678,8 @@ IDs assigned or reassigned by a real (non-`--dry-run`) clean are minted in this 
 ```
 
 The flags carry what the arrays cannot. `dry_run` is whether anything was written. `normalize` is what `field_order.reordered` *means*: with it those tasks were rewritten, without it they were only found. A consumer that ignores it reads a preview as a result. The document is printed after the write succeeds, so a run that failed to save prints nothing.
+
+`archived_by_track` is one row per track that archived anything, answering what a flat list of task IDs cannot: which limit tripped (`reason` is `"count"`, `"bytes"` or `"both"`) and whether it helped. `done_bytes_after` matters for the one case draining cannot fix — a retained task larger than `done_bytes_retain` leaves the section over budget however much is archived around it, and without the number every later clean would look like it had quietly done nothing. The human output says the same thing in one line per track, and prints the task-by-task list only when ten or fewer moved.
 
 #### `fr clean --normalize`
 

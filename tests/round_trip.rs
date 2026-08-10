@@ -182,8 +182,13 @@ fn rewriting_a_task_with_an_unclosed_fence_note_preserves_the_track() {
     let mut track = parse_track(&source);
 
     // A real edit to the offending task — this is what `fr note` does.
-    frame::ops::task_ops::set_note(&mut track, "UF-001", "Example:\n```\nand more".to_string())
-        .unwrap();
+    frame::ops::task_ops::set_note(
+        &mut track,
+        "UF-001",
+        "Example:\n```\nand more".to_string(),
+        None,
+    )
+    .unwrap();
 
     let output = serialize_track(&track);
     let reparsed = parse_track(&output);

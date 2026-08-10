@@ -341,6 +341,38 @@ const CASES: &[Case] = &[
         repair: Repair::None,
     },
     Case {
+        name: "oversize-track",
+        provenance: "a track accumulated more open work than one track should hold \
+                     — not damage, and nothing here is malformed: the finding is \
+                     advisory and the remedy (split the track, or close some work) \
+                     is a judgement no repair can make. The case tightens \
+                     `limits.track_warn_bytes` rather than writing half a megabyte \
+                     of fixture, which is the same condition at a workable size",
+        covers: &["oversize_track"],
+        build: |root| {
+            let toml_path = root.join("frame/project.toml");
+            let text = fs::read_to_string(&toml_path).unwrap();
+            fs::write(
+                &toml_path,
+                format!("{text}\n[limits]\ntrack_warn_bytes = 512\n"),
+            )
+            .unwrap();
+            append_backlog(
+                root,
+                &format!(
+                    "- [ ] `M-004` Carries a long note\n  - added: 2026-01-01\n  - note:\n    {}\n",
+                    "x".repeat(800)
+                ),
+            );
+            Built::Ok
+        },
+        expect: &[warning(
+            "oversize_track",
+            &[("track_id", Match::Eq("main"))],
+        )],
+        repair: Repair::None,
+    },
+    Case {
         name: "broken-ref",
         provenance: "the file was moved or renamed after the task referenced it",
         covers: &["broken_ref"],

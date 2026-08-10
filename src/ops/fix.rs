@@ -1162,6 +1162,7 @@ mod tests {
                 },
                 ui: UiConfig::default(),
                 recovery: Default::default(),
+                limits: Default::default(),
             },
             tracks: tracks
                 .into_iter()

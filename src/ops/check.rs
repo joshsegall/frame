@@ -216,6 +216,35 @@ pub enum CheckWarning {
     /// than project content.
     #[serde(rename = "merge_driver_unregistered")]
     MergeDriverUnregistered,
+    /// A track holds more open work than `limits.track_warn_bytes` allows for.
+    ///
+    /// **One finding per track, and it names no tasks.** The per-task version of
+    /// this was tried on paper and discarded: a project that has been running a
+    /// while has dozens of long notes, and a list of them is a wall nobody reads
+    /// twice. There is also nothing per-task to *do* here — no individual note
+    /// is the problem, the aggregate is, and the remedy is splitting the track
+    /// or closing work rather than editing any one task.
+    ///
+    /// **Live content, not file size.** `live_bytes` is `## Backlog` plus
+    /// `## Parked`; Done is excluded because `[clean]` bounds it automatically
+    /// and does so by oscillating between `done_bytes_retain` and
+    /// `done_bytes_threshold`. Folding that swing in would mean the same track
+    /// warns before a clean and goes quiet after one with the open work
+    /// untouched — a warning that answers to the archiver's schedule rather
+    /// than to anything its reader did. `file_bytes` rides along for context and
+    /// decides nothing.
+    ///
+    /// Advisory, and no `--fix`: open work cannot be archived, and how much of
+    /// it belongs in one track is a judgement frame is in no position to make.
+    #[serde(rename = "oversize_track")]
+    OversizeTrack {
+        track_id: String,
+        /// `## Backlog` + `## Parked`. The measure the limit is against.
+        live_bytes: usize,
+        /// The whole file, live and done together. Context only.
+        file_bytes: usize,
+        limit_bytes: usize,
+    },
     /// A task note leaves a code fence open. Frame parses the note correctly
     /// either way — note extent is bound by indentation, not fence state — but
     /// markdown renderers will swallow the rest of the file into a code block.
@@ -498,6 +527,41 @@ pub enum CheckInfo {
 // Main check entry point
 // ---------------------------------------------------------------------------
 
+/// Warn on tracks holding more open work than `limits.track_warn_bytes`.
+///
+/// See [`CheckWarning::OversizeTrack`] for why this measures live content and
+/// says nothing about individual tasks.
+fn check_track_sizes(project: &Project, result: &mut CheckResult) {
+    let Some(limit) = project.config.limits.track_warn_bytes else {
+        return;
+    };
+    let limit_bytes = limit.bytes() as usize;
+    for (track_id, track) in &project.tracks {
+        let live_bytes = track.live_bytes();
+        if live_bytes <= limit_bytes {
+            continue;
+        }
+        // Off disk rather than off the model: this is the number a human sees
+        // in a file listing, and it is context rather than the trigger, so it
+        // should match what they would see there. Absent if the file cannot be
+        // read, which every other check already reports on.
+        let file_bytes = project
+            .config
+            .tracks
+            .iter()
+            .find(|tc| &tc.id == track_id)
+            .and_then(|tc| std::fs::metadata(project.frame_dir.join(&tc.file)).ok())
+            .map(|m| m.len() as usize)
+            .unwrap_or(live_bytes);
+        result.warnings.push(CheckWarning::OversizeTrack {
+            track_id: track_id.clone(),
+            live_bytes,
+            file_bytes,
+            limit_bytes,
+        });
+    }
+}
+
 /// Validate a project and return structured results.
 ///
 /// This is a read-only operation — it does not modify the project.
@@ -561,6 +625,9 @@ pub fn check_project(project: &Project) -> CheckResult {
     if let Some(ref inbox) = project.inbox {
         check_inbox(inbox, &mut result);
     }
+
+    // Tracks carrying more open work than one track should.
+    check_track_sizes(project, &mut result);
 
     // Does the recovery log actually hold the other side of each conflict?
     resolve_conflict_evidence(&project.frame_dir, &mut result);
@@ -1611,6 +1678,7 @@ mod tests {
             },
             ui: UiConfig::default(),
             recovery: Default::default(),
+            limits: Default::default(),
         }
     }
 

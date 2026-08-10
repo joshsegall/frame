@@ -17,6 +17,8 @@ pub struct ProjectConfig {
     pub ui: UiConfig,
     #[serde(default)]
     pub recovery: RecoveryConfig,
+    #[serde(default)]
+    pub limits: LimitsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +66,35 @@ pub struct CleanConfig {
     /// Default: see src/templates/project.toml
     #[serde(default = "default_done_retain")]
     pub done_retain: usize,
+    /// Bytes of done tasks a track may hold before archiving is considered.
+    ///
+    /// A parallel trigger to `done_threshold`, not a replacement: the count
+    /// trigger cannot see that 173 done tasks averaging 9 KB are a different
+    /// proposition from 173 one-liners, and a track whose notes run long
+    /// outgrows every practical file size long before it reaches 100 of them.
+    ///
+    /// The default is deliberately the same statement as `done_threshold` for
+    /// a project whose notes are ordinary — at the ~2.7 KB median a real
+    /// project produces, 100 done tasks *is* about 256 KB. The two agree on a
+    /// healthy track and diverge exactly where the count is blind.
+    ///
+    /// `"off"` (or `0`) disables the byte trigger, leaving the count alone.
+    #[serde(
+        default = "default_done_bytes_threshold",
+        deserialize_with = "de_limit"
+    )]
+    pub done_bytes_threshold: Option<ByteSize>,
+    /// What a byte-triggered archive drains down to, not the level it stops at.
+    ///
+    /// The gap between this and `done_bytes_threshold` is hysteresis, and it is
+    /// load-bearing: draining only to the trigger would archive one task per
+    /// clean forever. It mirrors the count rule, which triggers at 100 and
+    /// drains to 10.
+    ///
+    /// `done_retain` still floors this — the newest handful of done tasks stay
+    /// in the track whatever the arithmetic says.
+    #[serde(default = "default_done_bytes_retain", deserialize_with = "de_limit")]
+    pub done_bytes_retain: Option<ByteSize>,
     /// Default: see src/templates/project.toml
     #[serde(default = "default_true")]
     pub archive_per_track: bool,
@@ -75,7 +106,118 @@ impl Default for CleanConfig {
             auto_clean: true,
             done_threshold: 100,
             done_retain: 10,
+            done_bytes_threshold: default_done_bytes_threshold(),
+            done_bytes_retain: default_done_bytes_retain(),
             archive_per_track: true,
+        }
+    }
+}
+
+/// Limits on how large frame will let its own commands make things.
+///
+/// **A guardrail on authoring, not an invariant on the file.** Markdown is the
+/// source of truth and stays hand-editable, and `fr import` is exempt because
+/// it is how pre-existing content enters frame. Neither is a hole to be closed
+/// later: a project that already holds an oversize note is a supported state,
+/// and `fr check` does not report one as damage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LimitsConfig {
+    /// The largest note frame's own commands will *grow* a note to.
+    ///
+    /// Enforcement is non-increasing rather than absolute: a write is refused
+    /// only if it would leave the note both over the limit and larger than it
+    /// already was. An existing 148 KB note is therefore never touched, never
+    /// truncated and never blocks the operations that do not lengthen it — and
+    /// it can still be edited down, in as many passes as it takes, because a
+    /// shrinking write is always legal. An absolute check would leave no path
+    /// off a note that big except one edit landing under the limit in a single
+    /// shot.
+    ///
+    /// `"off"` (or `0`) disables the limit.
+    #[serde(default = "default_note_max_bytes", deserialize_with = "de_limit")]
+    pub note_max_bytes: Option<ByteSize>,
+    /// Live content — `## Backlog` plus `## Parked` — past which `fr check`
+    /// warns that a track holds too much open work.
+    ///
+    /// **Live content, not file size, and the distinction is the design.** Done
+    /// is excluded because `[clean]` already bounds it automatically, and by
+    /// design it *oscillates*: it triggers at `done_bytes_threshold` and drains
+    /// to `done_bytes_retain`, so it swings across that whole band in normal
+    /// operation. A whole-file measure inherits the band as slop — the same
+    /// track warns at 520 KB just before a clean and sits quiet at 334 KB just
+    /// after, with identical open work, and the warning clears itself with no
+    /// human action. Measuring only the term nothing auto-remediates keeps the
+    /// signal about the one thing a human can act on.
+    ///
+    /// `"off"` (or `0`) disables the warning.
+    #[serde(default = "default_track_warn_bytes", deserialize_with = "de_limit")]
+    pub track_warn_bytes: Option<ByteSize>,
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        LimitsConfig {
+            note_max_bytes: default_note_max_bytes(),
+            track_warn_bytes: default_track_warn_bytes(),
+        }
+    }
+}
+
+/// 16 KB. Around p93 of the notes in a real long-running project: high enough
+/// that a dated investigation record with file:line citations — the thing a
+/// note is for, and which runs 2–6 KB — is nowhere near it, low enough to stop
+/// the class of note that has stopped being a record and become a document.
+fn default_note_max_bytes() -> Option<ByteSize> {
+    Some(ByteSize(16 * 1024))
+}
+
+/// 512 KB of open work. At a ~2.7 KB median note that is roughly 190 live
+/// tasks in one track, which is a defensible "this wants splitting" mark on its
+/// own terms rather than a fit to any one project's numbers.
+fn default_track_warn_bytes() -> Option<ByteSize> {
+    Some(ByteSize(512 * 1024))
+}
+
+/// 256 KB. See [`CleanConfig::done_bytes_threshold`].
+fn default_done_bytes_threshold() -> Option<ByteSize> {
+    Some(ByteSize(256 * 1024))
+}
+
+/// 64 KB. See [`CleanConfig::done_bytes_retain`].
+fn default_done_bytes_retain() -> Option<ByteSize> {
+    Some(ByteSize(64 * 1024))
+}
+
+/// A limit that may be switched off, where [`ByteSize`] alone may not be.
+///
+/// `ByteSize` rejects zero outright, for a reason that belongs to the recovery
+/// log: a max size of zero there would trim on every write, so it is always a
+/// mistake. For a limit, off is a legitimate thing to ask for — these refuse
+/// writes and warn, and there is no `--force`, so the config *is* the escape
+/// hatch. `0`, `"0"` and `"off"` all mean off; anything else parses as a size.
+fn de_limit<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<ByteSize>, D::Error> {
+    use serde::de::Error;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Int(i64),
+        Text(String),
+    }
+    match Option::<Raw>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(Raw::Int(0)) => Ok(None),
+        Some(Raw::Int(n)) if n > 0 => Ok(Some(ByteSize(n as u64))),
+        Some(Raw::Int(n)) => Err(D::Error::custom(format!(
+            "invalid limit {n}: must be a positive number of bytes, or 0 / \"off\" to disable"
+        ))),
+        Some(Raw::Text(s)) => {
+            let t = s.trim();
+            if t.eq_ignore_ascii_case("off") || t.eq_ignore_ascii_case("none") || t == "0" {
+                return Ok(None);
+            }
+            ByteSize::parse(t).map(Some).map_err(D::Error::custom)
         }
     }
 }
@@ -173,6 +315,35 @@ pub struct ByteSize(pub u64);
 impl ByteSize {
     pub fn bytes(self) -> u64 {
         self.0
+    }
+
+    /// A rounded size for prose — `19.6KB`, `1.5MB`, `512B`.
+    ///
+    /// Separate from [`Display`](std::fmt::Display), which is exact and is how a
+    /// configured value is echoed back: it falls through to raw bytes for
+    /// anything not a whole multiple of its unit, so a *measured* size prints as
+    /// `20024B` next to a configured `16KB` and the reader has to do the
+    /// division themselves. Measurements are almost never round; limits almost
+    /// always are. Reporting surfaces want this one.
+    pub fn human(self) -> String {
+        const K: f64 = 1024.0;
+        let b = self.0 as f64;
+        let (value, unit) = if b >= K * K * K {
+            (b / (K * K * K), "GB")
+        } else if b >= K * K {
+            (b / (K * K), "MB")
+        } else if b >= K {
+            (b / K, "KB")
+        } else {
+            return format!("{}B", self.0);
+        };
+        // One decimal, but not a bare `.0` — `16KB` reads better than `16.0KB`,
+        // and a limit is usually exact.
+        if (value.round() - value).abs() < 0.05 {
+            format!("{:.0}{}", value, unit)
+        } else {
+            format!("{:.1}{}", value, unit)
+        }
     }
 
     /// Parse `"5MB"`, `"5 mb"`, `"5MiB"`, or a bare `"5242880"`.

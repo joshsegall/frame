@@ -4,6 +4,32 @@ All notable changes to frame will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- **A hard limit on note size, `limits.note_max_bytes` (16 KB).** Frame's own commands will not grow a note past it. Found on a project whose largest track file had reached 3 MB: 93% of it was note bodies, no single task dominated, and there was no bug — notes had simply accumulated, most of the largest being per-task copies of standing process rather than anything about the task.
+
+  **Enforced non-increasing rather than absolutely.** A write is refused only if it would leave the note both over the limit *and* larger than it already was. So a note that predates the limit is never touched, never truncated, and never blocks operations that do not lengthen it — and it can still be edited down, in as many passes as it takes, because a shrinking write is always legal. An absolute check would make the only legal edit to a 148 KB note one landing under the limit in a single shot, trapping exactly the notes the limit exists to discourage.
+
+  In the TUI the rule is enforced at the keystroke: the note field caps at `max(limit, length when opened)`, so an oversize note opens intact and can only shrink, and a paste that will not fit is rejected whole rather than clipped — keeping its first N bytes would silently discard the tail. Nothing typed is ever discarded at save time.
+
+  There is no `--force`; `note_max_bytes = "off"` is the escape hatch. `fr import` is exempt, because importing is how content that predates a limit gets in, and `fr check` does not report an oversize note as damage: this is a guardrail on authoring, not an invariant on the file.
+
+- **Size-based archiving, `clean.done_bytes_threshold` (256 KB) and `done_bytes_retain` (64 KB).** A second, independent trigger alongside `done_threshold`. The count trigger cannot tell 173 done tasks averaging 9 KB from 173 one-liners, which is how a track carrying 1.5 MB of finished work sat under a threshold of 250 and never archived anything.
+
+  The defaults are close to the same statement for ordinary notes — at a typical note length 100 done tasks is roughly 256 KB — so they agree on a healthy track and diverge only where the count was blind. Whichever trips, the drain goes to the retain level rather than back to the trigger; that gap is hysteresis, and without it a track archives one task per clean for ever. `done_retain` floors the byte drain, so if a retained task is on its own larger than `done_bytes_retain` the section stays over budget and clean says so.
+
+  `fr clean` gains a per-track summary in both surfaces: one human line per track naming the trigger and the before/after size, and `archived_by_track` in `--json`. The task-by-task list is printed only when ten or fewer moved.
+
+- **`fr check` warns on a track holding too much open work**, past `limits.track_warn_bytes` (512 KB). One line per track, naming no individual task — no single task is the problem, the aggregate is.
+
+  It measures `## Backlog` plus `## Parked`, not file size. Done is excluded because `[clean]` already bounds it, and bounds it by oscillating between the two `done_bytes` settings: a whole-file measure would inherit that swing, warning just before a clean and going quiet just after one with the open work untouched.
+
+### Fixed
+
+- **`fr clean --dry-run` wrote the archive file.** The dry run skipped saving track files, but archiving writes the archive from inside its walk — deliberately, before the Done section is emptied, so a crash between the two loses nothing — and nothing about "don't save afterwards" reached that write. A preview therefore created `frame/archive/`, appended every task it was only supposed to be reporting, and logged recovery entries. The TUI's clean preview had it worse: it cloned the project to avoid mutating the real one, which does nothing about a write that goes straight to disk.
+
+  Latent until now because archiving rarely triggered; the byte trigger above would have made it routine, on the command you would reach for first to see what the new trigger was about to do.
+
 ### Changed
 
 - **Task fields have a canonical order**, used by the markdown, `fr show`, `--json` and the TUI Detail view alike: `conflict`, `added`, `resolved`, `dep`, `spec`, `ref`, `note`. Short fields first, the note last, because a note has no length bound and anything after one is past the fold.

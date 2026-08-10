@@ -1167,6 +1167,7 @@ mod cross_track_dep_tests {
             ids,
             ui: UiConfig::default(),
             recovery: Default::default(),
+            limits: Default::default(),
         };
         let project = crate::model::project::Project {
             root: dir.to_path_buf(),

@@ -1279,6 +1279,126 @@ fn test_note_append() {
     );
 }
 
+/// Set `limits.note_max_bytes` on a project the helpers just built.
+fn set_note_limit(root: &Path, value: &str) {
+    let path = root.join("frame/project.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    fs::write(
+        &path,
+        format!("{text}\n[limits]\nnote_max_bytes = {value}\n"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn note_over_the_limit_is_refused_and_writes_nothing() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    set_note_limit(tmp.path(), "200");
+
+    let (_, stderr, ok) = run_fr(tmp.path(), &["note", "M-001", &"x".repeat(300)]);
+    assert!(!ok, "an over-limit note should exit non-zero");
+    assert!(
+        stderr.contains("note_max_bytes"),
+        "the message should name the knob: {stderr}"
+    );
+
+    let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    assert!(
+        !track.contains("xxx"),
+        "a refused write must leave the file untouched"
+    );
+}
+
+/// Appending is how notes get large, so an append that would cross the limit is
+/// refused even though each piece on its own is small.
+#[test]
+fn note_append_that_would_cross_the_limit_is_refused() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    set_note_limit(tmp.path(), "200");
+
+    run_fr_ok(tmp.path(), &["note", "M-001", &"a".repeat(150)]);
+    let (_, _, ok) = run_fr(tmp.path(), &["note", "M-001", &"b".repeat(100)]);
+    assert!(!ok, "the append crosses 200 bytes and should be refused");
+
+    let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    assert!(track.contains(&"a".repeat(150)), "the first note survives");
+    assert!(!track.contains("bbb"), "the refused append wrote nothing");
+}
+
+/// The case an absolute `new_len <= limit` check would get wrong, and the reason
+/// the rule is non-increasing: a note that predates the limit must stay
+/// editable, and must be reachable in more than one pass. Lowering the limit
+/// under an existing note is exactly how every project meets this feature.
+#[test]
+fn a_note_already_over_the_limit_can_still_be_shortened() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    // Written while the limit is generous...
+    set_note_limit(tmp.path(), "4000");
+    run_fr_ok(tmp.path(), &["note", "M-001", &"x".repeat(3000)]);
+
+    // ...then the limit drops well below it.
+    let path = tmp.path().join("frame/project.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    fs::write(
+        &path,
+        text.replace("note_max_bytes = 4000", "note_max_bytes = 200"),
+    )
+    .unwrap();
+
+    // Growing it is refused.
+    let (_, _, grew) = run_fr(tmp.path(), &["note", "M-001", "more"]);
+    assert!(!grew, "an over-limit note must not be grown");
+
+    // Shrinking it is allowed even though the result is still over the limit —
+    // otherwise the only legal edit is one that lands under 200 bytes in a
+    // single shot, and a long note could never be worked down.
+    run_fr_ok(
+        tmp.path(),
+        &["note", "M-001", &"y".repeat(1000), "--replace"],
+    );
+    let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    assert!(track.contains(&"y".repeat(1000)), "the shrink should land");
+    assert!(!track.contains("xxx"), "the long note should be gone");
+
+    // And the rest of the way down, under the limit, still works.
+    run_fr_ok(tmp.path(), &["note", "M-001", "short", "--replace"]);
+}
+
+#[test]
+fn note_limit_can_be_switched_off() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    set_note_limit(tmp.path(), "\"off\"");
+
+    run_fr_ok(tmp.path(), &["note", "M-001", &"x".repeat(50_000)]);
+    let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    assert!(track.contains(&"x".repeat(50_000)));
+}
+
+/// Operations that do not lengthen the note must not be caught by the limit.
+#[test]
+fn an_oversize_note_does_not_block_other_edits() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    set_note_limit(tmp.path(), "\"off\"");
+    run_fr_ok(tmp.path(), &["note", "M-001", &"x".repeat(5000)]);
+
+    let path = tmp.path().join("frame/project.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    fs::write(
+        &path,
+        text.replace("note_max_bytes = \"off\"", "note_max_bytes = 100"),
+    )
+    .unwrap();
+
+    run_fr_ok(tmp.path(), &["state", "M-001", "done"]);
+    run_fr_ok(tmp.path(), &["check"]);
+}
+
 #[test]
 fn test_note_replace() {
     let tmp = tempfile::TempDir::new().unwrap();

@@ -2013,8 +2013,110 @@ pub(super) fn detail_jump_to_region_and_edit(
     detail_enter_edit(app, cursor_at_end);
 }
 
+/// The byte cap on the note field currently being edited, if one applies.
+///
+/// `max(limit, original)` — the CLI's non-increasing rule, solved for a field
+/// edited a keystroke at a time. The `original` term is what lets a
+/// grandfathered 148 KB note open in the editor whole rather than arriving
+/// truncated; from there it can only be made shorter.
+///
+/// Task notes only. An inbox item's body travels the same multiline editor but
+/// is not a note, and `limits.note_max_bytes` does not claim it.
+fn note_cap(app: &App) -> Option<usize> {
+    if app.inbox_note_index.is_some() {
+        return None;
+    }
+    let ds = app.detail_state.as_ref()?;
+    if !ds.editing || ds.region != DetailRegion::Note {
+        return None;
+    }
+    let limit = app.project.config.limits.note_max_bytes?.bytes() as usize;
+    Some(crate::ops::task_ops::note_input_cap(
+        ds.edit_original.len(),
+        Some(limit),
+    ))
+}
+
+/// State captured before a note edit, so an edit that would overrun the cap can
+/// be put back.
+///
+/// **Revert-after rather than check-before, and deliberately.** Roughly forty
+/// sites mutate the note buffer — typing, both pastes, tab-indent, autocomplete,
+/// and a long tail of deletions and movements that cannot grow it. Auditing
+/// which of those can lengthen the buffer is exactly the kind of list that is
+/// right today and wrong after the next edit-mode feature; measuring the buffer
+/// either side of the whole handler cannot miss one. The cost is a clone per
+/// keystroke while a note is open, which even at 148 KB is microseconds.
+pub(super) struct NoteCapGuard {
+    cap: usize,
+    buffer: String,
+    cursor_line: usize,
+    cursor_col: usize,
+    mark: Option<crate::tui::app::EditHistoryMark>,
+}
+
+impl NoteCapGuard {
+    pub(super) fn before(app: &App) -> Option<NoteCapGuard> {
+        let cap = note_cap(app)?;
+        let ds = app.detail_state.as_ref()?;
+        Some(NoteCapGuard {
+            cap,
+            buffer: ds.edit_buffer.clone(),
+            cursor_line: ds.edit_cursor_line,
+            cursor_col: ds.edit_cursor_col,
+            mark: app.edit_history.as_ref().map(|eh| eh.mark()),
+        })
+    }
+
+    /// Put the buffer back if the operation overran the cap, and say why.
+    pub(super) fn enforce(self, app: &mut App) {
+        let overran = app
+            .detail_state
+            .as_ref()
+            .is_some_and(|ds| ds.edit_buffer.len() > self.cap && ds.edit_buffer != self.buffer);
+        if !overran {
+            return;
+        }
+        let added = app
+            .detail_state
+            .as_ref()
+            .map(|ds| ds.edit_buffer.len().saturating_sub(self.buffer.len()))
+            .unwrap_or(0);
+        let free = self.cap.saturating_sub(self.buffer.len());
+        if let Some(ds) = &mut app.detail_state {
+            ds.edit_buffer = self.buffer;
+            ds.edit_cursor_line = self.cursor_line;
+            ds.edit_cursor_col = self.cursor_col;
+        }
+        // The operation may have recorded itself before we undid it; drop that
+        // so undo/redo cannot walk back into a buffer the user never saw.
+        if let (Some(eh), Some(mark)) = (app.edit_history.as_mut(), self.mark) {
+            eh.rewind_to(mark);
+        }
+        use crate::model::config::ByteSize;
+        let cap = ByteSize(self.cap as u64).human();
+        app.status_message = Some(if added > 1 {
+            format!(
+                "note at limit ({cap}) — {} rejected, {} free",
+                ByteSize(added as u64).human(),
+                ByteSize(free as u64).human()
+            )
+        } else {
+            format!("note at limit ({cap})")
+        });
+    }
+}
+
 /// Handle multi-line editing (note field) in detail view
 pub(super) fn handle_detail_multiline_edit(app: &mut App, key: KeyEvent) {
+    let guard = NoteCapGuard::before(app);
+    handle_detail_multiline_edit_inner(app, key);
+    if let Some(guard) = guard {
+        guard.enforce(app);
+    }
+}
+
+fn handle_detail_multiline_edit_inner(app: &mut App, key: KeyEvent) {
     // Selection pre-pass: manage multiline_selection_anchor for movement keys
     let has_shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let is_movement = matches!(
@@ -3193,6 +3295,132 @@ mod tests {
     fn the_fixture_is_already_settled() {
         let app = app_in_detail_view(TRACK, "T-001");
         assert_eq!(track_text(&app), TRACK);
+    }
+
+    /// Open the note for editing with `limits.note_max_bytes` set to `limit`.
+    fn open_note_with_limit(limit: u64) -> App {
+        let mut app = open(DetailRegion::Note);
+        app.project.config.limits.note_max_bytes = Some(crate::model::config::ByteSize(limit));
+        detail_enter_edit(&mut app, true);
+        app
+    }
+
+    fn note_buffer(app: &App) -> &str {
+        app.detail_state.as_ref().map_or("", |ds| &ds.edit_buffer)
+    }
+
+    fn type_char(app: &mut App, c: char) {
+        handle_detail_multiline_edit(app, KeyEvent::from(KeyCode::Char(c)));
+    }
+
+    /// Typing stops at the cap instead of the save failing later — the field
+    /// refuses the character, so there is never text the user typed that frame
+    /// then declines to keep.
+    #[test]
+    fn typing_past_the_note_limit_is_refused_at_the_keystroke() {
+        let mut app = open_note_with_limit(40);
+        let before = note_buffer(&app).len();
+        assert!(before < 40, "fixture note should start under the cap");
+
+        for _ in 0..200 {
+            type_char(&mut app, 'z');
+        }
+
+        assert_eq!(
+            note_buffer(&app).len(),
+            40,
+            "the buffer should sit exactly at the cap"
+        );
+        assert!(
+            app.status_message
+                .as_deref()
+                .is_some_and(|m| m.contains("limit")),
+            "the refusal should be visible: {:?}",
+            app.status_message
+        );
+    }
+
+    /// A note that already exceeds the limit opens whole — the cap is
+    /// `max(limit, original)`. Truncating it on open would destroy content the
+    /// user only meant to look at.
+    #[test]
+    fn an_oversize_note_opens_intact_and_can_only_shrink() {
+        let mut app = open(DetailRegion::Note);
+        app.project.config.limits.note_max_bytes = Some(crate::model::config::ByteSize(8));
+        detail_enter_edit(&mut app, true);
+
+        let original = note_buffer(&app).to_string();
+        assert!(original.len() > 8, "fixture is already over this cap");
+
+        // Growth is refused...
+        type_char(&mut app, 'z');
+        assert_eq!(note_buffer(&app), original, "an over-cap note grew");
+
+        // ...but deletion is not, and each deletion lowers the ceiling with it.
+        handle_detail_multiline_edit(&mut app, KeyEvent::from(KeyCode::Backspace));
+        assert_eq!(note_buffer(&app).len(), original.len() - 1);
+    }
+
+    /// A paste that will not fit is rejected whole rather than clipped: keeping
+    /// its first N bytes silently discards the tail.
+    #[test]
+    fn an_oversize_paste_is_rejected_rather_than_truncated() {
+        let mut app = open_note_with_limit(64);
+        let before = note_buffer(&app).to_string();
+
+        crate::tui::input::handle_paste(&mut app, &"p".repeat(500));
+
+        assert_eq!(
+            note_buffer(&app),
+            before,
+            "the paste should have been rejected in full, not clipped to fit"
+        );
+    }
+
+    /// A rejected edit must not survive in the edit-undo history either, or
+    /// Ctrl+Z / Ctrl+Y would walk into a buffer the cap never allowed.
+    #[test]
+    fn a_rejected_edit_leaves_no_undo_entry() {
+        let mut app = open_note_with_limit(64);
+        let before = note_buffer(&app).to_string();
+
+        crate::tui::input::handle_paste(&mut app, &"p".repeat(500));
+
+        // Walk the history all the way back and then all the way forward; the
+        // over-cap buffer must appear at neither end.
+        for _ in 0..8 {
+            if let Some(eh) = &mut app.edit_history
+                && let Some((buf, _, _)) = eh.undo()
+            {
+                assert!(
+                    buf.len() <= 64.max(before.len()),
+                    "undo reached {}",
+                    buf.len()
+                );
+            }
+        }
+        for _ in 0..8 {
+            if let Some(eh) = &mut app.edit_history
+                && let Some((buf, _, _)) = eh.redo()
+            {
+                assert!(
+                    buf.len() <= 64.max(before.len()),
+                    "redo reached {}",
+                    buf.len()
+                );
+            }
+        }
+    }
+
+    /// With the limit off, nothing is capped.
+    #[test]
+    fn the_note_field_is_uncapped_when_the_limit_is_off() {
+        let mut app = open(DetailRegion::Note);
+        app.project.config.limits.note_max_bytes = None;
+        detail_enter_edit(&mut app, true);
+
+        crate::tui::input::handle_paste(&mut app, &"p".repeat(50_000));
+        assert!(note_buffer(&app).len() > 50_000);
     }
 
     /// The bug this file's `fields` module exists for: opening a field and

@@ -26,6 +26,19 @@ pub enum TaskError {
     AlreadyTopLevel,
     #[error("reparenting would exceed maximum nesting depth (3)")]
     DepthExceeded,
+    /// The write would leave a note both over `limits.note_max_bytes` and
+    /// larger than it already was. Carries the sizes so the caller can say what
+    /// happened without recomputing them.
+    #[error("{task_id} note would be {would_be} bytes; limit is {limit} (limits.note_max_bytes)")]
+    NoteTooLarge {
+        task_id: String,
+        /// Size of the note the write would have produced.
+        would_be: usize,
+        /// Size of the note as it stands. Non-zero means this is a grandfathered
+        /// note being grown, rather than a fresh one landing over the line.
+        current: usize,
+        limit: usize,
+    },
 }
 
 /// Location of a task in the track tree
@@ -324,9 +337,65 @@ pub fn remove_dep(track: &mut Track, task_id: &str, dep_id: &str) -> Result<(), 
     Ok(())
 }
 
-pub fn set_note(track: &mut Track, task_id: &str, note_text: String) -> Result<(), TaskError> {
+/// Whether a note of `would_be` bytes may replace one of `current` bytes.
+///
+/// The rule is **non-increasing**, not absolute: legal if the result is within
+/// the limit, *or* if it is no larger than what is already there. Both halves
+/// earn their place. The first is the limit. The second is what makes the limit
+/// safe to introduce to a project that already holds notes far past it — those
+/// notes keep working, and, more to the point, they can be edited down in as
+/// many passes as it takes. Under an absolute check the only legal edit to a
+/// 148 KB note is one that lands under the limit in a single shot, so the
+/// limit would trap exactly the notes it exists to get rid of.
+///
+/// `None` for `limit` is the limit switched off.
+pub fn note_write_allowed(current: usize, would_be: usize, limit: Option<usize>) -> bool {
+    match limit {
+        None => true,
+        Some(limit) => would_be <= limit || would_be <= current,
+    }
+}
+
+/// The largest note `limits.note_max_bytes` allows to be *typed* into a field
+/// holding `current` bytes — the same rule as [`note_write_allowed`], solved
+/// for the cap the TUI enforces per keystroke.
+///
+/// Never below `current`, which is what lets an already-oversize note open in
+/// the editor intact instead of arriving truncated.
+pub fn note_input_cap(current: usize, limit: Option<usize>) -> usize {
+    match limit {
+        None => usize::MAX,
+        Some(limit) => limit.max(current),
+    }
+}
+
+fn current_note_len(task: &Task) -> usize {
+    task.metadata
+        .iter()
+        .find_map(|m| match m {
+            Metadata::Note(n) => Some(n.len()),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+pub fn set_note(
+    track: &mut Track,
+    task_id: &str,
+    note_text: String,
+    limit: Option<usize>,
+) -> Result<(), TaskError> {
     let task = find_task_mut_in_track(track, task_id)
         .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
+    let current = current_note_len(task);
+    if !note_write_allowed(current, note_text.len(), limit) {
+        return Err(TaskError::NoteTooLarge {
+            task_id: task_id.to_string(),
+            would_be: note_text.len(),
+            current,
+            limit: limit.unwrap_or(0),
+        });
+    }
     if note_text.is_empty() {
         remove_metadata(task, "note");
     } else {
@@ -336,17 +405,33 @@ pub fn set_note(track: &mut Track, task_id: &str, note_text: String) -> Result<(
     Ok(())
 }
 
-pub fn append_note(track: &mut Track, task_id: &str, note_text: String) -> Result<(), TaskError> {
+pub fn append_note(
+    track: &mut Track,
+    task_id: &str,
+    note_text: String,
+    limit: Option<usize>,
+) -> Result<(), TaskError> {
     let task = find_task_mut_in_track(track, task_id)
         .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
     let existing = task.metadata.iter().find_map(|m| match m {
         Metadata::Note(n) => Some(n.clone()),
         _ => None,
     });
+    let current = existing.as_ref().map(|n| n.len()).unwrap_or(0);
     let new_note = match existing {
         Some(old) if !old.is_empty() => format!("{}\n\n{}", old, note_text),
         _ => note_text,
     };
+    // An append can only grow the note, so over the limit it is always refused —
+    // which is the point, since appending is how notes get to be that size.
+    if !note_write_allowed(current, new_note.len(), limit) {
+        return Err(TaskError::NoteTooLarge {
+            task_id: task_id.to_string(),
+            would_be: new_note.len(),
+            current,
+            limit: limit.unwrap_or(0),
+        });
+    }
     if new_note.is_empty() {
         remove_metadata(task, "note");
     } else {
@@ -1680,7 +1765,7 @@ mod tests {
     #[test]
     fn test_set_note() {
         let mut track = sample_track();
-        set_note(&mut track, "T-001", "This is a note.".into()).unwrap();
+        set_note(&mut track, "T-001", "This is a note.".into(), None).unwrap();
         let task = find_task_in_track(&track, "T-001").unwrap();
         assert!(
             task.metadata
@@ -1692,7 +1777,7 @@ mod tests {
     #[test]
     fn test_append_note_no_existing() {
         let mut track = sample_track();
-        append_note(&mut track, "T-001", "First note.".into()).unwrap();
+        append_note(&mut track, "T-001", "First note.".into(), None).unwrap();
         let task = find_task_in_track(&track, "T-001").unwrap();
         assert!(
             task.metadata
@@ -1704,8 +1789,8 @@ mod tests {
     #[test]
     fn test_append_note_with_existing() {
         let mut track = sample_track();
-        set_note(&mut track, "T-001", "First note.".into()).unwrap();
-        append_note(&mut track, "T-001", "Second note.".into()).unwrap();
+        set_note(&mut track, "T-001", "First note.".into(), None).unwrap();
+        append_note(&mut track, "T-001", "Second note.".into(), None).unwrap();
         let task = find_task_in_track(&track, "T-001").unwrap();
         assert!(
             task.metadata
@@ -1832,7 +1917,7 @@ mod tests {
             vec!["doc/new.md".into()],
         )
         .unwrap();
-        set_note(&mut track, "T-001", "a different note".into()).unwrap();
+        set_note(&mut track, "T-001", "a different note".into(), None).unwrap();
 
         let task = find_task_in_track(&track, "T-001").unwrap();
         assert_eq!(task.metadata[0], Metadata::Spec(vec!["doc/new.md".into()]));

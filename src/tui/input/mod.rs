@@ -94,6 +94,11 @@ pub fn handle_paste(app: &mut App, text: &str) {
         && app.edit_target.is_none();
 
     if is_detail_multiline {
+        // A paste that would overrun `limits.note_max_bytes` is rejected whole
+        // rather than truncated to fit: keeping the first 12 KB of a 47 KB paste
+        // silently drops the tail, which is the data loss the limit exists to
+        // avoid causing. The guard reverts and reports it.
+        let guard = NoteCapGuard::before(app);
         // Capture current cursor into the undo stack before mutating.
         // Cursor movements don't create snapshots, so the last entry may
         // have a stale position. snapshot()'s dedup updates it in place.
@@ -110,6 +115,9 @@ pub fn handle_paste(app: &mut App, text: &str) {
             ds.edit_cursor_col = new_col;
         }
         snapshot_multiline(app);
+        if let Some(guard) = guard {
+            guard.enforce(app);
+        }
     } else {
         // Capture current cursor into the undo stack before mutating.
         // Cursor movements don't create snapshots, so the last entry may

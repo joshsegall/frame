@@ -205,12 +205,39 @@ pub struct EditHistory {
     position: usize,
 }
 
+/// A position in an [`EditHistory`], taken before an operation that may need
+/// un-recording. Opaque on purpose — only `rewind_to` consumes it.
+#[derive(Debug, Clone, Copy)]
+pub struct EditHistoryMark {
+    entries: usize,
+    position: usize,
+}
+
 impl EditHistory {
     pub fn new(initial_buffer: &str, cursor_pos: usize, cursor_line: usize) -> Self {
         EditHistory {
             entries: vec![(initial_buffer.to_string(), cursor_pos, cursor_line)],
             position: 0,
         }
+    }
+
+    /// Where the history stands, for [`EditHistory::rewind_to`].
+    pub fn mark(&self) -> EditHistoryMark {
+        EditHistoryMark {
+            entries: self.entries.len(),
+            position: self.position,
+        }
+    }
+
+    /// Drop snapshots taken since `mark` — for an edit that was recorded and
+    /// then reverted, so that neither undo nor redo can reach a state the user
+    /// was never shown.
+    pub fn rewind_to(&mut self, mark: EditHistoryMark) {
+        if self.entries.len() <= mark.entries {
+            return;
+        }
+        self.entries.truncate(mark.entries);
+        self.position = mark.position.min(self.entries.len().saturating_sub(1));
     }
 
     /// Save a snapshot (call after each text-modifying action)
@@ -6007,6 +6034,7 @@ pub(crate) fn app_on_disk(dir: &std::path::Path) -> App {
         ids: IdConfig::default(),
         ui: UiConfig::default(),
         recovery: Default::default(),
+        limits: Default::default(),
     };
     let project = crate::model::project::Project {
         root: dir.to_path_buf(),
@@ -6356,6 +6384,7 @@ mod tests {
             ids: IdConfig::default(),
             ui: UiConfig::default(),
             recovery: Default::default(),
+            limits: Default::default(),
         };
         let project = Project {
             root: std::path::PathBuf::from("/tmp/test"),
@@ -6450,6 +6479,7 @@ mod tests {
             ids: IdConfig { prefixes },
             ui: UiConfig::default(),
             recovery: Default::default(),
+            limits: Default::default(),
         };
         let project = Project {
             root: std::path::PathBuf::from("/tmp/test"),
@@ -6537,6 +6567,7 @@ mod tests {
             ids: IdConfig::default(),
             ui: UiConfig::default(),
             recovery: Default::default(),
+            limits: Default::default(),
         };
         let project = Project {
             root: std::path::PathBuf::from("/tmp/test"),

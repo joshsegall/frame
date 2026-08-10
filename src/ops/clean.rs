@@ -155,6 +155,11 @@ pub struct CleanResult {
     pub duplicates_resolved: Vec<DuplicateResolution>,
     /// Tasks archived from done sections
     pub tasks_archived: Vec<ArchiveRecord>,
+    /// One row per track that archived anything, saying what tripped and by how
+    /// much. Additive to `tasks_archived`, which keeps its shape and contents —
+    /// this answers "why did that happen, and did it help", which a flat list of
+    /// task IDs cannot.
+    pub archived_by_track: Vec<ArchiveSummary>,
     /// Dangling dependency references
     pub dangling_deps: Vec<DanglingDep>,
     /// Broken file references (ref/spec)
@@ -212,6 +217,38 @@ pub struct ArchiveRecord {
     pub track_id: String,
     pub task_id: String,
     pub title: String,
+}
+
+/// What one track's archive pass did, and what set it off.
+#[derive(Debug, Clone, Serialize)]
+pub struct ArchiveSummary {
+    pub track_id: String,
+    /// Which limit tripped.
+    pub reason: ArchiveReason,
+    /// How many tasks left the track's Done section.
+    pub tasks: usize,
+    pub done_bytes_before: usize,
+    /// Done bytes left behind. Compared against `done_bytes_threshold`, this is
+    /// what makes the one case the drain cannot fix visible instead of silently
+    /// retried: a single done task larger than `done_bytes_retain` leaves the
+    /// section over budget however much is archived around it, and without this
+    /// number every subsequent clean would look like it had simply done nothing.
+    pub done_bytes_after: usize,
+    /// The byte trigger in force, or `None` when it is switched off.
+    pub done_bytes_threshold: Option<usize>,
+    /// Archive file the tasks went to, relative to the project root.
+    pub archive_path: String,
+}
+
+/// Which of `[clean]`'s two triggers fired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ArchiveReason {
+    /// `done_threshold` — too many done tasks.
+    Count,
+    /// `done_bytes_threshold` — too much done text, at any number of tasks.
+    Bytes,
+    Both,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -402,7 +439,31 @@ pub fn reconcile_sections(project: &mut Project) -> Vec<String> {
 /// so the clone never mints null IDs it doesn't own. Archival and thresholds
 /// key on task state and `resolved:` dates, not ID structure, so they run
 /// identically regardless of `scope`.
+/// Whether a clean may write anything outside the in-memory project.
+///
+/// Only archiving needs to know. Every other step mutates the model and leaves
+/// persistence to the caller, which is why a dry run could get away with simply
+/// not saving the tracks — but the archive file is written from inside the
+/// walk, before the Done section is emptied, so that a crash between the two
+/// loses nothing. That ordering is right and worth keeping; it just means the
+/// dry run has to be told, because "don't save afterwards" does not reach it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanMode {
+    Apply,
+    DryRun,
+}
+
+impl CleanMode {
+    fn is_dry_run(self) -> bool {
+        self == CleanMode::DryRun
+    }
+}
+
 pub fn clean_project(project: &mut Project, scope: IdScope) -> CleanResult {
+    clean_project_with(project, scope, CleanMode::Apply)
+}
+
+pub fn clean_project_with(project: &mut Project, scope: IdScope, mode: CleanMode) -> CleanResult {
     let mut result = CleanResult::default();
 
     for (track_id, track) in &mut project.tracks {
@@ -443,7 +504,7 @@ pub fn clean_project(project: &mut Project, scope: IdScope) -> CleanResult {
     }
 
     // 7. Archive done tasks past threshold
-    archive_done_tasks(project, &mut result);
+    archive_done_tasks(project, &mut result, mode);
 
     // 8. Fill missing resolved dates. After archival by design — see
     //    `assign_missing_resolved_dates`.
@@ -1054,22 +1115,41 @@ fn collect_suggestions_in_tasks(tasks: &[Task], track_id: &str, result: &mut Cle
 // 6. Archive done tasks past threshold
 // ---------------------------------------------------------------------------
 
-fn archive_done_tasks(project: &mut Project, result: &mut CleanResult) {
+fn archive_done_tasks(project: &mut Project, result: &mut CleanResult, mode: CleanMode) {
     if !project.config.clean.archive_per_track {
         return;
     }
     let threshold = project.config.clean.done_threshold;
     let retain = project.config.clean.done_retain;
+    let bytes_threshold = project
+        .config
+        .clean
+        .done_bytes_threshold
+        .map(|b| b.bytes() as usize);
+    let bytes_retain = project
+        .config
+        .clean
+        .done_bytes_retain
+        .map(|b| b.bytes() as usize)
+        .unwrap_or(0);
 
     for (track_id, track) in &mut project.tracks {
         let done_tasks = track.section_tasks(SectionKind::Done);
         let done_task_count = done_tasks.len();
-        if done_task_count <= threshold {
-            continue;
-        }
 
-        // If we'd retain everything, skip archiving entirely
-        if retain >= done_task_count {
+        // Per-task sizes, needed by the byte rule and reported either way.
+        let task_bytes: Vec<usize> = done_tasks
+            .iter()
+            .map(|t| crate::model::track::tasks_bytes(std::slice::from_ref(t)))
+            .collect();
+        let done_bytes_before: usize = task_bytes.iter().sum();
+
+        // Two independent triggers. The count cannot see that 173 done tasks
+        // averaging 9 KB are a different proposition from 173 one-liners, and
+        // the bytes cannot see a track accumulating hundreds of trivial tasks.
+        let count_triggered = done_task_count > threshold;
+        let bytes_triggered = bytes_threshold.is_some_and(|t| done_bytes_before > t);
+        if !count_triggered && !bytes_triggered {
             continue;
         }
 
@@ -1095,8 +1175,46 @@ fn archive_done_tasks(project: &mut Project, result: &mut CleanResult) {
             .collect();
         indexed.sort_by(|a, b| b.1.cmp(&a.1)); // most recent first
 
-        // The top `retain` entries stay; the rest get archived
-        let retain_indices: HashSet<usize> = indexed.iter().take(retain).map(|(i, _)| *i).collect();
+        // Each rule keeps a prefix of that newest-first order, so archiving the
+        // union of what they select is keeping the shorter of the two prefixes.
+        let mut keep = done_task_count;
+        if count_triggered {
+            keep = keep.min(retain);
+        }
+        if bytes_triggered {
+            // Drain to `done_bytes_retain`, not to the trigger. The gap is
+            // hysteresis and it is the whole reason the low-water mark exists:
+            // stopping at the threshold would archive one task per clean for
+            // ever. `retain` still floors it — and that floor is also what
+            // terminates the walk when one done task is on its own larger than
+            // the retain budget.
+            let mut used = 0usize;
+            let mut byte_keep = 0usize;
+            for (i, _) in &indexed {
+                let next = used + task_bytes[*i];
+                if next > bytes_retain {
+                    break;
+                }
+                used = next;
+                byte_keep += 1;
+            }
+            keep = keep.min(byte_keep.max(retain));
+        }
+
+        // Nothing to do — including the case where `retain` alone covers every
+        // done task there is.
+        if keep >= done_task_count {
+            continue;
+        }
+
+        let retain_indices: HashSet<usize> = indexed.iter().take(keep).map(|(i, _)| *i).collect();
+        let done_bytes_after: usize = retain_indices.iter().map(|i| task_bytes[*i]).sum();
+        let reason = match (count_triggered, bytes_triggered) {
+            (true, true) => ArchiveReason::Both,
+            (true, false) => ArchiveReason::Count,
+            (false, true) => ArchiveReason::Bytes,
+            (false, false) => unreachable!("guarded above"),
+        };
 
         let tasks_to_archive: Vec<&Task> = done_tasks
             .iter()
@@ -1112,7 +1230,9 @@ fn archive_done_tasks(project: &mut Project, result: &mut CleanResult) {
             .frame_dir
             .join("archive")
             .join(format!("{}.md", track_id));
-        if let Some(parent) = archive_path.parent() {
+        if let Some(parent) = archive_path.parent()
+            && !mode.is_dry_run()
+        {
             let _ = std::fs::create_dir_all(parent);
         }
         let existing = std::fs::read_to_string(&archive_path).unwrap_or_default();
@@ -1136,6 +1256,9 @@ fn archive_done_tasks(project: &mut Project, result: &mut CleanResult) {
         // edited after that first write those edits would vanish silently — so
         // preserve it where anything lost goes.
         for task in &duplicates {
+            if mode.is_dry_run() {
+                break;
+            }
             let id = task.id.as_ref().map(|i| i.to_string()).unwrap_or_default();
             crate::io::recovery::log_recovery(
                 &project.frame_dir,
@@ -1158,7 +1281,7 @@ fn archive_done_tasks(project: &mut Project, result: &mut CleanResult) {
         // Nothing new to append (every task was already archived): skip the
         // write, but still extract below — leaving them in Done would make every
         // future clean retry the same no-op.
-        if !fresh.is_empty() {
+        if !fresh.is_empty() && !mode.is_dry_run() {
             // Appending used to be string concatenation onto the raw existing
             // text, which is how a CRLF archive ended up with LF blocks glued
             // under CRLF ones — a file with both, that no later reader could put
@@ -1192,6 +1315,17 @@ fn archive_done_tasks(project: &mut Project, result: &mut CleanResult) {
                 track_id: track_id.clone(),
                 task_id: task.id.as_ref().map(|i| i.to_string()).unwrap_or_default(),
                 title: task.title.clone(),
+            });
+        }
+        if !archived.is_empty() {
+            result.archived_by_track.push(ArchiveSummary {
+                track_id: track_id.clone(),
+                reason,
+                tasks: archived.len(),
+                done_bytes_before,
+                done_bytes_after,
+                done_bytes_threshold: bytes_threshold,
+                archive_path: format!("frame/archive/{}.md", track_id),
             });
         }
     }
@@ -1279,6 +1413,7 @@ fn collect_ids_from_tasks(tasks: &[Task], ids: &mut HashSet<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::config::ByteSize;
     use crate::model::config::{
         AgentConfig, CleanConfig, IdConfig, ProjectConfig, ProjectInfo, TrackConfig, UiConfig,
     };
@@ -1309,6 +1444,7 @@ mod tests {
             },
             ui: UiConfig::default(),
             recovery: Default::default(),
+            limits: Default::default(),
         }
     }
 
@@ -1860,6 +1996,147 @@ mod tests {
         // Archive file should exist
         let archive_path = root.join("frame/archive/main.md");
         assert!(archive_path.exists());
+    }
+
+    /// Build a project whose Done section holds `n` tasks of roughly
+    /// `note_bytes` each, for the byte-trigger tests.
+    fn project_with_fat_done(root: &std::path::Path, n: usize, note_bytes: usize) -> Project {
+        std::fs::create_dir_all(root.join("frame/tracks")).unwrap();
+        let filler = "x".repeat(note_bytes);
+        let mut done_lines = String::new();
+        for i in 0..n {
+            done_lines.push_str(&format!(
+                "- [x] `M-{:03}` Done task {}\n  - added: 2025-01-01\n  - resolved: 2025-05-{:02}\n  - note:\n    {}\n",
+                i,
+                i,
+                (i % 28) + 1,
+                filler
+            ));
+        }
+        let src = format!(
+            "# Main\n\n## Backlog\n\n- [ ] `M-900` Active task\n\n## Done\n\n{}",
+            done_lines.trim_end()
+        );
+        Project {
+            root: root.to_path_buf(),
+            frame_dir: root.join("frame"),
+            config: make_config(vec![("main", "M")]),
+            tracks: vec![("main".to_string(), parse_track(&src))],
+            inbox: None,
+        }
+    }
+
+    /// The byte trigger fires where the count trigger cannot see a problem:
+    /// few enough done tasks to sit under `done_threshold`, far too many bytes.
+    #[test]
+    fn test_archive_triggers_on_bytes_under_the_count_threshold() {
+        let tmp = TempDir::new().unwrap();
+        // 20 tasks × ~8 KB = ~160 KB of Done, at a count threshold of 100.
+        let mut project = project_with_fat_done(tmp.path(), 20, 8 * 1024);
+        project.config.clean.done_threshold = 100;
+        // Deliberately far below what the byte budget affords, so that what is
+        // kept is decided by the drain rather than by the floor.
+        project.config.clean.done_retain = 1;
+        project.config.clean.done_bytes_threshold = Some(ByteSize(64 * 1024));
+        project.config.clean.done_bytes_retain = Some(ByteSize(32 * 1024));
+
+        let result = clean_project(&mut project, IdScope::Mint(None));
+
+        let summary = result
+            .archived_by_track
+            .first()
+            .expect("byte trigger should have fired");
+        assert_eq!(summary.reason, ArchiveReason::Bytes);
+        assert!(summary.done_bytes_before > 64 * 1024);
+        // Drained to the low-water mark, not merely back under the trigger.
+        assert!(
+            summary.done_bytes_after <= 32 * 1024,
+            "drained to {} bytes, expected <= 32 KB",
+            summary.done_bytes_after
+        );
+        // And the budget, not `done_retain`, is what set the stopping point:
+        // ~8 KB tasks means 32 KB holds several, where the floor would keep one.
+        let kept = 20 - summary.tasks;
+        assert!(
+            kept > project.config.clean.done_retain,
+            "kept {kept}, which is just the retain floor — the byte budget decided nothing"
+        );
+        assert_eq!(summary.tasks, result.tasks_archived.len());
+    }
+
+    /// The count trigger keeps working when the byte trigger is switched off,
+    /// and says so.
+    #[test]
+    fn test_archive_reason_is_count_when_bytes_disabled() {
+        let tmp = TempDir::new().unwrap();
+        let mut project = project_with_fat_done(tmp.path(), 20, 16);
+        project.config.clean.done_threshold = 5;
+        project.config.clean.done_retain = 2;
+        project.config.clean.done_bytes_threshold = None;
+
+        let result = clean_project(&mut project, IdScope::Mint(None));
+
+        let summary = result.archived_by_track.first().expect("count should fire");
+        assert_eq!(summary.reason, ArchiveReason::Count);
+        assert_eq!(summary.done_bytes_threshold, None);
+        // Count rule retains exactly `done_retain`.
+        assert_eq!(summary.tasks, 18);
+    }
+
+    /// `done_retain` floors the byte drain. One done task larger than the whole
+    /// retain budget cannot be archived away, so the section stays over budget —
+    /// and `done_bytes_after` is what makes that visible rather than leaving
+    /// every later clean looking like it silently did nothing.
+    #[test]
+    fn test_byte_drain_is_floored_by_done_retain() {
+        let tmp = TempDir::new().unwrap();
+        let mut project = project_with_fat_done(tmp.path(), 6, 32 * 1024);
+        project.config.clean.done_threshold = 100;
+        project.config.clean.done_retain = 3;
+        project.config.clean.done_bytes_threshold = Some(ByteSize(16 * 1024));
+        project.config.clean.done_bytes_retain = Some(ByteSize(1024));
+
+        let result = clean_project(&mut project, IdScope::Mint(None));
+
+        let summary = result.archived_by_track.first().expect("bytes should fire");
+        // Three kept because `done_retain` said so, though each alone busts the
+        // 1 KB retain budget.
+        assert_eq!(summary.tasks, 3);
+        assert!(
+            summary.done_bytes_after > 16 * 1024,
+            "the residual should be visible, got {}",
+            summary.done_bytes_after
+        );
+    }
+
+    /// `fr clean --dry-run` must not write the archive.
+    ///
+    /// Cloning the project or skipping the track save is not enough on its own:
+    /// the archive is written from inside the archive walk, deliberately before
+    /// the Done section is emptied so a crash between the two loses nothing.
+    /// Nothing about "do not save afterwards" reaches that write.
+    #[test]
+    fn test_dry_run_writes_no_archive() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let mut project = project_with_fat_done(root, 20, 8 * 1024);
+        project.config.clean.done_threshold = 5;
+        project.config.clean.done_retain = 2;
+
+        let result = clean_project_with(&mut project, IdScope::Mint(None), CleanMode::DryRun);
+
+        assert!(
+            !result.tasks_archived.is_empty(),
+            "the preview should still say what it would archive"
+        );
+        assert!(
+            !root.join("frame/archive/main.md").exists(),
+            "dry run wrote the archive file"
+        );
+        assert!(
+            !root.join("frame/archive").exists(),
+            "dry run created the archive directory"
+        );
     }
 
     /// A task the archive already holds must not be appended twice.

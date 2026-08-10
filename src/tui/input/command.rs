@@ -821,6 +821,20 @@ pub(super) fn palette_check_project(app: &mut App) {
                         )
                     }
                 }
+                check::CheckWarning::OversizeTrack {
+                    track_id,
+                    live_bytes,
+                    limit_bytes,
+                    ..
+                } => {
+                    use crate::model::config::ByteSize;
+                    format!(
+                        "  [{}] {} of open work exceeds the {} limit",
+                        track_id,
+                        ByteSize(*live_bytes as u64).human(),
+                        ByteSize(*limit_bytes as u64).human(),
+                    )
+                }
                 check::CheckWarning::UnclosedNoteFence {
                     track_id,
                     task_id,
@@ -1030,9 +1044,14 @@ pub(super) fn palette_preview_clean(app: &mut App) {
 
     // Clone project so we don't mutate the real one. Preview only — don't
     // auto-claim, and an unclaimed clone previews no minting (strict null policy).
+    //
+    // Cloning is not on its own enough to make this a preview: archiving writes
+    // the archive file from inside the walk, and that write does not care that
+    // the project it is walking is a copy. `DryRun` is what actually holds it
+    // back.
     let scope = crate::io::actors::id_scope(&app.project.frame_dir);
     let mut project_clone = app.project.clone();
-    let result = clean::clean_project(&mut project_clone, scope);
+    let result = clean::clean_project_with(&mut project_clone, scope, clean::CleanMode::DryRun);
 
     let bg = app.theme.background;
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -1104,11 +1123,28 @@ pub(super) fn palette_preview_clean(app: &mut App) {
             "Tasks to archive",
             bold(highlight),
         )));
-        for a in &result.tasks_archived {
+        // Per-track first: in a popup a hundred task rows would push everything
+        // else off the bottom, and the summary is the part that says why.
+        for s in &result.archived_by_track {
+            use crate::model::config::ByteSize;
             lines.push(Line::from(Span::styled(
-                format!("  [{}] {} \"{}\"", a.track_id, a.task_id, a.title),
+                format!(
+                    "  [{}] {} tasks, Done {} → {}",
+                    s.track_id,
+                    s.tasks,
+                    ByteSize(s.done_bytes_before as u64).human(),
+                    ByteSize(s.done_bytes_after as u64).human(),
+                ),
                 text,
             )));
+        }
+        if result.tasks_archived.len() <= 10 {
+            for a in &result.tasks_archived {
+                lines.push(Line::from(Span::styled(
+                    format!("    [{}] {} \"{}\"", a.track_id, a.task_id, a.title),
+                    text,
+                )));
+            }
         }
         lines.push(Line::from(""));
     }

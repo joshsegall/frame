@@ -375,6 +375,7 @@ mod tests {
             ids: IdConfig::default(),
             ui: UiConfig::default(),
             recovery: Default::default(),
+            limits: Default::default(),
         }
     }
 

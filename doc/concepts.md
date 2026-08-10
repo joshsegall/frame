@@ -279,8 +279,36 @@ auto_clean = true          # run clean after file reload in TUI (default: true;
                            # always stands down while git is rewriting files)
 done_threshold = 100       # max done tasks per track before archiving (default: 100)
 done_retain = 10           # number of recent done tasks to keep in track after archiving (default: 10)
+done_bytes_threshold = "256KB"  # max bytes of done tasks before archiving (default: 256KB; 0/"off" disables)
+done_bytes_retain = "64KB" # what a byte-triggered archive drains down to (default: 64KB)
 archive_per_track = true   # separate archive file per track (default: true)
 ```
+
+**Two triggers, because either alone is blind to a real case.** A count cannot tell 100 done one-liners from 100 done essays; bytes cannot see a track quietly accumulating hundreds of trivial tasks. Archiving runs when *either* is exceeded. The defaults are close to the same statement for a project whose notes are ordinary — at a typical note length, 100 done tasks is roughly 256 KB — and only diverge once notes run long, which is the case the count was missing.
+
+**The drain goes to the retain level, not back to the trigger.** `done_threshold = 100` drains to `done_retain = 10`; `done_bytes_threshold = "256KB"` drains to `done_bytes_retain = "64KB"`. That gap is hysteresis and it is load-bearing: stopping at the threshold would archive one task on every clean for ever. `done_retain` also floors the byte drain, so a handful of recent done tasks always stay in the track — and if one of them is on its own larger than `done_bytes_retain`, the section stays over budget and `fr clean` says so rather than looking like it did nothing.
+
+### `[limits]`
+
+What frame's own commands will not do:
+
+```toml
+[limits]
+note_max_bytes = "16KB"    # largest note frame will grow a note to (default: 16KB; 0/"off" disables)
+track_warn_bytes = "512KB" # `fr check` warns past this much open work in one track (default: 512KB)
+```
+
+**`note_max_bytes` is enforced non-increasing, not absolutely.** A write is refused only if it would leave the note both over the limit *and* larger than it already was. So a note that predates the limit is never touched, never truncated, and never blocks the operations that do not lengthen it — and it can still be edited down, in as many passes as it takes, because a shrinking write is always legal. Under an absolute check the only legal edit to a 148 KB note would be one landing under the limit in a single shot, which would trap exactly the notes the limit exists to discourage.
+
+There is no `--force`. Setting `note_max_bytes = 0` (or `"off"`) is the escape hatch.
+
+In the TUI the same rule is enforced at the keystroke: the note field caps at `max(note_max_bytes, the note's length when opened)`, so an oversize note opens intact and can only shrink, and a paste that will not fit is rejected whole rather than clipped to fit — keeping its first N bytes would silently discard the tail.
+
+**A guardrail on authoring, not an invariant on the file.** Markdown is the source of truth and stays hand-editable, and `fr import` is exempt, because importing is how content that predates a limit gets in. `fr check` does not report an oversize note as damage.
+
+**`track_warn_bytes` measures open work — `## Backlog` plus `## Parked` — not file size.** Done is excluded because `[clean]` already bounds it, and bounds it by oscillating between `done_bytes_retain` and `done_bytes_threshold`. Folding that swing into the measurement would mean the same track warns just before a clean and goes quiet just after one with its open work untouched: a warning that answers to the archiver's schedule rather than to anything its reader did. The warning is one line per track and names no individual task, because no individual task is the problem — the aggregate is, and the remedy is splitting the track or closing work.
+
+Both accept a plain number of bytes or a string with a unit (`"16KB"`, `"512KB"`), 1024-based, as `[recovery]` does.
 
 ### `[recovery]`
 

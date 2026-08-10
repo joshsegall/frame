@@ -1307,6 +1307,7 @@ file = "tracks/old.md"
             },
             ui: Default::default(),
             recovery: Default::default(),
+            limits: Default::default(),
         };
 
         let mut tracks = vec![
@@ -1386,6 +1387,7 @@ file = "tracks/old.md"
             },
             ui: Default::default(),
             recovery: Default::default(),
+            limits: Default::default(),
         };
 
         let mut tracks = vec![
@@ -1468,6 +1470,7 @@ file = "tracks/old.md"
             },
             ui: Default::default(),
             recovery: Default::default(),
+            limits: Default::default(),
         };
 
         let track_content = "# A\n\n## Backlog\n\n## Done\n";

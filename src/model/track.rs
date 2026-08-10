@@ -74,6 +74,27 @@ impl Track {
         &[]
     }
 
+    /// Bytes a section's tasks occupy once written out, newlines included.
+    ///
+    /// Measured off the model rather than the file on disk, so that the numbers
+    /// `fr clean` archives by and `fr check` warns on describe the same thing —
+    /// and so that a dry run can price a section it is about to change. It
+    /// counts task content only: section headers and any literal text around
+    /// them belong to no task and are a rounding error next to the notes.
+    pub fn section_bytes(&self, kind: SectionKind) -> usize {
+        tasks_bytes(self.section_tasks(kind))
+    }
+
+    /// Bytes of everything that is not done — `## Backlog` plus `## Parked`.
+    ///
+    /// The measure behind `limits.track_warn_bytes`. Done is left out because
+    /// `[clean]` already bounds it, and bounds it by *oscillating*: including a
+    /// term that swings from 64 KB to 256 KB on its own schedule would make the
+    /// warning fire and clear with no human action behind either.
+    pub fn live_bytes(&self) -> usize {
+        self.section_bytes(SectionKind::Backlog) + self.section_bytes(SectionKind::Parked)
+    }
+
     /// Get mutable tasks from a specific section
     pub fn section_tasks_mut(&mut self, kind: SectionKind) -> Option<&mut Vec<Task>> {
         for node in &mut self.nodes {
@@ -142,4 +163,16 @@ impl Track {
 
         self.nodes.insert(insert_pos, new_node);
     }
+}
+
+/// Bytes these tasks occupy once written out, newlines included.
+///
+/// Serialized rather than summed off `source_text`, because `source_text` holds
+/// only a task's own lines and never its subtasks — measuring it would silently
+/// under-count every task that has any.
+pub fn tasks_bytes(tasks: &[Task]) -> usize {
+    crate::parse::serialize_tasks(tasks, 0)
+        .iter()
+        .map(|l| l.len() + 1)
+        .sum()
 }

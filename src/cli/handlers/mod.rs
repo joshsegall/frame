@@ -1490,6 +1490,21 @@ fn cmd_check(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
                             );
                         }
                     }
+                    check::CheckWarning::OversizeTrack {
+                        track_id,
+                        live_bytes,
+                        file_bytes,
+                        limit_bytes,
+                    } => {
+                        use crate::model::config::ByteSize;
+                        println!(
+                            "  [{}] {} of open work exceeds the {} limit (file is {}) — consider splitting the track or closing work",
+                            track_id,
+                            ByteSize(*live_bytes as u64).human(),
+                            ByteSize(*limit_bytes as u64).human(),
+                            ByteSize(*file_bytes as u64).human(),
+                        );
+                    }
                     check::CheckWarning::UnclosedNoteFence {
                         track_id,
                         task_id,
@@ -2086,6 +2101,7 @@ fn cmd_add(args: AddArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> 
     };
 
     let frame_dir = project.frame_dir.clone();
+    let limit = note_limit(&project);
     let track = find_track_mut(&mut project, &args.track)
         .ok_or_else(|| format!("track not found: {}", args.track))?;
 
@@ -2094,7 +2110,13 @@ fn cmd_add(args: AddArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> 
 
     // If --found-from, add a note
     if let Some(ref from_id) = args.found_from {
-        task_ops::set_note(track, &id, format!("Found while working on {}", from_id))?;
+        task_ops::set_note(
+            track,
+            &id,
+            format!("Found while working on {}", from_id),
+            limit,
+        )
+        .map_err(explain_note_limit)?;
     }
 
     save_track(&project, &args.track)?;
@@ -2331,19 +2353,68 @@ fn cmd_note(args: NoteArgs, json: bool) -> Result<(), Box<dyn std::error::Error>
     // Taken before the write so the report can say whether anything changed.
     let before = snapshot(&project, &track_id, &args.id);
 
+    let limit = note_limit(&project);
     let track = find_track_mut(&mut project, &track_id)
         .ok_or_else(|| format!("track not found: {}", track_id))?;
 
     if args.replace {
-        task_ops::set_note(track, &args.id, args.text)?;
+        task_ops::set_note(track, &args.id, args.text, limit).map_err(explain_note_limit)?;
     } else {
-        task_ops::append_note(track, &args.id, args.text)?;
+        task_ops::append_note(track, &args.id, args.text, limit).map_err(explain_note_limit)?;
     }
 
     save_track(&project, &track_id)?;
     report_task_change(json, "note", &project, &track_id, &args.id, before, || {
         println!("{} note updated", args.id)
     })
+}
+
+/// `limits.note_max_bytes` as the ops layer wants it.
+fn note_limit(project: &crate::model::project::Project) -> Option<usize> {
+    project
+        .config
+        .limits
+        .note_max_bytes
+        .map(|b| b.bytes() as usize)
+}
+
+/// Render a refused note write in the units a human reads.
+///
+/// The message says what the sizes are and which knob decided, and stops there.
+/// It deliberately does not suggest where the text should go instead: what
+/// belongs in a note is a project's own call, and an error string that proposes
+/// a destination is one an agent will follow literally — moving the bloat
+/// rather than not writing it.
+fn explain_note_limit(err: task_ops::TaskError) -> Box<dyn std::error::Error> {
+    use crate::model::config::ByteSize;
+    match err {
+        task_ops::TaskError::NoteTooLarge {
+            task_id,
+            would_be,
+            current,
+            limit,
+        } => {
+            let mut msg = format!(
+                "{} note would be {}; limit is {} (limits.note_max_bytes)\n       nothing was written",
+                task_id,
+                ByteSize(would_be as u64).human(),
+                ByteSize(limit as u64).human(),
+            );
+            // A note already past the limit is a different situation from one
+            // arriving over it, and the way out is different too — say so,
+            // rather than leaving `--replace` to be deduced from a bare number.
+            if current > limit {
+                msg.push_str(&format!(
+                    "\n       this note is already {} and predates the limit; \
+                     `fr note {} --replace` with anything shorter is allowed",
+                    ByteSize(current as u64).human(),
+                    task_id,
+                ));
+            }
+            msg.into()
+        }
+        other => Box::new(other),
+    }
 }
 
 /// Refuse paths with no file behind them, naming every one.
@@ -3439,7 +3510,15 @@ fn cmd_clean(args: CleanArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
         (Some(lock), actors::IdScope::Mint(token))
     };
 
-    let result = clean::clean_project(&mut project, scope);
+    let result = clean::clean_project_with(
+        &mut project,
+        scope,
+        if args.dry_run {
+            clean::CleanMode::DryRun
+        } else {
+            clean::CleanMode::Apply
+        },
+    );
 
     // After clean, so a task clean has just edited is already in canonical order
     // and is not reported twice for the same rewrite.
@@ -3565,9 +3644,56 @@ fn report_clean(
         }
     }
     if !result.tasks_archived.is_empty() {
-        println!("Tasks archived:");
-        for a in &result.tasks_archived {
-            println!("  [{}] {} \"{}\"", a.track_id, a.task_id, a.title);
+        use crate::model::config::ByteSize;
+        println!(
+            "{}:",
+            if args.dry_run {
+                "Tasks that would be archived"
+            } else {
+                "Tasks archived"
+            }
+        );
+        // Per-track first, and always. Archiving is the one clean step that can
+        // move a very large amount at once, and now that bytes can trigger it
+        // the reader's first question is what set it off and whether it helped —
+        // which a list of task IDs, however long, does not answer.
+        for s in &result.archived_by_track {
+            let trigger = match s.reason {
+                clean::ArchiveReason::Count => "over the done-task count".to_string(),
+                clean::ArchiveReason::Bytes | clean::ArchiveReason::Both => {
+                    match s.done_bytes_threshold {
+                        Some(t) => format!("over the {} budget", ByteSize(t as u64).human()),
+                        None => "over budget".to_string(),
+                    }
+                }
+            };
+            println!(
+                "  [{}] {} {}, Done {} → {} ({}) → {}",
+                s.track_id,
+                s.tasks,
+                plural(s.tasks, "task", "tasks"),
+                ByteSize(s.done_bytes_before as u64).human(),
+                ByteSize(s.done_bytes_after as u64).human(),
+                trigger,
+                s.archive_path,
+            );
+            // The one case draining cannot fix: a single done task larger than
+            // the whole retain budget. Said out loud, because otherwise every
+            // later clean looks like it quietly did nothing.
+            if s.done_bytes_threshold
+                .is_some_and(|t| s.done_bytes_after > t)
+            {
+                println!(
+                    "        still over budget afterwards — a retained task is larger than `done_bytes_retain`"
+                );
+            }
+        }
+        // The task-by-task list stays for a small archive, where it is the
+        // useful part, and goes when it would be a wall.
+        if result.tasks_archived.len() <= 10 {
+            for a in &result.tasks_archived {
+                println!("    [{}] {} \"{}\"", a.track_id, a.task_id, a.title);
+            }
         }
     }
     if !result.dangling_deps.is_empty() {

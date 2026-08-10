@@ -39,13 +39,45 @@ cc_only = true               # true: agent only works on #cc tasks
 # Clean
 # -----
 # Auto-clean and archival settings.
+#
+# Archiving has two independent triggers, because either one alone is blind to
+# a real case: a count cannot tell 100 done one-liners from 100 done essays,
+# and bytes cannot see a track quietly accumulating hundreds of trivial tasks.
+# Whichever trips, the drain goes down to the *retain* level rather than back to
+# the trigger — that gap is deliberate, and without it a track would archive one
+# task per clean for ever.
 
 [clean]
 auto_clean = true            # run clean after file reload in TUI
                              # (skipped while git is rewriting tracked files)
 done_threshold = 100         # max done tasks per track before archiving
 done_retain = 10             # number of recent done tasks to keep in track after archiving
+done_bytes_threshold = "256KB"  # max bytes of done tasks before archiving; 0 / "off" disables
+                             # (at a typical note length this is about the same
+                             # statement as done_threshold — the two only diverge
+                             # once notes run long, which is the point)
+done_bytes_retain = "64KB"   # what a byte-triggered archive drains down to
 archive_per_track = true     # separate archive file per track
+
+# Limits
+# ------
+# What frame's own commands will not do. These are guardrails on authoring, not
+# invariants on the file: markdown stays hand-editable and `fr import` is exempt,
+# because that is how content that predates a limit gets in.
+
+[limits]
+note_max_bytes = "16KB"      # largest note frame's commands will GROW a note to;
+                             # 0 / "off" disables. Enforcement is non-increasing:
+                             # a note already over the limit is never touched,
+                             # never truncated, and can still be edited down —
+                             # only writes that lengthen it are refused
+track_warn_bytes = "512KB"   # `fr check` warns past this much OPEN work in one
+                             # track (## Backlog + ## Parked). Done is excluded
+                             # because [clean] already bounds it, and does so by
+                             # swinging between the two done_bytes settings above —
+                             # counting that swing would make the warning fire and
+                             # clear on the archiver's schedule rather than on
+                             # anything its reader did. 0 / "off" disables
 
 # UI
 # --
