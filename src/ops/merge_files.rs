@@ -129,9 +129,11 @@ impl MergeReport {
 /// the file back to the VCS's own merge, which git only performs for a path no
 /// driver was configured for (see [`crate::cli::handlers::cmd_merge`]).
 ///
-/// `project.toml` and `actors.toml` line-merge fine (`actors.toml` serializes in
-/// insertion order precisely so they do) — but that is because they are never
-/// routed here, not because this turns them down. What declining is for is a
+/// `project.toml` and `actors.toml` line-merge acceptably — but that is because
+/// they are never routed here, not because this turns them down. What makes
+/// `actors.toml` safe under git's own merge is its serialization (one line per
+/// actor, sorted by token; see [`crate::io::actors::serialize_registry`]), not
+/// anything in this module. What declining is for is a
 /// file that *is* routed and whose shape we cannot name: stopping is right
 /// there, because parsing it as the wrong shape is how data goes missing.
 ///

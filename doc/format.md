@@ -315,6 +315,27 @@ stray          <- stranded: belongs to no item, carried on "two"
 
 **Spacing may be mixed after an edit**, and that is expected. A clean item is written back verbatim while an edited one is written canonically, so editing one item of a compactly-written inbox leaves a blank line below that item and not below its neighbours. A compact inbox converts to the canonical spacing one item at a time, as each is edited. Every intermediate state is stable: reading and writing it back reproduces it exactly.
 
+## Actor Registry (`frame/actors.toml`)
+
+The one committed non-markdown file frame generates. It maps every known [actor token](concepts.md#actors) to its state and provenance:
+
+```toml
+[actors]
+null = { name = "origin", state = "active" }
+a = { name = "laptop", state = "active", claimed = "2026-06-03" }
+c = { name = "desktop", state = "retired", claimed = "2026-06-02", retired = "2026-06-09" }
+```
+
+Fields: `name` (provenance, defaulting to the claiming machine's hostname) and `state` (`active` or `retired`) are always present; `claimed` and `retired` are `YYYY-MM-DD` and appear when they apply (`null` has no `claimed` date). Frame reads any valid TOML of this shape, including the one-section-per-actor form (`[actors.a]` with the fields below it) that older versions wrote.
+
+**The file is generated.** It is rewritten whole on every claim or retirement, so comments and hand formatting do not survive. Two properties of how it is written are deliberate, and both are about `git merge`:
+
+**One line per actor.** `actors.toml` is committed and is [not routed to frame's merge driver](cli.md#fr-merge), so git merges it as plain text — and two clones claiming tokens concurrently each add a row. Written as one section per actor, two rows claimed on the same machine on the same day differ only in their `[actors.<token>]` header; git aligns the identical `name`/`state`/`claimed` lines below and conflicts the header alone. Resolving that the obvious way — keep both sides — yields `[actors.e]` immediately followed by `[actors.d]`, which is an empty table for `e`: the registry stops parsing and an actor has silently lost its provenance. One line per actor makes the whole row the conflict region, so keeping both sides is correct and loses nothing.
+
+**Sorted by token, `null` first.** Appending each new actor put every claim at the end of the file, so two concurrent claims always landed at the same anchor and always conflicted. Sorted, they merge cleanly whenever an existing token sorts between them, which is increasingly likely as a project accumulates actors — that is, for exactly the people who merge this file. It does not help when nothing separates the two new tokens (the first two clones of a fresh project, whose registry holds only `null`); that case still conflicts, and is the one the row shape above makes safe. `null` is not a token and would otherwise sort into the middle of the letters, so it is pinned first and stays put.
+
+Do not restore arrival order. It is not a cosmetic choice: it is the difference between conflicting on every merge and conflicting on some of them.
+
 ## Selective Rewrite
 
 Frame uses a selective rewrite strategy for round-trip preservation:

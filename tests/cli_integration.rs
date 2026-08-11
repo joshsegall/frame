@@ -4467,7 +4467,7 @@ fn test_init_force_does_not_clobber_actors() {
     // The registry survived the reinit.
     let actors = fs::read_to_string(tmp.path().join("frame/actors.toml")).unwrap();
     assert!(
-        actors.contains("[actors.a]"),
+        actors.contains("\na = {"),
         "actors.toml clobbered: {actors}"
     );
     assert!(actors.contains("mine"));
@@ -4519,10 +4519,7 @@ fn test_first_mint_auto_claims_token() {
     assert_ne!(token, "null");
     assert_eq!(id, format!("M-{token}1"));
     let registry = fs::read_to_string(tmp.path().join("frame/actors.toml")).unwrap();
-    assert!(
-        registry.contains(&format!("[actors.{token}]")),
-        "{registry}"
-    );
+    assert!(registry.contains(&format!("\n{token} = {{")), "{registry}");
 
     // A second mint does not re-announce (token already claimed).
     let (_stdout2, stderr2, success2) = run_fr(tmp.path(), &["add", "main", "Second"]);
@@ -6835,6 +6832,153 @@ fn test_merge_declines_a_file_it_does_not_understand() {
     assert_eq!(
         fs::read_to_string(dir.join("ours.toml")).unwrap(),
         "a = 2\n"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `frame/actors.toml` under a real `git merge`
+//
+// The registry is committed and is deliberately *not* routed to frame's merge
+// driver, so git merges it as plain text and the file's shape decides what that
+// merge does. Two clones claiming tokens concurrently both add a row, which used
+// to mean: always a conflict, and a conflict whose natural resolution produced an
+// actor with no `name` and a registry that no longer parsed.
+//
+// One line per actor makes the conflict safe to resolve; sorted order makes it
+// rarer. These pin both, through git itself rather than `git merge-file`.
+// ---------------------------------------------------------------------------
+
+/// Sorted order pays off once a project has actors: two claims that an existing
+/// token sorts between are two insertions at *different* anchors, which git
+/// merges with no conflict and no driver involved.
+#[test]
+fn actors_registry_merges_cleanly_when_a_token_sorts_between_two_claims() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    if !merge_repo(tmp.path()) {
+        return; // git unavailable
+    }
+    let root = tmp.path();
+
+    // A project that has been around: the primary plus one more actor, with `m`
+    // sitting between the two tokens that are about to be claimed.
+    run_fr_ok(root, &["actor", "set", "null"]);
+    run_fr_ok(root, &["actor", "set", "m"]);
+    git_must(root, &["add", "-A"]);
+    git_must(root, &["commit", "-qm", "two actors"]);
+
+    git_must(root, &["checkout", "-q", "-b", "theirs"]);
+    run_fr_ok(root, &["actor", "set", "t"]);
+    git_must(root, &["add", "-A"]);
+    git_must(root, &["commit", "-qm", "their claim"]);
+
+    git_must(root, &["checkout", "-q", "main"]);
+    run_fr_ok(root, &["actor", "set", "a"]);
+    git_must(root, &["add", "-A"]);
+    git_must(root, &["commit", "-qm", "our claim"]);
+
+    let merged = Command::new("git")
+        .current_dir(root)
+        .args(["merge", "theirs"])
+        .output()
+        .expect("git merge runs");
+    assert!(
+        merged.status.success(),
+        "a claim either side of `m` should merge cleanly:\n{}\n{}",
+        String::from_utf8_lossy(&merged.stdout),
+        String::from_utf8_lossy(&merged.stderr)
+    );
+
+    let registry = fs::read_to_string(root.join("frame/actors.toml")).unwrap();
+    assert!(!registry.contains("<<<<<<<"), "no markers: {registry}");
+    // Every actor survived, and the file still parses.
+    let listed = run_fr_ok(root, &["actor", "list"]);
+    for token in ["null", "a", "m", "t"] {
+        assert!(
+            registry.contains(&format!("\n{} = {{", token)),
+            "{token} is missing from the merged registry: {registry}"
+        );
+        assert!(listed.contains(token), "{token} not listed: {listed}");
+    }
+}
+
+/// The case sorting cannot help — two claims with nothing between them, which is
+/// every project whose registry holds only the primary. It still conflicts; what
+/// matters is that the conflict is one whole row per side, so the resolution
+/// anyone would reach for (keep both lines) leaves a registry that parses with
+/// both actors intact.
+///
+/// The shape this replaced conflicted on the `[actors.<token>]` header alone —
+/// keeping both sides there produced an empty table and `cannot parse
+/// actors.toml: missing field 'name'`.
+#[test]
+fn actors_registry_conflict_between_adjacent_claims_resolves_by_keeping_both() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    if !merge_repo(tmp.path()) {
+        return; // git unavailable
+    }
+    let root = tmp.path();
+
+    run_fr_ok(root, &["actor", "set", "null"]);
+    git_must(root, &["add", "-A"]);
+    git_must(root, &["commit", "-qm", "primary only"]);
+
+    git_must(root, &["checkout", "-q", "-b", "theirs"]);
+    run_fr_ok(root, &["actor", "set", "d"]);
+    git_must(root, &["add", "-A"]);
+    git_must(root, &["commit", "-qm", "their claim"]);
+
+    git_must(root, &["checkout", "-q", "main"]);
+    run_fr_ok(root, &["actor", "set", "e"]);
+    git_must(root, &["add", "-A"]);
+    git_must(root, &["commit", "-qm", "our claim"]);
+
+    let merged = Command::new("git")
+        .current_dir(root)
+        .args(["merge", "theirs"])
+        .output()
+        .expect("git merge runs");
+    assert!(
+        !merged.status.success(),
+        "two claims with nothing sorting between them still conflict — \
+         this pins that, so a future ordering change is a deliberate one"
+    );
+
+    // Each side of the conflict is a whole row: token *and* provenance, never a
+    // bare header that would orphan the fields below it.
+    let conflicted = fs::read_to_string(root.join("frame/actors.toml")).unwrap();
+    for token in ["d", "e"] {
+        let row = conflicted
+            .lines()
+            .find(|l| l.starts_with(&format!("{} = ", token)))
+            .unwrap_or_else(|| panic!("no row for {token}: {conflicted}"));
+        assert!(
+            row.contains("name = ") && row.contains("state = ") && row.ends_with('}'),
+            "{token}'s row must carry its own fields: {row}"
+        );
+    }
+
+    // The resolution a human reaches for: drop the marker lines, keep both sides.
+    let resolved: String = conflicted
+        .lines()
+        .filter(|l| {
+            !l.starts_with("<<<<<<<") && !l.starts_with("=======") && !l.starts_with(">>>>>>>")
+        })
+        .map(|l| format!("{}\n", l))
+        .collect();
+    fs::write(root.join("frame/actors.toml"), &resolved).unwrap();
+
+    let listed = run_fr_ok(root, &["actor", "list"]);
+    for token in ["null", "d", "e"] {
+        assert!(
+            listed.contains(token),
+            "keeping both sides must keep both actors: {listed}\n{resolved}"
+        );
+    }
+    // And neither actor lost its provenance in the resolution.
+    assert_eq!(
+        resolved.matches("name = ").count(),
+        3,
+        "every row keeps its name: {resolved}"
     );
 }
 

@@ -65,8 +65,8 @@ impl ActorEntry {
     }
 }
 
-/// The token → entry registry, keyed by token. `IndexMap` preserves insertion
-/// order for diff-stable, merge-friendly serialization.
+/// The token → entry registry, keyed by token. `IndexMap` preserves the order
+/// the file was read in; [`serialize_registry`] imposes the write order.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ActorRegistry {
     #[serde(default)]
@@ -179,6 +179,18 @@ impl ActorRegistry {
         }
     }
 
+    /// The order rows are written in: the null namespace first, then every other
+    /// token sorted. See [`serialize_registry`] for why the order is fixed
+    /// rather than arrival-ordered.
+    pub fn write_order(&self) -> Vec<(&str, &ActorEntry)> {
+        let mut rows: Vec<(&str, &ActorEntry)> =
+            self.actors.iter().map(|(t, e)| (t.as_str(), e)).collect();
+        // `null` is not a token and sorts nowhere in particular; pin it first so
+        // the primary's row is where a reader expects it and never moves.
+        rows.sort_by_key(|(token, _)| (*token != "null", *token));
+        rows
+    }
+
     /// Tombstone `token` (active → retired). Errors if absent or already retired.
     pub fn retire(&mut self, token: &str, today: &str) -> Result<(), String> {
         match self.actors.get_mut(token) {
@@ -275,15 +287,33 @@ pub fn validate_registry_text(text: &str) -> Vec<String> {
     issues
 }
 
-/// Find token names that appear in more than one `[actors.<token>]` header.
+/// Find token names declared more than once, in either shape a registry can be
+/// written in: a repeated `[actors.<token>]` header (the section shape frame
+/// wrote before it moved to one line per actor), or a repeated `<token> = { … }`
+/// key under `[actors]`.
 fn duplicate_token_headers(text: &str) -> Vec<String> {
     let mut counts: IndexMap<String, usize> = IndexMap::new();
+    let mut in_actors_table = false;
     for line in text.lines() {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("[actors.")
             && let Some(token) = rest.strip_suffix(']')
         {
+            in_actors_table = false;
             *counts.entry(token.to_string()).or_insert(0) += 1;
+            continue;
+        }
+        if trimmed.starts_with('[') {
+            in_actors_table = trimmed == "[actors]";
+            continue;
+        }
+        if in_actors_table
+            && let Some((key, _)) = trimmed.split_once('=')
+            && !key.trim().is_empty()
+        {
+            *counts
+                .entry(key.trim().trim_matches('"').to_string())
+                .or_insert(0) += 1;
         }
     }
     counts
@@ -386,12 +416,63 @@ pub fn read_actors(frame_dir: &Path) -> Result<ActorRegistry, String> {
     toml::from_str(&text).map_err(|e| format!("cannot parse {}: {}", path.display(), e))
 }
 
-/// Write the registry, preserving key order (diff-stable for a committed file).
+/// Serialize the registry: **one line per actor**, in [`ActorRegistry::write_order`].
+///
+/// ```text
+/// [actors]
+/// null = { name = "origin", state = "active" }
+/// b = { name = "laptop", state = "active", claimed = "2026-08-11" }
+/// ```
+///
+/// Both properties exist for one reason: `actors.toml` is committed, is not
+/// routed to frame's merge driver, and two clones claiming tokens concurrently
+/// both write a new row. Git merges it as plain text, so the *shape* of the file
+/// decides what that merge does.
+///
+/// **One line per actor makes the conflict safe.** As one TOML section per actor,
+/// two rows written the same day on the same machine differ only in their
+/// `[actors.<token>]` header — git aligns the identical `name`/`state`/`claimed`
+/// lines and conflicts the header alone. Resolving that the natural way (keep
+/// both sides) yields `[actors.e]` immediately followed by `[actors.d]`: an empty
+/// table for `e`, a registry that no longer parses, and an actor silently
+/// stripped of its provenance. As one line per actor the whole row is the
+/// conflict region, and keeping both sides is correct and lossless.
+///
+/// **Sorted order makes the conflict rarer.** Appending put every new row at the
+/// end of the file, so two concurrent claims always landed at the same anchor and
+/// always conflicted. Sorted, two rows merge cleanly whenever an existing token
+/// sorts between them — which becomes the common case as a project accumulates
+/// actors, i.e. exactly for the people who merge this file at all. It does not
+/// help when nothing separates the two new tokens (notably the first two clones
+/// of a fresh project, whose registry holds only `null`); that case falls back to
+/// the conflict above, which is now safe to resolve.
+pub fn serialize_registry(registry: &ActorRegistry) -> String {
+    use toml_edit::{DocumentMut, InlineTable, Item, Table, Value};
+
+    let mut actors = Table::new();
+    for (token, entry) in registry.write_order() {
+        let mut row = InlineTable::new();
+        row.insert("name", Value::from(entry.name.as_str()));
+        row.insert("state", Value::from(entry.state.as_str()));
+        if let Some(claimed) = &entry.claimed {
+            row.insert("claimed", Value::from(claimed.as_str()));
+        }
+        if let Some(retired) = &entry.retired {
+            row.insert("retired", Value::from(retired.as_str()));
+        }
+        actors.insert(token, Item::Value(Value::InlineTable(row)));
+    }
+    let mut doc = DocumentMut::new();
+    doc.insert("actors", Item::Table(actors));
+    doc.to_string()
+}
+
+/// Write the registry. The file is generated: it is rewritten whole on every
+/// claim, so comments and hand formatting do not survive (see
+/// [`serialize_registry`] for the shape and why it is what it is).
 pub fn write_actors(frame_dir: &Path, registry: &ActorRegistry) -> std::io::Result<()> {
     let path = actors_path(frame_dir);
-    let text = toml::to_string_pretty(registry)
-        .map_err(|e| std::io::Error::other(format!("serialize actors.toml: {}", e)))?;
-    crate::io::recovery::atomic_write(&path, text.as_bytes())
+    crate::io::recovery::atomic_write(&path, serialize_registry(registry).as_bytes())
 }
 
 /// The outcome of resolving this clone's minting token (see
@@ -884,24 +965,143 @@ state = \"active\"
         );
     }
 
+    #[test]
+    fn validate_registry_text_reports_duplicates_in_the_one_line_shape() {
+        let text = "[actors]\n\
+             null = { name = \"origin\", state = \"active\" }\n\
+             a = { name = \"x\", state = \"active\" }\n\
+             a = { name = \"y\", state = \"active\" }\n";
+        let issues = validate_registry_text(text);
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.contains("duplicate token entry: [actors.a]")),
+            "issues: {issues:?}"
+        );
+    }
+
     // --- Registry I/O ---
 
     #[test]
-    fn registry_round_trip_preserves_key_order() {
+    fn registry_round_trips_into_sorted_one_line_rows() {
         let mut reg = ActorRegistry::default();
+        // Claimed out of order, and not in the order they will be written.
         reg.claim("null", "origin", None, "2026-06-01").unwrap();
         reg.claim("c", "host-c", None, "2026-06-02").unwrap();
         reg.claim("a", "host-a", None, "2026-06-03").unwrap();
+        reg.retire("c", "2026-06-04").unwrap();
 
         let tmp = TempDir::new().unwrap();
         let frame_dir = tmp.path().join("frame");
         std::fs::create_dir_all(&frame_dir).unwrap();
         write_actors(&frame_dir, &reg).unwrap();
 
+        // One line per actor, null first, the rest sorted — every field present.
+        let text = std::fs::read_to_string(actors_path(&frame_dir)).unwrap();
+        assert_eq!(
+            text,
+            "[actors]\n\
+             null = { name = \"origin\", state = \"active\" }\n\
+             a = { name = \"host-a\", state = \"active\", claimed = \"2026-06-03\" }\n\
+             c = { name = \"host-c\", state = \"retired\", claimed = \"2026-06-02\", \
+             retired = \"2026-06-04\" }\n"
+        );
+
         let loaded = read_actors(&frame_dir).unwrap();
         let keys: Vec<&String> = loaded.actors.keys().collect();
-        assert_eq!(keys, vec!["null", "c", "a"], "key order must be stable");
-        assert_eq!(loaded.actors.get("c").unwrap().name, "host-c");
+        assert_eq!(
+            keys,
+            vec!["null", "a", "c"],
+            "write order is null-then-sorted"
+        );
+        assert_eq!(
+            loaded.actors.get("c").unwrap(),
+            reg.actors.get("c").unwrap()
+        );
+        assert_eq!(
+            loaded.actors.get("a").unwrap(),
+            reg.actors.get("a").unwrap()
+        );
+    }
+
+    #[test]
+    fn arrival_ordered_section_file_is_read_and_rewritten_sorted() {
+        // The shape frame used to write, plus the hand-editing a human might do.
+        // Reading it must be lossless; the next write reorders it and drops the
+        // comments, which is why the file documents itself as generated.
+        let tmp = TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(&frame_dir).unwrap();
+        std::fs::write(
+            actors_path(&frame_dir),
+            "# my machines\n\n\
+             [actors.null]\n\
+             name = \"origin\"  # the primary\n\
+             state = \"active\"\n\n\
+             [actors.m]\n\
+             name = \"host-m\"\n\
+             state = \"retired\"\n\
+             claimed = \"2026-06-02\"\n\
+             retired = \"2026-06-09\"\n\n\
+             [actors.b]\n\
+             name = \"host-b\"\n\
+             state = \"active\"\n\
+             claimed = \"2026-06-05\"\n",
+        )
+        .unwrap();
+
+        let reg = read_actors(&frame_dir).unwrap();
+        assert_eq!(reg.actors.len(), 3);
+        write_actors(&frame_dir, &reg).unwrap();
+
+        let text = std::fs::read_to_string(actors_path(&frame_dir)).unwrap();
+        assert_eq!(
+            text,
+            "[actors]\n\
+             null = { name = \"origin\", state = \"active\" }\n\
+             b = { name = \"host-b\", state = \"active\", claimed = \"2026-06-05\" }\n\
+             m = { name = \"host-m\", state = \"retired\", claimed = \"2026-06-02\", \
+             retired = \"2026-06-09\" }\n"
+        );
+        // Not one field lost in the conversion.
+        let after = read_actors(&frame_dir).unwrap();
+        for (token, entry) in &reg.actors {
+            assert_eq!(after.actors.get(token), Some(entry), "lost {token}");
+        }
+    }
+
+    #[test]
+    fn null_is_written_first_whatever_sorts_around_it() {
+        // `null` starts with `n`: sorted with the rest it would land mid-file,
+        // and would move as tokens either side of it are claimed.
+        let mut reg = ActorRegistry::default();
+        for token in ["z", "a", "n", "p"] {
+            reg.claim(token, "host", None, "2026-06-01").unwrap();
+        }
+        reg.claim("null", "origin", None, "2026-06-01").unwrap();
+        let order: Vec<&str> = reg.write_order().into_iter().map(|(t, _)| t).collect();
+        assert_eq!(order, vec!["null", "a", "n", "p", "z"]);
+        assert!(serialize_registry(&reg).starts_with("[actors]\nnull = "));
+    }
+
+    #[test]
+    fn keeping_both_sides_of_a_conflicted_row_stays_a_valid_registry() {
+        // The resolution the one-line shape exists to make safe: two clones each
+        // added a row, git conflicted them, and the human kept both lines.
+        let resolved = "[actors]\n\
+             null = { name = \"Mac\", state = \"active\" }\n\
+             d = { name = \"Mac\", state = \"active\", claimed = \"2026-08-11\" }\n\
+             e = { name = \"Mac\", state = \"active\", claimed = \"2026-08-11\" }\n";
+        assert!(validate_registry_text(resolved).is_empty());
+        let reg: ActorRegistry = toml::from_str(resolved).unwrap();
+        assert_eq!(reg.actors.len(), 3);
+        // Both actors kept their provenance — the failure this replaces left one
+        // of them an empty table.
+        for token in ["d", "e"] {
+            let entry = reg.actors.get(token).unwrap();
+            assert_eq!(entry.name, "Mac");
+            assert!(entry.is_active());
+        }
     }
 
     #[test]
