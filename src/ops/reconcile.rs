@@ -1022,10 +1022,48 @@ fn merged_task(
 }
 
 /// The same merge over a flat list of sibling tasks, with no sections involved.
-fn reconcile_task_lists(
+///
+/// Used for a task's subtasks, and — through [`reconcile_archive_tasks`] — for a
+/// done archive, which *is* a flat task list and nothing else.
+///
+/// No ambiguous-title guard: two ID-less siblings sharing a title collide on one
+/// key and the second is dropped, which is the behaviour this has always had for
+/// subtasks. [`reconcile_archive_tasks`] passes a guard instead of inheriting
+/// that; see its docs for why the two differ.
+pub(crate) fn reconcile_task_lists(
     base: &[Task],
     ours: &[Task],
     theirs: &[Task],
+) -> (Vec<Task>, Vec<Conflict>) {
+    reconcile_flat(base, ours, theirs, &std::collections::HashSet::new())
+}
+
+/// The flat merge for a **done archive**: the same identity merge, plus the
+/// ambiguous-title guard that [`reconcile_track`] applies and
+/// [`reconcile_task_lists`] does not.
+///
+/// The guard matters more here than it does for subtasks. An archive is a file
+/// people hand-edit and that `fr clean` appends to over years, so two ID-less
+/// tasks sharing a title is reachable — and silently dropping one would be the
+/// same class of loss this whole path exists to stop. Subtask behaviour is left
+/// exactly as it was: changing it would change `reconcile_track`, which this fix
+/// deliberately does not touch.
+pub(crate) fn reconcile_archive_tasks(
+    base: &[Task],
+    ours: &[Task],
+    theirs: &[Task],
+) -> (Vec<Task>, Vec<Conflict>) {
+    let ambiguous = ambiguous_in_lists(&[base, ours, theirs]);
+    reconcile_flat(base, ours, theirs, &ambiguous)
+}
+
+/// The shared body. `ambiguous` names keys no side may be matched on, each of
+/// which keeps ours and reports theirs rather than guessing.
+fn reconcile_flat(
+    base: &[Task],
+    ours: &[Task],
+    theirs: &[Task],
+    ambiguous: &std::collections::HashSet<String>,
 ) -> (Vec<Task>, Vec<Conflict>) {
     let bi = index_tasks(base, SectionKind::Backlog);
     let oi = index_tasks(ours, SectionKind::Backlog);
@@ -1051,6 +1089,23 @@ fn reconcile_task_lists(
         let b = bi.entries.get(key);
         let o = oi.entries.get(key);
         let t = ti.entries.get(key);
+
+        // Same policy as `reconcile_track`: an ambiguous key cannot be matched
+        // across sides with any confidence, so the merge declines rather than
+        // guesses. Empty for the subtask path, so that stays as it was.
+        if ambiguous.contains(key) {
+            if let Some(o) = o {
+                out.push(o.task.clone());
+                if let Some(t) = t {
+                    conflicts.push(Conflict {
+                        key: key.clone(),
+                        reason: ConflictReason::AmbiguousTitle,
+                        theirs: own_lines(&t.task),
+                    });
+                }
+            }
+            continue;
+        }
 
         match decide(b, o, t) {
             Outcome::Delete => {}
@@ -1176,23 +1231,49 @@ pub fn task_key(task: &Task) -> String {
 fn ambiguous_keys(tracks: &[&Track]) -> std::collections::HashSet<String> {
     let mut ambiguous = std::collections::HashSet::new();
     for track in tracks {
-        let mut counts: HashMap<String, usize> = HashMap::new();
-        for node in &track.nodes {
-            if let TrackNode::Section { tasks, .. } = node {
-                for task in tasks {
-                    if task.id.is_none() {
-                        *counts.entry(task_key(task)).or_default() += 1;
-                    }
-                }
-            }
-        }
-        for (key, n) in counts {
-            if n > 1 {
-                ambiguous.insert(key);
+        note_ambiguous(
+            track.nodes.iter().filter_map(|node| match node {
+                TrackNode::Section { tasks, .. } => Some(tasks.iter()),
+                TrackNode::Literal(_) => None,
+            }),
+            &mut ambiguous,
+        );
+    }
+    ambiguous
+}
+
+/// The same count over flat task lists, one per side.
+///
+/// A key is ambiguous when *any one side* carries it more than once: it is that
+/// side's own list the merge would have to pick from, and it cannot.
+fn ambiguous_in_lists(lists: &[&[Task]]) -> std::collections::HashSet<String> {
+    let mut ambiguous = std::collections::HashSet::new();
+    for tasks in lists {
+        note_ambiguous(std::iter::once(tasks.iter()), &mut ambiguous);
+    }
+    ambiguous
+}
+
+/// Add the keys **one side** carries more than once. Counted per side and by
+/// reference — a track's tasks can each hold a long note, and this runs on every
+/// merge.
+fn note_ambiguous<'a>(
+    groups: impl Iterator<Item = std::slice::Iter<'a, Task>>,
+    ambiguous: &mut std::collections::HashSet<String>,
+) {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for group in groups {
+        for task in group {
+            if task.id.is_none() {
+                *counts.entry(task_key(task)).or_default() += 1;
             }
         }
     }
-    ambiguous
+    for (key, n) in counts {
+        if n > 1 {
+            ambiguous.insert(key);
+        }
+    }
 }
 
 /// A task's own markdown lines, excluding subtasks.

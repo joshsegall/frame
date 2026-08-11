@@ -254,7 +254,7 @@ Task syntax, metadata and nesting are exactly as in a track file. The file has t
 - **Tasks** — the flat list. New tasks are appended after the last one.
 - **Tail** — anything below the last task the parser will claim: a note, a rule, an HTML comment. Also carried verbatim.
 
-Because there are no sections, walking `## Section` headers finds nothing in one. Parse it with `parse_archive`, never `parse_track`.
+Because there are no sections, walking `## Section` headers finds nothing in one. Parse it with `parse_archive`, never `parse_track`. That applies to *merging* too: `fr merge` reads this shape as `FileKind::Archive` and merges the flat list by task identity. Reading it as a track found zero tasks and silently discarded one side of every archive merge — see `doc/architecture.md` § Merging Under Version Control.
 
 The first task line is found with the parser's own definition of a task line, at any indent. A bullet that merely *looks* like one — an ordinary markdown link, `- [notes](x.md)` — is header text, not the start of the list.
 

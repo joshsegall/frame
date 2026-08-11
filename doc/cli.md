@@ -804,7 +804,7 @@ Three things, reported individually:
 | Step | What it does |
 |------|--------------|
 | `.gitignore` | ensures the blanket `frame/.*` pattern, and collapses any per-file entries it covers into it |
-| `.gitattributes` | routes `frame/tracks/*.md`, `frame/archive/*.md` and `frame/inbox.md` to the merge driver |
+| `.gitattributes` | routes `frame/tracks/*.md`, `frame/archive/*.md`, `frame/archive/_tracks/*.md` and `frame/inbox.md` to the merge driver |
 | `.git/config` | registers the driver: `merge.frame.driver` |
 
 `fr init` runs this for you inside a repo, so a new project needs nothing extra.
@@ -817,10 +817,10 @@ The `.gitignore` migration only ever removes lines it can name: an exact match f
 
 ### `fr merge`
 
-Three-way merge two versions of a track or the inbox. **Normally invoked by git, not by you** — `fr git setup` registers it as a merge driver and it runs during `git merge`, `git rebase`, `git cherry-pick` and `git stash pop`.
+Three-way merge two versions of a track, a done archive, or the inbox. **Normally invoked by git, not by you** — `fr git setup` registers it as a merge driver and it runs during `git merge`, `git rebase`, `git cherry-pick` and `git stash pop`.
 
 ```
-fr merge --base FILE --ours FILE --theirs FILE [--path PATH] [--kind track|inbox]
+fr merge --base FILE --ours FILE --theirs FILE [--path PATH] [--kind track|archive|inbox]
 fr merge --resolve ID...
 ```
 
@@ -834,9 +834,24 @@ Not to be confused with [`fr actor merge`](#fr-actor-merge), which collapses one
 |--------|---------|
 | `0` | merged cleanly |
 | `1` | merged, but something was left undecided — the VCS stops |
-| `2` | not a frame file, or the merge could not run — the VCS falls back to its own merge |
+| `2` | not a frame file, or the merge could not run |
 
-Status `2` is why `project.toml` and `actors.toml` are not routed to the driver: they are TOML that merges fine line by line, and frame declines anything it does not recognise rather than guessing.
+**Declining does not hand the file back to git's own merge.** Git treats any non-zero status from a merge driver as a conflict: your side stays in the file, the path is marked unmerged, and the merge stops. `1` and `2` are indistinguishable to git, and neither writes `<<<<<<<` markers — git's internal text merge is what produces those, and it only runs for a path no driver was configured for. The status stays distinct because it is what the driver's own message on stderr explains, and because not every VCS is git.
+
+So `project.toml` and `actors.toml` merge line by line for a different reason than you might expect: they are **never routed to the driver**, so nothing declines them — git simply merges them itself, which for TOML in insertion order works fine. What declining is actually for is a file that *is* routed and whose shape frame cannot name; stopping is the right answer there, because reading a file as a shape it does not have is how data goes missing quietly.
+
+**Every routed path shape is named explicitly**, and a path the driver cannot name is never given a default kind. The shape is matched on the file's own directory and its parent, not from the repo root, so a project in a subdirectory works: git passes a path relative to the repo root while the `.gitattributes` pattern that routed it is relative to its own directory, and `subdir/frame/archive/main.md` has to resolve the same as `frame/archive/main.md`.
+
+**Three file shapes, three sets of rules.**
+
+| Path | Merged as |
+|------|-----------|
+| `frame/tracks/*.md` | a track: task identity within sections |
+| `frame/archive/*.md` | a done archive: task identity over a flat list |
+| `frame/archive/_tracks/*.md` | a track — `fr track archive` moved it there intact, sections and all |
+| `frame/inbox.md` | the inbox: content as a multiset |
+
+A **done archive** is not a track and does not merge as one: it has no `## Section` headers, so there is no relocation to reconcile and position carries no meaning. Both sides having run `fr clean` since the common ancestor is the ordinary case, and the answer is the union of what each archived. Your header, anything you wrote below the task list, and the file's line ending are kept from your side.
 
 **On conflict, no conflict markers are written.** A file full of `<<<<<<<` is not valid frame markdown, so it breaks the parser, `fr check` and `fr show` at exactly the moment you need them. Instead:
 
@@ -855,7 +870,9 @@ fr merge --resolve BAC-179
 
 which clears the marker and nothing else. Clearing it is you recording the judgment; frame cannot check that the right thing came out.
 
-**Running it by hand.** The three file arguments and `--path` mirror what a VCS passes (`%O %A %B %P` in git). The merged result is written over `--ours`. `--path` decides whether the file is a track or the inbox; `--kind` forces it when there is no meaningful path.
+**An archive conflict carries no marker, and that is deliberate.** Everything above still holds — your version stays in the file, theirs goes to the recovery log by absolute path, the merge exits 1 and git stops — except the `conflict:` line and `fr merge --resolve`. Both of those are track-only: `fr check`'s conflict detector and `--resolve` walk the project's tracks, which archives are not part of, so a marker written into an archive could be neither reported nor cleared. A marker's job is to carry an unmade decision forward to another clone or a later session; an archive conflict has no such audience, because the halt puts it in front of the one person who can decide. Edit the archive by hand if theirs is the version you want, then stage the file.
+
+**Running it by hand.** The three file arguments and `--path` mirror what a VCS passes (`%O %A %B %P` in git). The merged result is written over `--ours`. `--path` decides which of the three shapes the file is; `--kind` forces it when there is no meaningful path.
 
 ## Project Registry
 

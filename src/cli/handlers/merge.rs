@@ -13,7 +13,28 @@
 //!
 //! Exit status is the interface with the VCS, so it is the return value here
 //! rather than an error: `0` merged, `1` conflicted (stop and let a human look),
-//! `2` declined or broken (fall back to the VCS's own merge).
+//! `2` declined or broken.
+//!
+//! # What declining actually gets you
+//!
+//! **Not a fallback to the VCS's own merge.** Git treats *any* non-zero status
+//! from a merge driver as a conflict: it leaves our side in the file, marks the
+//! path unmerged, and stops — so `1` and `2` are indistinguishable to it, and
+//! neither produces the `<<<<<<<` markers git's internal merge would. Measured,
+//! not assumed; `scratch/archive-merge-repro/driver-exit-codes.sh` runs all four
+//! cases.
+//!
+//! The fallback people expect from `2` happens one step earlier, and for a
+//! different reason: `project.toml` and `actors.toml` merge line by line because
+//! they are **never routed to the driver at all**, not because the driver turns
+//! them down.
+//!
+//! So declining is still the right answer for a routed file whose shape we
+//! cannot name — halting beats guessing, and guessing is what silently emptied
+//! one side of every archive merge — but what it buys is a safe stop, not a
+//! second opinion. The status stays distinct because it is the one the driver's
+//! own stderr explains, and because a VCS that does distinguish them is entitled
+//! to a straight answer.
 
 use crate::cli::commands::MergeArgs;
 use crate::ops::merge_files::{self, FileKind, MergeReport};
@@ -37,10 +58,13 @@ pub fn cmd_merge(args: MergeArgs) -> i32 {
     };
 
     let Some(kind) = resolve_kind(&args, ours) else {
-        // Declining is the whole point of a distinct status: the VCS still has
-        // its own merge, and using it is better than guessing at a file shape.
+        // Declining halts the merge with our side intact and the path unmerged
+        // — it does *not* hand the file back to the VCS's own merge; see the
+        // module docs. That is still the right answer, because the alternative
+        // is guessing at a file shape, and guessing is precisely what silently
+        // emptied one side of every archive merge.
         eprintln!(
-            "fr merge: {} is not a frame track or inbox file — declining",
+            "fr merge: {} is not a frame track, archive or inbox file — declining",
             args.path.as_deref().unwrap_or(ours)
         );
         return EXIT_DECLINED;
@@ -75,11 +99,7 @@ pub fn cmd_merge(args: MergeArgs) -> i32 {
             eprintln!(
                 "fr merge: {label} — merged {} {} from the other side",
                 report.took_theirs + report.deleted,
-                if kind == FileKind::Track {
-                    "task(s)"
-                } else {
-                    "item(s)"
-                }
+                kind.unit()
             );
         }
         return EXIT_MERGED;
@@ -218,6 +238,19 @@ fn report_conflicts(
                 searched.display()
             );
         }
+    }
+
+    // An archive carries no marker, so it must not be told it does. `fr check`'s
+    // conflict detector and `fr merge --resolve` both walk `project.tracks`,
+    // which archives are not in — a marker written here could be neither
+    // reported nor cleared. The halt is what carries the decision instead: the
+    // one person who can make it is standing in front of it right now.
+    if report.kind == FileKind::Archive {
+        eprintln!(
+            "the archive keeps our version of each task above; edit it by hand if theirs is the one you want,\n\
+             then stage the file to finish the merge"
+        );
+        return;
     }
 
     eprintln!("each task above carries a `conflict:` line, which `fr check` reports as an error");

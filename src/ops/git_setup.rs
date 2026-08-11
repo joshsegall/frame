@@ -55,7 +55,11 @@ pub const DRIVER_DESCRIPTION: &str = "frame markdown three-way merge";
 pub const DRIVER_RECURSIVE: &str = "binary";
 
 /// One line per frame file shape that must route to the driver.
-fn attribute_lines(frame_rel: &str) -> Vec<String> {
+///
+/// `pub(crate)` so `merge_files` can assert that every pattern routed here has a
+/// kind [`crate::ops::merge_files::kind_for_path`] recognises. Routing a shape
+/// the merge cannot name is how a done archive came to be parsed as a track.
+pub(crate) fn attribute_lines(frame_rel: &str) -> Vec<String> {
     let frame_rel = frame_rel.trim_end_matches('/');
     vec![
         format!("{frame_rel}/tracks/*.md merge={DRIVER_NAME}"),

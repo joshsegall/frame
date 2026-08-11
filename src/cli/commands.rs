@@ -138,7 +138,7 @@ pub struct MergeArgs {
     #[arg(long, value_name = "PATH")]
     pub path: Option<String>,
     /// Force the file kind instead of inferring it from --path
-    #[arg(long, value_parser = ["track", "inbox"])]
+    #[arg(long, value_parser = ["track", "archive", "inbox"])]
     pub kind: Option<String>,
     /// Clear the conflict marker on tasks whose conflict you have resolved
     #[arg(
