@@ -846,7 +846,7 @@ So `project.toml` and `actors.toml` merge line by line for a different reason th
 
 **Every routed path shape is named explicitly**, and a path the driver cannot name is never given a default kind. The shape is matched on the file's own directory and its parent, not from the repo root, so a project in a subdirectory works: git passes a path relative to the repo root while the `.gitattributes` pattern that routed it is relative to its own directory, and `subdir/frame/archive/main.md` has to resolve the same as `frame/archive/main.md`.
 
-**Three file shapes, three sets of rules.**
+**Four path shapes, three sets of rules** — `tracks/` and `archive/_tracks/` both hold tracks, and merge alike.
 
 | Path | Merged as |
 |------|-----------|
@@ -876,7 +876,7 @@ which clears the marker and nothing else. Clearing it is you recording the judgm
 
 **An archive conflict carries no marker, and that is deliberate.** Everything above still holds — your version stays in the file, theirs goes to the recovery log by absolute path, the merge exits 1 and git stops — except the `conflict:` line and `fr merge --resolve`. Both of those are track-only: `fr check`'s conflict detector and `--resolve` walk the project's tracks, which archives are not part of, so a marker written into an archive could be neither reported nor cleared. A marker's job is to carry an unmade decision forward to another clone or a later session; an archive conflict has no such audience, because the halt puts it in front of the one person who can decide. Edit the archive by hand if theirs is the version you want, then stage the file.
 
-**Running it by hand.** The three file arguments and `--path` mirror what a VCS passes (`%O %A %B %P` in git). The merged result is written over `--ours`. `--path` decides which of the three shapes the file is; `--kind` forces it when there is no meaningful path.
+**Running it by hand.** The three file arguments and `--path` mirror what a VCS passes (`%O %A %B %P` in git). The merged result is written over `--ours`. `--path` decides which of the three kinds the file is merged as; `--kind` forces it when there is no meaningful path.
 
 ## Project Registry
 
