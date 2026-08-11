@@ -102,7 +102,7 @@ fn render_project_toml(
 ///
 /// Returns the names of the steps that changed something.
 fn update_git_config(cwd: &std::path::Path) -> Vec<String> {
-    let report = crate::ops::git_setup::run(cwd, "frame", false);
+    let report = crate::ops::git_setup::run(cwd, false);
     report
         .steps
         .iter()

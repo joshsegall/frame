@@ -294,6 +294,50 @@ pub fn ignored_paths(dir: &Path, paths: &[String]) -> Option<Vec<String>> {
     git_paths(dir, &["check-ignore"], paths)
 }
 
+/// The `merge` attribute git resolves for each of `paths`, in the same order.
+///
+/// `dir` is where git runs and `paths` are resolved against it, exactly as for
+/// [`ignored_paths`]. `None` when git cannot be run or `dir` is not in a
+/// repository; otherwise one value per path — `"frame"` when the frame driver is
+/// routed, `"unspecified"` when nothing routes it.
+///
+/// **This is pattern matching, not file inspection**: `check-attr` answers for a
+/// path that does not exist on disk. That is what makes it usable as a health
+/// check, since a project that has never run `fr clean` has no archive file to
+/// point at and would otherwise be unprobeable. Measured rather than assumed —
+/// `scratch/archive-merge-repro/probe-git-behaviour.sh` runs it against paths
+/// that were never created.
+///
+/// Asking git rather than reading `.gitattributes` is the whole point: the
+/// pattern that *looks* right may not be, because a pattern containing a slash
+/// is relative to the directory of the file it is written in. `fr git setup`
+/// once wrote `sub/frame/archive/*.md` into `sub/.gitattributes`, where it means
+/// `sub/sub/frame/...` and matches nothing at all.
+pub fn merge_attr_values(dir: &Path, paths: &[String]) -> Option<Vec<String>> {
+    if paths.is_empty() {
+        return Some(Vec::new());
+    }
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["check-attr", "-z", "merge", "--"])
+        .args(paths)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    // NUL-separated triplets: path, attribute name, value.
+    let text = String::from_utf8_lossy(&output.stdout);
+    let fields: Vec<&str> = text.split('\0').collect();
+    let values: Vec<String> = fields
+        .chunks(3)
+        .filter(|c| c.len() == 3)
+        .map(|c| c[2].to_string())
+        .collect();
+    (values.len() == paths.len()).then_some(values)
+}
+
 /// Which of `rel_paths` (repo-relative) have unstaged modifications — the working
 /// tree copy differs from what is staged in the index.
 fn modified_paths(toplevel: &Path, rel_paths: &[String]) -> Option<Vec<String>> {

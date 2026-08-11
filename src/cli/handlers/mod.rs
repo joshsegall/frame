@@ -1503,6 +1503,18 @@ fn cmd_check(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
                             "  frame's merge driver is not registered in this clone, so git will merge track files line by line — run `fr git setup`"
                         );
                     }
+                    check::CheckWarning::MergeRoutingBroken { paths } => {
+                        println!(
+                            "  .gitattributes does not route {} to frame's merge driver ({}), so git will merge {} line by line — run `fr git setup`",
+                            if paths.len() == 1 {
+                                "a frame file"
+                            } else {
+                                "frame files"
+                            },
+                            paths.join(", "),
+                            if paths.len() == 1 { "it" } else { "them" },
+                        );
+                    }
                     check::CheckWarning::LocalFileCommitted { path, tracked } => {
                         if *tracked {
                             // `git rm --cached` refuses a directory without

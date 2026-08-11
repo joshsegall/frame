@@ -223,6 +223,8 @@ So archives merge as `FileKind::Archive`, through `reconcile::reconcile_archive_
 
 The third piece is the awkward one: `.git/config` is per-clone and cannot be committed. A teammate who clones a correctly-configured project gets the attributes but not the driver, and silently falls back to text merges. That is why `fr check` warns about an unregistered driver — it is the only thing that tells a fresh clone to run setup. Both git checks are no-ops outside a repo, or when `git` cannot be run.
 
+**Patterns are relative to the file holding them, and the check asks git rather than reading them.** Both written files live beside `frame/`, at the project root, so their prefix is always `frame` — there is nothing to compute, and computing it was a bug: setup used the frame directory's path relative to the git *toplevel*, so a project in `sub/` got `sub/frame/archive/*.md` written into `sub/.gitattributes`, where it means `sub/sub/frame/…`. Nothing routed and nothing was ignored, in a file that read correctly at a glance. The general shape is the same one the archive merge had — two things that must agree, decided in different places, with no mechanism keeping them honest — so the answer is the same: `fr check` runs `git check-attr` against a representative path per routed shape and warns on anything that does not come back `frame`. A presence test is a proxy; this is the thing itself. `check-attr` matches patterns rather than inspecting files, so the probe works for an archive a project has not written yet.
+
 **Code**: `src/ops/merge_files.rs`, `src/ops/git_setup.rs`, `src/cli/handlers/merge.rs`, `src/cli/handlers/git.rs`
 
 ## Done Task Lifecycle

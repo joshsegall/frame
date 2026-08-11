@@ -4,8 +4,6 @@
 //! useful on a project that is in some way broken, and refusing to fix a
 //! `.gitignore` because a track file will not parse would be exactly backwards.
 
-use std::path::Path;
-
 use crate::cli::commands::{GitAction, GitCmd};
 use crate::ops::git_setup::{self, SetupReport, StepStatus};
 
@@ -13,8 +11,7 @@ pub fn cmd_git(args: GitCmd, json: bool) -> Result<(), Box<dyn std::error::Error
     match args.action {
         GitAction::Setup(setup_args) => {
             let root = super::discover_project_root()?;
-            let frame_rel = frame_rel_for(&root);
-            let report = git_setup::run(&root, &frame_rel, setup_args.dry_run);
+            let report = git_setup::run(&root, setup_args.dry_run);
 
             if json {
                 print_json(&report, setup_args.dry_run);
@@ -28,29 +25,6 @@ pub fn cmd_git(args: GitCmd, json: bool) -> Result<(), Box<dyn std::error::Error
             Ok(())
         }
     }
-}
-
-/// The frame directory's path relative to the repository root.
-///
-/// Everything written — the ignore pattern, the attribute patterns — is
-/// repo-relative, so a project in a subdirectory needs `sub/frame`, not `frame`.
-/// Falls back to `frame` when the relationship cannot be established, which is
-/// the conventional layout and the only sensible guess.
-fn frame_rel_for(root: &Path) -> String {
-    let frame_dir = root.join("frame");
-    let Some(paths) = crate::io::git::repo_paths(&frame_dir) else {
-        return "frame".to_string();
-    };
-    frame_dir
-        .canonicalize()
-        .ok()
-        .and_then(|abs| {
-            abs.strip_prefix(&paths.toplevel)
-                .ok()
-                .map(|p| p.to_path_buf())
-        })
-        .map(|rel| rel.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|| "frame".to_string())
 }
 
 fn print_human(report: &SetupReport, dry_run: bool) {

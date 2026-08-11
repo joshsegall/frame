@@ -262,6 +262,26 @@ pub enum CheckWarning {
     /// than project content.
     #[serde(rename = "merge_driver_unregistered")]
     MergeDriverUnregistered,
+    /// `.gitattributes` does not actually route frame's files to the merge
+    /// driver, so git will merge them line by line however the file reads.
+    ///
+    /// **Asked of git, not read off the file.** A pattern containing a slash is
+    /// relative to the directory of the `.gitattributes` holding it, so a
+    /// plausible-looking line can match nothing at all: `fr git setup` used to
+    /// write `sub/frame/archive/*.md` into `sub/.gitattributes`, where it means
+    /// `sub/sub/frame/...`. Checking that the patterns are *present* said the
+    /// project was fine; `git check-attr` says whether they *work*, and that is
+    /// the only question worth asking.
+    ///
+    /// `paths` are the representative files that did not route, one per shape
+    /// (see [`crate::ops::git_setup::routed_paths`]). They need not exist — the
+    /// attribute is matched against the path, not the file.
+    ///
+    /// A warning rather than an error, and no `--fix`: the repair is
+    /// `fr git setup`, which rewrites git configuration rather than project
+    /// content.
+    #[serde(rename = "merge_routing_broken")]
+    MergeRoutingBroken { paths: Vec<String> },
     /// A track holds more open work than `limits.track_warn_bytes` allows for.
     ///
     /// **One finding per track, and it names no tasks.** The per-task version of
@@ -757,6 +777,10 @@ pub fn check_project(project: &Project) -> CheckResult {
 
     // The merge driver, which is per-clone and so cannot arrive with a clone.
     check_merge_driver(&project.root, &mut result);
+
+    // And whether `.gitattributes` — which *does* arrive with a clone — actually
+    // routes anything, asked of git rather than inferred from the file.
+    check_merge_routing(&project.root, &mut result);
 
     // Numbers handed out twice, where one holder is archived (invisible to the
     // live-tracks-only duplicate check above).
@@ -1365,6 +1389,39 @@ fn check_local_files_ignored(frame_dir: &Path, result: &mut CheckResult) {
 fn check_merge_driver(root: &Path, result: &mut CheckResult) {
     if crate::ops::git_setup::driver_registered(root) == Some(false) {
         result.warnings.push(CheckWarning::MergeDriverUnregistered);
+    }
+}
+
+/// Ask git whether frame's files actually reach the merge driver.
+///
+/// The two halves of routing are decided in different places and nothing kept
+/// them honest: `.gitattributes` decides what git hands the driver, and it is
+/// easy to write a line there that looks right and matches nothing. Testing for
+/// the *presence* of a pattern is a proxy; `git check-attr` is the real thing,
+/// and it is what this asks.
+///
+/// Silent outside a repo and whenever git cannot be run, like every other git
+/// check here. Probing paths that do not exist is fine and deliberate — a
+/// project that has never run `fr clean` has no archive file, and its routing
+/// still needs to be right before the day it does.
+fn check_merge_routing(root: &Path, result: &mut CheckResult) {
+    if crate::io::git::repo_paths(&root.join("frame")).is_none() {
+        return;
+    }
+    let paths = crate::ops::git_setup::routed_paths();
+    let Some(values) = crate::io::git::merge_attr_values(root, &paths) else {
+        return;
+    };
+    let unrouted: Vec<String> = paths
+        .iter()
+        .zip(values)
+        .filter(|(_, value)| value != crate::ops::git_setup::DRIVER_NAME)
+        .map(|(path, _)| path.clone())
+        .collect();
+    if !unrouted.is_empty() {
+        result
+            .warnings
+            .push(CheckWarning::MergeRoutingBroken { paths: unrouted });
     }
 }
 

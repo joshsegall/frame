@@ -825,6 +825,13 @@ pub(super) fn palette_check_project(app: &mut App) {
                 check::CheckWarning::MergeDriverUnregistered => {
                     "  merge driver not registered in this clone — run `fr git setup`".to_string()
                 }
+                check::CheckWarning::MergeRoutingBroken { paths } => {
+                    format!(
+                        "  .gitattributes routes {} of {} frame file shapes to the merge driver — run `fr git setup`",
+                        crate::ops::git_setup::routed_paths().len() - paths.len(),
+                        crate::ops::git_setup::routed_paths().len(),
+                    )
+                }
                 check::CheckWarning::LocalFileCommitted { path, tracked } => {
                     if *tracked {
                         format!(

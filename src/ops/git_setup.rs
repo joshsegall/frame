@@ -54,6 +54,33 @@ pub const DRIVER_DESCRIPTION: &str = "frame markdown three-way merge";
 /// produce a file frame does not understand.
 pub const DRIVER_RECURSIVE: &str = "binary";
 
+/// The frame directory's name, and therefore its path relative to the project
+/// root — which is where `.gitignore` and `.gitattributes` are written.
+///
+/// **Both files' patterns are relative to the directory holding them**, not to
+/// the repository root, because a git pattern containing a slash always is. So
+/// this is the right prefix for every project, at the repo root or below it, and
+/// there is nothing to compute. Computing it *was* the bug: `fr git setup` used
+/// the frame directory's path relative to the git toplevel, so a project in
+/// `sub/` got `sub/frame/archive/*.md` written into `sub/.gitattributes`, where
+/// it means `sub/sub/frame/...` and matches nothing. Nothing routed to the merge
+/// driver and nothing was ignored, silently, while the file looked plausible.
+pub(crate) const FRAME_REL: &str = "frame";
+
+/// One representative path per routed shape, relative to the project root.
+///
+/// Derived from [`attribute_lines`] so the two cannot drift: this is what
+/// `fr check` hands to `git check-attr` to find out whether routing actually
+/// works, and a pattern added there is probed here without anyone remembering
+/// to. The paths need not exist — `check-attr` matches patterns, not files.
+pub fn routed_paths() -> Vec<String> {
+    attribute_lines(FRAME_REL)
+        .iter()
+        .filter_map(|line| line.split_whitespace().next())
+        .map(|pattern| pattern.replace('*', "sample"))
+        .collect()
+}
+
 /// One line per frame file shape that must route to the driver.
 ///
 /// `pub(crate)` so `merge_files` can assert that every pattern routed here has a
@@ -182,9 +209,22 @@ fn legacy_entries(frame_rel: &str) -> Vec<String> {
 /// - With nothing to remove and no pattern present, it is appended with its own
 ///   comment header — the same shape `fr init` writes.
 /// - Every other line, comment, and blank keeps its place.
-pub fn planned_gitignore(existing: &str, frame_rel: &str) -> Option<(String, Vec<String>)> {
+/// - **A dead pattern this command itself wrote is removed too**, when
+///   `stale_prefix` names one. Only the exact line
+///   `<stale_prefix>/.*` — the output of an older `fr git setup` at a prefix
+///   that matches nothing from here. A prefixed line that is *not* that exact
+///   string belongs to somebody else and is left alone, including a genuine
+///   entry for a different project written into a shared file.
+pub fn planned_gitignore(
+    existing: &str,
+    frame_rel: &str,
+    stale_prefix: Option<&str>,
+) -> Option<(String, Vec<String>)> {
     let pattern = crate::io::project_io::gitignore_pattern_for(frame_rel);
-    let legacy = legacy_entries(frame_rel);
+    let mut legacy = legacy_entries(frame_rel);
+    if let Some(stale) = stale_prefix {
+        legacy.push(crate::io::project_io::gitignore_pattern_for(stale));
+    }
 
     let has_pattern = existing.lines().any(|l| l.trim() == pattern);
     let removed: Vec<String> = existing
@@ -229,44 +269,88 @@ pub fn planned_gitignore(existing: &str, frame_rel: &str) -> Option<(String, Vec
 // .gitattributes
 // ---------------------------------------------------------------------------
 
-/// The `.gitattributes` a project should have, or `None` when every line is
-/// already present.
+/// A file rewrite that is worth doing, and what it changes.
+#[derive(Debug)]
+pub struct Planned {
+    pub content: String,
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+}
+
+/// The `.gitattributes` a project should have, or `None` when it is already
+/// right.
 ///
 /// Existing lines are never rewritten — a project may deliberately route some
 /// other path elsewhere, and a pattern already mapped to a different driver is
 /// left as the user set it. Only missing lines are appended.
-pub fn planned_gitattributes(existing: &str, frame_rel: &str) -> Option<(String, Vec<String>)> {
-    let wanted = attribute_lines(frame_rel);
-    let present: Vec<&str> = existing.lines().map(|l| l.trim()).collect();
+///
+/// **One exception, and it is deliberately narrow.** When `stale_prefix` names
+/// one, a line that is character-for-character something an older `fr git setup`
+/// wrote at that prefix is removed. Those lines are dead where they sit: a
+/// pattern with a slash resolves against the directory of the file holding it,
+/// so `sub/frame/*.md` inside `sub/.gitattributes` means `sub/sub/frame/*.md`.
+/// The test is exact-match against [`attribute_lines`] output — a prefixed line
+/// that differs by so much as its driver name is somebody's deliberate routing
+/// and is left alone.
+pub fn planned_gitattributes(
+    existing: &str,
+    frame_rel: &str,
+    stale_prefix: Option<&str>,
+) -> Option<Planned> {
+    let dead: Vec<String> = stale_prefix.map(attribute_lines).unwrap_or_default();
+
+    let kept: Vec<&str> = existing
+        .lines()
+        .filter(|l| !dead.iter().any(|d| d == l.trim()))
+        .collect();
+    let removed: Vec<String> = existing
+        .lines()
+        .filter(|l| dead.iter().any(|d| d == l.trim()))
+        .map(|l| l.trim().to_string())
+        .collect();
 
     // A pattern already mentioned — with any driver — counts as configured, so
-    // re-running never fights a deliberate override.
-    let missing: Vec<String> = wanted
+    // re-running never fights a deliberate override. Checked against what
+    // *survives* the removal above, so a dead line cannot vouch for the live one
+    // it was written instead of.
+    let added: Vec<String> = attribute_lines(frame_rel)
         .into_iter()
         .filter(|line| {
             let pattern = line.split_whitespace().next().unwrap_or_default();
-            !present
+            !kept
                 .iter()
                 .any(|p| p.split_whitespace().next() == Some(pattern))
         })
         .collect();
 
-    if missing.is_empty() {
+    if added.is_empty() && removed.is_empty() {
         return None;
     }
 
-    let mut content = existing.to_string();
+    let mut content = if removed.is_empty() {
+        existing.to_string()
+    } else {
+        let mut text = kept.join("\n");
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text
+    };
     if !content.is_empty() && !content.ends_with('\n') {
         content.push('\n');
     }
-    if content.is_empty() {
+    if content.is_empty() && !added.is_empty() {
         content.push_str("# frame — merge track and inbox files by task identity\n");
     }
-    for line in &missing {
+    for line in &added {
         content.push_str(line);
         content.push('\n');
     }
-    Some((content, missing))
+    Some(Planned {
+        content,
+        added,
+        removed,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -326,42 +410,85 @@ fn git_config_get(root: &Path, key: &str) -> Option<String> {
 ///
 /// Idempotent: a second run reports `AlreadyCorrect` throughout and writes
 /// nothing.
-pub fn run(root: &Path, frame_rel: &str, dry_run: bool) -> SetupReport {
+/// `root` is the **project** root — the directory holding `frame/`, and the one
+/// both files are written to. The prefix used inside them is always
+/// [`FRAME_REL`]; see there for why it is not computed from anything.
+pub fn run(root: &Path, dry_run: bool) -> SetupReport {
     let mut report = SetupReport {
         steps: Vec::new(),
-        in_git: crate::io::git::repo_paths(&root.join("frame")).is_some(),
+        in_git: crate::io::git::repo_paths(&root.join(FRAME_REL)).is_some(),
         fr_not_on_path: false,
     };
     if !report.in_git {
         return report;
     }
 
-    report.steps.push(step_gitignore(root, frame_rel, dry_run));
-    report
-        .steps
-        .push(step_gitattributes(root, frame_rel, dry_run));
+    // What an older frame wrote here, if it differs — lines to clean up rather
+    // than leave sitting dead in a committed file.
+    let stale = stale_prefix(root);
+    let stale = stale.as_deref();
+
+    report.steps.push(step_gitignore(root, stale, dry_run));
+    report.steps.push(step_gitattributes(root, stale, dry_run));
     report.steps.push(step_driver(root, dry_run));
     report.fr_not_on_path = !fr_on_path();
     report
 }
 
-fn step_gitignore(root: &Path, frame_rel: &str, dry_run: bool) -> Step {
+/// The prefix a **previous** `fr git setup` would have written here: the frame
+/// directory relative to the git toplevel rather than to the project root.
+///
+/// `None` when it agrees with [`FRAME_REL`], which is every project at the repo
+/// root — so nothing is looked for and nothing can be removed there. For a
+/// project below the root it names exactly the four `.gitattributes` lines and
+/// the one `.gitignore` pattern that the old computation produced, which are
+/// dead where they sit and are what [`planned_gitignore`] and
+/// [`planned_gitattributes`] are allowed to delete.
+fn stale_prefix(root: &Path) -> Option<String> {
+    let frame_dir = root.join(FRAME_REL);
+    let paths = crate::io::git::repo_paths(&frame_dir)?;
+    let rel = frame_dir
+        .canonicalize()
+        .ok()?
+        .strip_prefix(
+            paths
+                .toplevel
+                .canonicalize()
+                .ok()
+                .as_deref()
+                .unwrap_or(&paths.toplevel),
+        )
+        .ok()?
+        .to_string_lossy()
+        .replace('\\', "/");
+    (rel != FRAME_REL && !rel.is_empty()).then_some(rel)
+}
+
+fn step_gitignore(root: &Path, stale_prefix: Option<&str>, dry_run: bool) -> Step {
     const NAME: &str = ".gitignore";
     let path = root.join(".gitignore");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let Some((content, removed)) = planned_gitignore(&existing, frame_rel) else {
+    let Some((content, removed)) = planned_gitignore(&existing, FRAME_REL, stale_prefix) else {
         return Step::already(NAME);
     };
 
-    let pattern = crate::io::project_io::gitignore_pattern_for(frame_rel);
+    let pattern = crate::io::project_io::gitignore_pattern_for(FRAME_REL);
+    let dead = stale_prefix.map(crate::io::project_io::gitignore_pattern_for);
+    let (dead_lines, collapsed): (Vec<&String>, Vec<&String>) = removed
+        .iter()
+        .partition(|r| dead.as_deref() == Some(r.as_str()));
+
     let mut detail = vec![format!("+ {pattern}")];
-    if !removed.is_empty() {
+    if !collapsed.is_empty() {
         detail.push(format!(
             "- collapsed {} per-file entr{} into it",
-            removed.len(),
-            if removed.len() == 1 { "y" } else { "ies" }
+            collapsed.len(),
+            if collapsed.len() == 1 { "y" } else { "ies" }
         ));
-        detail.extend(removed.iter().map(|r| format!("  - {r}")));
+        detail.extend(collapsed.iter().map(|r| format!("  - {r}")));
+    }
+    for line in dead_lines {
+        detail.push(format!("- removed {line} — matched nothing from here"));
     }
 
     if dry_run {
@@ -373,18 +500,26 @@ fn step_gitignore(root: &Path, frame_rel: &str, dry_run: bool) -> Step {
     }
 }
 
-fn step_gitattributes(root: &Path, frame_rel: &str, dry_run: bool) -> Step {
+fn step_gitattributes(root: &Path, stale_prefix: Option<&str>, dry_run: bool) -> Step {
     const NAME: &str = ".gitattributes";
     let path = root.join(".gitattributes");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let Some((content, added)) = planned_gitattributes(&existing, frame_rel) else {
+    let Some(plan) = planned_gitattributes(&existing, FRAME_REL, stale_prefix) else {
         return Step::already(NAME);
     };
-    let detail = added.iter().map(|l| format!("+ {l}")).collect();
+    let mut detail: Vec<String> = plan.added.iter().map(|l| format!("+ {l}")).collect();
+    if !plan.removed.is_empty() {
+        detail.push(format!(
+            "- removed {} line{} that matched nothing from here",
+            plan.removed.len(),
+            if plan.removed.len() == 1 { "" } else { "s" }
+        ));
+        detail.extend(plan.removed.iter().map(|r| format!("  - {r}")));
+    }
     if dry_run {
         return Step::changed(NAME, detail);
     }
-    match std::fs::write(&path, content) {
+    match std::fs::write(&path, plan.content) {
         Ok(()) => Step::changed(NAME, detail),
         Err(e) => Step::failed(NAME, format!("could not write .gitattributes: {e}")),
     }
@@ -441,14 +576,14 @@ mod tests {
 
     #[test]
     fn a_project_with_no_gitignore_gets_the_pattern() {
-        let (content, removed) = planned_gitignore("", "frame").unwrap();
+        let (content, removed) = planned_gitignore("", "frame", None).unwrap();
         assert!(content.contains("frame/.*"));
         assert!(removed.is_empty());
     }
 
     #[test]
     fn an_existing_pattern_is_left_alone() {
-        assert!(planned_gitignore("target/\nframe/.*\n", "frame").is_none());
+        assert!(planned_gitignore("target/\nframe/.*\n", "frame", None).is_none());
     }
 
     /// The migration this exists for: a project predating the blanket pattern
@@ -465,7 +600,7 @@ frame/.recovery.log
 frame/.actor
 frame/.rescue/
 ";
-        let (content, removed) = planned_gitignore(existing, "frame").unwrap();
+        let (content, removed) = planned_gitignore(existing, "frame", None).unwrap();
 
         assert_eq!(removed.len(), 5);
         assert!(content.contains("frame/.*"));
@@ -493,7 +628,7 @@ frame/.rescue/
     #[test]
     fn leading_and_trailing_slash_spellings_are_recognized() {
         let existing = "/frame/.actor\nframe/.rescue/\n/frame/.lock/\n";
-        let (content, removed) = planned_gitignore(existing, "frame").unwrap();
+        let (content, removed) = planned_gitignore(existing, "frame", None).unwrap();
         assert_eq!(removed.len(), 3);
         assert!(!content.contains(".actor"));
         assert!(!content.contains(".rescue"));
@@ -510,7 +645,7 @@ frame/archive/.keep
 !frame/.important
 frame-other/.actor
 ";
-        let (content, removed) = planned_gitignore(existing, "frame").unwrap();
+        let (content, removed) = planned_gitignore(existing, "frame", None).unwrap();
         assert_eq!(removed, vec!["frame/.actor"]);
         assert!(content.contains("frame/notes.md"));
         // Nested dotfiles are NOT covered by `frame/.*`, so removing them would
@@ -520,25 +655,29 @@ frame-other/.actor
         assert!(content.contains("frame-other/.actor"));
     }
 
-    /// A project whose frame directory is not at the repo root needs its own
-    /// prefix throughout — pattern and legacy entries alike.
+    /// The prefix is whatever the caller says, and legacy entries follow it —
+    /// the pure function has no opinion about where the project sits.
+    ///
+    /// `run` always passes [`FRAME_REL`], because the file is written beside the
+    /// frame directory and a git pattern is relative to its own file. This test
+    /// pins the parameter's meaning, not a project layout.
     #[test]
-    fn a_project_in_a_subdirectory_uses_its_own_prefix() {
+    fn legacy_entries_follow_the_prefix_they_are_given() {
         let existing = "sub/frame/.actor\nframe/.actor\n";
-        let (content, removed) = planned_gitignore(existing, "sub/frame").unwrap();
+        let (content, removed) = planned_gitignore(existing, "sub/frame", None).unwrap();
 
         assert_eq!(removed, vec!["sub/frame/.actor"]);
         assert!(content.contains("sub/frame/.*"));
-        // A different project's entry is not this project's business.
+        // A different prefix's entry is not this one's business.
         assert!(content.contains("frame/.actor"));
     }
 
     #[test]
     fn gitignore_migration_is_idempotent() {
         let existing = "target/\nframe/.actor\nframe/.lock\n";
-        let (once, _) = planned_gitignore(existing, "frame").unwrap();
+        let (once, _) = planned_gitignore(existing, "frame", None).unwrap();
         assert!(
-            planned_gitignore(&once, "frame").is_none(),
+            planned_gitignore(&once, "frame", None).is_none(),
             "second run would rewrite:\n{once}"
         );
     }
@@ -547,33 +686,34 @@ frame-other/.actor
 
     #[test]
     fn attributes_are_added_when_absent() {
-        let (content, added) = planned_gitattributes("", "frame").unwrap();
-        assert_eq!(added.len(), 4);
-        assert!(content.contains("frame/tracks/*.md merge=frame"));
-        assert!(content.contains("frame/inbox.md merge=frame"));
+        let plan = planned_gitattributes("", "frame", None).unwrap();
+        assert_eq!(plan.added.len(), 4);
+        assert!(plan.removed.is_empty());
+        assert!(plan.content.contains("frame/tracks/*.md merge=frame"));
+        assert!(plan.content.contains("frame/inbox.md merge=frame"));
     }
 
     #[test]
     fn attributes_are_idempotent() {
-        let (once, _) = planned_gitattributes("", "frame").unwrap();
-        assert!(planned_gitattributes(&once, "frame").is_none());
+        let once = planned_gitattributes("", "frame", None).unwrap().content;
+        assert!(planned_gitattributes(&once, "frame", None).is_none());
     }
 
     #[test]
     fn existing_content_is_preserved() {
         let existing = "*.png binary\n";
-        let (content, _) = planned_gitattributes(existing, "frame").unwrap();
-        assert!(content.contains("*.png binary"));
-        assert!(content.contains("merge=frame"));
+        let plan = planned_gitattributes(existing, "frame", None).unwrap();
+        assert!(plan.content.contains("*.png binary"));
+        assert!(plan.content.contains("merge=frame"));
     }
 
     /// A pattern the user already mapped somewhere else is theirs, not ours.
     #[test]
     fn a_deliberate_override_is_not_fought() {
         let existing = "frame/inbox.md merge=union\n";
-        let (content, added) = planned_gitattributes(existing, "frame").unwrap();
-        assert!(content.contains("frame/inbox.md merge=union"));
-        assert!(!added.iter().any(|l| l.starts_with("frame/inbox.md")));
+        let plan = planned_gitattributes(existing, "frame", None).unwrap();
+        assert!(plan.content.contains("frame/inbox.md merge=union"));
+        assert!(!plan.added.iter().any(|l| l.starts_with("frame/inbox.md")));
     }
 
     // --- Outside git ---
@@ -583,7 +723,7 @@ frame-other/.actor
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("frame")).unwrap();
 
-        let report = run(tmp.path(), "frame", false);
+        let report = run(tmp.path(), false);
 
         assert!(!report.in_git);
         assert!(report.steps.is_empty());

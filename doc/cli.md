@@ -275,6 +275,8 @@ Everything else check reports is left alone, because it has no repair that is sa
 
 **`--fix` does not touch git configuration.** Anything about `.gitignore`, `.gitattributes` or the merge driver is [`fr git setup`](#fr-git-setup)'s, whether it is a missing ignore pattern, an unregistered driver, or a local file git already tracks (which needs `git rm --cached` from you either way). `--fix` used to add the ignore pattern and nothing else, which left no way to predict which part of git readiness it would repair. One command owns that surface now, and `--fix` names it.
 
+**Routing is verified, not inferred.** Check asks `git check-attr` whether a representative file of each shape actually reaches the merge driver, and warns naming the ones that do not (`merge_routing_broken`). Testing that the patterns are *present* in `.gitattributes` would not do: a pattern containing a slash resolves against the directory of the file holding it, so a line can look exactly right and match nothing — which is what an older `fr git setup` wrote for any project below the repo root. The probed paths need not exist; attributes are matched against the path, not the file, so a project that has never run `fr clean` still gets a real answer about its archives. Silent outside a repo and whenever git cannot be run, like the other git checks.
+
 An **unresolved merge conflict** — a task still carrying the `conflict:` line `fr merge` left on it — is reported as an *error* with no repair, for the same reason a reissued ID is: which side should win is the judgment the merge could not make. See [`fr merge`](#fr-merge).
 
 The message says where the other side actually is, having looked. The marker is committed and travels to every clone; the recovery log holding the discarded version is working-copy-local and does not. When the entry is here you get `fr recovery --for <ID>`; when it is not — a marker pulled from someone else's merge, or a pruned log — the message says so and sends you to version control instead. The `--json` form carries the same answer as `evidence`.
@@ -808,6 +810,8 @@ Three things, reported individually:
 | `.git/config` | registers the driver: `merge.frame.driver` |
 
 `fr init` runs this for you inside a repo, so a new project needs nothing extra.
+
+Both files are written **beside the `frame/` directory**, at the project root, and their patterns are relative to that — which is what git means by a pattern containing a slash: it resolves against the directory of the file holding it, never against the repository root. So a project in a subdirectory of a larger repo gets exactly the same lines as one at the root, and needs no special handling. Setup also removes the dead prefixed lines an older frame wrote here (`sub/frame/…` inside `sub/.gitattributes`, which meant `sub/sub/frame/…` and matched nothing), and only those — an exact match for its own output, never a line you wrote.
 
 **The first two are committed; the third cannot be.** `.git/config` is per-clone, so a teammate who clones a correctly-configured project gets the attributes but *not* the driver, and git silently goes back to merging track files line by line. `fr check` warns when the driver is missing for exactly this reason — it is what tells a fresh clone to run this. Every worktree of one clone shares the config, so once per clone is enough.
 

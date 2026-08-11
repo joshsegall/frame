@@ -5887,6 +5887,162 @@ fn test_git_setup_adds_the_gitignore_pattern() {
 }
 
 // ---------------------------------------------------------------------------
+// `fr git setup` where the project is not at the repo root
+//
+// Both files it writes contain patterns, and a git pattern with a slash in it is
+// relative to the directory of the file holding it — never to the repository
+// root. Setup wrote the frame directory's path relative to the *git toplevel*
+// instead, so a project in `sub/` got `sub/frame/archive/*.md` written into
+// `sub/.gitattributes`, where it means `sub/sub/frame/...`. Nothing routed to
+// the merge driver and nothing was ignored, in a file that looked right.
+//
+// So these assert on what git resolves, never on what the file says.
+// ---------------------------------------------------------------------------
+
+/// The `merge` attribute git resolves for `path`, asked from `dir`.
+fn merge_attr(dir: &Path, path: &str) -> String {
+    let out = std::process::Command::new("git")
+        .args(["check-attr", "merge", "--", path])
+        .current_dir(dir)
+        .output()
+        .expect("git check-attr runs");
+    // `<path>: merge: <value>`
+    String::from_utf8_lossy(&out.stdout)
+        .rsplit(':')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+/// Assert that every routed shape reaches the driver, and that the blanket
+/// ignore pattern really covers a local file — both asked of git.
+fn assert_git_ready(project_root: &Path, label: &str) {
+    for path in frame::ops::git_setup::routed_paths() {
+        assert_eq!(
+            merge_attr(project_root, &path),
+            "frame",
+            "{label}: {path} must route to the frame merge driver"
+        );
+    }
+    assert!(
+        git_ok(project_root, &["check-ignore", "-q", "frame/.actor"]),
+        "{label}: frame/.actor must be ignored"
+    );
+}
+
+/// A project at the repo root, and one below it, must both end up genuinely
+/// configured — and a second `fr git setup` must change nothing.
+#[test]
+fn git_setup_routes_and_ignores_at_the_root_and_below_it() {
+    for sub in ["", "sub"] {
+        let tmp = tempfile::TempDir::new().unwrap();
+        if !git_ok(tmp.path(), &["init", "-q"]) {
+            return; // no git available
+        }
+        let root = if sub.is_empty() {
+            tmp.path().to_path_buf()
+        } else {
+            let p = tmp.path().join(sub);
+            fs::create_dir_all(&p).unwrap();
+            p
+        };
+        create_test_project(&root);
+        let label = if sub.is_empty() {
+            "at root"
+        } else {
+            "below root"
+        };
+
+        let first = run_fr_ok(&root, &["git", "setup"]);
+        assert!(first.contains("configured"), "{label}: {first}");
+        assert_git_ready(&root, label);
+
+        // Idempotent: the second run reports nothing to do and rewrites nothing.
+        let before_attrs = fs::read_to_string(root.join(".gitattributes")).unwrap();
+        let before_ignore = fs::read_to_string(root.join(".gitignore")).unwrap();
+        let second = run_fr_ok(&root, &["git", "setup"]);
+        assert_eq!(
+            fs::read_to_string(root.join(".gitattributes")).unwrap(),
+            before_attrs,
+            "{label}: second `fr git setup` rewrote .gitattributes:\n{second}"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(".gitignore")).unwrap(),
+            before_ignore,
+            "{label}: second `fr git setup` rewrote .gitignore:\n{second}"
+        );
+        assert_git_ready(&root, label);
+
+        // And `fr check` is satisfied — the routing warning is the real test of
+        // the same thing, so the two must agree.
+        let checked = run_fr_ok(&root, &["check"]);
+        assert!(
+            !checked.contains("gitattributes"),
+            "{label}: check should report no routing problem: {checked}"
+        );
+    }
+}
+
+/// A project already carrying the dead prefixed lines an older `fr git setup`
+/// wrote: setup replaces them with working ones and takes the dead ones out.
+#[test]
+fn git_setup_cleans_up_the_dead_lines_it_used_to_write() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    if !git_ok(tmp.path(), &["init", "-q"]) {
+        return;
+    }
+    let root = tmp.path().join("sub");
+    fs::create_dir_all(&root).unwrap();
+    create_test_project(&root);
+
+    // Exactly what the old computation produced, in the file it produced it in.
+    fs::write(
+        root.join(".gitattributes"),
+        "# frame — merge track and inbox files by task identity\n\
+         sub/frame/tracks/*.md merge=frame\n\
+         sub/frame/archive/*.md merge=frame\n\
+         sub/frame/archive/_tracks/*.md merge=frame\n\
+         sub/frame/inbox.md merge=frame\n\
+         *.png binary\n",
+    )
+    .unwrap();
+    fs::write(root.join(".gitignore"), "target/\nsub/frame/.*\n").unwrap();
+
+    // Before: the patterns are all present, and none of them do anything.
+    let broken = run_fr_ok(&root, &["check"]);
+    assert!(
+        broken.contains("gitattributes"),
+        "check must notice that present patterns route nothing: {broken}"
+    );
+
+    run_fr_ok(&root, &["git", "setup"]);
+    assert_git_ready(&root, "after cleanup");
+
+    let attrs = fs::read_to_string(root.join(".gitattributes")).unwrap();
+    assert!(
+        !attrs.contains("sub/frame/"),
+        "the dead lines should be gone: {attrs}"
+    );
+    assert!(
+        attrs.contains("*.png binary"),
+        "an unrelated line is not ours to remove: {attrs}"
+    );
+    let ignore = fs::read_to_string(root.join(".gitignore")).unwrap();
+    assert!(!ignore.contains("sub/frame/.*"), "{ignore}");
+    assert!(ignore.contains("frame/.*"), "{ignore}");
+    assert!(ignore.contains("target/"), "unrelated line kept: {ignore}");
+
+    // Still idempotent afterwards.
+    let before = fs::read_to_string(root.join(".gitattributes")).unwrap();
+    run_fr_ok(&root, &["git", "setup"]);
+    assert_eq!(
+        fs::read_to_string(root.join(".gitattributes")).unwrap(),
+        before
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Crash injection: multi-file write sequences
 //
 // Single-file writes are atomic (temp file + rename), so the exposure is

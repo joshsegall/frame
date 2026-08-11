@@ -113,6 +113,8 @@ All notable changes to frame will be documented in this file.
 
   Nothing else in the output could say it. `project` is the committed name, identical across a clone's worktrees, and `frame_dir` only implied the answer by being a path you had to recognise. Naming the main tree also explains why the `frontier` line points somewhere other than the directory you are standing in: that is where the clone's shared state lives. Omitted in the main working tree. `--json` gains `worktree` and `main_worktree`, always present and `null` in the main tree, so a consumer can tell that apart from an older frame that did not report it.
 
+- **`fr check` verifies that merge routing actually works, rather than assuming it.** It asks `git check-attr` whether a representative file of each frame shape really reaches the merge driver, and warns naming the ones that do not. Testing that the patterns are *present* in `.gitattributes` would not do: a pattern containing a slash resolves against the directory of the file holding it, so a line can look exactly right and match nothing — which is what `fr git setup` wrote for every project below the repo root (below). The probed paths need not exist, since attributes match against the path rather than the file, so a project that has never run `fr clean` still gets a real answer about its archives. Silent outside a repo and when `git` cannot be run, like the other git checks. `--json`: `merge_routing_broken`.
+
 ### Changed
 
 - **Dependencies refreshed, including three major bumps**: `ratatui` 0.29 → 0.30, `crossterm` 0.28 → 0.29, `notify` 7 → 8. No source change was needed for any of them, and the suite passes unchanged — noted here only because ratatui is what draws every TUI frame, so it is the first thing to look at if a rendering oddity appears in this release and not the last.
@@ -128,6 +130,12 @@ All notable changes to frame will be documented in this file.
   `--json` changes key order only — no keys added, removed or retyped. A consumer using a JSON parser is unaffected; one reading the bytes positionally is not.
 
 ### Fixed
+
+- **`fr git setup` configured nothing at all for a project below the repo root.** Both files it writes hold patterns, and a git pattern containing a slash is relative to the directory of the file holding it — never to the repository root. Setup used the frame directory's path relative to the git toplevel, so a project in `sub/` got `sub/frame/archive/*.md` written into `sub/.gitattributes`, where it means `sub/sub/frame/…` and matches nothing. No frame file routed to the merge driver and no working-copy-local file was ignored, in files that read correctly at a glance.
+
+  A project created by `fr init` was spared, because init passed the right prefix — so the damage is a nested project set up or re-checked by `fr git setup`, which left dead lines sitting next to init's working ones. The prefix is no longer computed from anything: both files are written beside `frame/`, so it is always `frame`, at the repo root or below it.
+
+  Re-running `fr git setup` repairs an affected project and removes the dead lines. It removes **only** an exact match for a line it would itself have written at the old prefix — anything else in either file, including a deliberate entry for another project, is left alone.
 
 - **`fr merge` silently discarded one side of a done archive.** Two clones that had each run `fr clean` since their common ancestor lost one side's archived tasks on merge — no conflict, no marker, nothing in the recovery log, exit 0, and `fr check` reporting the project valid afterwards. Archived tasks are the durable record of finished work, the ID frontier means the numbers are never handed out again, and `fr check`'s cross-archive detectors look for *duplicate* IDs and never for missing ones, so the tasks were gone with nothing pointing at the gap.
 

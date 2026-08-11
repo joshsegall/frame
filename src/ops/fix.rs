@@ -979,6 +979,11 @@ mod tests {
             // The driver lives in `.git/config`, which is machine state rather
             // than project content — further outside `--fix`'s remit still.
             CheckWarning::MergeDriverUnregistered,
+            // Same surface, same owner: `.gitattributes` is git configuration,
+            // and `fr git setup` is the one command that writes it.
+            CheckWarning::MergeRoutingBroken {
+                paths: vec!["frame/archive/sample.md".into()],
+            },
             CheckWarning::IdReissuedAfterArchive {
                 task_id: "T-1".into(),
                 tracks: vec!["t".into()],

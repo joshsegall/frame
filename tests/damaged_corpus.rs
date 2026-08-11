@@ -554,6 +554,7 @@ const CASES: &[Case] = &[
                 return Built::Skipped("git unavailable");
             }
             register_merge_driver(root);
+            route_merge_attributes(root);
             // Everything else about the repo is right, so this case reports one
             // thing.
             std::fs::write(root.join(".gitignore"), "frame/.*\nscratch/\n").unwrap();
@@ -975,6 +976,7 @@ const CASES: &[Case] = &[
                 return Built::Skipped("git unavailable");
             }
             register_merge_driver(root);
+            route_merge_attributes(root);
             Built::Ok
         },
         // `.actor` exists and is not ignored. `.inflight` is reported whether or
@@ -1009,6 +1011,7 @@ const CASES: &[Case] = &[
                 return Built::Skipped("git unavailable");
             }
             register_merge_driver(root);
+            route_merge_attributes(root);
             // The pattern is in place, so nothing else is reported and this case
             // is attributable to the one thing it breaks.
             std::fs::write(root.join(".gitignore"), "frame/.*\n").unwrap();
@@ -1085,13 +1088,59 @@ const CASES: &[Case] = &[
                 return Built::Skipped("git unavailable");
             }
             // Everything else about the repo is right, so this case reports one
-            // thing: git would merge track files line by line.
+            // thing: git would merge track files line by line. In particular the
+            // attributes *do* route — this case is about the half of routing
+            // that cannot be committed, not the half that can.
             std::fs::write(root.join(".gitignore"), "frame/.*\n").unwrap();
+            route_merge_attributes(root);
             Built::Ok
         },
         expect: &[warning("merge_driver_unregistered", &[])],
         // The repair writes `.git/config`, which is machine state rather than
         // project content — `fr git setup`, not `--fix`.
+        repair: Repair::None,
+    },
+    Case {
+        name: "merge-routing-broken",
+        provenance: "a project below the repo root, set up by a frame that wrote \
+                     `.gitattributes` patterns relative to the git toplevel — so \
+                     they sit in the project's own file meaning one directory too \
+                     deep, and match nothing",
+        covers: &["merge_routing_broken"],
+        build: |root| {
+            if !git(root, &["init", "-q"]) {
+                return Built::Skipped("git unavailable");
+            }
+            register_merge_driver(root);
+            std::fs::write(root.join(".gitignore"), "frame/.*\n").unwrap();
+            // Present, plausible, and dead: a pattern with a slash resolves
+            // against the directory of the file holding it, so from here these
+            // name `sub/frame/...` under *this* directory. Checking that the
+            // patterns exist would call this project healthy.
+            std::fs::write(
+                root.join(".gitattributes"),
+                "sub/frame/tracks/*.md merge=frame\n\
+                 sub/frame/archive/*.md merge=frame\n\
+                 sub/frame/archive/_tracks/*.md merge=frame\n\
+                 sub/frame/inbox.md merge=frame\n",
+            )
+            .unwrap();
+            Built::Ok
+        },
+        // Every shape is unrouted, which is the point: nothing reaches the
+        // driver, and git would merge all of it line by line.
+        expect: &[warning(
+            "merge_routing_broken",
+            &[(
+                "paths",
+                Match::Eq(
+                    "frame/tracks/sample.md,frame/archive/sample.md,\
+                     frame/archive/_tracks/sample.md,frame/inbox.md",
+                ),
+            )],
+        )],
+        // `.gitattributes` is git configuration; `fr git setup` owns it, and it
+        // also removes the dead lines above.
         repair: Repair::None,
     },
     Case {
@@ -1445,6 +1494,22 @@ fn register_merge_driver(dir: &Path) -> bool {
             "fr merge --base %O --ours %A --theirs %B --path %P",
         ],
     )
+}
+
+/// Route every frame file shape to the driver, so a case that only means to
+/// break one thing does not also report `merge_routing_broken`.
+///
+/// The patterns are written the way `fr git setup` writes them — relative to the
+/// directory holding the file, which is the project root here.
+fn route_merge_attributes(dir: &Path) {
+    std::fs::write(
+        dir.join(".gitattributes"),
+        "frame/tracks/*.md merge=frame\n\
+         frame/archive/*.md merge=frame\n\
+         frame/archive/_tracks/*.md merge=frame\n\
+         frame/inbox.md merge=frame\n",
+    )
+    .unwrap();
 }
 
 fn git(dir: &Path, args: &[&str]) -> bool {
