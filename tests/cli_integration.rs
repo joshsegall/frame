@@ -3277,6 +3277,159 @@ fn test_mv_parent() {
     assert!(show_out.contains("First task"));
 }
 
+/// `--parent` with neither placement flag appends as the last child. This is
+/// the pre-existing default, pinned here because `--top`/`--after` now change it.
+#[test]
+fn test_mv_parent_default_appends_last() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    run_fr_ok(tmp.path(), &["mv", "M-001", "--parent", "M-003"]);
+
+    let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    let first = track.find("First task").unwrap();
+    let sub_one = track.find("Sub one").unwrap();
+    let sub_two = track.find("Sub two").unwrap();
+    assert!(sub_one < sub_two && sub_two < first, "expected last child");
+}
+
+#[test]
+fn test_mv_parent_top() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    run_fr_ok(tmp.path(), &["mv", "M-001", "--parent", "M-003", "--top"]);
+
+    let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    let first = track.find("First task").unwrap();
+    let sub_one = track.find("Sub one").unwrap();
+    let sub_two = track.find("Sub two").unwrap();
+    assert!(first < sub_one && sub_one < sub_two, "expected first child");
+}
+
+#[test]
+fn test_mv_parent_after() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    run_fr_ok(
+        tmp.path(),
+        &["mv", "M-001", "--parent", "M-003", "--after", "M-003.1"],
+    );
+
+    let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    let first = track.find("First task").unwrap();
+    let sub_one = track.find("Sub one").unwrap();
+    let sub_two = track.find("Sub two").unwrap();
+    assert!(
+        sub_one < first && first < sub_two,
+        "expected placement between the two existing children"
+    );
+}
+
+/// An unresolvable `--after` anchor aborts before anything is written.
+#[test]
+fn test_mv_parent_after_not_found() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    let (_, stderr, success) = run_fr(
+        tmp.path(),
+        &["mv", "M-001", "--parent", "M-003", "--after", "M-999"],
+    );
+    assert!(!success);
+    assert!(stderr.contains("M-999"), "stderr should name the anchor");
+
+    // Nothing moved: M-001 is still top-level, ID intact.
+    let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    assert!(track.contains("- [ ] `M-001` First task"));
+}
+
+/// The anchor is resolved in the section the task lives in, not the Backlog —
+/// promote works from any section and re-inserts into the one it came from.
+#[test]
+fn test_mv_promote_after_in_parked_section() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let frame_dir = tmp.path().join("frame");
+    fs::create_dir_all(frame_dir.join("tracks")).unwrap();
+    fs::write(frame_dir.join(".actor"), "null\n").unwrap();
+
+    fs::write(
+        frame_dir.join("project.toml"),
+        r#"[project]
+name = "parked-test"
+
+[[tracks]]
+id = "parked"
+name = "Parked Track"
+state = "active"
+file = "tracks/parked.md"
+
+[ids.prefixes]
+parked = "P"
+"#,
+    )
+    .unwrap();
+
+    fs::write(
+        frame_dir.join("tracks/parked.md"),
+        "\
+# Parked Track
+
+## Backlog
+
+- [ ] `P-005` A backlog task
+
+## Parked
+
+- [~] `P-001` Parked parent
+  - [~] `P-001.1` Parked child
+- [~] `P-002` Another parked
+",
+    )
+    .unwrap();
+
+    fs::write(frame_dir.join("inbox.md"), "# Inbox\n").unwrap();
+
+    run_fr_ok(
+        tmp.path(),
+        &["mv", "P-001.1", "--promote", "--after", "P-002"],
+    );
+
+    let track = fs::read_to_string(tmp.path().join("frame/tracks/parked.md")).unwrap();
+    let parent = track.find("Parked parent").unwrap();
+    let another = track.find("Another parked").unwrap();
+    let child = track.find("Parked child").unwrap();
+    assert!(
+        parent < another && another < child,
+        "promoted task should follow its Parked-section anchor:\n{track}"
+    );
+}
+
+/// `--track` alongside either reparent flag is rejected rather than ignored.
+#[test]
+fn test_mv_track_conflicts_with_reparent() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    for argv in [
+        &["mv", "M-003.1", "--promote", "--track", "side"][..],
+        &["mv", "M-001", "--parent", "M-003", "--track", "side"][..],
+    ] {
+        let (_, stderr, success) = run_fr(tmp.path(), argv);
+        assert!(!success, "{argv:?} should be rejected");
+        assert!(
+            stderr.contains("cannot be used with") || stderr.contains("conflict"),
+            "{argv:?} stderr: {stderr}"
+        );
+    }
+
+    // Neither attempt wrote anything.
+    let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    assert!(track.contains("- [ ] `M-001` First task"));
+    assert!(track.contains("`M-003.1` Sub one"));
+}
+
 #[test]
 fn test_mv_promote_top_level_error() {
     let tmp = tempfile::TempDir::new().unwrap();

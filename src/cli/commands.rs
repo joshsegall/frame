@@ -375,10 +375,10 @@ pub struct MvArgs {
     #[arg(long)]
     pub after: Option<String>,
     /// Move to a different track
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["promote", "parent"])]
     pub track: Option<String>,
     /// Promote subtask to top-level
-    #[arg(long)]
+    #[arg(long, conflicts_with = "parent")]
     pub promote: bool,
     /// Reparent under the given task ID
     #[arg(long)]

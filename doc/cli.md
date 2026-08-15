@@ -545,12 +545,16 @@ fr mv ID [POSITION] [--top] [--after ID] [--track TRACK] [--promote] [--parent I
 
 | Flag | Description |
 |------|-------------|
-| `POSITION` | 0-indexed position in backlog |
-| `--top` | Move to top of backlog |
-| `--after ID` | Move after this task |
+| `POSITION` | 0-indexed position in backlog (plain reorder only) |
+| `--top` | Move to the first position in the destination |
+| `--after ID` | Move after this task in the destination |
 | `--track TRACK` | Move to a different track (cross-track) |
-| `--promote` | Promote subtask to top-level (placed after former parent by default) |
-| `--parent ID` | Reparent under the given task (becomes last child) |
+| `--promote` | Promote subtask to top-level |
+| `--parent ID` | Reparent under the given task |
+
+`--top` and `--after` name a position **within whatever the destination is**: the backlog for a plain reorder or a cross-track move, the task's own section for `--promote` (which re-inserts into the section it came from, so a Parked subtask promotes within `## Parked`), and the new parent's children for `--parent`. With neither flag, `--promote` places the task after its former parent and `--parent` appends it as the last child.
+
+`--track` cannot be combined with `--promote` or `--parent`, and those two cannot be combined with each other. To move a subtask to top level in another track, promote it first, then move the result with `--track`.
 
 Cross-track moves rewrite the task's ID prefix to match the target track. Reparenting (`--promote` or `--parent`) re-keys the task and all descendant IDs to match the new parent structure. Both operations update all dependency references across tracks.
 

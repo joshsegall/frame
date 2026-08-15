@@ -2697,11 +2697,9 @@ fn cmd_mv(args: MvArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     // Taken before the tracks are borrowed mutably below.
     let frame_dir = project.frame_dir.clone();
 
-    // Validate flag conflicts
-    if args.promote && args.parent.is_some() {
-        return Err("--promote and --parent are conflicting flags".into());
-    }
-
+    // Flag conflicts (`--track` against either reparent flag, and the two
+    // reparent flags against each other) are declared on `MvArgs` and rejected
+    // by clap before this runs.
     let source_track_id = find_task_track(&project, &args.id)
         .ok_or_else(|| format!("task not found: {}", args.id))?
         .to_string();
@@ -2728,12 +2726,16 @@ fn cmd_mv(args: MvArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
             return Err("task is already top-level".into());
         }
 
-        // Determine placement: after the former parent, or use --top/--after/position
+        // Determine placement: after the former parent, or use --top/--after.
+        // The anchor is resolved in the section the task actually lives in —
+        // promote works from any section, and the task is re-inserted into the
+        // one it came from, so resolving against the Backlog would read the
+        // wrong list for a Parked or Done subtask.
         let sibling_index = if args.top {
             0
         } else if let Some(ref after_id) = args.after {
-            let backlog = project.tracks[track_idx].1.backlog();
-            backlog
+            let siblings = project.tracks[track_idx].1.section_tasks(location.section);
+            siblings
                 .iter()
                 .position(|t| t.id.as_deref() == Some(after_id.as_str()))
                 .map(|i| i + 1)
@@ -2787,6 +2789,32 @@ fn cmd_mv(args: MvArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
             .position(|(id, _)| id == &source_track_id)
             .ok_or_else(|| format!("track not found: {}", source_track_id))?;
 
+        // Placement among the new parent's children; with neither flag the task
+        // is appended as the last child.
+        //
+        // The index is resolved here, against the tree as it stands, but
+        // `reparent_task` applies it after removing the task. That is off by one
+        // only in appearance: an anchor above the task keeps its index, and one
+        // below it shifts down by exactly the `+ 1` added here, so the two
+        // cancel. Out-of-range degrades to last child (`insert_task_subtree`
+        // clamps), which is also the no-flag default.
+        let sibling_index = if args.top {
+            0
+        } else if let Some(ref after_id) = args.after {
+            let parent = task_ops::find_task_in_track(&project.tracks[track_idx].1, parent_id)
+                .ok_or_else(|| format!("parent not found: {}", parent_id))?;
+            parent
+                .subtasks
+                .iter()
+                .position(|t| t.id.as_deref() == Some(after_id.as_str()))
+                .map(|i| i + 1)
+                .ok_or_else(|| {
+                    format!("after target not found under {}: {}", parent_id, after_id)
+                })?
+        } else {
+            usize::MAX
+        };
+
         // Split tracks to get mutable track + other tracks for dep updates
         let (left, right) = project.tracks.split_at_mut(track_idx);
         let (track_entry, rest) = right.split_first_mut().unwrap();
@@ -2798,7 +2826,7 @@ fn cmd_mv(args: MvArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
             &mut track_entry.1,
             &args.id,
             Some(parent_id),
-            usize::MAX,
+            sibling_index,
             Mint::new(&frame_dir, &source_track_id, &prefix, token.as_ref()),
             &mut other_tracks,
         )?;
