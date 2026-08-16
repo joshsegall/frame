@@ -723,6 +723,40 @@ fn human_and_json_agree_on_field_order() {
     );
 }
 
+/// Both surfaces say the same thing about where an archived task came from.
+///
+/// Not a [`ROWS`] entry for the same reason field order isn't: the matrix
+/// compares identifier sequences, and this is a field on one task. The two
+/// surfaces render one `ArchivedIn` — the human line composes its fields, the
+/// JSON serializes them — and this is what fails if either side starts deriving
+/// the path or the track id for itself.
+#[test]
+fn human_and_json_agree_on_where_an_archive_hit_came_from() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    create_fixture(root);
+
+    fs::create_dir_all(root.join("frame/archive")).unwrap();
+    fs::write(
+        root.join("frame/archive/side.md"),
+        "# Archive — side\n\n- [x] `S-900` Archived work\n  - resolved: 2025-06-01\n",
+    )
+    .unwrap();
+
+    let human = run_fr(root, &["show", "S-900"]);
+    let line = human
+        .lines()
+        .find_map(|l| l.strip_prefix("archived: "))
+        .unwrap_or_else(|| panic!("no archived: line in\n{human}"));
+
+    let json: Value = serde_json::from_str(&run_fr(root, &["--json", "show", "S-900"])).unwrap();
+    let track = json["archived"]["track"].as_str().unwrap();
+    let file = json["archived"]["file"].as_str().unwrap();
+
+    assert_eq!(line, format!("{track} ({file})"), "\n{human}");
+    assert_eq!(file, "frame/archive/side.md");
+}
+
 /// The canonical order, as `fr show` labels it. `Metadata::rank`'s order, named
 /// once here so a rank change that nobody propagated fails with a diff a reader
 /// can act on rather than a bare inequality.

@@ -131,6 +131,12 @@ All notable changes to frame will be documented in this file.
 
 ### Fixed
 
+- **`fr show` reported `task not found` for a task that was archived.** The lookup walked live tracks only, so a task `fr clean` had moved to `frame/archive/<track>.md` — or one in a track `fr track archive` had moved to `frame/archive/_tracks/<track>.md` — was unreadable from either surface: the TUI finds archived tasks by search but its hits are read-only stubs, and `fr show` was where you went instead. It now falls back to both archive shapes when no live track holds the ID, printing an `archived:` line that names the track and the file it read, ahead of the task's own fields. `--json` carries the same two strings as `archived: {track, file}`, and omits the key for a live task.
+
+  A live track still wins over an archive holding the same ID: that pair is what `fr check` reports as a reissued ID, and the live task is the one every other command acts on. `--no-archive` restricts `fr show` to live tracks, matching the flag `fr search` already had.
+
+  Write commands still refuse an archived ID — an archive is terminal, and reaching into one would break what `fr clean` guarantees — but they no longer answer the question with a message that looks wrong. `fr note`, `fr mv`, `fr title`, `fr delete`, `fr deps` and the rest now say which archive holds the ID and that `fr show` will read it. The archives are consulted only on the error path, so nothing that succeeds pays for it.
+
 - **`fr mv` accepted placement flags it then discarded.** `--top` and `--after` alongside `--parent` were parsed and ignored: the reparent always appended as the last child, so there was no way to say where under the new parent the task should land — including the one thing the TUI's outdent does, which is to leave the task directly after its former parent. Both flags now position the task among the new parent's children, and with neither the task still appends last.
 
   `--after` with `--promote` had the narrower version of the same problem: it resolved the anchor in `## Backlog` while the promotion re-inserts into the section the task came from, so promoting a Parked or Done subtask with `--after` matched against the wrong list. It now reads the section the task is actually in.

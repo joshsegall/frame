@@ -25,6 +25,16 @@ pub struct TaskJson {
     pub title: String,
     pub state: TaskState,
     pub tags: Vec<String>,
+    /// Where an archived task was read from. Present only when the task came out
+    /// of an archive rather than a live track — absent, not null, so a consumer
+    /// gates on it the way it gates on `conflict`, and so every command that
+    /// emits a live task emits exactly the bytes it did before.
+    ///
+    /// Set on the shown task alone. Its subtasks and ancestors came out of the
+    /// same file by construction, and repeating it down the tree would say
+    /// nothing new.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archived: Option<ArchivedIn>,
     /// An unresolved merge conflict left by `fr merge`. Present only while the
     /// task still carries one, so a consumer can gate on it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -47,6 +57,38 @@ pub struct TaskJson {
     pub subtasks: Vec<TaskJson>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ancestors: Vec<TaskJson>,
+}
+
+/// Where an archived task was read from, as `fr show` reports it.
+///
+/// The two strings are the whole of it, and both surfaces render *these* rather
+/// than re-deriving anything: the human `archived:` line is [`Self::value`] and
+/// `--json` serializes the fields. A path alone would have made the human line
+/// long and the track id a thing to parse out of it; a track id alone would not
+/// say which of the two archive shapes holds the task, since a done-task archive
+/// and a whole archived track can share a track id.
+#[derive(Serialize, Clone)]
+pub struct ArchivedIn {
+    pub track: String,
+    /// Path from the project root, the way a person would type it to open the
+    /// file: `frame/archive/bac.md`, or `frame/archive/_tracks/bac.md`.
+    pub file: String,
+}
+
+impl ArchivedIn {
+    /// Build from a track id and a path relative to `frame/`, as
+    /// [`crate::io::project_io::ArchivedTasks`] carries it.
+    pub fn new(track_id: &str, frame_relative_file: &str) -> Self {
+        ArchivedIn {
+            track: track_id.to_string(),
+            file: format!("frame/{}", frame_relative_file),
+        }
+    }
+
+    /// The human surface's `archived:` value: the track, then the file it is in.
+    pub fn value(&self) -> String {
+        format!("{} ({})", self.track, self.file)
+    }
 }
 
 /// `fr clean --json`.
@@ -277,6 +319,7 @@ pub fn task_to_json(task: &Task) -> TaskJson {
         added,
         resolved,
         conflict,
+        archived: None,
         subtasks: task.subtasks.iter().map(task_to_json).collect(),
         ancestors: Vec::new(),
     }
@@ -348,7 +391,7 @@ pub fn format_task_tree(task: &Task, indent: usize) -> Vec<String> {
 }
 
 /// Format detailed task view
-pub fn format_task_detail(task: &Task) -> Vec<String> {
+pub fn format_task_detail(task: &Task, archived: Option<&ArchivedIn>) -> Vec<String> {
     let mut lines = Vec::new();
 
     // Header
@@ -372,6 +415,7 @@ pub fn format_task_detail(task: &Task) -> Vec<String> {
         ));
     }
 
+    lines.extend(format_archived_line(archived, ""));
     lines.extend(format_metadata_lines(task, ""));
 
     // Subtasks
@@ -399,17 +443,25 @@ fn format_context_separator(label: &str, task: &Task) -> String {
 }
 
 /// Format task detail with ancestor context (--context flag)
-pub fn format_task_detail_with_context(ancestors: &[&Task], task: &Task) -> Vec<String> {
+///
+/// `archived` describes the file the whole block came from, so it prints under
+/// the target task and not under each ancestor — an ancestor is in the same
+/// archive by construction, and saying so once is saying it.
+pub fn format_task_detail_with_context(
+    ancestors: &[&Task],
+    task: &Task,
+    archived: Option<&ArchivedIn>,
+) -> Vec<String> {
     let mut lines = Vec::new();
 
     for ancestor in ancestors {
         lines.push(format_context_separator("Parent", ancestor));
-        lines.extend(format_context_fields(ancestor));
+        lines.extend(format_context_fields(ancestor, None));
         lines.push(String::new());
     }
 
     lines.push(format_context_separator("Task", task));
-    lines.extend(format_context_fields(task));
+    lines.extend(format_context_fields(task, archived));
 
     // Subtasks
     if !task.subtasks.is_empty() {
@@ -426,7 +478,7 @@ pub fn format_task_detail_with_context(ancestors: &[&Task], task: &Task) -> Vec<
 }
 
 /// Format the fields of a task for context display (indented, no header)
-fn format_context_fields(task: &Task) -> Vec<String> {
+fn format_context_fields(task: &Task, archived: Option<&ArchivedIn>) -> Vec<String> {
     let mut lines = Vec::new();
 
     let state_str = match task.state {
@@ -449,9 +501,26 @@ fn format_context_fields(task: &Task) -> Vec<String> {
         ));
     }
 
+    lines.extend(format_archived_line(archived, "  "));
     lines.extend(format_metadata_lines(task, "  "));
 
     lines
+}
+
+/// The `archived:` line, or nothing for a live task.
+///
+/// **First of the field lines, ahead of `conflict:`.** The documented order —
+/// `conflict`, `added`, `resolved`, `dep`, `spec`, `ref`, `note` — is
+/// [`Metadata::rank`]'s, and this is not metadata: it is not in the file and no
+/// write puts it there. Printing it above that sequence leaves the sequence
+/// intact and contiguous, and puts the one fact that qualifies every line under
+/// it — that this record is not live and no write command will touch it — where
+/// it is read first rather than after a note of unbounded length.
+fn format_archived_line(archived: Option<&ArchivedIn>, indent: &str) -> Vec<String> {
+    archived
+        .map(|a| format!("{indent}archived: {}", a.value()))
+        .into_iter()
+        .collect()
 }
 
 /// A task's metadata as display lines, in canonical order, each prefixed with
@@ -703,7 +772,7 @@ mod tests {
             Metadata::Resolved("2025-05-14".into()),
             Metadata::Added("2025-05-01".into()),
         ]);
-        let lines = format_task_detail(&task);
+        let lines = format_task_detail(&task, None);
         let keys: Vec<&str> = lines
             .iter()
             .filter_map(|l| l.split_once(':').map(|(k, _)| k))
@@ -721,16 +790,55 @@ mod tests {
             Metadata::Added("2025-05-01".into()),
             Metadata::Conflict("both-edited 2026-08-03T04:08:38Z".into()),
         ]);
-        let plain: Vec<String> = format_task_detail(&task)
+        let plain: Vec<String> = format_task_detail(&task, None)
             .iter()
             .filter_map(|l| l.split_once(':').map(|(k, _)| k.trim().to_string()))
             .collect();
-        let context: Vec<String> = format_context_fields(&task)
+        let context: Vec<String> = format_context_fields(&task, None)
             .iter()
             .filter_map(|l| l.split_once(':').map(|(k, _)| k.trim().to_string()))
             .collect();
         assert!(context.starts_with(&["state".to_string()]), "{context:?}");
         assert_eq!(plain, context[1..], "{plain:?} vs {context:?}");
+    }
+
+    /// `archived:` leads the field lines in both human forms, and says the same
+    /// thing `--json` does.
+    ///
+    /// Placement is the point: it is not metadata, so it sits ahead of the
+    /// documented `conflict … note` sequence rather than inside it, and ahead of
+    /// a note it cannot be pushed past.
+    #[test]
+    fn the_archived_line_leads_the_fields_in_both_forms() {
+        let task = task_with(vec![
+            Metadata::Note("body".into()),
+            Metadata::Conflict("both-edited 2026-08-03T04:08:38Z".into()),
+        ]);
+        let origin = ArchivedIn::new("bac", "archive/bac.md");
+
+        let plain = format_task_detail(&task, Some(&origin));
+        let fields: Vec<&str> = plain
+            .iter()
+            .filter_map(|l| l.split_once(':').map(|(k, _)| k.trim()))
+            .filter(|k| ["archived", "conflict", "note"].contains(k))
+            .collect();
+        assert_eq!(fields, ["archived", "conflict", "note"], "{plain:?}");
+        assert_eq!(
+            plain.iter().find(|l| l.starts_with("archived:")),
+            Some(&"archived: bac (frame/archive/bac.md)".to_string()),
+            "{plain:?}"
+        );
+
+        // The context form indents the same line, under the shown task only.
+        let context = format_task_detail_with_context(&[&task], &task, Some(&origin));
+        assert_eq!(
+            context
+                .iter()
+                .filter(|l| l.trim_start().starts_with("archived:"))
+                .collect::<Vec<_>>(),
+            ["  archived: bac (frame/archive/bac.md)"],
+            "{context:?}"
+        );
     }
 
     /// Ordering must not drop a field, and must not shuffle two entries that
@@ -744,7 +852,7 @@ mod tests {
             Metadata::Added("2025-05-01".into()),
             Metadata::Note("second".into()),
         ]);
-        let lines = format_task_detail(&task);
+        let lines = format_task_detail(&task, None);
         let bodies: Vec<&String> = lines.iter().filter(|l| l.starts_with("  ")).collect();
         assert_eq!(bodies, ["  first", "  second"], "{lines:?}");
     }

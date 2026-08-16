@@ -193,6 +193,9 @@ pub struct ShowArgs {
     /// Include ancestor context (parent chain)
     #[arg(long)]
     pub context: bool,
+    /// Skip archived tasks (searched when a live track has no such ID)
+    #[arg(long)]
+    pub no_archive: bool,
 }
 
 #[derive(Args)]

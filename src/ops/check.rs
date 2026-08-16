@@ -1490,8 +1490,8 @@ fn check_archived_id_collisions(project: &Project, result: &mut CheckResult) {
     }
 
     let mut archived: HashMap<String, Vec<String>> = HashMap::new();
-    for (label, tasks) in archived_task_lists(&project.frame_dir) {
-        collect_id_locations(&tasks, &label, &mut archived);
+    for list in crate::io::project_io::archived_task_lists(&project.frame_dir) {
+        collect_id_locations(&list.tasks, &list.file, &mut archived);
     }
 
     // Only IDs an archive holds are reported here; a live-only duplicate is
@@ -1579,43 +1579,6 @@ fn dedup_sorted(labels: &[String]) -> Vec<String> {
     let mut out: Vec<String> = labels.to_vec();
     out.sort();
     out.dedup();
-    out
-}
-
-/// Every archived task list, each labelled by the path it came from:
-/// `archive/<track>.md` for done-task archives, `archive/_tracks/<track>.md` for
-/// whole tracks that were archived. Unreadable files contribute nothing.
-fn archived_task_lists(frame_dir: &Path) -> Vec<(String, Vec<Task>)> {
-    let mut out = Vec::new();
-
-    if let Ok(archives) = crate::io::project_io::load_archives(frame_dir) {
-        for (track_id, tasks) in archives {
-            out.push((format!("archive/{}.md", track_id), tasks));
-        }
-    }
-
-    let whole_tracks = frame_dir.join("archive").join("_tracks");
-    if let Ok(entries) = std::fs::read_dir(&whole_tracks) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("md") {
-                continue;
-            }
-            let Ok(content) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let track = crate::parse::parse_track(&content);
-            let mut tasks = Vec::new();
-            for node in &track.nodes {
-                if let TrackNode::Section { tasks: section, .. } = node {
-                    tasks.extend(section.iter().cloned());
-                }
-            }
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
-            out.push((format!("archive/_tracks/{}", name), tasks));
-        }
-    }
-
     out
 }
 

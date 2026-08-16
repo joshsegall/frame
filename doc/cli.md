@@ -71,12 +71,17 @@ Shows Backlog + Parked sections. Done section only shown when `--state done`.
 Show full details for a task, including metadata and subtasks.
 
 ```
-fr show ID [--context]
+fr show ID [--context] [--no-archive]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--context` | Include ancestor context (parent chain, root-first) |
+| `--no-archive` | Skip archived tasks |
+
+**Archives are read when no live track holds the ID.** A task `fr clean` moved to `frame/archive/<track>.md`, or one in a track that `fr track archive` moved to `frame/archive/_tracks/<track>.md`, is still in the project — and `fr show` is the only surface that reads it, since the TUI's archive search hits are read-only. An archived task prints an `archived:` line naming its track and file, ahead of the fields below; `--json` carries the same two strings as `archived: {track, file}`, absent entirely for a live task. Write commands still refuse an archived ID, but their error says where it went.
+
+A live track wins over an archive holding the same ID — the pair `fr check` reports as [a live task holding an archived task's ID](#fr-check) — because the live one is what every other command acts on. `--no-archive` restricts the lookup to live tracks.
 
 Fields print in a fixed order — `conflict`, `added`, `resolved`, `dep`, `spec`, `ref`, `note` — with `--json` using the same sequence. Short fields first and the note last, because a note has no length bound and anything after one is past the fold. `--context`, the TUI Detail view and the markdown itself all use this order; see [format.md](format.md#field-order).
 

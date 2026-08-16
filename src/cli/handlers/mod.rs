@@ -369,38 +369,96 @@ fn track_is_listed(project: &Project, track_id: &str, args: &ListArgs) -> bool {
     }
 }
 
+/// `fr show ID`, resolving live tracks first and archives second.
+///
+/// **A live track wins over an archive holding the same id.** An interrupted
+/// `fr clean` leaves the task in both, and the live copy is the one every other
+/// command acts on — showing the archived one would describe a record no write
+/// can reach. `fr check` reports the pair as `IdReissuedAfterArchive`.
+///
+/// Archives are read only when the live walk misses, so the common path costs
+/// what it always did: the project is already in memory, the archive files are
+/// not.
 fn cmd_show(args: ShowArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let project = load_project_cwd()?;
 
     for (_, track) in &project.tracks {
         if let Some(task) = task_ops::find_task_in_track(track, &args.id) {
-            if json {
-                let mut tj = task_to_json(task);
-                // JSON always includes ancestors
-                tj.ancestors = collect_ancestor_ids(&args.id)
-                    .iter()
-                    .filter_map(|aid| task_ops::find_task_in_track(track, aid))
-                    .map(task_to_json)
-                    .collect();
-                println!("{}", serde_json::to_string_pretty(&tj)?);
-            } else if args.context {
+            let ancestors: Vec<&Task> = collect_ancestor_ids(&args.id)
+                .iter()
+                .filter_map(|aid| task_ops::find_task_in_track(track, aid))
+                .collect();
+            return print_task_detail(&args, json, task, &ancestors, None);
+        }
+    }
+
+    // `fr clean` moves a done task out of its track, and `fr track archive`
+    // moves a whole track; either way the task is still in the project and
+    // `fr show` is the only surface that can read it — the TUI's own archive
+    // hits are read-only stubs. Not finding it here was the bug.
+    if !args.no_archive {
+        for list in project_io::archived_task_lists(&project.frame_dir) {
+            if let Some(task) = find_task_by_id(&list.tasks, &args.id) {
+                let origin = ArchivedIn::new(&list.track_id, &list.file);
                 let ancestors: Vec<&Task> = collect_ancestor_ids(&args.id)
                     .iter()
-                    .filter_map(|aid| task_ops::find_task_in_track(track, aid))
+                    .filter_map(|aid| find_task_by_id(&list.tasks, aid))
                     .collect();
-                for line in format_task_detail_with_context(&ancestors, task) {
-                    println!("{}", line);
-                }
-            } else {
-                for line in format_task_detail(task) {
-                    println!("{}", line);
-                }
+                return print_task_detail(&args, json, task, &ancestors, Some(&origin));
             }
-            return Ok(());
         }
     }
 
     Err(format!("task not found: {}", args.id).into())
+}
+
+/// Render one resolved task, live or archived, in whichever surface was asked
+/// for. One function because the archive path must print what the live path
+/// prints — plus the `archived:` line, which is the only difference between them.
+///
+/// `ancestors` are resolved by the caller, against the same container the task
+/// came out of.
+fn print_task_detail(
+    args: &ShowArgs,
+    json: bool,
+    task: &Task,
+    ancestors: &[&Task],
+    archived: Option<&ArchivedIn>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if json {
+        let mut tj = task_to_json(task);
+        tj.archived = archived.cloned();
+        // JSON always includes ancestors
+        tj.ancestors = ancestors.iter().map(|a| task_to_json(a)).collect();
+        println!("{}", serde_json::to_string_pretty(&tj)?);
+    } else if args.context {
+        for line in format_task_detail_with_context(ancestors, task, archived) {
+            println!("{}", line);
+        }
+    } else {
+        for line in format_task_detail(task, archived) {
+            println!("{}", line);
+        }
+    }
+    Ok(())
+}
+
+/// `task not found: ID` — and, when an archive holds that id, where it is.
+///
+/// A write command cannot act on an archived task and this does not pretend
+/// otherwise; it answers the question the bare message provoked, which is "but I
+/// can see it in the file". The archives are read only on the error path, so a
+/// command that succeeds never pays for this.
+fn task_not_found(frame_dir: &Path, id: &str) -> String {
+    for list in project_io::archived_task_lists(frame_dir) {
+        if find_task_by_id(&list.tasks, id).is_some() {
+            return format!(
+                "task not found: {id} (archived in {}, frame/{}; read it with `fr show {id}`)",
+                list.track_id, list.file
+            );
+        }
+    }
+    format!("task not found: {}", id)
 }
 
 /// Collect ancestor task IDs from a dotted ID, root-first.
@@ -1278,7 +1336,10 @@ fn cmd_deps(args: DepsArgs, json: bool) -> Result<(), Box<dyn std::error::Error>
 
     let tree = deps::dep_tree(&project, &args.id);
     if tree.status == deps::DepStatus::Missing {
-        return Err(format!("task not found: {}", args.id).into());
+        // `fr deps` reads live tracks only — whether an archived dep counts as
+        // satisfied is its own question — but the miss is the same one `fr show`
+        // used to report, so it says where the task went.
+        return Err(task_not_found(&project.frame_dir, &args.id).into());
     }
 
     if json {
@@ -2216,7 +2277,7 @@ fn cmd_sub(args: SubArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> 
 
     // Find which track the parent task is in
     let track_id = find_task_track(&project, &args.id)
-        .ok_or_else(|| format!("task not found: {}", args.id))?
+        .ok_or_else(|| task_not_found(&project.frame_dir, &args.id))?
         .to_string();
     reject_add_to_shelved(&project, &track_id)?;
     let token = resolve_mint_namespace(&project.frame_dir)?;
@@ -2296,7 +2357,7 @@ fn cmd_state(args: StateArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
     let new_state = parse_task_state(&args.state).map_err(Box::<dyn std::error::Error>::from)?;
 
     let track_id = find_task_track(&project, &args.id)
-        .ok_or_else(|| format!("task not found: {}", args.id))?
+        .ok_or_else(|| task_not_found(&project.frame_dir, &args.id))?
         .to_string();
 
     // Taken before the write so the report can say whether anything changed.
@@ -2340,7 +2401,7 @@ fn cmd_tag(args: TagArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> 
     let (mut project, _lock) = lock_and_load()?;
 
     let track_id = find_task_track(&project, &args.id)
-        .ok_or_else(|| format!("task not found: {}", args.id))?
+        .ok_or_else(|| task_not_found(&project.frame_dir, &args.id))?
         .to_string();
 
     // Taken before the write so the report can say whether anything changed.
@@ -2365,7 +2426,7 @@ fn cmd_dep(args: DepArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> 
     let (mut project, _lock) = lock_and_load()?;
 
     let track_id = find_task_track(&project, &args.id)
-        .ok_or_else(|| format!("task not found: {}", args.id))?
+        .ok_or_else(|| task_not_found(&project.frame_dir, &args.id))?
         .to_string();
 
     // Taken before the write so the report can say whether anything changed.
@@ -2396,7 +2457,7 @@ fn cmd_note(args: NoteArgs, json: bool) -> Result<(), Box<dyn std::error::Error>
     let (mut project, _lock) = lock_and_load()?;
 
     let track_id = find_task_track(&project, &args.id)
-        .ok_or_else(|| format!("task not found: {}", args.id))?
+        .ok_or_else(|| task_not_found(&project.frame_dir, &args.id))?
         .to_string();
 
     // Taken before the write so the report can say whether anything changed.
@@ -2628,7 +2689,7 @@ fn cmd_path_field(
     }
 
     let track_id = find_task_track(&project, &args.id)
-        .ok_or_else(|| format!("task not found: {}", args.id))?
+        .ok_or_else(|| task_not_found(&project.frame_dir, &args.id))?
         .to_string();
 
     // Taken before the write so the report can say whether anything changed.
@@ -2675,7 +2736,7 @@ fn cmd_title(args: TitleArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
     let (mut project, _lock) = lock_and_load()?;
 
     let track_id = find_task_track(&project, &args.id)
-        .ok_or_else(|| format!("task not found: {}", args.id))?
+        .ok_or_else(|| task_not_found(&project.frame_dir, &args.id))?
         .to_string();
 
     // Taken before the write so the report can say whether anything changed.
@@ -2701,7 +2762,7 @@ fn cmd_mv(args: MvArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     // reparent flags against each other) are declared on `MvArgs` and rejected
     // by clap before this runs.
     let source_track_id = find_task_track(&project, &args.id)
-        .ok_or_else(|| format!("task not found: {}", args.id))?
+        .ok_or_else(|| task_not_found(&frame_dir, &args.id))?
         .to_string();
 
     // Handle --promote
@@ -4137,7 +4198,7 @@ fn cmd_delete(args: DeleteArgs, json: bool) -> Result<(), Box<dyn std::error::Er
     let mut to_delete: Vec<(String, String)> = Vec::new(); // (track_id, task_id)
     for task_id in &args.ids {
         let track_id = find_task_track(&project, task_id)
-            .ok_or_else(|| format!("task not found: {}", task_id))?
+            .ok_or_else(|| task_not_found(&project.frame_dir, task_id))?
             .to_string();
         to_delete.push((track_id, task_id.clone()));
     }

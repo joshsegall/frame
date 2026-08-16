@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::model::config::ProjectConfig;
 use crate::model::inbox::Inbox;
 use crate::model::project::Project;
+use crate::model::task::Task;
 use crate::model::track::Track;
 use crate::parse::{parse_inbox, parse_track};
 
@@ -191,9 +192,15 @@ pub fn load_project(root: &Path) -> Result<Project, ProjectError> {
 
 /// Load archived tasks from `frame/archive/*.md` files.
 ///
-/// Returns a list of `(track_id, tasks)` pairs. The track ID is derived from
-/// the archive filename stem (e.g., `archive/main.md` → `"main"`).
-/// Skips the `_tracks/` subdirectory (which holds archived whole-track files).
+/// Returns a list of `(track_id, tasks)` pairs, **sorted by track id**. The track
+/// ID is derived from the archive filename stem (e.g., `archive/main.md` →
+/// `"main"`). Skips the `_tracks/` subdirectory (which holds archived
+/// whole-track files).
+///
+/// Sorted because `read_dir` order is whatever the filesystem says, and two
+/// callers now resolve a task id against this list in order: `fr show`'s
+/// fallback, which must pick the same archive twice running, and `fr search`,
+/// whose archive groups would otherwise come back shuffled.
 pub fn load_archives(
     frame_dir: &Path,
 ) -> Result<Vec<(String, Vec<crate::model::task::Task>)>, ProjectError> {
@@ -239,7 +246,79 @@ pub fn load_archives(
         }
     }
 
+    archives.sort_by(|(a, _), (b, _)| a.cmp(b));
     Ok(archives)
+}
+
+/// One list of archived tasks, and where it came from.
+///
+/// Two file shapes end up here and a reader almost always wants both:
+/// `archive/<track>.md`, the done tasks `fr clean` moved out of a live track,
+/// and `archive/_tracks/<track>.md`, a whole track that `fr track archive` moved
+/// intact. Together they are exactly the tasks a project still holds that
+/// [`load_project`] does not return — the second shape because an archived
+/// track's config `file` field still reads `tracks/<id>.md` and that file is
+/// gone, so the row is skipped on load.
+pub struct ArchivedTasks {
+    /// The track the tasks were archived from, derived from the filename stem.
+    pub track_id: String,
+    /// Path relative to `frame/` — the convention `TrackConfig::file` uses.
+    /// `archive/<track>.md` or `archive/_tracks/<track>.md`, which is also what
+    /// distinguishes the two shapes to a caller that cares.
+    pub file: String,
+    /// For a done-task archive, the archive's flat task list; for a whole
+    /// archived track, every task in every section of it.
+    pub tasks: Vec<Task>,
+}
+
+/// Every archived task list, done-task archives first and each group sorted by
+/// track id. Unreadable files contribute nothing — this is a fallback path for
+/// readers, and a project whose archive directory is damaged should still answer
+/// what it can rather than fail the command that asked.
+pub fn archived_task_lists(frame_dir: &Path) -> Vec<ArchivedTasks> {
+    let mut out = Vec::new();
+
+    if let Ok(archives) = load_archives(frame_dir) {
+        for (track_id, tasks) in archives {
+            out.push(ArchivedTasks {
+                file: format!("archive/{}.md", track_id),
+                track_id,
+                tasks,
+            });
+        }
+    }
+
+    let mut whole = Vec::new();
+    if let Ok(entries) = fs::read_dir(frame_dir.join("archive").join("_tracks")) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let Some(track_id) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let track = parse_track(&content);
+            let mut tasks = Vec::new();
+            for node in &track.nodes {
+                if let crate::model::track::TrackNode::Section { tasks: section, .. } = node {
+                    tasks.extend(section.iter().cloned());
+                }
+            }
+            whole.push(ArchivedTasks {
+                track_id: track_id.to_string(),
+                file: format!("archive/_tracks/{}.md", track_id),
+                tasks,
+            });
+        }
+    }
+    whole.sort_by(|a, b| a.track_id.cmp(&b.track_id));
+    out.extend(whole);
+
+    out
 }
 
 /// Save a track file back to disk

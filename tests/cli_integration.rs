@@ -556,6 +556,163 @@ fn test_show_not_found() {
     assert!(stderr.contains("not found"));
 }
 
+/// Write a done-task archive by hand, the shape `fr clean` leaves behind.
+fn write_archive(root: &Path, track_id: &str, body: &str) {
+    let dir = root.join("frame").join("archive");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join(format!("{track_id}.md")), body).unwrap();
+}
+
+/// The archive fixture: one done task with a subtask, out of the `main` track.
+const ARCHIVED_MAIN: &str = "\
+# Archive — main
+
+- [x] `M-900` Archived widget #legacy
+  - added: 2025-01-02
+  - resolved: 2025-02-03
+  - [x] `M-900.1` Archived subtask
+    - resolved: 2025-02-03
+";
+
+/// `fr clean` moves a done task out of its track file into `archive/<track>.md`.
+/// The task is still in the project and `fr show` is the only surface that can
+/// read it — the TUI's archive search hits are read-only stubs — so reporting
+/// `task not found` for one was the whole bug.
+#[test]
+fn show_falls_back_to_the_done_archive() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    write_archive(tmp.path(), "main", ARCHIVED_MAIN);
+
+    let out = run_fr_ok(tmp.path(), &["show", "M-900"]);
+    assert!(out.contains("Archived widget"), "{out}");
+    assert!(out.contains("resolved: 2025-02-03"), "{out}");
+    assert!(
+        out.contains("archived: main (frame/archive/main.md)"),
+        "the file it came out of has to be on the record: {out}"
+    );
+    // Everything the live surface prints, it still prints.
+    assert!(out.contains("tags: #legacy"), "{out}");
+    assert!(out.contains("M-900.1"), "subtasks too: {out}");
+}
+
+/// A whole track moved by `fr track archive` is the other archive shape, and it
+/// is invisible to `load_project` for a different reason: the config row's
+/// `file` field still says `tracks/<id>.md` and that file is gone. Its tasks
+/// need not be done, so this one is still `[ ]`.
+#[test]
+fn show_falls_back_to_an_archived_track() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    run_fr_ok(tmp.path(), &["track", "archive", "side"]);
+
+    let out = run_fr_ok(tmp.path(), &["show", "S-001"]);
+    assert!(out.contains("Side task one"), "{out}");
+    assert!(
+        out.starts_with("[ ]"),
+        "state is preserved, not implied: {out}"
+    );
+    assert!(
+        out.contains("archived: side (frame/archive/_tracks/side.md)"),
+        "the path is what tells the two archive shapes apart: {out}"
+    );
+}
+
+/// The live copy wins. An interrupted `fr clean` leaves the same id in both
+/// places, and the live one is what every write command acts on — showing the
+/// archived record would describe something no command can reach.
+#[test]
+fn show_prefers_the_live_task_over_an_archived_copy() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    write_archive(
+        tmp.path(),
+        "main",
+        "# Archive — main\n\n- [x] `M-001` Stale archived copy\n  - resolved: 2025-02-03\n",
+    );
+
+    let out = run_fr_ok(tmp.path(), &["show", "M-001"]);
+    assert!(out.contains("First task"), "{out}");
+    assert!(!out.contains("Stale archived copy"), "{out}");
+    assert!(
+        !out.contains("archived:"),
+        "a live task says nothing: {out}"
+    );
+}
+
+#[test]
+fn show_no_archive_opts_out_of_the_fallback() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    write_archive(tmp.path(), "main", ARCHIVED_MAIN);
+
+    let (_out, stderr, success) = run_fr(tmp.path(), &["show", "--no-archive", "M-900"]);
+    assert!(!success);
+    assert!(stderr.contains("task not found: M-900"), "{stderr}");
+}
+
+/// `--context` resolves the parent chain in whatever container the task came
+/// out of, and names the archive once — under the task, not under each ancestor.
+#[test]
+fn show_context_resolves_ancestors_inside_the_archive() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    write_archive(tmp.path(), "main", ARCHIVED_MAIN);
+
+    let out = run_fr_ok(tmp.path(), &["show", "M-900.1", "--context"]);
+    assert!(out.contains("── Parent ── M-900 Archived widget"), "{out}");
+    assert!(out.contains("── Task ── M-900.1 Archived subtask"), "{out}");
+    assert_eq!(
+        out.lines()
+            .filter(|l| l.trim_start().starts_with("archived:"))
+            .count(),
+        1,
+        "{out}"
+    );
+}
+
+/// `--json` carries the same two strings the human `archived:` line composes,
+/// and a live task carries no `archived` key at all — absent, not null, so an
+/// existing consumer sees the bytes it always saw.
+#[test]
+fn show_json_reports_where_an_archived_task_lives() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    write_archive(tmp.path(), "main", ARCHIVED_MAIN);
+
+    let out = run_fr_ok(tmp.path(), &["show", "M-900", "--json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(parsed["id"], "M-900");
+    assert_eq!(parsed["archived"]["track"], "main");
+    assert_eq!(parsed["archived"]["file"], "frame/archive/main.md");
+
+    let live = run_fr_ok(tmp.path(), &["show", "M-001", "--json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&live).unwrap();
+    assert!(parsed.get("archived").is_none(), "{live}");
+}
+
+/// A write command still refuses — an archived task is not editable — but it
+/// answers the question the bare message provoked: I can see it in the file.
+#[test]
+fn a_write_command_says_where_the_archived_task_went() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    write_archive(tmp.path(), "main", ARCHIVED_MAIN);
+
+    let (_out, stderr, success) = run_fr(tmp.path(), &["title", "M-900", "New title"]);
+    assert!(!success);
+    assert!(
+        stderr.contains("archived in main") && stderr.contains("frame/archive/main.md"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("fr show M-900"), "{stderr}");
+
+    // A genuinely absent id keeps the short message.
+    let (_out, stderr, success) = run_fr(tmp.path(), &["title", "M-404", "New title"]);
+    assert!(!success);
+    assert_eq!(stderr.trim(), "error: task not found: M-404", "{stderr}");
+}
+
 #[test]
 fn test_ready() {
     let tmp = tempfile::TempDir::new().unwrap();
