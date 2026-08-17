@@ -9011,3 +9011,202 @@ fn mv_backward_across_tracks_rewrites_deps_pointing_at_it() {
     );
     assert!(!shown.contains("S-001"), "stale dep survived:\n{shown}");
 }
+
+// ---------------------------------------------------------------------------
+// `-C` / `--project-dir` resolution
+// ---------------------------------------------------------------------------
+//
+// `-C` names a project. It used to name a place to *start looking* for one, so
+// a path inside a project resolved upward to that project — silently, reporting
+// success, with nothing separating "operated on the sandbox" from "operated on
+// the live tracks".
+
+/// A `-C` at a directory inside a project is an error, not that project.
+#[test]
+fn project_dir_at_a_nested_directory_is_an_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+    let nested = tmp.path().join("sandbox");
+    fs::create_dir(&nested).unwrap();
+
+    let (_, stderr, ok) = run_fr(tmp.path(), &["tracks", "-C", "./sandbox"]);
+    assert!(!ok, "-C at a nested directory resolved upward");
+    assert!(
+        stderr.contains("not a frame project"),
+        "unexpected error:\n{stderr}"
+    );
+    // The enclosing project is what the caller may have meant, so it is named.
+    assert!(
+        stderr.contains("an enclosing project exists at"),
+        "the refusal does not name the enclosing project:\n{stderr}"
+    );
+}
+
+/// And it writes nothing: the write half resolved upward too.
+#[test]
+fn project_dir_at_a_nested_directory_writes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+    let nested = tmp.path().join("sandbox");
+    fs::create_dir(&nested).unwrap();
+    let track = tmp.path().join("frame/tracks/main.md");
+    let before = fs::read_to_string(&track).unwrap();
+
+    let (_, _, ok) = run_fr(
+        tmp.path(),
+        &["add", "main", "leaked task", "-C", "./sandbox"],
+    );
+    assert!(!ok, "a write through a nested -C succeeded");
+
+    let after = fs::read_to_string(&track).unwrap();
+    assert_eq!(before, after, "the write landed in the enclosing project");
+    assert!(
+        !nested.join("frame").exists(),
+        "a project appeared at the -C path"
+    );
+}
+
+/// A `-C` at a project root still reads and writes that project, from anywhere.
+#[test]
+fn project_dir_at_a_project_root_reads_and_writes_there() {
+    let base = tempfile::tempdir().unwrap();
+    let proj = base.path().join("proj");
+    let elsewhere = base.path().join("elsewhere");
+    fs::create_dir_all(&proj).unwrap();
+    fs::create_dir_all(&elsewhere).unwrap();
+    create_test_project(&proj);
+    let proj_arg = proj.to_str().unwrap();
+
+    let listed = run_fr_ok(&elsewhere, &["list", "-C", proj_arg]);
+    assert!(listed.contains("M-001"), "did not read the named project");
+
+    let (_, stderr, ok) = run_fr(&elsewhere, &["add", "main", "landed here", "-C", proj_arg]);
+    assert!(ok, "{stderr}");
+    let track = fs::read_to_string(proj.join("frame/tracks/main.md")).unwrap();
+    assert!(track.contains("landed here"), "the write went elsewhere");
+
+    // The preview names files relative to the project it is about, not to a
+    // working directory that has nothing to do with it.
+    let preview = run_fr_ok(
+        &elsewhere,
+        &["add", "main", "previewed", "-C", proj_arg, "--dry-run"],
+    );
+    assert!(
+        preview.contains("frame/tracks/main.md"),
+        "dry-run paths are not relative to the named project:\n{preview}"
+    );
+}
+
+/// Outside any project, `-C` errors as it always did — and has nothing to offer.
+#[test]
+fn project_dir_outside_any_project_errors_without_a_hint() {
+    let base = tempfile::tempdir().unwrap();
+    let empty = base.path().join("empty");
+    fs::create_dir_all(&empty).unwrap();
+
+    let (_, stderr, ok) = run_fr(base.path(), &["tracks", "-C", empty.to_str().unwrap()]);
+    assert!(!ok, "-C outside a project succeeded");
+    assert!(
+        stderr.contains("not a frame project"),
+        "unexpected error:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("an enclosing project"),
+        "named an enclosing project that does not exist:\n{stderr}"
+    );
+}
+
+/// A `-C` at a path that does not exist is an error, not a project created there.
+#[test]
+fn project_dir_at_a_missing_path_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+
+    let (_, stderr, ok) = run_fr(tmp.path(), &["tracks", "-C", "./no-such-dir"]);
+    assert!(!ok, "-C at a missing path succeeded");
+    assert!(
+        stderr.contains("cannot resolve -C path"),
+        "unexpected error:\n{stderr}"
+    );
+}
+
+/// `fr init -C <path>` initializes the named directory, not the working one.
+///
+/// `init` runs before project discovery and so never saw the override at all:
+/// it created the project in the working directory and said nothing.
+#[test]
+fn init_honors_project_dir() {
+    let base = tempfile::tempdir().unwrap();
+    let target = base.path().join("target");
+    let elsewhere = base.path().join("elsewhere");
+    fs::create_dir_all(&target).unwrap();
+    fs::create_dir_all(&elsewhere).unwrap();
+
+    let (_, stderr, ok) = run_fr(
+        &elsewhere,
+        &[
+            "init",
+            "--name",
+            "sandboxed",
+            "-C",
+            target.to_str().unwrap(),
+            "--track",
+            "main",
+            "Main",
+        ],
+    );
+    assert!(ok, "{stderr}");
+    assert!(
+        target.join("frame/project.toml").exists(),
+        "no project at the -C path"
+    );
+    assert!(
+        !elsewhere.join("frame").exists(),
+        "init created the project in the working directory"
+    );
+}
+
+/// `fr track rename --prefix` renumbers the named project, not the caller's.
+///
+/// The gate validated the `-C` project and then the prefix branch re-discovered
+/// from the working directory, so the bulk rewrite — every task ID in the track,
+/// plus every `dep:` pointing at one — landed in whatever project the caller
+/// happened to be standing in, while the lock was held on the one named.
+#[test]
+fn track_rename_prefix_honors_project_dir() {
+    let base = tempfile::tempdir().unwrap();
+    let caller = base.path().join("caller");
+    let named = base.path().join("named");
+    fs::create_dir_all(&caller).unwrap();
+    fs::create_dir_all(&named).unwrap();
+    create_test_project(&caller);
+    create_test_project(&named);
+
+    let caller_before = fs::read_to_string(caller.join("frame/tracks/main.md")).unwrap();
+
+    let (_, stderr, ok) = run_fr(
+        &caller,
+        &[
+            "track",
+            "rename",
+            "main",
+            "--prefix",
+            "ZZZ",
+            "-C",
+            named.to_str().unwrap(),
+            "-y",
+        ],
+    );
+    assert!(ok, "{stderr}");
+
+    let renamed = fs::read_to_string(named.join("frame/tracks/main.md")).unwrap();
+    assert!(
+        renamed.contains("ZZZ-001"),
+        "the named project was not renamed:\n{renamed}"
+    );
+    let caller_after = fs::read_to_string(caller.join("frame/tracks/main.md")).unwrap();
+    assert_eq!(
+        caller_before, caller_after,
+        "the rename rewrote the caller's project"
+    );
+}

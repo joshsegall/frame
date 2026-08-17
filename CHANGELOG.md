@@ -154,6 +154,22 @@ All notable changes to frame will be documented in this file.
 
 ### Fixed
 
+- **`-C <path>` resolved upward into an enclosing project.** A `-C` at a directory with no `frame/` of its own but sitting inside a frame project silently operated on the enclosing project, reported success, and gave no indication it had used a project other than the one named — on writes as well as reads. Outside any project `-C` errored correctly, so the behaviour was inconsistent rather than uniformly "search upward".
+
+  `-C` now resolves **exactly**: `<path>/frame/project.toml` must exist. A working *directory* still resolves upward, which is not an inconsistency — a directory you are standing in is where you started looking, and a directory you named is what you meant. The refusal names the project an upward search would have found, since that is a plausible thing to have meant and a catastrophic thing to hit by accident:
+
+  ```
+  $ fr add main "task" -C ./sandbox
+  error: not a frame project: /work/proj/sandbox has no frame/ directory
+    (an enclosing project exists at /work/proj — use `-C /work/proj` to operate on it)
+  ```
+
+  What this protects is the case where the `-C` target is not in the state the caller assumed — a scratch copy that was never populated, a path typo, a setup step that quietly did nothing. Each of those used to proceed against the enclosing real project, with nothing separating "operated on the sandbox" from "operated on the live tracks". The TUI resolves `-C` the same way, and an explicit `-C` that does not resolve is now an error rather than a fall-through to the project picker, which would silently offer a different project than the one named.
+
+- **`fr track rename --prefix` rewrote the working directory's project instead of the one `-C` named.** The gate validated the named project, and then the prefix branch re-discovered the project from the working directory — so the bulk rewrite landed somewhere nobody had named, renumbering every task ID in that track and every `dep:` pointing at one, while the lock was still held on the project named. With `cwd` in project A and `-C` at B, A came back renumbered and B was untouched. It now reuses the project already discovered and locked.
+
+- **`fr init` ignored `-C` entirely**, creating the project in the working directory and saying nothing. It now initializes the named directory. The path must already exist, so a typo is an error rather than a project somewhere unintended.
+
 - **`fr mv --track` failed with `task not found` whenever the destination track came before the source in `project.toml`.** Forward moves worked, backward ones never did — on an *n*-track project the result was a perfectly triangular matrix, and reordering the tracks in `project.toml` moved the failure with the order. The error named the task, so it read as a corrupted or missing task rather than as a rejected direction, and `fr show` resolved the same id immediately before the failing move.
 
   A cross-track move needs two mutable references into one vector, so the handler splits it. Both arms of that split already yield `(source, target)` — the arm for a source *after* the target names the source first too — but a second `if/else` read the halves as positional and swapped them back, so `move_task_to_track` searched the destination for the task and correctly reported that it was not there. The second swap is gone.

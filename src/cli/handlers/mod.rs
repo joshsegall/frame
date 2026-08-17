@@ -39,12 +39,7 @@ use crate::ops::{
 pub fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let json = cli.json;
 
-    // Store -C override for load_project_cwd()
-    if let Some(ref dir) = cli.project_dir {
-        let abs = std::fs::canonicalize(dir)
-            .map_err(|e| format!("cannot resolve -C path '{}': {}", dir, e))?;
-        PROJECT_DIR_OVERRIDE.lock().unwrap().replace(abs);
-    }
+    set_project_dir_override(cli.project_dir.as_deref())?;
 
     let result = dispatch_command(cli.command, json);
 
@@ -176,17 +171,44 @@ fn load_project_at(root: &Path) -> Result<Project, ProjectError> {
     Ok(project)
 }
 
+/// Arm the `-C` override for this run, resolving it to an absolute path.
+///
+/// Called from [`dispatch`], and separately from `main` for `fr init`, which
+/// runs before project discovery and so does not go through dispatch at all.
+/// Canonicalizing here is also what makes `-C` at a path that does not exist an
+/// error rather than a project created somewhere else.
+pub fn set_project_dir_override(dir: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(dir) = dir {
+        let abs = std::fs::canonicalize(dir)
+            .map_err(|e| format!("cannot resolve -C path '{}': {}", dir, e))?;
+        PROJECT_DIR_OVERRIDE.lock().unwrap().replace(abs);
+    }
+    Ok(())
+}
+
+/// The absolute `-C` path, if one was given.
+fn project_dir_override() -> Option<PathBuf> {
+    PROJECT_DIR_OVERRIDE.lock().unwrap().clone()
+}
+
 /// The project root, without loading or registering the project.
 ///
 /// For commands that operate on a project's *surroundings* rather than its
 /// contents — `fr git setup` configures a repo, and has to keep working when a
 /// track file will not parse.
+///
+/// `-C` resolves exactly and the working directory resolves upward, which is
+/// not an inconsistency: a directory you are standing in is where you started
+/// looking, and a directory you named is what you meant. See
+/// [`project_io::project_at`].
 fn discover_project_root() -> Result<PathBuf, ProjectError> {
-    let start = match PROJECT_DIR_OVERRIDE.lock().unwrap().as_ref() {
-        Some(dir) => dir.clone(),
-        None => std::env::current_dir().map_err(ProjectError::IoError)?,
-    };
-    project_io::discover_project(&start)
+    match project_dir_override() {
+        Some(dir) => project_io::project_at(&dir),
+        None => {
+            let cwd = std::env::current_dir().map_err(ProjectError::IoError)?;
+            project_io::discover_project(&cwd)
+        }
+    }
 }
 
 /// Find the track config and prefix for a given track ID.
@@ -2188,15 +2210,20 @@ fn report_track_write(
 /// next to the command that produced it, and `frame/tracks/main.md` is the name
 /// the reader already has for the file.
 ///
+/// Under `-C` that name comes from the named project instead, which is the same
+/// rule: the reader's frame of reference is the project the preview is about,
+/// and relativizing it against an unrelated working directory only produced
+/// absolute paths.
+///
 /// **Drains the record**, so exactly one surface may call it per run. `--json`
 /// does, embedding the list in its document; the human surface leaves it for
 /// [`print_dry_run_trailer`] at the end of dispatch.
 fn would_write_paths() -> Vec<String> {
-    let cwd = std::env::current_dir().ok();
+    let base = project_dir_override().or_else(|| std::env::current_dir().ok());
     dryrun::would_write()
         .iter()
         .map(|p| {
-            let shown = cwd
+            let shown = base
                 .as_ref()
                 .and_then(|c| p.strip_prefix(c).ok())
                 .unwrap_or(p.as_path());
@@ -3742,9 +3769,15 @@ fn cmd_track_rename(args: TrackRenameArgs, json: bool) -> Result<(), Box<dyn std
             .cloned()
             .ok_or_else(|| format!("no prefix configured for track '{}'", effective_id))?;
 
-        // Reload tracks for in-memory mutation
-        let cwd = std::env::current_dir().map_err(|e| format!("could not get cwd: {}", e))?;
-        let root = project_io::discover_project(&cwd)?;
+        // Reload tracks for in-memory mutation.
+        //
+        // From the project already discovered and locked, not from the working
+        // directory. Re-discovering here reached straight past `-C`: the gate
+        // above validated the named project, and then this loaded — and the
+        // rewrite below wrote — whichever project the *caller's* directory was
+        // in, renumbering every task ID in a project nobody had named while the
+        // lock was still held on the one that was.
+        let root = project.root.clone();
         project = project_io::load_project(&root)?;
         // Re-read config to get latest state after potential --name/--id changes
         let (latest_config, _) = config_io::read_config(&project.frame_dir)?;

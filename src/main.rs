@@ -15,9 +15,12 @@ fn main() {
             }
         }
         Some(Commands::Init(args)) => {
-            // Init is handled before project discovery
+            // Init is handled before project discovery, so it arms the -C
+            // override itself rather than inheriting it from `dispatch`.
             let json = cli.json;
-            if let Err(e) = handlers::cmd_init(args, json) {
+            let result = handlers::set_project_dir_override(project_dir.as_deref())
+                .and_then(|()| handlers::cmd_init(args, json));
+            if let Err(e) = result {
                 eprintln!("error: {}", e);
                 std::process::exit(1);
             }

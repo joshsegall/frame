@@ -112,7 +112,17 @@ fn update_git_config(cwd: &std::path::Path) -> Vec<String> {
 
 pub fn cmd_init(args: InitArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     dryrun::arm(args.dry_run);
-    let cwd = std::env::current_dir()?;
+    // `-C` names where the project goes, as it names which project every other
+    // command runs against. It was read by nothing here, so `fr init -C
+    // ./sandbox` created the project in the working directory instead and said
+    // nothing — the same silent substitution `-C` used to make on reads.
+    //
+    // The path must already exist: it is canonicalized when the override is
+    // armed, so a typo is an error rather than a new directory.
+    let cwd = match super::project_dir_override() {
+        Some(dir) => dir,
+        None => std::env::current_dir()?,
+    };
     let frame_dir = cwd.join("frame");
 
     // Check if already initialized

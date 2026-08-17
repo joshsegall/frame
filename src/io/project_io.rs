@@ -98,6 +98,19 @@ pub fn append_gitignore_entry(root: &Path, entry: &str) -> Result<(), std::io::E
 pub enum ProjectError {
     #[error("not a frame project: no frame/ directory found")]
     NotAProject,
+    /// A path that was *named* as a project and is not one.
+    ///
+    /// Separate from [`ProjectError::NotAProject`] because the two have
+    /// different fixes and only the caller of `-C` can tell them apart once the
+    /// path is gone: the bare case means "you are not in a project", this one
+    /// means "the project you named is not there".
+    #[error("not a frame project: {} has no frame/ directory{}", path.display(), enclosing_hint(enclosing))]
+    NotAProjectAt {
+        path: PathBuf,
+        /// The project this path *would* have resolved to under an upward
+        /// search — the one a silent resolution used to operate on.
+        enclosing: Option<PathBuf>,
+    },
     #[error("could not read {path}: {source}")]
     ReadError {
         path: PathBuf,
@@ -109,6 +122,44 @@ pub enum ProjectError {
     ConfigSerializeError(#[from] toml::ser::Error),
     #[error("io error: {0}")]
     IoError(#[from] std::io::Error),
+}
+
+/// The trailer on [`ProjectError::NotAProjectAt`], naming the project an upward
+/// search would have found.
+///
+/// The whole point of refusing the upward search is that the enclosing project
+/// is a plausible thing to have meant and a catastrophic thing to hit by
+/// accident, so the refusal names it rather than leaving it to be guessed.
+fn enclosing_hint(enclosing: &Option<PathBuf>) -> String {
+    match enclosing {
+        Some(root) => format!(
+            "\n  (an enclosing project exists at {} — use `-C {}` to operate on it)",
+            root.display(),
+            root.display()
+        ),
+        None => String::new(),
+    }
+}
+
+/// Resolve a project root that was named outright, with no upward search.
+///
+/// `-C <path>` names a project; it does not name a place to start looking for
+/// one. Searching upward from it made a path *inside* a project resolve to that
+/// project — so a `-C` at a scratch copy that had never been populated, or at a
+/// typo, silently read and wrote the enclosing real project and reported
+/// success. There was no signal separating that from having operated on the
+/// directory named.
+pub fn project_at(path: &Path) -> Result<PathBuf, ProjectError> {
+    let frame_dir = path.join("frame");
+    if frame_dir.is_dir() && frame_dir.join("project.toml").exists() {
+        return Ok(path.to_path_buf());
+    }
+    Err(ProjectError::NotAProjectAt {
+        path: path.to_path_buf(),
+        // From the parent: `path` is already known not to be a project, and a
+        // search that started there would report itself.
+        enclosing: path.parent().and_then(|p| discover_project(p).ok()),
+    })
 }
 
 /// Discover the Frame project by walking up from the given directory,
@@ -461,6 +512,39 @@ file = "tracks/main.md"
     fn test_discover_project_not_found() {
         let tmp = TempDir::new().unwrap();
         assert!(discover_project(tmp.path()).is_err());
+    }
+
+    /// `project_at` accepts a root and nothing else — where `discover_project`
+    /// from the same subdirectory resolves upward to that root.
+    #[test]
+    fn test_project_at_does_not_search_upward() {
+        let tmp = TempDir::new().unwrap();
+        create_test_project(tmp.path());
+
+        assert_eq!(project_at(tmp.path()).unwrap(), tmp.path());
+
+        let sub = tmp.path().join("frame/tracks");
+        assert_eq!(discover_project(&sub).unwrap(), tmp.path());
+        let err = project_at(&sub).expect_err("resolved upward");
+        // The enclosing project is carried, so the refusal can name it.
+        match err {
+            ProjectError::NotAProjectAt { enclosing, .. } => {
+                assert_eq!(enclosing.as_deref(), Some(tmp.path()));
+            }
+            other => panic!("wrong error: {other}"),
+        }
+    }
+
+    /// Outside any project there is nothing to point at, and the message says
+    /// only that the named path is not a project.
+    #[test]
+    fn test_project_at_outside_any_project_has_no_enclosing() {
+        let tmp = TempDir::new().unwrap();
+        let err = project_at(tmp.path()).expect_err("not a project");
+        assert!(
+            !err.to_string().contains("enclosing"),
+            "unexpected hint: {err}"
+        );
     }
 
     #[test]

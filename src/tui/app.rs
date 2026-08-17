@@ -18,7 +18,7 @@ use ratatui::text::Line;
 use regex::Regex;
 
 use crate::io::lock::FileLock;
-use crate::io::project_io::{self, discover_project, load_project};
+use crate::io::project_io::{self, discover_project, load_project, project_at};
 use crate::io::watcher::{FileEvent, FrameWatcher};
 use crate::model::{Metadata, Project, SectionKind, Task, TaskState, Track};
 use crate::parse::{parse_inbox, parse_track};
@@ -5169,20 +5169,26 @@ pub fn clear_window_title() {
 /// Run the TUI application.
 /// If `project_dir_override` is set, use that as the starting directory.
 pub fn run(project_dir_override: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-    // Discover and load project
-    let start_dir = match project_dir_override {
-        Some(dir) => std::fs::canonicalize(dir)
-            .map_err(|e| format!("cannot resolve -C path '{}': {}", dir, e))?,
-        None => std::env::current_dir()?,
-    };
-
-    // If we can't find a project, check the registry for the picker
-    let root = match discover_project(&start_dir) {
-        Ok(root) => root,
-        Err(_) => {
-            // No project found — launch project picker
-            return run_project_picker(None);
+    // Discover and load project.
+    //
+    // `-C` resolves exactly here too, and an explicit one that does not resolve
+    // is an error rather than a fall-through to the picker: the picker is the
+    // right answer to "I ran `fr` and there is no project here", and the wrong
+    // answer to "I named a project", where it would silently offer a different
+    // one.
+    let root = match project_dir_override {
+        Some(dir) => {
+            let abs = std::fs::canonicalize(dir)
+                .map_err(|e| format!("cannot resolve -C path '{}': {}", dir, e))?;
+            project_at(&abs)?
         }
+        None => match discover_project(&std::env::current_dir()?) {
+            Ok(root) => root,
+            Err(_) => {
+                // No project found — launch project picker
+                return run_project_picker(None);
+            }
+        },
     };
     let mut project = load_project(&root)?;
 

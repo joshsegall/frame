@@ -4,7 +4,7 @@ The frame CLI binary is `fr`. Run with no arguments to launch the TUI.
 
 **Global flags**:
 - `--json` — output as JSON. Every command has a JSON surface except `fr merge`, whose interface is an exit status a VCS driver reads
-- `-C <path>` / `--project-dir <path>` — run against a different project directory without changing the working directory
+- `-C <path>` / `--project-dir <path>` — run against a different project directory without changing the working directory. Resolves **exactly**: `<path>/frame/` must exist ([see below](#the--c-flag))
 - `-V` / `--version` — version plus the commit the binary was built from (`fr 0.1.6 (ad763b0)`); omits the commit when the build didn't come from a git checkout
 
 ### `--json` on a command that writes
@@ -1006,6 +1006,17 @@ Run any frame command against a different project directory:
 ```
 fr -C ~/code/api-server tasks
 fr -C ~/code/api-server add bugs "Fix auth bug"
+fr init -C ~/code/scratch --track main "Main"   # initializes ~/code/scratch
+```
+
+**`-C` names a project, and resolution is exact.** `<path>/frame/project.toml` must exist; frame does not search upward from `<path>`, and a path that does not exist is an error rather than a directory frame creates. A working *directory* resolves upward, because that is where you started looking — but a directory you named is what you meant.
+
+The distinction matters for the case where the `-C` target is not in the state you assumed — a scratch copy that was never populated, a path typo, a setup step that quietly did nothing. Under an upward search each of those silently operated on the enclosing real project and reported success, with no signal separating that from having operated on the sandbox. Now it refuses, and names the enclosing project in case that is what you meant:
+
+```
+$ fr add main "task" -C ./sandbox
+error: not a frame project: /work/proj/sandbox has no frame/ directory
+  (an enclosing project exists at /work/proj — use `-C /work/proj` to operate on it)
 ```
 
 The `-C` flag also triggers auto-registration if the target project isn't already in the registry.
