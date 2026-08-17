@@ -704,7 +704,7 @@ pub fn clear_local_actor_token(frame_dir: &Path) -> std::io::Result<Option<Strin
     let path = actor_token_path(frame_dir);
     let held = read_local_actor_token(frame_dir);
     if path.exists() {
-        std::fs::remove_file(&path)?;
+        crate::io::dryrun::remove_file(&path)?;
     }
     Ok(held)
 }

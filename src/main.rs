@@ -16,9 +16,15 @@ fn main() {
         }
         Some(Commands::Init(args)) => {
             // Init is handled before project discovery
-            if let Err(e) = handlers::cmd_init(args, cli.json) {
+            let json = cli.json;
+            if let Err(e) = handlers::cmd_init(args, json) {
                 eprintln!("error: {}", e);
                 std::process::exit(1);
+            }
+            // `dispatch` prints this for every other command; init does not go
+            // through it.
+            if !json && frame::io::dryrun::is_active() {
+                handlers::print_dry_run_trailer();
             }
         }
         Some(Commands::Merge(args)) if args.resolve.is_empty() => {

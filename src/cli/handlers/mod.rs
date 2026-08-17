@@ -18,6 +18,7 @@ use crate::cli::commands::*;
 use crate::cli::output::*;
 use crate::io::actors;
 use crate::io::config_io;
+use crate::io::dryrun;
 use crate::io::lock::FileLock;
 use crate::io::project_io::{self, ProjectError};
 use crate::io::registry;
@@ -45,7 +46,24 @@ pub fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         PROJECT_DIR_OVERRIDE.lock().unwrap().replace(abs);
     }
 
-    match cli.command {
+    let result = dispatch_command(cli.command, json);
+
+    // One trailer for every command, printed here rather than by each handler:
+    // the handler's own output already says what the command would have done,
+    // and this says only that it did not happen. Not on the `--json` path, where
+    // the same two facts are fields in the document. Not after an error either —
+    // a failed command has nothing to preview.
+    if result.is_ok() && !json && dryrun::is_active() {
+        print_dry_run_trailer();
+    }
+    result
+}
+
+fn dispatch_command(
+    command: Option<Commands>,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
         None => {
             eprintln!("TUI not yet implemented. Use a subcommand (try `fr --help`).");
             Ok(())
@@ -62,7 +80,7 @@ pub fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 if args.resolve.is_empty() {
                     cmd_merge(args);
                 } else {
-                    cmd_merge_resolve(&args.resolve)?;
+                    cmd_merge_resolve(&args.resolve, args.dry_run)?;
                 }
                 Ok(())
             }
@@ -141,9 +159,19 @@ fn load_project_cwd() -> Result<Project, ProjectError> {
 fn load_project_at(root: &Path) -> Result<Project, ProjectError> {
     let project = project_io::load_project(root)?;
 
-    // Auto-register and touch CLI timestamp
-    registry::register_project(&project.config.project.name, &project.root);
-    registry::touch_cli(&project.root);
+    // Auto-register and touch CLI timestamp.
+    //
+    // Skipped under `--dry-run`, and skipped here rather than left to the write
+    // barrier, so it stays out of the "would change" list. This touch is not an
+    // effect of the command being previewed — *every* command makes it, `fr list`
+    // included — so naming the global registry in the preview of an `fr mv` would
+    // put the same irrelevant line at the top of every preview frame prints, and
+    // teach people to stop reading the list. `fr projects add` registers through
+    // its own call, which does report.
+    if !dryrun::is_active() {
+        registry::register_project(&project.config.project.name, &project.root);
+        registry::touch_cli(&project.root);
+    }
 
     Ok(project)
 }
@@ -1858,6 +1886,7 @@ fn check_failed() -> ! {
 /// `fr delete` and `fr track rename --prefix`, and it keeps a half-applied plan
 /// from being a state anyone has to reason about.
 fn cmd_check_fix(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    dryrun::arm(args.dry_run);
     // A dry run only previews, so it takes no lock and runs no recovery — the
     // same split `fr clean` makes. A real run locks first, like every other
     // write path, so the plan is computed against a project that is neither
@@ -1876,12 +1905,12 @@ fn cmd_check_fix(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::
         if json {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
+                serde_json::to_string_pretty(&with_dry_run(serde_json::json!({
                     "planned": [],
                     "applied": [],
                     "skipped": [],
                     "dry_run": args.dry_run,
-                }))?
+                })))?
             );
         } else {
             println!("nothing to repair");
@@ -1908,12 +1937,12 @@ fn cmd_check_fix(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::
         if json {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
+                serde_json::to_string_pretty(&with_dry_run(serde_json::json!({
                     "planned": &plan,
                     "applied": [],
                     "skipped": [],
                     "dry_run": true,
-                }))?
+                })))?
             );
         } else {
             println!("(dry run — no changes written)");
@@ -1957,13 +1986,13 @@ fn cmd_check_fix(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
+            serde_json::to_string_pretty(&with_dry_run(serde_json::json!({
                 "planned": &plan,
                 "applied": &result.applied,
                 "skipped": &result.skipped,
                 "dry_run": false,
                 "remaining": &after,
-            }))?
+            })))?
         );
     } else {
         println!();
@@ -2028,7 +2057,25 @@ fn lock_and_load() -> Result<(Project, FileLock), Box<dyn std::error::Error>> {
 }
 
 /// Complete any interrupted operation. The project lock must already be held.
+///
+/// **Skipped outright under `--dry-run`, rather than left to the write barrier.**
+/// Recovery is not one write but a write and a re-read: `recover_pending` moves
+/// files and then the project is reloaded from disk. With the writes suppressed
+/// the reload returns the *un*-recovered project, silently dropping the repair
+/// from the in-memory copy the preview is then computed against. Better to
+/// decline, and say so — a preview against a half-finished operation is a preview
+/// of something that is not going to happen.
 fn recover_under_lock(project: &mut Project) -> Result<(), Box<dyn std::error::Error>> {
+    if dryrun::is_active() {
+        if crate::io::inflight::read(&project.frame_dir).is_some() {
+            eprintln!(
+                "warning: an interrupted operation is pending, and a dry run will not \
+                 complete it.\n  This preview is against the project as it stands. \
+                 Re-run without --dry-run to recover first."
+            );
+        }
+        return Ok(());
+    }
     if let Some(outcome) = crate::ops::recover::recover_pending(project) {
         match &outcome {
             crate::ops::recover::Outcome::AlreadyComplete { .. } => {}
@@ -2060,7 +2107,13 @@ fn resolve_mint_namespace(
 ) -> Result<Option<crate::model::task_id::Token>, Box<dyn std::error::Error>> {
     let resolved = actors::resolve_actor_token(frame_dir)?;
     if let Some(msg) = resolved.announcement {
-        eprintln!("{}", msg);
+        // The claim itself is suppressed by the write barrier, so under a dry run
+        // the announcement is describing something that has not happened.
+        if dryrun::is_active() {
+            eprintln!("would claim a token: {}", msg);
+        } else {
+            eprintln!("{}", msg);
+        }
     }
     Ok(crate::model::task_id::actor_namespace(&resolved.token))
 }
@@ -2088,6 +2141,8 @@ fn report_task_write(
             serde_json::to_string_pretty(&TaskWriteJson {
                 command,
                 changed,
+                dry_run: dryrun::is_active(),
+                would_write: would_write_paths(),
                 track: track.map(str::to_string),
                 tasks: tasks.into_iter().map(task_to_json).collect(),
             })?
@@ -2112,6 +2167,8 @@ fn report_track_write(
             serde_json::to_string_pretty(&TrackWriteJson {
                 command,
                 changed,
+                dry_run: dryrun::is_active(),
+                would_write: would_write_paths(),
                 track,
             })?
         );
@@ -2119,6 +2176,87 @@ fn report_track_write(
         human();
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The `--dry-run` surface
+// ---------------------------------------------------------------------------
+
+/// The files a dry run would have changed, as a reader would name them.
+///
+/// Relative to the working directory where they are under it: a preview is read
+/// next to the command that produced it, and `frame/tracks/main.md` is the name
+/// the reader already has for the file.
+///
+/// **Drains the record**, so exactly one surface may call it per run. `--json`
+/// does, embedding the list in its document; the human surface leaves it for
+/// [`print_dry_run_trailer`] at the end of dispatch.
+fn would_write_paths() -> Vec<String> {
+    let cwd = std::env::current_dir().ok();
+    dryrun::would_write()
+        .iter()
+        .map(|p| {
+            let shown = cwd
+                .as_ref()
+                .and_then(|c| p.strip_prefix(c).ok())
+                .unwrap_or(p.as_path());
+            shown.display().to_string()
+        })
+        .collect()
+}
+
+/// Close a human-surface dry run by saying what it did not do.
+///
+/// Printed once, from dispatch, rather than by each handler: the handler's own
+/// output already says what the command would have done, and this says only that
+/// it did not happen. Wording follows `fr git setup --dry-run`, which said it
+/// first.
+pub fn print_dry_run_trailer() {
+    let paths = would_write_paths();
+    println!();
+    if paths.is_empty() {
+        println!("dry run — nothing was written, and nothing would change.");
+        return;
+    }
+    println!("dry run — nothing was written. Would change:");
+    for path in &paths {
+        println!("  {path}");
+    }
+    println!("Re-run without --dry-run to apply.");
+}
+
+/// Add the dry-run fields to a hand-built `--json` document.
+///
+/// The two shared shapes ([`TaskWriteJson`], [`TrackWriteJson`]) carry the fields
+/// as typed members; the commands that build a document by hand get them here, so
+/// every write command answers the same two questions in the same words.
+fn with_dry_run(mut value: serde_json::Value) -> serde_json::Value {
+    if let Some(map) = value.as_object_mut() {
+        map.insert("dry_run".to_string(), dryrun::is_active().into());
+        map.insert("would_write".to_string(), would_write_paths().into());
+    }
+    value
+}
+
+/// The project as it stands after a config write — re-read from disk, or, under
+/// a dry run where the write did not land, the in-memory config carried across.
+///
+/// The three track commands that edit `project.toml` all reload afterwards,
+/// because the change went through the document rather than their own copy. With
+/// the write suppressed that reload returns the *old* config, and the command
+/// would report the state it was about to change away from. This is the one place
+/// the barrier is not transparent: a handler that reads back what it wrote has to
+/// be told.
+fn after_config_write(
+    project: Project,
+    config: crate::model::config::ProjectConfig,
+) -> Result<Project, Box<dyn std::error::Error>> {
+    if dryrun::is_active() {
+        let mut previewed = project;
+        previewed.config = config;
+        return Ok(previewed);
+    }
+    Ok(load_project_cwd()?)
 }
 
 /// One track as `fr tracks --json` describes it.
@@ -2195,6 +2333,7 @@ fn refuse_to_prompt(json: bool, what: &str) -> Result<(), Box<dyn std::error::Er
 }
 
 fn cmd_add(args: AddArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    dryrun::arm(args.dry_run);
     let (mut project, _lock) = lock_and_load()?;
 
     reject_add_to_shelved(&project, &args.track)?;
@@ -2241,6 +2380,7 @@ fn cmd_add(args: AddArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> 
 }
 
 fn cmd_push(args: PushArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    dryrun::arm(args.dry_run);
     let (mut project, _lock) = lock_and_load()?;
 
     reject_add_to_shelved(&project, &args.track)?;
@@ -2273,6 +2413,7 @@ fn cmd_push(args: PushArgs, json: bool) -> Result<(), Box<dyn std::error::Error>
 }
 
 fn cmd_sub(args: SubArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    dryrun::arm(args.dry_run);
     let (mut project, _lock) = lock_and_load()?;
 
     // Find which track the parent task is in
@@ -2299,6 +2440,7 @@ fn cmd_sub(args: SubArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> 
 }
 
 fn cmd_inbox_add(args: InboxCmd, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    dryrun::arm(args.dry_run);
     let (mut project, _lock) = lock_and_load()?;
 
     let text = args.text.unwrap(); // We know it's Some from dispatch
@@ -2336,6 +2478,7 @@ fn cmd_start(args: StartArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
         StateArgs {
             id: args.id,
             state: "active".to_string(),
+            dry_run: args.dry_run,
         },
         json,
     )
@@ -2346,12 +2489,14 @@ fn cmd_done(args: DoneArgs, json: bool) -> Result<(), Box<dyn std::error::Error>
         StateArgs {
             id: args.id,
             state: "done".to_string(),
+            dry_run: args.dry_run,
         },
         json,
     )
 }
 
 fn cmd_state(args: StateArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    dryrun::arm(args.dry_run);
     let (mut project, _lock) = lock_and_load()?;
 
     let new_state = parse_task_state(&args.state).map_err(Box::<dyn std::error::Error>::from)?;
@@ -2398,6 +2543,7 @@ fn cmd_state(args: StateArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
 }
 
 fn cmd_tag(args: TagArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    dryrun::arm(args.dry_run);
     let (mut project, _lock) = lock_and_load()?;
 
     let track_id = find_task_track(&project, &args.id)
@@ -2423,6 +2569,7 @@ fn cmd_tag(args: TagArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> 
 }
 
 fn cmd_dep(args: DepArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    dryrun::arm(args.dry_run);
     let (mut project, _lock) = lock_and_load()?;
 
     let track_id = find_task_track(&project, &args.id)
@@ -2454,6 +2601,7 @@ fn cmd_dep(args: DepArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> 
 }
 
 fn cmd_note(args: NoteArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    dryrun::arm(args.dry_run);
     let (mut project, _lock) = lock_and_load()?;
 
     let track_id = find_task_track(&project, &args.id)
@@ -2675,6 +2823,7 @@ fn cmd_path_field(
     args: PathFieldArgs,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    dryrun::arm(args.dry_run);
     let key = field.key();
     let (mut project, _lock) = lock_and_load()?;
 
@@ -2733,6 +2882,7 @@ fn cmd_path_field(
 }
 
 fn cmd_title(args: TitleArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    dryrun::arm(args.dry_run);
     let (mut project, _lock) = lock_and_load()?;
 
     let track_id = find_task_track(&project, &args.id)
@@ -2754,6 +2904,7 @@ fn cmd_title(args: TitleArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
 }
 
 fn cmd_mv(args: MvArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    dryrun::arm(args.dry_run);
     let (mut project, _lock) = lock_and_load()?;
     // Taken before the tracks are borrowed mutably below.
     let frame_dir = project.frame_dir.clone();
@@ -3125,6 +3276,7 @@ fn cmd_mv(args: MvArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cmd_triage(args: TriageArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    dryrun::arm(args.dry_run);
     let (mut project, _lock) = lock_and_load()?;
 
     reject_add_to_shelved(&project, &args.track)?;
@@ -3202,10 +3354,24 @@ fn cmd_triage(args: TriageArgs, json: bool) -> Result<(), Box<dyn std::error::Er
 fn cmd_track(args: TrackCmd, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     match args.action {
         TrackAction::New(a) => cmd_track_new(a, json),
-        TrackAction::Shelve(a) => cmd_track_state_change(a.id, "shelve", json),
-        TrackAction::Activate(a) => cmd_track_state_change(a.id, "activate", json),
-        TrackAction::Archive(a) => cmd_track_state_change(a.id, "archive", json),
-        TrackAction::Delete(a) => cmd_track_delete(a.id, json),
+        // The three state changes share a handler that takes an id rather than
+        // an args struct, so the barrier is armed here instead of inside it.
+        TrackAction::Shelve(a) => {
+            dryrun::arm(a.dry_run);
+            cmd_track_state_change(a.id, "shelve", json)
+        }
+        TrackAction::Activate(a) => {
+            dryrun::arm(a.dry_run);
+            cmd_track_state_change(a.id, "activate", json)
+        }
+        TrackAction::Archive(a) => {
+            dryrun::arm(a.dry_run);
+            cmd_track_state_change(a.id, "archive", json)
+        }
+        TrackAction::Delete(a) => {
+            dryrun::arm(a.dry_run);
+            cmd_track_delete(a.id, json)
+        }
         TrackAction::Mv(a) => cmd_track_mv(a, json),
         TrackAction::CcFocus(a) => cmd_track_cc_focus(a, json),
         TrackAction::Rename(a) => cmd_track_rename(a, json),
@@ -3213,6 +3379,7 @@ fn cmd_track(args: TrackCmd, json: bool) -> Result<(), Box<dyn std::error::Error
 }
 
 fn cmd_track_new(args: TrackNewArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    dryrun::arm(args.dry_run);
     let (mut project, _lock) = lock_and_load()?;
 
     let (mut config, mut doc) = config_io::read_config(&project.frame_dir)?;
@@ -3322,7 +3489,7 @@ fn cmd_track_state_change(
     }
 
     // Re-read: the state change went through the config, not this copy.
-    let project = load_project_cwd()?;
+    let project = after_config_write(project, config)?;
     let info = track_info_json(&project, &track_id)
         .ok_or_else(|| format!("track not found: {}", track_id))?;
     report_track_write(json, action, true, info, || {
@@ -3331,6 +3498,7 @@ fn cmd_track_state_change(
 }
 
 fn cmd_track_mv(args: TrackMvArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    dryrun::arm(args.dry_run);
     let (mut project, _lock) = lock_and_load()?;
 
     track_ops::reorder_tracks(&mut project.config, &args.id, args.position)?;
@@ -3345,7 +3513,8 @@ fn cmd_track_mv(args: TrackMvArgs, json: bool) -> Result<(), Box<dyn std::error:
     config_io::set_track_order(&mut doc, &order);
     config_io::write_config(&project.frame_dir, &doc)?;
 
-    let project = load_project_cwd()?;
+    let config = project.config.clone();
+    let project = after_config_write(project, config)?;
     let info = track_info_json(&project, &args.id)
         .ok_or_else(|| format!("track not found: {}", args.id))?;
     report_track_write(json, "track mv", true, info, || {
@@ -3354,6 +3523,7 @@ fn cmd_track_mv(args: TrackMvArgs, json: bool) -> Result<(), Box<dyn std::error:
 }
 
 fn cmd_track_cc_focus(args: CcFocusArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    dryrun::arm(args.dry_run);
     if args.clear {
         let (project, _lock) = lock_and_load()?;
         let (mut config, mut doc) = config_io::read_config(&project.frame_dir)?;
@@ -3362,11 +3532,11 @@ fn cmd_track_cc_focus(args: CcFocusArgs, json: bool) -> Result<(), Box<dyn std::
         if json {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
+                serde_json::to_string_pretty(&with_dry_run(serde_json::json!({
                     "command": "track cc-focus",
                     "changed": true,
                     "cc_focus": serde_json::Value::Null,
-                }))?
+                })))?
             );
         } else {
             println!("cc-focus cleared");
@@ -3377,7 +3547,7 @@ fn cmd_track_cc_focus(args: CcFocusArgs, json: bool) -> Result<(), Box<dyn std::
         let (mut config, mut doc) = config_io::read_config(&project.frame_dir)?;
         track_ops::set_cc_focus(&mut doc, &mut config, &id)?;
         config_io::write_config(&project.frame_dir, &doc)?;
-        let project = load_project_cwd()?;
+        let project = after_config_write(project, config)?;
         let info =
             track_info_json(&project, &id).ok_or_else(|| format!("track not found: {}", id))?;
         report_track_write(json, "track cc-focus", true, info, || {
@@ -3430,11 +3600,11 @@ fn cmd_track_delete(track_id: String, json: bool) -> Result<(), Box<dyn std::err
         // shape — the id and the fact of its removal is the whole result.
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
+            serde_json::to_string_pretty(&with_dry_run(serde_json::json!({
                 "command": "track delete",
                 "changed": true,
                 "deleted": track_id,
-            }))?
+            })))?
         );
     } else {
         println!("deleted track \"{}\"", track_id);
@@ -3443,6 +3613,7 @@ fn cmd_track_delete(track_id: String, json: bool) -> Result<(), Box<dyn std::err
 }
 
 fn cmd_track_rename(args: TrackRenameArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    dryrun::arm(args.dry_run);
     let (mut project, _lock) = lock_and_load()?;
 
     if args.name.is_none() && args.new_id.is_none() && args.prefix.is_none() {
@@ -3649,23 +3820,22 @@ fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
 }
 
 fn cmd_clean(args: CleanArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    dryrun::arm(args.dry_run);
     let mut project = load_project_cwd()?;
 
-    // A real clean holds the lock and mints in this clone's namespace (auto-
-    // claiming a token on first use); a dry run only previews, so it neither
-    // locks nor claims — and on an unclaimed clone it mints nothing (strict
-    // null policy).
-    let (_lock, scope) = if args.dry_run {
-        (None, actors::id_scope(&project.frame_dir))
-    } else {
-        let lock = FileLock::acquire_default(&project.frame_dir)?;
-        let token = resolve_mint_namespace(&project.frame_dir)?;
-        (Some(lock), actors::IdScope::Mint(token))
-    };
+    // Both modes lock and both mint in this clone's namespace, auto-claiming a
+    // token on first use. Neither is a concession under a dry run: the lock buys
+    // a preview computed against a project nobody else is mid-write on, and the
+    // claim and every id it hands out are suppressed by the write barrier, which
+    // is *why* they can be asked for. The previous shape asked for neither and
+    // built a live `Mint` anyway — so a dry run skipped the lock it wanted and
+    // advanced the durable id frontier it claimed not to touch.
+    let _lock = FileLock::acquire_default(&project.frame_dir)?;
+    let token = resolve_mint_namespace(&project.frame_dir)?;
 
     let result = clean::clean_project_with(
         &mut project,
-        scope,
+        actors::IdScope::Mint(token),
         if args.dry_run {
             clean::CleanMode::DryRun
         } else {
@@ -3685,13 +3855,12 @@ fn cmd_clean(args: CleanArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
         report_clean(&args, &result, &normalized);
     }
 
-    if !args.dry_run {
-        // Save all modified tracks. A clean task serializes verbatim, so saving
-        // one clean did not touch rewrites nothing.
-        for (track_id, track) in &project.tracks {
-            if let Some(file) = track_file(&project, track_id) {
-                project_io::save_track(&project.frame_dir, file, track)?;
-            }
+    // Save all modified tracks. A clean task serializes verbatim, so saving one
+    // clean did not touch rewrites nothing. Under a dry run these are suppressed
+    // by the write barrier and recorded as files that would change.
+    for (track_id, track) in &project.tracks {
+        if let Some(file) = track_file(&project, track_id) {
+            project_io::save_track(&project.frame_dir, file, track)?;
         }
     }
 
@@ -4021,6 +4190,7 @@ fn cmd_projects_list(json: bool) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cmd_projects_add(args: ProjectsAddArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    dryrun::arm(args.dry_run);
     let abs_path = std::fs::canonicalize(&args.path)
         .map_err(|e| format!("cannot resolve path '{}': {}", args.path, e))?;
 
@@ -4040,12 +4210,12 @@ fn cmd_projects_add(args: ProjectsAddArgs, json: bool) -> Result<(), Box<dyn std
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
+            serde_json::to_string_pretty(&with_dry_run(serde_json::json!({
                 "command": "projects add",
                 "changed": true,
                 "name": name,
                 "path": abs_path.display().to_string(),
-            }))?
+            })))?
         );
     } else {
         println!("Added: {} ({})", name, abs_path.display());
@@ -4057,17 +4227,18 @@ fn cmd_projects_remove(
     args: ProjectsRemoveArgs,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    dryrun::arm(args.dry_run);
     match registry::remove_project(&args.name_or_path) {
         Ok(Some(entry)) => {
             if json {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
+                    serde_json::to_string_pretty(&with_dry_run(serde_json::json!({
                         "command": "projects remove",
                         "changed": true,
                         "name": entry.name,
                         "path": entry.path,
-                    }))?
+                    })))?
                 );
             } else {
                 println!("Removed: {}", entry.name);
@@ -4083,17 +4254,13 @@ fn cmd_projects_prune(
     args: ProjectsPruneArgs,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // For a dry run, report the not-found entries without mutating the file.
-    // Otherwise prune them and report what was removed.
-    let removed = if args.dry_run {
-        registry::read_registry()
-            .projects
-            .into_iter()
-            .filter(registry::is_prunable)
-            .collect::<Vec<_>>()
-    } else {
-        registry::prune_missing()
-    };
+    dryrun::arm(args.dry_run);
+    // One path in both modes: `prune_missing` computes the removals and then
+    // writes the registry, and under a dry run the write barrier drops that write
+    // while the removals still come back to be reported. The fork this replaces
+    // recomputed the same list through a second filter, which is one more place
+    // for the preview and the real run to disagree about what "prunable" means.
+    let removed = registry::prune_missing();
 
     if json {
         #[derive(serde::Serialize)]
@@ -4139,6 +4306,7 @@ fn cmd_projects_prune(
 }
 
 fn cmd_import(args: ImportArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    dryrun::arm(args.dry_run);
     let (mut project, _lock) = lock_and_load()?;
 
     reject_add_to_shelved(&project, &args.track)?;
@@ -4190,6 +4358,7 @@ fn cmd_import(args: ImportArgs, json: bool) -> Result<(), Box<dyn std::error::Er
 }
 
 fn cmd_delete(args: DeleteArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    dryrun::arm(args.dry_run);
     use crate::io::recovery;
 
     let (mut project, _lock) = lock_and_load()?;
@@ -4385,6 +4554,7 @@ fn whole_track_archive_files(frame_dir: &std::path::Path) -> Vec<PathBuf> {
 }
 
 fn cmd_actor_merge(args: ActorMergeArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    dryrun::arm(args.dry_run);
     use crate::io::recovery::atomic_write;
     use crate::model::archive::Archive;
     use crate::model::task_id::{TaskId, actor_namespace};
@@ -4595,7 +4765,7 @@ fn cmd_actor_merge(args: ActorMergeArgs, json: bool) -> Result<(), Box<dyn std::
             .collect();
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
+            serde_json::to_string_pretty(&with_dry_run(serde_json::json!({
                 "into": args.into,
                 "from": args.from,
                 "dry_run": args.dry_run,
@@ -4603,7 +4773,7 @@ fn cmd_actor_merge(args: ActorMergeArgs, json: bool) -> Result<(), Box<dyn std::
                 "renamed": renamed,
                 "retired": retire,
                 "prose_hits": prose,
-            }))?
+            })))?
         );
         return Ok(());
     }
@@ -4780,6 +4950,7 @@ fn cmd_actor_status(json: bool) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cmd_actor_claim(args: ActorClaimArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    dryrun::arm(args.dry_run);
     let project = load_project_cwd()?;
     let frame_dir = project.frame_dir.clone();
     let _lock = FileLock::acquire_default(&frame_dir)?;
@@ -4809,10 +4980,10 @@ fn cmd_actor_claim(args: ActorClaimArgs, json: bool) -> Result<(), Box<dyn std::
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
+            serde_json::to_string_pretty(&with_dry_run(serde_json::json!({
                 "token": token,
                 "outcome": "created",
-            }))?
+            })))?
         );
     } else {
         println!("claimed token '{}'", token);
@@ -4822,6 +4993,7 @@ fn cmd_actor_claim(args: ActorClaimArgs, json: bool) -> Result<(), Box<dyn std::
 }
 
 fn cmd_actor_set(args: ActorSetArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    dryrun::arm(args.dry_run);
     let project = load_project_cwd()?;
     let frame_dir = project.frame_dir.clone();
     let _lock = FileLock::acquire_default(&frame_dir)?;
@@ -4852,10 +5024,10 @@ fn cmd_actor_set(args: ActorSetArgs, json: bool) -> Result<(), Box<dyn std::erro
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
+            serde_json::to_string_pretty(&with_dry_run(serde_json::json!({
                 "token": args.token,
                 "outcome": outcome_str,
-            }))?
+            })))?
         );
         return Ok(());
     }
@@ -4880,6 +5052,7 @@ fn cmd_actor_set(args: ActorSetArgs, json: bool) -> Result<(), Box<dyn std::erro
 }
 
 fn cmd_actor_retire(args: ActorRetireArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    dryrun::arm(args.dry_run);
     let project = load_project_cwd()?;
     let frame_dir = project.frame_dir.clone();
     let _lock = FileLock::acquire_default(&frame_dir)?;
@@ -4893,11 +5066,11 @@ fn cmd_actor_retire(args: ActorRetireArgs, json: bool) -> Result<(), Box<dyn std
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
+            serde_json::to_string_pretty(&with_dry_run(serde_json::json!({
                 "token": args.token,
                 "outcome": "retired",
                 "was_own": is_own,
-            }))?
+            })))?
         );
         return Ok(());
     }
@@ -4981,6 +5154,7 @@ fn cmd_recovery(args: RecoveryCmd, global_json: bool) -> Result<(), Box<dyn std:
 
     match args.action {
         Some(RecoveryAction::Prune(prune_args)) => {
+            dryrun::arm(prune_args.dry_run);
             let project = load_project_cwd()?;
             let before = if let Some(ref s) = prune_args.before {
                 Some(
@@ -4995,11 +5169,11 @@ fn cmd_recovery(args: RecoveryCmd, global_json: bool) -> Result<(), Box<dyn std:
             if args.json || global_json {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
+                    serde_json::to_string_pretty(&with_dry_run(serde_json::json!({
                         "command": "recovery prune",
                         "changed": count > 0,
                         "pruned": count,
-                    }))?
+                    })))?
                 );
             } else {
                 println!("pruned {} entries", count);

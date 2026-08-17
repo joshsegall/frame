@@ -1233,7 +1233,7 @@ fn archive_done_tasks(project: &mut Project, result: &mut CleanResult, mode: Cle
         if let Some(parent) = archive_path.parent()
             && !mode.is_dry_run()
         {
-            let _ = std::fs::create_dir_all(parent);
+            let _ = crate::io::dryrun::create_dir_all(parent);
         }
         let existing = std::fs::read_to_string(&archive_path).unwrap_or_default();
 
@@ -2136,6 +2136,50 @@ mod tests {
         assert!(
             !root.join("frame/archive").exists(),
             "dry run created the archive directory"
+        );
+    }
+
+    /// `fr clean --dry-run` must not advance the durable ID frontier.
+    ///
+    /// The bug this pins: `CleanMode::DryRun` gated the archive append and
+    /// nothing else, so ID assignment still went through a live [`Mint`], and
+    /// `io::ids::reserve` recorded the number it handed out. A preview burned an
+    /// ID for real, on a store shared by every worktree of the clone, while the
+    /// documentation said it wrote nothing.
+    ///
+    /// The fix is not in this module — it is [`crate::io::dryrun`], one barrier
+    /// under every write — which is why the test arms that rather than passing a
+    /// mode. The preview must still *say* which ID it would assign; suppressing
+    /// the report would trade one wrong answer for another.
+    #[test]
+    fn test_dry_run_does_not_advance_the_id_frontier() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("frame/tracks")).unwrap();
+        let frame_dir = root.join("frame");
+
+        let mut project = Project {
+            root: root.to_path_buf(),
+            frame_dir: frame_dir.clone(),
+            config: make_config(vec![("main", "M")]),
+            tracks: vec![(
+                "main".to_string(),
+                parse_track("# Main\n\n## Backlog\n\n- [ ] No id yet\n"),
+            )],
+            inbox: None,
+        };
+
+        crate::io::dryrun::arm(true);
+        let result = clean_project_with(&mut project, IdScope::Mint(None), CleanMode::DryRun);
+        crate::io::dryrun::arm(false);
+
+        assert!(
+            !result.ids_assigned.is_empty(),
+            "the preview should still name the id it would assign"
+        );
+        assert!(
+            !frame_dir.join(".ids.toml").exists(),
+            "dry run recorded a reservation in the id frontier"
         );
     }
 

@@ -1,6 +1,5 @@
-use std::fs;
-
 use crate::cli::commands::InitArgs;
+use crate::io::dryrun;
 use crate::io::project_io;
 use crate::ops::track_ops::generate_prefix;
 
@@ -112,6 +111,7 @@ fn update_git_config(cwd: &std::path::Path) -> Vec<String> {
 }
 
 pub fn cmd_init(args: InitArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    dryrun::arm(args.dry_run);
     let cwd = std::env::current_dir()?;
     let frame_dir = cwd.join("frame");
 
@@ -161,20 +161,20 @@ pub fn cmd_init(args: InitArgs, json: bool) -> Result<(), Box<dyn std::error::Er
     }
 
     // Create directory structure
-    fs::create_dir_all(frame_dir.join("tracks"))?;
-    fs::create_dir_all(frame_dir.join("archive"))?;
+    dryrun::create_dir_all(&frame_dir.join("tracks"))?;
+    dryrun::create_dir_all(&frame_dir.join("archive"))?;
 
     // Write project.toml
     let toml_content = render_project_toml(&name, &track_pairs, &prefixes);
-    fs::write(frame_dir.join("project.toml"), toml_content)?;
+    dryrun::write(&frame_dir.join("project.toml"), toml_content)?;
 
     // Write inbox.md
-    fs::write(frame_dir.join("inbox.md"), INBOX_TEMPLATE)?;
+    dryrun::write(&frame_dir.join("inbox.md"), INBOX_TEMPLATE)?;
 
     // Create track files
     for (id, tname) in &track_pairs {
         let content = TRACK_TEMPLATE.replace("{name}", tname);
-        fs::write(frame_dir.join(format!("tracks/{}.md", id)), content)?;
+        dryrun::write(&frame_dir.join(format!("tracks/{}.md", id)), content)?;
     }
 
     // Claim the `null` (primary) token for this working copy. Don't clobber an
@@ -198,13 +198,13 @@ pub fn cmd_init(args: InitArgs, json: bool) -> Result<(), Box<dyn std::error::Er
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
+            serde_json::to_string_pretty(&super::with_dry_run(serde_json::json!({
                 "command": "init",
                 "changed": true,
                 "frame_dir": frame_dir.display().to_string(),
                 "tracks": track_pairs.iter().map(|(id, _)| id).collect::<Vec<_>>(),
                 "git_configured": git_configured,
-            }))?
+            })))?
         );
         return Ok(());
     }
@@ -229,6 +229,7 @@ pub fn cmd_init(args: InitArgs, json: bool) -> Result<(), Box<dyn std::error::Er
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn test_validate_track_id_valid() {

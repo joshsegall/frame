@@ -264,6 +264,11 @@ fn lock_log(lock_path: &Path) -> Option<FileLock> {
 /// Write `content` to `path` atomically using a temp file + rename.
 pub fn atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
     crate::io::fault::maybe_fail(path)?;
+    // The single biggest reach of the `--dry-run` barrier: every track, archive,
+    // inbox, config, ID-frontier and actor-registry write lands here.
+    if crate::io::dryrun::blocked_with(path, content) {
+        return Ok(());
+    }
     let dir = path.parent().unwrap_or(Path::new("."));
     let mut tmp = NamedTempFile::new_in(dir)?;
     tmp.write_all(content)?;
@@ -353,6 +358,13 @@ pub fn log_recovery(frame_dir: &Path, entry: RecoveryEntry) {
 fn log_recovery_inner(frame_dir: &Path, entry: RecoveryEntry) -> io::Result<()> {
     let settings = settings(frame_dir);
     let path = &settings.log;
+
+    // Guarded here rather than at the append below, because everything between
+    // is a mutation too — the legacy absorb unlinks a file, and the trim rewrites
+    // the log. A preview writes no history for a thing it did not do.
+    if crate::io::dryrun::blocked(path) {
+        return Ok(());
+    }
 
     // Held across the trim and the append both. The append needs it as much as
     // the trim does: the log is replaced by rename, and an append racing that

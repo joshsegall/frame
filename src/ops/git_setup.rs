@@ -494,7 +494,7 @@ fn step_gitignore(root: &Path, stale_prefix: Option<&str>, dry_run: bool) -> Ste
     if dry_run {
         return Step::changed(NAME, detail);
     }
-    match std::fs::write(&path, content) {
+    match crate::io::dryrun::write(&path, content) {
         Ok(()) => Step::changed(NAME, detail),
         Err(e) => Step::failed(NAME, format!("could not write .gitignore: {e}")),
     }
@@ -519,7 +519,7 @@ fn step_gitattributes(root: &Path, stale_prefix: Option<&str>, dry_run: bool) ->
     if dry_run {
         return Step::changed(NAME, detail);
     }
-    match std::fs::write(&path, plan.content) {
+    match crate::io::dryrun::write(&path, plan.content) {
         Ok(()) => Step::changed(NAME, detail),
         Err(e) => Step::failed(NAME, format!("could not write .gitattributes: {e}")),
     }

@@ -10,6 +10,7 @@ use crate::ops::git_setup::{self, SetupReport, StepStatus};
 pub fn cmd_git(args: GitCmd, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     match args.action {
         GitAction::Setup(setup_args) => {
+            crate::io::dryrun::arm(setup_args.dry_run);
             let root = super::discover_project_root()?;
             let report = git_setup::run(&root, setup_args.dry_run);
 

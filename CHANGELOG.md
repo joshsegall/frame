@@ -15,6 +15,29 @@ All notable changes to frame will be documented in this file.
 
 ### Added
 
+- **`--dry-run` on every command that mutates state.** Previously six commands had it — `fr check --fix`, `fr clean`, `fr track rename`, `fr projects prune`, `fr actor merge`, `fr git setup` — and the other twenty-six did not, which meant they *rejected* the flag: `fr mv SEC-3 --track other --dry-run` exited 2 with `error: unexpected argument '--dry-run' found`. Reported against `fr mv`, which is the command that needs it most.
+
+  The command runs in full — resolving the same tasks, taking the same lock, minting the same IDs — and then nothing lands. **The ID in a preview is the ID you get**, which is the whole point on `fr mv`: `--track`, `--promote` and `--parent` each re-mint the moved task and its entire subtree, and rewrite `dep:` references across every track, so what the task will be called afterwards is a question only frame can answer. The preview reserves nothing, so asking twice gives the same answer and asking does not consume the number.
+
+  Both surfaces say what would have happened. The human one lists the files:
+
+  ```
+  $ fr mv SEC-3 --track other --dry-run
+  SEC-3 → OTH-12 (other)
+
+  dry run — nothing was written. Would change:
+    frame/.ids.toml
+    frame/tracks/other.md
+    frame/tracks/backlog.md
+  Re-run without --dry-run to apply.
+  ```
+
+  and `--json` carries `dry_run` — always present, so a consumer never reads meaning into an absent field — alongside `would_write`. "Would change" means the bytes differ: a write laying down what the file already holds is not listed.
+
+  **Enforced by one write barrier rather than twenty-six remembered `if` statements.** Guarding each command's own saves is what frame was doing, and it is why `fr clean --dry-run` was writing (below). `io::dryrun` sits under every write frame makes, so nothing under `frame/` can escape by a path nobody had in view — and the same guarantee reaches outside it, leaving the global registry alone for `fr projects` and `.gitignore`/`.gitattributes`/`.git/config` alone for `fr git setup`. `tests/parity.rs` runs every command twice and asserts the preview leaves `frame/` byte for byte, that the real run does not, and that both exit the same way; a new subcommand fails the build until someone declares its verdict.
+
+  Two deliberate exemptions, both documented in `doc/cli.md`. A dry run still takes the lock files, so the preview is computed against a project no other process is mid-write on. And it declines to complete an interrupted operation, saying so on stderr, because recovery is a write followed by a re-read and a suppressed one would leave the preview describing a project the real run would have repaired first.
+
 - **BREAKING: A hard limit on note size, `limits.note_max_bytes` (16 KB).** Frame's own commands will not grow a note past it. Found on a project whose largest track file had reached 3 MB: 93% of it was note bodies, no single task dominated, and there was no bug — notes had simply accumulated, most of the largest being per-task copies of standing process rather than anything about the task.
 
   **Enforced non-increasing rather than absolutely.** A write is refused only if it would leave the note both over the limit *and* larger than it already was. So a note that predates the limit is never touched, never truncated, and never blocks operations that do not lengthen it — and it can still be edited down, in as many passes as it takes, because a shrinking write is always legal. An absolute check would make the only legal edit to a 148 KB note one landing under the limit in a single shot, trapping exactly the notes the limit exists to discourage.
@@ -130,6 +153,12 @@ All notable changes to frame will be documented in this file.
   `--json` changes key order only — no keys added, removed or retyped. A consumer using a JSON parser is unaffected; one reading the bytes positionally is not.
 
 ### Fixed
+
+- **`fr clean --dry-run` advanced the durable ID frontier.** `doc/cli.md` said it "previews without claiming a token or writing anything." It did not: `CleanMode::DryRun` gated the archive append and nothing else, so ID assignment still ran through a live mint, and `io::ids::reserve` recorded every number it handed out — in `.ids.toml`, the store shared by every git worktree of the clone. A preview burned an ID for real, once per ID-less task, every time it was run.
+
+  Fixed by the write barrier above rather than by another guard in `clean`, since another guard is what produced it. The preview still names the IDs it would assign; it just no longer reserves them, so running it twice leaves the store byte for byte.
+
+  **What `fr clean --dry-run` previews has changed as a result.** On a clone with no actor token it used to report *no* IDs assigned, while the real `fr clean` on the same clone claims a letter token and assigns them — a preview of a different command's behaviour. It now computes what the real run would, under the token the real run would claim, and claims nothing. It also takes the project lock in both modes, where the dry run previously skipped it.
 
 - **`fr show` reported `task not found` for a task that was archived.** The lookup walked live tracks only, so a task `fr clean` had moved to `frame/archive/<track>.md` — or one in a track `fr track archive` had moved to `frame/archive/_tracks/<track>.md` — was unreadable from either surface: the TUI finds archived tasks by search but its hits are read-only stubs, and `fr show` was where you went instead. It now falls back to both archive shapes when no live track holds the ID, printing an `archived:` line that names the track and the file it read, ahead of the task's own fields. `--json` carries the same two strings as `archived: {track, file}`, and omits the key for a live task.
 

@@ -74,7 +74,7 @@ pub fn new_track(
     // Create the track file
     let full_path = frame_dir.join(&file_path);
     if let Some(parent) = full_path.parent() {
-        fs::create_dir_all(parent).map_err(ProjectError::IoError)?;
+        crate::io::dryrun::create_dir_all(parent).map_err(ProjectError::IoError)?;
     }
     let content = format!("# {}\n\n## Backlog\n\n## Parked\n\n## Done\n", name);
     crate::io::recovery::atomic_write(&full_path, content.as_bytes())
@@ -412,7 +412,7 @@ pub fn delete_track(
 
     // Remove the track file
     if track_file.exists() {
-        fs::remove_file(&track_file).map_err(ProjectError::IoError)?;
+        crate::io::dryrun::remove_file(&track_file).map_err(ProjectError::IoError)?;
     }
 
     // Remove from config
@@ -445,7 +445,7 @@ pub fn archive_track_file(
 ) -> Result<(), TrackError> {
     let source = frame_dir.join(file_path);
     let archive_dir = frame_dir.join("archive").join("_tracks");
-    fs::create_dir_all(&archive_dir).map_err(ProjectError::IoError)?;
+    crate::io::dryrun::create_dir_all(&archive_dir).map_err(ProjectError::IoError)?;
     let dest = archive_dir.join(format!("{}.md", track_id));
 
     // Already moved is success, not failure. Recovery of an interrupted archive
@@ -458,7 +458,7 @@ pub fn archive_track_file(
     // hook of its own — archiving a track is a two-step sequence (config, then
     // this) and this is its second step.
     crate::io::fault::maybe_fail(&source).map_err(ProjectError::IoError)?;
-    fs::rename(&source, &dest).map_err(ProjectError::IoError)?;
+    crate::io::dryrun::rename(&source, &dest).map_err(ProjectError::IoError)?;
     Ok(())
 }
 
@@ -474,7 +474,7 @@ pub fn restore_track_file(
         .join(format!("{}.md", track_id));
     let dest = frame_dir.join(file_path);
     if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent).map_err(ProjectError::IoError)?;
+        crate::io::dryrun::create_dir_all(parent).map_err(ProjectError::IoError)?;
     }
 
     // Already moved is success, not failure — the same rule `archive_track_file`
@@ -488,7 +488,7 @@ pub fn restore_track_file(
     // The other half of `archive_track_file`, and it gets the same hook for the
     // same reason: a rename is not an `atomic_write`, so nothing else can cut it.
     crate::io::fault::maybe_fail(&archive_path).map_err(ProjectError::IoError)?;
-    fs::rename(&archive_path, &dest).map_err(ProjectError::IoError)?;
+    crate::io::dryrun::rename(&archive_path, &dest).map_err(ProjectError::IoError)?;
     Ok(())
 }
 
@@ -555,7 +555,7 @@ pub fn rename_track_id(
     let new_path = frame_dir.join(&new_file);
     if old_path.exists() {
         crate::io::fault::maybe_fail(&old_path).map_err(ProjectError::IoError)?;
-        fs::rename(&old_path, &new_path).map_err(ProjectError::IoError)?;
+        crate::io::dryrun::rename(&old_path, &new_path).map_err(ProjectError::IoError)?;
     }
 
     // Move archive file if exists
@@ -563,7 +563,7 @@ pub fn rename_track_id(
     if old_archive.exists() {
         let new_archive = frame_dir.join("archive").join(format!("{}.md", new_id));
         crate::io::fault::maybe_fail(&old_archive).map_err(ProjectError::IoError)?;
-        fs::rename(&old_archive, &new_archive).map_err(ProjectError::IoError)?;
+        crate::io::dryrun::rename(&old_archive, &new_archive).map_err(ProjectError::IoError)?;
     }
 
     // Update config

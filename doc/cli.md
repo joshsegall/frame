@@ -29,6 +29,50 @@ error: confirmation required for delete: pass --yes with --json
 
 **Errors are not documents.** They go to stderr as `error: …` with a non-zero exit, and stdout stays empty — so a failed run never prints a result document describing changes that did not land. stdout carries the answer, stderr the error, the exit code the verdict.
 
+## `--dry-run`
+
+**Every command that mutates state takes `--dry-run`, and none that only reads does.** The command runs in full — resolving the same tasks, minting the same IDs, computing the same result — and then nothing lands.
+
+```
+$ fr mv SEC-3 --track other --dry-run
+SEC-3 → OTH-12 (other)
+
+dry run — nothing was written. Would change:
+  frame/.ids.toml
+  frame/tracks/other.md
+  frame/tracks/backlog.md
+Re-run without --dry-run to apply.
+```
+
+**The ID in a preview is the ID you get.** This is the reason the flag matters most on `fr mv`: a cross-track move, a `--promote` and a `--parent` each re-mint the moved task *and its whole subtree*, so what the task will be called afterwards is a question only frame can answer. The preview reserves nothing, so running it twice gives the same answer, and running it does not consume the number.
+
+### What "nothing was written" covers
+
+Nothing under `frame/`, nothing in the [ID frontier](architecture.md), no [actor token](concepts.md#minting-in-a-token-namespace) claimed, no recovery-log entry, no `project.toml` edit, no file moved or removed. Commands that reach outside `frame/` are covered too: `fr projects` leaves the global registry alone and `fr git setup` leaves `.gitignore`, `.gitattributes` and `.git/config` alone.
+
+Rather than each command remembering to skip its own saves, a single write barrier sits under every write frame makes, armed for the length of the command. That is not a stylistic preference: the six commands that had `--dry-run` before this each guarded their own writes, and `fr clean --dry-run` guarded the archive it wrote while the ID mint underneath it went on reserving numbers in a store shared by every worktree of the clone.
+
+**One exemption, and it is deliberate.** A dry run still takes `frame/.lock` (and the frontier and recovery-log locks), so the preview is computed against a project no other process is halfway through writing. Creating an empty lock file is the one thing the guarantee does not cover. They are working-copy-local and gitignored — see [`fr check`](#fr-check).
+
+Two further things a dry run declines to do, because doing them would make the preview describe something else:
+
+- **It does not complete an interrupted operation.** Recovery is a write followed by a re-read, so a suppressed recovery would leave the preview computed against a project the real run would have repaired first. It says so on stderr and previews the project as it stands.
+- **`fr check --fix --dry-run` exits 0 where the real run may exit non-zero.** `check`'s exit status reports the findings that remain *after* repair, which a preview cannot know without applying. Every other command exits the same way in both modes.
+
+### Under `--json`
+
+Every write command's document carries `dry_run`, always present so a consumer never has to read meaning into an absent field, and `would_write` naming the files — project-relative, omitted on a real run:
+
+```json
+{ "command": "mv", "changed": true, "dry_run": true,
+  "would_write": ["frame/.ids.toml", "frame/tracks/other.md", "frame/tracks/backlog.md"],
+  "track": "other", "tasks": [ … ] }
+```
+
+`fr projects prune --json` is the one exception: its document is a bare array of the entries it would remove, which has nowhere to put a flag. The `--dry-run` behaviour is the same.
+
+**"Would change" means the bytes differ.** A write that lays down exactly what the file already holds is not listed — `fr clean` saves every track, on the grounds that a task it did not touch serializes verbatim, and listing all of them would report the shape of the save loop rather than the effect of the command.
+
 ## Project Init
 
 ### `fr init`
@@ -545,7 +589,7 @@ Deleted tasks are logged to the recovery log before removal. The entire subtask 
 Move a task (reorder within track, cross-track, or reparent).
 
 ```
-fr mv ID [POSITION] [--top] [--after ID] [--track TRACK] [--promote] [--parent ID]
+fr mv ID [POSITION] [--top] [--after ID] [--track TRACK] [--promote] [--parent ID] [--dry-run]
 ```
 
 | Flag | Description |
@@ -556,10 +600,13 @@ fr mv ID [POSITION] [--top] [--after ID] [--track TRACK] [--promote] [--parent I
 | `--track TRACK` | Move to a different track (cross-track) |
 | `--promote` | Promote subtask to top-level |
 | `--parent ID` | Reparent under the given task |
+| `--dry-run` | Report the move, including the ID it would mint, and write nothing |
 
 `--top` and `--after` name a position **within whatever the destination is**: the backlog for a plain reorder or a cross-track move, the task's own section for `--promote` (which re-inserts into the section it came from, so a Parked subtask promotes within `## Parked`), and the new parent's children for `--parent`. With neither flag, `--promote` places the task after its former parent and `--parent` appends it as the last child.
 
 `--track` cannot be combined with `--promote` or `--parent`, and those two cannot be combined with each other. To move a subtask to top level in another track, promote it first, then move the result with `--track`.
+
+**Three of the four forms re-mint the ID.** `--track`, `--promote` and `--parent` each give the moved task a new ID in this clone's namespace, and so does every task in its subtree; `dep:` references to any of them are rewritten across every track. A plain reorder does none of that. [`--dry-run`](#--dry-run) is how you see the result first, and the ID it names is the ID the real run mints.
 
 Cross-track moves rewrite the task's ID prefix to match the target track. Reparenting (`--promote` or `--parent`) re-keys the task and all descendant IDs to match the new parent structure. Both operations update all dependency references across tracks.
 
@@ -675,7 +722,7 @@ Actions performed:
 
 Missing `resolved:` dates are filled *after* archival, deliberately. Archive retention ranks done tasks by that date and treats a missing one as oldest, so stamping it earlier in the run would make the oldest task look like the newest completion — retained over genuinely recent work, and surfacing at the top of `fr recent`.
 
-IDs assigned or reassigned by a real (non-`--dry-run`) clean are minted in this clone's [actor-token namespace](concepts.md#minting-in-a-token-namespace), auto-claiming a token on first use. Archival and thresholds key on task state and `resolved:` dates, not ID structure, so they are unaffected by the token. A `--dry-run` previews without claiming a token or writing anything.
+IDs assigned or reassigned by a clean are minted in this clone's [actor-token namespace](concepts.md#minting-in-a-token-namespace), auto-claiming a token on first use. Archival and thresholds key on task state and `resolved:` dates, not ID structure, so they are unaffected by the token. A `--dry-run` computes the same IDs from the same namespace, and claims nothing and writes nothing — see [`--dry-run`](#--dry-run).
 
 `--json` emits the whole report as one document — the finding categories flattened in as arrays, the way `fr check --json` reads, plus `field_order` and two flags:
 

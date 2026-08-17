@@ -344,7 +344,7 @@ fn recover_track_rename(
         if !from.exists() {
             continue;
         }
-        if let Err(e) = std::fs::rename(&from, &to) {
+        if let Err(e) = crate::io::dryrun::rename(&from, &to) {
             return Outcome::Indeterminate {
                 operation,
                 reason: format!("could not move {}: {e}", from.display()),

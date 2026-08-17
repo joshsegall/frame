@@ -47,6 +47,7 @@ const EXIT_CONFLICT: i32 = 1;
 const EXIT_DECLINED: i32 = 2;
 
 pub fn cmd_merge(args: MergeArgs) -> i32 {
+    crate::io::dryrun::arm(args.dry_run);
     // Clap guarantees all three are present whenever `--resolve` is absent, and
     // `--resolve` never reaches here (main.rs routes it through the normal
     // handler path, since it writes to the project and needs the lock).
@@ -119,7 +120,8 @@ pub fn cmd_merge(args: MergeArgs) -> i32 {
 /// merge kept our version and recorded theirs, and whether the right thing came
 /// out of that is a judgment only the person who read both can make. Clearing
 /// the marker *is* that judgment being recorded.
-pub fn cmd_merge_resolve(ids: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+pub fn cmd_merge_resolve(ids: &[String], dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
+    crate::io::dryrun::arm(dry_run);
     let (mut project, _lock) = super::lock_and_load()?;
 
     let mut cleared = Vec::new();

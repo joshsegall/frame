@@ -4841,9 +4841,18 @@ fn test_first_mint_auto_claims_token() {
 }
 
 #[test]
-fn test_dry_run_clean_on_unclaimed_clone_mints_nothing() {
-    // Strict null policy: a passive path (`fr clean --dry-run`) on an unclaimed
-    // clone must neither claim a token nor mint a null ID for an ID-less task.
+fn test_dry_run_clean_on_unclaimed_clone_claims_nothing() {
+    // Strict null policy on an unclaimed clone, under `fr clean --dry-run`: the
+    // token is not claimed and no ID reaches a file.
+    //
+    // **What it previews changed, and deliberately.** This used to compute the
+    // preview with `IdScope::Unclaimed` — so it reported no IDs assigned, while
+    // the real `fr clean` on the same clone claims a letter token and assigns
+    // them. A preview of a *different* command's behaviour is worse than none,
+    // and it was the same missing distinction that let the old dry run advance
+    // the ID frontier for real. It now computes exactly what the real run would,
+    // and the write barrier is what keeps that off the disk. The ID is minted in
+    // a claimed letter namespace, never the null one, which is the policy.
     let tmp = tempfile::TempDir::new().unwrap();
     create_test_project(tmp.path());
     fs::remove_file(tmp.path().join("frame/.actor")).unwrap();
@@ -4851,21 +4860,25 @@ fn test_dry_run_clean_on_unclaimed_clone_mints_nothing() {
     // Give the track an ID-less task.
     let main_path = tmp.path().join("frame/tracks/main.md");
     let main = fs::read_to_string(&main_path).unwrap();
-    fs::write(
-        &main_path,
-        main.replace("## Backlog\n", "## Backlog\n\n- [ ] Task with no id\n"),
-    )
-    .unwrap();
+    let before = main.replace("## Backlog\n", "## Backlog\n\n- [ ] Task with no id\n");
+    fs::write(&main_path, &before).unwrap();
 
     let (stdout, _stderr, success) = run_fr(tmp.path(), &["clean", "--dry-run"]);
     assert!(success);
-    // Nothing was assigned, and no claim happened.
+
+    // The ID it would assign is in a letter namespace, not the null one it does
+    // not own.
+    assert!(stdout.contains("IDs assigned"), "{stdout}");
     assert!(
-        !stdout.contains("IDs assigned"),
-        "unclaimed clone must not mint on a dry run: {stdout}"
+        !stdout.contains("→ \"Task with no id\"") || !stdout.contains("[main] M-1 "),
+        "an unclaimed clone must never preview a null-namespace id: {stdout}"
     );
+
+    // And none of it happened: no claim, no registry, no rewritten track.
     assert!(!tmp.path().join("frame/.actor").exists());
     assert!(!tmp.path().join("frame/actors.toml").exists());
+    assert!(!tmp.path().join("frame/.ids.toml").exists());
+    assert_eq!(fs::read_to_string(&main_path).unwrap(), before);
 }
 
 #[test]
@@ -8722,4 +8735,113 @@ fn write_human_output_is_still_human() {
     let out = run_fr_ok(tmp.path(), &["add", "main", "plain"]);
     assert!(!out.trim_start().starts_with('{'), "{out}");
     assert!(out.trim().starts_with("M-"), "{out}");
+}
+
+// ---------------------------------------------------------------------------
+// `--dry-run` on `fr mv`
+// ---------------------------------------------------------------------------
+//
+// The reason the flag exists: `fr mv` is the command whose result you cannot
+// read off the invocation. A cross-track move, a promote and a reparent all
+// re-mint the id — of the whole moved subtree — so "what will this task be
+// called afterwards" is a question only frame can answer. A preview that named a
+// different id than the real run would be worse than no preview at all.
+//
+// `tests/parity.rs` proves the writes are suppressed, for every command. These
+// prove the *answer* is right.
+
+/// The id a `--dry-run` names is the id the real run mints, in every form of the
+/// move that re-mints one.
+#[test]
+fn mv_dry_run_names_the_id_the_real_run_mints() {
+    for (what, argv) in [
+        ("cross-track", &["mv", "M-001", "--track", "side"][..]),
+        ("promote", &["mv", "M-003.1", "--promote"][..]),
+        ("reparent", &["mv", "M-001", "--parent", "M-002"][..]),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        create_test_project(tmp.path());
+
+        let mut previewed: Vec<&str> = argv.to_vec();
+        previewed.push("--dry-run");
+        let preview = run_fr_ok(tmp.path(), &previewed);
+        let real = run_fr_ok(tmp.path(), argv);
+
+        // The first line is the handler's own report; the preview then adds its
+        // trailer. Compare the reports.
+        let preview_line = preview.lines().next().unwrap_or_default();
+        let real_line = real.lines().next().unwrap_or_default();
+        assert_eq!(
+            preview_line, real_line,
+            "{what}: preview said {preview_line:?}, the real run did {real_line:?}"
+        );
+        assert!(
+            preview.contains("dry run — nothing was written"),
+            "{what}: no trailer in:\n{preview}"
+        );
+    }
+}
+
+/// A same-track reorder previews too, and touches only its own track file.
+#[test]
+fn mv_dry_run_reorder_reports_only_the_track_it_would_rewrite() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+
+    let out = run_fr_ok(tmp.path(), &["--json", "mv", "M-003", "--top", "--dry-run"]);
+    let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+    assert_eq!(v["command"], "mv");
+    assert_eq!(v["dry_run"], true);
+
+    let would: Vec<&str> = v["would_write"]
+        .as_array()
+        .expect("would_write")
+        .iter()
+        .map(|p| p.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        would,
+        vec!["frame/tracks/main.md"],
+        "a reorder rewrites one file and mints nothing"
+    );
+}
+
+/// A cross-track move reports both track files and the id frontier, because it
+/// writes all three — and the frontier is the one a `--dry-run` used to advance.
+#[test]
+fn mv_dry_run_across_tracks_reports_every_file_it_would_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+
+    let out = run_fr_ok(
+        tmp.path(),
+        &["--json", "mv", "M-001", "--track", "side", "--dry-run"],
+    );
+    let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+    let would: Vec<&str> = v["would_write"]
+        .as_array()
+        .expect("would_write")
+        .iter()
+        .map(|p| p.as_str().unwrap())
+        .collect();
+
+    for expected in ["frame/tracks/main.md", "frame/tracks/side.md"] {
+        assert!(
+            would.contains(&expected),
+            "{expected} missing from {would:?}"
+        );
+    }
+}
+
+/// A real run says it is not a preview, so a consumer never has to infer it from
+/// the field being absent.
+#[test]
+fn a_real_run_reports_dry_run_false() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+
+    let out = run_fr_ok(tmp.path(), &["--json", "add", "main", "real"]);
+    let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+    assert_eq!(v["dry_run"], false);
+    assert!(v.get("would_write").is_none(), "empty on a real run");
 }

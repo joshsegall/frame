@@ -168,6 +168,9 @@ pub fn read(frame_dir: &Path) -> Option<Marker> {
 
 /// Remove the marker. Absent is success — recovery must stay idempotent.
 pub fn clear(frame_dir: &Path) -> io::Result<()> {
+    if crate::io::dryrun::is_active() {
+        return Ok(());
+    }
     match fs::remove_file(marker_path(frame_dir)) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -206,7 +209,14 @@ impl InFlight {
         let path = marker_path(frame_dir);
         // Deliberately not `atomic_write`: that path is fault-injectable, and a
         // test cutting a track write must not have its marker cut too.
-        fs::write(&path, text)?;
+        //
+        // Suppressed under `--dry-run`, and deliberately *not* recorded as a file
+        // the run would change: the marker exists only between the first write and
+        // the last, so a completed operation leaves none. Listing it would name a
+        // file that is not there either before or after.
+        if !crate::io::dryrun::is_active() {
+            fs::write(&path, text)?;
+        }
         Ok(InFlight {
             path,
             committed: false,
@@ -221,7 +231,7 @@ impl InFlight {
 
 impl Drop for InFlight {
     fn drop(&mut self) {
-        if self.committed {
+        if self.committed && !crate::io::dryrun::is_active() {
             let _ = fs::remove_file(&self.path);
         }
     }

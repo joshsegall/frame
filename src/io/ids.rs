@@ -195,7 +195,7 @@ fn read_or_reset(path: &Path) -> Frontier {
         Ok(Some(frontier)) => frontier,
         Ok(None) => Frontier::default(),
         Err(_) => {
-            let _ = fs::rename(path, backup_path(path));
+            let _ = crate::io::dryrun::rename(path, &backup_path(path));
             Frontier::default()
         }
     }

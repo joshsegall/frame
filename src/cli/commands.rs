@@ -148,6 +148,9 @@ pub struct MergeArgs {
         conflicts_with_all = ["base", "ours", "theirs", "path", "kind"]
     )]
     pub resolve: Vec<String>,
+    /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +168,9 @@ pub struct InitArgs {
     /// Reinitialize even if frame/ already exists
     #[arg(long)]
     pub force: bool,
+    /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -233,6 +239,9 @@ pub struct InboxCmd {
     /// Note body for the new inbox item
     #[arg(long)]
     pub note: Option<String>,
+    /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args)]
@@ -271,6 +280,9 @@ pub struct AddArgs {
     /// Note that this task was found while working on another task
     #[arg(long)]
     pub found_from: Option<String>,
+    /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args)]
@@ -279,6 +291,9 @@ pub struct PushArgs {
     pub track: String,
     /// Task title
     pub title: String,
+    /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args)]
@@ -287,6 +302,9 @@ pub struct SubArgs {
     pub id: String,
     /// Subtask title
     pub title: String,
+    /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args)]
@@ -295,18 +313,27 @@ pub struct StateArgs {
     pub id: String,
     /// New state (todo, active, blocked, done, parked)
     pub state: String,
+    /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args)]
 pub struct StartArgs {
     /// Task ID
     pub id: String,
+    /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args)]
 pub struct DoneArgs {
     /// Task ID
     pub id: String,
+    /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args)]
@@ -317,6 +344,9 @@ pub struct TagArgs {
     pub action: String,
     /// Tag name
     pub tag: String,
+    /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args)]
@@ -327,6 +357,9 @@ pub struct DepArgs {
     pub action: String,
     /// Dependency task ID
     pub dep_id: String,
+    /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args)]
@@ -338,6 +371,9 @@ pub struct NoteArgs {
     /// Replace existing note instead of appending
     #[arg(long)]
     pub replace: bool,
+    /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// Shared by `fr ref` and `fr spec`: the two fields hold the same kind of value
@@ -355,6 +391,9 @@ pub struct PathFieldArgs {
     /// Accept paths that do not exist in the project. Never needed for "rm".
     #[arg(long)]
     pub force: bool,
+    /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args)]
@@ -363,6 +402,9 @@ pub struct TitleArgs {
     pub id: String,
     /// New title
     pub title: String,
+    /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args)]
@@ -386,6 +428,9 @@ pub struct MvArgs {
     /// Reparent under the given task ID
     #[arg(long)]
     pub parent: Option<String>,
+    /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args)]
@@ -404,6 +449,9 @@ pub struct TriageArgs {
     /// Insert after this task ID
     #[arg(long)]
     pub after: Option<String>,
+    /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args)]
@@ -414,6 +462,9 @@ pub struct DeleteArgs {
     /// Skip confirmation prompt
     #[arg(long)]
     pub yes: bool,
+    /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -452,12 +503,18 @@ pub struct TrackNewArgs {
     pub id: String,
     /// Track name
     pub name: String,
+    /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args)]
 pub struct TrackIdArg {
     /// Track ID
     pub id: String,
+    /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args)]
@@ -467,6 +524,9 @@ pub struct CcFocusArgs {
     /// Clear the cc-focus setting
     #[arg(long)]
     pub clear: bool,
+    /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args)]
@@ -475,6 +535,9 @@ pub struct TrackMvArgs {
     pub id: String,
     /// New position (0-indexed among active tracks)
     pub position: usize,
+    /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args)]
@@ -538,6 +601,9 @@ pub struct ImportArgs {
     /// Insert after this task ID
     #[arg(long)]
     pub after: Option<String>,
+    /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -566,6 +632,9 @@ pub enum ProjectsAction {
 pub struct ProjectsAddArgs {
     /// Path to the project directory
     pub path: String,
+    /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args)]
@@ -579,6 +648,9 @@ pub struct ProjectsPruneArgs {
 pub struct ProjectsRemoveArgs {
     /// Project name or path
     pub name_or_path: String,
+    /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -630,6 +702,9 @@ pub struct ActorClaimArgs {
     /// clone-wide token that sibling worktrees inherit
     #[arg(long)]
     pub local: bool,
+    /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args)]
@@ -643,12 +718,18 @@ pub struct ActorSetArgs {
     /// clone-wide token that sibling worktrees inherit. Implied for `null`.
     #[arg(long)]
     pub local: bool,
+    /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args)]
 pub struct ActorRetireArgs {
     /// Token to retire
     pub token: String,
+    /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -694,4 +775,7 @@ pub struct RecoveryPruneArgs {
     /// Remove all entries
     #[arg(long)]
     pub all: bool,
+    /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
 }

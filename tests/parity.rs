@@ -1699,3 +1699,416 @@ fn every_subcommand_has_a_json_verdict() {
          a command with no surface accepts it and silently prints human text."
     );
 }
+
+// ---------------------------------------------------------------------------
+// The `--dry-run` surface guard
+// ---------------------------------------------------------------------------
+
+/// Whether a command form takes `--dry-run`, and therefore promises to write
+/// nothing.
+///
+/// The `--json` guard above exists because a global flag is silently accepted
+/// where it does nothing. `--dry-run` has the opposite failure and needs the
+/// opposite guard: it is declared per command, so a mutating command that never
+/// got one *rejects* the flag outright — which is how `fr mv --dry-run` came to
+/// exit 2 with `unexpected argument` while six other commands honoured it.
+///
+/// The promise is checked by running it, not by reading the flag: `frame/` must
+/// come back byte for byte, including the id frontier. Declaring the flag and
+/// then writing anyway is exactly what `fr clean --dry-run` used to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DryRun {
+    /// Takes `--dry-run`, and writes nothing when given it.
+    Yes,
+    /// Mutates nothing, so there is nothing to preview. The reason is what
+    /// someone reads before adding one.
+    No(&'static str),
+}
+
+struct DryRunRow {
+    /// Commands run first, for a row needing state the fixture lacks.
+    setup: &'static [&'static [&'static str]],
+    argv: &'static [&'static str],
+    dry_run: DryRun,
+    /// Rows whose real run legitimately changes nothing under `frame/`, so the
+    /// "and the real run does change something" half cannot apply. `fr projects`
+    /// writes only the global registry; `fr git setup` writes only repo config.
+    changes_nothing_in_frame: bool,
+    /// Why the two halves are allowed to exit differently. `None` — the normal
+    /// case — means they must agree, which is what catches a command that rejects
+    /// the flag. A reason is required rather than a bare bool because the
+    /// exemption is the one that would hide the original bug.
+    status_differs: Option<&'static str>,
+}
+
+const fn drow(argv: &'static [&'static str], dry_run: DryRun) -> DryRunRow {
+    DryRunRow {
+        setup: &[],
+        argv,
+        dry_run,
+        changes_nothing_in_frame: false,
+        status_differs: None,
+    }
+}
+
+/// As [`drow`], for a command whose effect is outside `frame/`.
+const fn drow_outside(argv: &'static [&'static str]) -> DryRunRow {
+    DryRunRow {
+        setup: &[],
+        argv,
+        dry_run: DryRun::Yes,
+        changes_nothing_in_frame: true,
+        status_differs: None,
+    }
+}
+
+const DRY_RUN_SURFACE: &[DryRunRow] = &[
+    // Reads. Nothing to preview.
+    drow(&["list"], DryRun::No("a read")),
+    drow(&["show", "M-001"], DryRun::No("a read")),
+    drow(&["ready"], DryRun::No("a read")),
+    drow(&["blocked"], DryRun::No("a read")),
+    drow(&["search", "task"], DryRun::No("a read")),
+    drow(&["tracks"], DryRun::No("a read")),
+    drow(&["stats"], DryRun::No("a read")),
+    drow(&["recent"], DryRun::No("a read")),
+    drow(&["deps", "H-001"], DryRun::No("a read")),
+    drow(&["info"], DryRun::No("a read")),
+    // `fr check` is a read, but the flag is real: it previews the repairs behind
+    // `--fix`. Its row is the `--fix` one below, which is what both guards find.
+    drow(&["recovery", "path"], DryRun::No("a read")),
+    drow(&["projects", "list"], DryRun::No("a read")),
+    drow(&["actor", "list"], DryRun::No("a read")),
+    // Writes.
+    drow(&["inbox", "a new item"], DryRun::Yes),
+    drow(&["add", "main", "x"], DryRun::Yes),
+    drow(&["push", "main", "x"], DryRun::Yes),
+    drow(&["sub", "M-001", "x"], DryRun::Yes),
+    drow(&["state", "M-001", "parked"], DryRun::Yes),
+    drow(&["start", "M-001"], DryRun::Yes),
+    drow(&["done", "M-001"], DryRun::Yes),
+    drow(&["tag", "M-001", "add", "x"], DryRun::Yes),
+    drow(&["dep", "M-001", "add", "M-005"], DryRun::Yes),
+    drow(&["note", "M-001", "x"], DryRun::Yes),
+    drow(&["ref", "M-001", "add", "frame/inbox.md"], DryRun::Yes),
+    drow(&["spec", "M-001", "add", "frame/inbox.md"], DryRun::Yes),
+    drow(&["title", "M-001", "x"], DryRun::Yes),
+    drow(&["mv", "M-003", "--top"], DryRun::Yes),
+    drow(&["mv", "M-001", "--track", "side"], DryRun::Yes),
+    drow(&["triage", "1", "--track", "main"], DryRun::Yes),
+    drow(&["delete", "M-001", "--yes"], DryRun::Yes),
+    drow(&["import", "import.md", "--track", "main"], DryRun::Yes),
+    drow(&["clean"], DryRun::Yes),
+    DryRunRow {
+        setup: &[],
+        argv: &["check", "--fix", "--yes"],
+        dry_run: DryRun::Yes,
+        changes_nothing_in_frame: false,
+        status_differs: Some(
+            "check's exit status reports the findings that remain *after* repair,              which a preview cannot know without applying: it prints the plan and              exits 0 while the real run exits 1 on what --fix could not repair",
+        ),
+    },
+    drow(&["track", "new", "t2", "T2"], DryRun::Yes),
+    drow(&["track", "shelve", "side"], DryRun::Yes),
+    drow(&["track", "activate", "shelf"], DryRun::Yes),
+    drow(&["track", "mv", "main", "1"], DryRun::Yes),
+    drow(&["track", "cc-focus", "side"], DryRun::Yes),
+    drow(
+        &["track", "rename", "side", "--name", "Renamed"],
+        DryRun::Yes,
+    ),
+    DryRunRow {
+        setup: &[&["track", "new", "tmp", "Tmp"]],
+        argv: &["track", "delete", "tmp"],
+        dry_run: DryRun::Yes,
+        changes_nothing_in_frame: false,
+        status_differs: None,
+    },
+    DryRunRow {
+        setup: &[&["track", "new", "tmp", "Tmp"]],
+        argv: &["track", "archive", "tmp"],
+        dry_run: DryRun::Yes,
+        changes_nothing_in_frame: false,
+        status_differs: None,
+    },
+    drow(&["actor", "set", "c"], DryRun::Yes),
+    drow(&["actor", "claim"], DryRun::Yes),
+    DryRunRow {
+        setup: &[&["actor", "set", "b"], &["actor", "set", "c"]],
+        argv: &["actor", "retire", "b"],
+        dry_run: DryRun::Yes,
+        changes_nothing_in_frame: false,
+        status_differs: None,
+    },
+    DryRunRow {
+        setup: &[&["actor", "set", "b"], &["actor", "set", "c"]],
+        argv: &["actor", "merge", "b", "--into", "c"],
+        dry_run: DryRun::Yes,
+        changes_nothing_in_frame: false,
+        status_differs: None,
+    },
+    // Effects outside `frame/`: the global registry, and repo configuration.
+    drow_outside(&["projects", "add", "."]),
+    DryRunRow {
+        setup: &[&["projects", "add", "."]],
+        argv: &["projects", "remove", "parity-fixture"],
+        dry_run: DryRun::Yes,
+        changes_nothing_in_frame: true,
+        status_differs: None,
+    },
+    drow_outside(&["projects", "prune"]),
+    drow_outside(&["git", "setup"]),
+    // Writes whose real run may legitimately be a no-op on this fixture.
+    DryRunRow {
+        setup: &[],
+        argv: &["recovery", "prune", "--all"],
+        dry_run: DryRun::Yes,
+        changes_nothing_in_frame: true,
+        status_differs: None,
+    },
+    DryRunRow {
+        setup: &[],
+        argv: &["merge", "--resolve", "M-001"],
+        dry_run: DryRun::Yes,
+        changes_nothing_in_frame: true,
+        status_differs: None,
+    },
+    // `fr init` needs a directory without a project in it, which the runner
+    // below gives it, and its whole effect is creating `frame/`.
+    drow(&["init"], DryRun::Yes),
+];
+
+/// Everything under `frame/`, keyed by path, keeping the local-only files that
+/// [`frame_tree`] drops.
+///
+/// **`.ids.toml` is the point.** `frame_tree` skips every name in
+/// `LOCAL_ONLY_FRAME_FILES`, and the id frontier is one of them — so the bug this
+/// guard exists to catch, a dry run quietly reserving an id number, is invisible
+/// to it.
+///
+/// Only the advisory lock files are excluded — `.lock`, `.ids.lock`,
+/// `.recovery.lock` — and only because a dry run still takes them, so that a
+/// preview is computed against a project nobody else is mid-write on. Creating an
+/// empty lock file is the one thing "wrote nothing" does not cover.
+fn frame_snapshot(root: &Path) -> Vec<(String, Vec<u8>)> {
+    let frame = root.join("frame");
+    let mut out = Vec::new();
+    let mut stack = vec![frame.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            // By suffix, not by `extension()`: a bare `.lock` has no extension
+            // as far as `Path` is concerned — the leading dot makes it all stem.
+            if path
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().ends_with(".lock"))
+            {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(&frame)
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            out.push((rel, fs::read(&path).unwrap_or_default()));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Run `fr`, returning its exit code and stderr.
+///
+/// The code rather than a bool: the two halves of a dry-run row must agree on it,
+/// and `2` (clap's usage error, from a command that does not know the flag) is
+/// exactly the failure this guard exists to catch.
+fn run_fr_status(dir: &Path, args: &[&str]) -> (i32, String) {
+    let output = Command::new(fr_bin())
+        .args(args)
+        .current_dir(dir)
+        .env("XDG_CONFIG_HOME", dir.join(".xdg-config"))
+        .output()
+        .expect("failed to run fr");
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    )
+}
+
+/// A `--dry-run` leaves `frame/` byte for byte, and the same command without it
+/// does not.
+///
+/// Three things are asserted, and each catches a different way the flag can be a
+/// lie:
+///
+/// 1. **The preview writes nothing.** The promise. This is what `fr clean
+///    --dry-run` broke by advancing the id frontier.
+/// 2. **The real run writes something.** Without it a row passes because the
+///    command did nothing at all, and a preview of a no-op proves nothing.
+/// 3. **Both halves exit the same way.** A command that does not know the flag
+///    exits 2 with a clap usage error and touches nothing, which halves 1 and 2
+///    would happily call a pass — and is precisely how `fr mv` shipped. Exit
+///    codes are compared rather than required to be zero, because a row may fail
+///    on the fixture for its own reasons (`fr check --fix` exits non-zero while
+///    findings remain) and that is not this test's business.
+#[test]
+fn dry_run_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut failures: Vec<String> = Vec::new();
+
+    for (i, row) in DRY_RUN_SURFACE.iter().enumerate() {
+        if row.dry_run != DryRun::Yes {
+            continue;
+        }
+        let name = row.argv.join(" ");
+        let mut outcome: Vec<(i32, String, bool)> = Vec::new();
+
+        // A fresh working copy per half, so the real run is not measured against
+        // a tree the preview already disturbed.
+        for preview in [true, false] {
+            let root = dir.path().join(format!("row{i}-{preview}"));
+            fs::create_dir_all(&root).unwrap();
+            if row.argv != ["init"] {
+                create_fixture(&root);
+                fs::write(root.join("import.md"), "- [ ] an imported task\n").unwrap();
+            }
+            for pre in row.setup {
+                run_fr_status(&root, pre);
+            }
+
+            let before = frame_snapshot(&root);
+            let mut argv: Vec<&str> = row.argv.to_vec();
+            if preview {
+                argv.push("--dry-run");
+            }
+            let (code, stderr) = run_fr_status(&root, &argv);
+            let after = frame_snapshot(&root);
+
+            if preview && before != after {
+                failures.push(format!(
+                    "fr {name} --dry-run changed frame/:\n{}",
+                    describe_snapshot_diff(&before, &after)
+                ));
+            }
+            if !preview && before == after && !row.changes_nothing_in_frame {
+                failures.push(format!(
+                    "fr {name} without --dry-run changed nothing under frame/, so the \
+                     dry-run half proves nothing. Give the row state it will actually \
+                     change, or set changes_nothing_in_frame."
+                ));
+            }
+            outcome.push((code, stderr, before != after));
+        }
+
+        let [(preview_code, preview_err, _), (real_code, ..)] = &outcome[..] else {
+            unreachable!("two halves per row")
+        };
+        if preview_code != real_code && row.status_differs.is_none() {
+            failures.push(format!(
+                "fr {name} exits {real_code}, but with --dry-run exits {preview_code}. \
+                 A command that does not declare the flag rejects it outright.\n{}",
+                preview_err.lines().take(3).collect::<Vec<_>>().join("\n")
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} dry-run check(s) failed:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}
+
+/// Name the first file the two snapshots disagree about.
+fn describe_snapshot_diff(before: &[(String, Vec<u8>)], after: &[(String, Vec<u8>)]) -> String {
+    for (path, old) in before {
+        match after.iter().find(|(p, _)| p == path) {
+            Some((_, new)) if new == old => continue,
+            Some(_) => return format!("  frame/{path} was rewritten"),
+            None => return format!("  frame/{path} was removed"),
+        }
+    }
+    for (path, _) in after {
+        if !before.iter().any(|(p, _)| p == path) {
+            return format!("  frame/{path} was created");
+        }
+    }
+    "  the snapshots differ, but no single differing file was found".to_string()
+}
+
+/// Every subcommand clap knows about appears in the table.
+///
+/// The twin of [`every_subcommand_has_a_json_verdict`], and it exists because
+/// `fr mv` shipped without `--dry-run` and nothing said so. A new subcommand
+/// fails the build until someone declares whether it can be previewed.
+#[test]
+fn every_subcommand_has_a_dry_run_verdict() {
+    use clap::CommandFactory;
+
+    let cmd = frame::cli::commands::Cli::command();
+    let mut missing: Vec<String> = Vec::new();
+    let mut undeclared: Vec<String> = Vec::new();
+
+    for sub in cmd.get_subcommands() {
+        let name = sub.get_name();
+        if name == "help" {
+            continue;
+        }
+        let leaves: Vec<&str> = sub
+            .get_subcommands()
+            .map(|l| l.get_name())
+            .filter(|n| *n != "help")
+            .collect();
+
+        let paths: Vec<Vec<&str>> = if leaves.is_empty() {
+            vec![vec![name]]
+        } else {
+            leaves.iter().map(|l| vec![name, *l]).collect()
+        };
+
+        for path in paths {
+            let row = DRY_RUN_SURFACE
+                .iter()
+                .find(|r| r.argv.len() >= path.len() && r.argv[..path.len()] == path[..]);
+            let Some(row) = row else {
+                missing.push(path.join(" "));
+                continue;
+            };
+            // A row saying `Yes` must correspond to a real clap flag, or the
+            // table is describing a command that would reject it.
+            let leaf = if path.len() == 1 {
+                sub
+            } else {
+                sub.get_subcommands()
+                    .find(|l| l.get_name() == path[1])
+                    .unwrap()
+            };
+            let has_flag = leaf.get_arguments().any(|a| a.get_id() == "dry_run");
+            if (row.dry_run == DryRun::Yes) != has_flag {
+                undeclared.push(format!(
+                    "fr {} {} a --dry-run flag but the table says {:?}",
+                    path.join(" "),
+                    if has_flag { "has" } else { "has no" },
+                    row.dry_run,
+                ));
+            }
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "subcommand(s) {missing:?} have no row in DRY_RUN_SURFACE (tests/parity.rs).\n\
+         Add one saying whether the command can be previewed: `DryRun::Yes` if it \
+         mutates state, or `DryRun::No(reason)` if it does not. A mutating command \
+         without the flag rejects `--dry-run` outright, which is how `fr mv` shipped."
+    );
+    assert!(undeclared.is_empty(), "{}", undeclared.join("\n"));
+}

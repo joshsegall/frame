@@ -127,11 +127,19 @@ pub struct CleanJson<'a> {
 /// Computed by comparing the task before and after — see [`Task`]'s hand-written
 /// `PartialEq`, which ignores `source_text` and `dirty` and so compares exactly
 /// what a reader would call a change.
+/// `dry_run` is whether the run was a preview. Always present, never skipped: a
+/// consumer deciding whether to act on `changed` needs to know whether anything
+/// actually happened, and a field that appears only sometimes is one a consumer
+/// has to guess the meaning of when it is absent. `would_write` names the files a
+/// preview would have changed — project-relative, and empty on a real run.
 #[derive(Serialize)]
 pub struct TaskWriteJson {
     /// The subcommand, so a consumer piping several can tell them apart.
     pub command: &'static str,
     pub changed: bool,
+    pub dry_run: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub would_write: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub track: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -143,6 +151,9 @@ pub struct TaskWriteJson {
 pub struct TrackWriteJson {
     pub command: &'static str,
     pub changed: bool,
+    pub dry_run: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub would_write: Vec<String>,
     pub track: TrackInfoJson,
 }
 

@@ -90,7 +90,7 @@ pub fn append_gitignore_entry(root: &Path, entry: &str) -> Result<(), std::io::E
     }
     content.push_str(entry);
     content.push('\n');
-    fs::write(&path, content)
+    crate::io::dryrun::write(&path, content)
 }
 
 /// Error type for project I/O operations

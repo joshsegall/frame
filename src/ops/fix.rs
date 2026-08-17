@@ -518,7 +518,7 @@ pub fn apply(project: &mut Project, plan: &[Repair]) -> FixResult {
                 }
             }
             Repair::RemoveFrontierBackup { path } => {
-                match std::fs::remove_file(path) {
+                match crate::io::dryrun::remove_file(std::path::Path::new(path)) {
                     Ok(()) => result.applied.push(repair.clone()),
                     // Already gone is the outcome we wanted, not a failure —
                     // `--fix` must stay idempotent.

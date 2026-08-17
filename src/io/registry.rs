@@ -86,10 +86,10 @@ pub fn read_registry() -> ProjectRegistry {
 /// Write the project registry to a specific path.
 pub fn write_registry_to(path: &Path, reg: &ProjectRegistry) -> Result<(), std::io::Error> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        crate::io::dryrun::create_dir_all(parent)?;
     }
     let content = toml::to_string_pretty(reg).map_err(|e| std::io::Error::other(e.to_string()))?;
-    fs::write(path, content)
+    crate::io::dryrun::write(path, content)
 }
 
 /// Write the project registry to the default location.
