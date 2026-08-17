@@ -154,6 +154,14 @@ All notable changes to frame will be documented in this file.
 
 ### Fixed
 
+- **`fr mv --track` failed with `task not found` whenever the destination track came before the source in `project.toml`.** Forward moves worked, backward ones never did — on an *n*-track project the result was a perfectly triangular matrix, and reordering the tracks in `project.toml` moved the failure with the order. The error named the task, so it read as a corrupted or missing task rather than as a rejected direction, and `fr show` resolved the same id immediately before the failing move.
+
+  A cross-track move needs two mutable references into one vector, so the handler splits it. Both arms of that split already yield `(source, target)` — the arm for a source *after* the target names the source first too — but a second `if/else` read the halves as positional and swapped them back, so `move_task_to_track` searched the destination for the task and correctly reported that it was not there. The second swap is gone.
+
+  **`tests/conservation.rs` carried the same swap**, which is why the suite built to catch this class of defect reproduced it instead: its cross-track op dropped the resulting error with `if let Ok(…)`, so every backward move in a generated sequence was a silent no-op and P7 held over nothing. Fixed there too, and the error is now loud.
+
+- **`fr mv <ID> --track <the track it is already in>` panicked** with `index out of bounds: the len is 1 but the index is 1`, reaching the same two-reference split with one index for both halves. It is not a cross-track move and is no longer run as one: with a placement flag it reorders within the track, and without one it succeeds reporting `changed: false`, re-minting nothing. Re-minting would have given the task a fresh number under the same prefix and churned every `dep:` pointing at it, for a move that goes nowhere.
+
 - **`fr clean --dry-run` advanced the durable ID frontier.** `doc/cli.md` said it "previews without claiming a token or writing anything." It did not: `CleanMode::DryRun` gated the archive append and nothing else, so ID assignment still ran through a live mint, and `io::ids::reserve` recorded every number it handed out — in `.ids.toml`, the store shared by every git worktree of the clone. A preview burned an ID for real, once per ID-less task, every time it was run.
 
   Fixed by the write barrier above rather than by another guard in `clean`, since another guard is what produced it. The preview still names the IDs it would assign; it just no longer reserves them, so running it twice leaves the store byte for byte.

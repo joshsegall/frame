@@ -3053,7 +3053,39 @@ fn cmd_mv(args: MvArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    if let Some(ref target_track_id) = args.track {
+    // `--track` naming the track the task is already in is not a cross-track
+    // move, and must not be run as one. It would re-mint the id — a fresh number
+    // in the same prefix, churning every `dep:` that pointed at it, for a move
+    // that goes nowhere — and the split below indexes one half of the split with
+    // the other half's index, which for a single track is out of bounds and
+    // panics outright (`the len is 1 but the index is 1`).
+    //
+    // With a placement flag it is a reorder, which is exactly what the same-track
+    // branch further down does. Without one, the request is already satisfied: it
+    // succeeds and reports `changed: false`, the convention `fr tag` sets for an
+    // operation whose effect is already in place.
+    let cross_track = match args.track {
+        Some(ref target) if *target == source_track_id => {
+            if !args.top && args.after.is_none() && args.position.is_none() {
+                let already = find_track(&project, &source_track_id)
+                    .and_then(|t| task_ops::find_task_in_track(t, &args.id))
+                    .into_iter()
+                    .collect();
+                return report_task_write(
+                    json,
+                    "mv",
+                    false,
+                    Some(&source_track_id),
+                    already,
+                    || println!("{} is already in {}", args.id, source_track_id),
+                );
+            }
+            None
+        }
+        ref other => other.as_ref(),
+    };
+
+    if let Some(target_track_id) = cross_track {
         // Cross-track move
         reject_add_to_shelved(&project, target_track_id)?;
         let target_prefix = track_prefix(&project, target_track_id)
@@ -3086,19 +3118,23 @@ fn cmd_mv(args: MvArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
             task_ops::InsertPosition::Bottom
         };
 
-        // We need to split the tracks to get two mutable references
-        let (left, right) = if source_idx < target_idx {
+        // Two mutable references into one Vec, so it has to be split — at
+        // whichever index is higher, leaving the lower one on the left.
+        //
+        // **Both arms already yield (source, target).** Reading `left`/`right` as
+        // if they were positional is what broke this: a second `if/else` used to
+        // swap them back for `source_idx > target_idx`, on the reasoning that the
+        // else arm returns "left, right" in the other order. It does not — it
+        // names the source first in both arms, so the swap reversed them and
+        // `move_task_to_track` searched the *destination* for the task, reporting
+        // `task not found` on an id `fr show` resolves. Every backward move
+        // failed; every forward one worked. The tests below pin both directions.
+        let (source_track, target_track) = if source_idx < target_idx {
             let (left, right) = project.tracks.split_at_mut(target_idx);
             (&mut left[source_idx].1, &mut right[0].1)
         } else {
             let (left, right) = project.tracks.split_at_mut(source_idx);
             (&mut right[0].1, &mut left[target_idx].1)
-        };
-
-        let (source_track, target_track) = if source_idx < target_idx {
-            (left, right)
-        } else {
-            (right, left)
         };
 
         let moved = task_ops::move_task_to_track(

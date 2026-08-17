@@ -606,6 +606,8 @@ fr mv ID [POSITION] [--top] [--after ID] [--track TRACK] [--promote] [--parent I
 
 `--track` cannot be combined with `--promote` or `--parent`, and those two cannot be combined with each other. To move a subtask to top level in another track, promote it first, then move the result with `--track`.
 
+`--track` naming the track the task is already in is not a cross-track move: it reports `changed: false` and re-mints nothing, or, with `--top`/`--after`/a position, reorders within that track.
+
 **Three of the four forms re-mint the ID.** `--track`, `--promote` and `--parent` each give the moved task a new ID in this clone's namespace, and so does every task in its subtree; `dep:` references to any of them are rewritten across every track. A plain reorder does none of that. [`--dry-run`](#--dry-run) is how you see the result first, and the ID it names is the ID the real run mints.
 
 Cross-track moves rewrite the task's ID prefix to match the target track. Reparenting (`--promote` or `--parent`) re-keys the task and all descendant IDs to match the new parent structure. Both operations update all dependency references across tracks.

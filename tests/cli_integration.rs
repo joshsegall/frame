@@ -8845,3 +8845,169 @@ fn a_real_run_reports_dry_run_false() {
     assert_eq!(v["dry_run"], false);
     assert!(v.get("would_write").is_none(), "empty on a real run");
 }
+
+// ---------------------------------------------------------------------------
+// `fr mv --track` in both index directions
+// ---------------------------------------------------------------------------
+//
+// A cross-track move needs two mutable references into one `Vec<(String,
+// Track)>`, so the handler splits it. Reading the split's two halves as
+// positional — "left is the earlier track" — rather than as what they are named
+// (source, target) is what broke this: a second swap reversed them whenever the
+// source sat after the target, so `move_task_to_track` searched the destination
+// for the task and reported `task not found` on an id `fr show` resolves.
+//
+// The failure was therefore a function of *config order*, not of the tracks
+// involved: on a project of n tracks, every move to a later track worked and
+// every move to an earlier one failed. Reordering `project.toml` moved the
+// failure with it. These pin both directions, because a test that only moves
+// forward passes against the bug.
+
+/// Both directions of a cross-track move work, and land the task where asked.
+#[test]
+fn mv_across_tracks_works_in_both_index_directions() {
+    // `main` is the first track in the fixture's config, `side` the second.
+    for (what, task, from, to) in [
+        ("forward: main (#0) → side (#1)", "M-001", "main", "side"),
+        ("backward: side (#1) → main (#0)", "S-001", "side", "main"),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        create_test_project(tmp.path());
+
+        let (stdout, stderr, ok) = run_fr(tmp.path(), &["mv", task, "--track", to]);
+        assert!(ok, "{what}: {stderr}");
+
+        // The task left the source and arrived in the destination, under the
+        // destination's prefix.
+        let new_id = stdout
+            .split_whitespace()
+            .nth(2)
+            .unwrap_or_default()
+            .to_string();
+        let landed = run_fr_ok(tmp.path(), &["list", to]);
+        assert!(landed.contains(&new_id), "{what}: not in {to}:\n{landed}");
+
+        let left = run_fr_ok(tmp.path(), &["list", from]);
+        assert!(!left.contains(task), "{what}: still in {from}:\n{left}");
+    }
+}
+
+/// The reporter's shape: on a multi-track project, every ordered pair moves.
+///
+/// A triangular result — forward fine, backward failing — is the signature of
+/// the split being read positionally, so the matrix is the assertion.
+#[test]
+fn mv_across_tracks_works_for_every_ordered_pair() {
+    let names = ["alpha", "beta", "gamma", "delta"];
+
+    for (i, from) in names.iter().enumerate() {
+        for (j, to) in names.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            let tmp = tempfile::tempdir().unwrap();
+            let mut init = vec!["init", "--name", "matrix"];
+            for n in &names {
+                init.push("--track");
+                init.push(n);
+                init.push(n);
+            }
+            let (_, stderr, ok) = run_fr(tmp.path(), &init);
+            assert!(ok, "init failed: {stderr}");
+
+            let (added, stderr, ok) = run_fr(tmp.path(), &["add", from, "the task"]);
+            assert!(ok, "add failed: {stderr}");
+            let id = added.trim().to_string();
+
+            let (_, stderr, ok) = run_fr(tmp.path(), &["mv", &id, "--track", to]);
+            assert!(
+                ok,
+                "moving {id} from {from} (#{i}) to {to} (#{j}) failed: {stderr}"
+            );
+
+            let landed = run_fr_ok(tmp.path(), &["list", to]);
+            assert!(
+                landed.contains("the task"),
+                "{id}: {from} (#{i}) → {to} (#{j}) reported success but did not land:\n{landed}"
+            );
+        }
+    }
+}
+
+/// `--track` naming the track the task is already in is not a cross-track move.
+///
+/// It used to reach the two-reference split with one index for both halves,
+/// indexing past the end of one of them: `index out of bounds: the len is 1 but
+/// the index is 1`, a panic rather than an error.
+#[test]
+fn mv_to_the_same_track_is_a_no_op_not_a_panic() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+
+    let before = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    let (stdout, stderr, ok) = run_fr(tmp.path(), &["mv", "M-001", "--track", "main"]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("already in main"), "{stdout}");
+
+    // No re-mint: the id, and the file, are untouched.
+    let after = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    assert_eq!(before, after, "a no-op move rewrote the track");
+}
+
+/// The same, under `--json`: a request already satisfied reports `changed: false`.
+#[test]
+fn mv_to_the_same_track_reports_changed_false() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+
+    let out = run_fr_ok(tmp.path(), &["--json", "mv", "M-001", "--track", "main"]);
+    let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+    assert_eq!(v["command"], "mv");
+    assert_eq!(v["changed"], false);
+    assert_eq!(v["tasks"][0]["id"], "M-001", "still under its original id");
+}
+
+/// With a placement flag, the same-track form is a reorder — and still no re-mint.
+#[test]
+fn mv_to_the_same_track_with_a_placement_flag_reorders() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+
+    let (_, stderr, ok) = run_fr(tmp.path(), &["mv", "M-003", "--track", "main", "--top"]);
+    assert!(ok, "{stderr}");
+
+    let listed = run_fr_ok(tmp.path(), &["list", "main"]);
+    let first = listed
+        .lines()
+        .find(|l| l.contains("M-00"))
+        .unwrap_or_default();
+    assert!(first.contains("M-003"), "M-003 is not first:\n{listed}");
+}
+
+/// A `dep:` pointing at a task moved backward is rewritten, as it is forward.
+///
+/// The reversed move failed before it could renumber anything, so the deps half
+/// of a cross-track move was never exercised in that direction either.
+#[test]
+fn mv_backward_across_tracks_rewrites_deps_pointing_at_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_test_project(tmp.path());
+
+    // M-002 already depends on M-001. Move S-001 backward and point M-001 at it,
+    // so a dep crosses the move in the failing direction.
+    run_fr_ok(tmp.path(), &["dep", "M-001", "add", "S-001"]);
+    let (stdout, stderr, ok) = run_fr(tmp.path(), &["mv", "S-001", "--track", "main"]);
+    assert!(ok, "{stderr}");
+    let new_id = stdout
+        .split_whitespace()
+        .nth(2)
+        .unwrap_or_default()
+        .to_string();
+
+    let shown = run_fr_ok(tmp.path(), &["show", "M-001"]);
+    assert!(
+        shown.contains(&new_id),
+        "dep still points at the retired id:\n{shown}"
+    );
+    assert!(!shown.contains("S-001"), "stale dep survived:\n{shown}");
+}

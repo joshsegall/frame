@@ -691,17 +691,19 @@ fn apply_op(project: &mut Project, op: &Op, step: usize) -> Licensed {
             }
 
             let mint = Mint::new(&frame_dir, &target_id, &prefix, None);
-            let (left, right) = if source_idx < target_idx {
+            // Both arms yield (source, target). This used to carry the same
+            // second swap the CLI handler did, and for the same misreading of
+            // `left`/`right` as positional — so this suite reproduced the defect
+            // it exists to catch instead of failing on it. The `if let Ok` below
+            // is why that was silent: a reversed move looks for the task in the
+            // destination, returns `TaskNotFound`, and the error was dropped, so
+            // every backward move was a no-op and P7 held over nothing.
+            let (source_track, target_track) = if source_idx < target_idx {
                 let (l, r) = project.tracks.split_at_mut(target_idx);
                 (&mut l[source_idx].1, &mut r[0].1)
             } else {
                 let (l, r) = project.tracks.split_at_mut(source_idx);
                 (&mut r[0].1, &mut l[target_idx].1)
-            };
-            let (source_track, target_track) = if source_idx < target_idx {
-                (left, right)
-            } else {
-                (right, left)
             };
             let moved = task_ops::move_task_to_track(
                 source_track,
@@ -710,7 +712,15 @@ fn apply_op(project: &mut Project, op: &Op, step: usize) -> Licensed {
                 InsertPosition::Bottom,
                 mint,
             );
-            if let Ok(moved) = moved {
+            // Loud rather than swallowed: every precondition the op needs has
+            // been checked above, so a failure here is a bug in the code under
+            // test, which is exactly what this suite is for.
+            let moved = moved.unwrap_or_else(|e| {
+                panic!(
+                    "move {id} from {source_id} (#{source_idx}) to {target_id} (#{target_idx}): {e}"
+                )
+            });
+            {
                 // Every id the move retired is licensed; the new ones are picked
                 // up when the step re-baselines. The *titles* are not licensed —
                 // a move renames, it does not remove, and that is the half of
