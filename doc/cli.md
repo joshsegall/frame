@@ -464,14 +464,43 @@ fr dep EFF-015 rm EFF-014
 
 Adding validates the dependency task exists.
 
-### `fr note ID TEXT`
+### `fr note ID TEXT` / `fr note ID --file PATH`
 
 Add to a task's note. **Appends by default**, separated by a blank line; `--replace` overwrites instead.
 
 ```
 fr note EFF-014 "Found while working on closures"
 fr note EFF-014 "Superseded by the design doc" --replace
+fr note EFF-014 --file /tmp/finding.md --replace
 ```
+
+**`--file PATH` reads the note text from a file, and is the way to write anything multi-line or containing markdown.** A note is markdown, and markdown starts lists with `-` — which the argument parser reads as a flag, so `fr note EFF-014 "- found it in layout.rs"` is rejected outright. Passing a bulleted note as an argument is not merely awkward, it is impossible. Write it to a file instead.
+
+The path resolves against the working directory and may live anywhere, including outside the project and in directories git ignores: it is text on its way into a note, not a [`ref:`](#fr-ref-id-action-path), so none of the containment rules that govern those apply to it. A file that is empty or only whitespace is refused, because that is an upstream step that produced nothing rather than a request to blank the note — to clear a note, pass an empty argument (`fr note EFF-014 "" --replace`). One trailing newline is stripped; anything more is kept.
+
+**Text that is one of the command's own flags is refused.** Two spellings otherwise reach the text argument as ordinary values and are silent when they land:
+
+```
+$ fr note EFF-014 --replace -
+error: "-" is a flag, not note text — nothing was written.
+       frame does not read notes from stdin; pass the text as an argument, or
+       `--file PATH` for anything multi-line or starting with `-`
+```
+
+A bare `-` is the reflex spelling for "read from stdin" and frame has no stdin form, so it used to store itself over the note. And `--` is the options terminator, so `fr note EFF-014 -- --replace` fed `--replace` to the text argument *and* dropped the flag — storing the literal string and appending rather than replacing. Both have destroyed real notes. The rule is an exact-match list of flag spellings, deliberately not "starts with `-`", so a note that opens with a bullet still lands through `--file`.
+
+**A replacement says what it discarded.** The result line is otherwise identical whether one byte or a thousand words landed, so there is nothing to notice while the change is still uncommitted:
+
+```
+$ fr note EFF-014 "wip" --replace
+EFF-014 note replaced (780B → 3B)
+warning: EFF-014 note replaced 780B with 3B — if that was meant as a flag or a
+         filename rather than note text, the previous note is still in git
+```
+
+The sizes appear whenever `--replace` discarded content, including under `--dry-run`; `--json` carries them as `displaced_bytes`. Text that contains the existing note verbatim displaces nothing — that is a read-modify-write, the shape `--replace` is meant to have — and reports plainly as `note updated`.
+
+The **warning** is advisory and the write still goes through: discarding a note is what `--replace` is for. It fires only on the shape that is almost never meant — under 64 bytes written over at least 128 — which is what a flag or a filename looks like once stored. `--json` carries it in `warnings`. The two bounds sit far apart on purpose, so that shortening a note by hand stays quiet.
 
 Refused if the result would exceed [`limits.note_max_bytes`](concepts.md#limits) (16 KB by default) *and* be longer than the note already is. Since appending can only lengthen a note, an append onto a note that is already over the limit is always refused — which is the point, as appending is how notes get that size. Nothing is written when a write is refused; the text is still yours to shorten and retry.
 
@@ -480,9 +509,8 @@ Also refused if the appended text repeats a paragraph the note already holds (`l
 ```
 error: MAI-b7 note already contains this text (663B):
          "Spec unique-types.md §3.4a: `val y* = x` (x owned unique) moves x…"
-       nothing was written — `fr note` appends. If you meant to replace the note,
-       use `fr note MAI-b7 "…" --replace`; if you meant to add to it, leave out
-       what is already there
+       nothing was written — `fr note` appends. Send only what is new; or
+       `--replace` to discard the whole note and write this in its place.
 ```
 
 A note that predates the limit keeps working and can be edited down in as many passes as you like: any write that leaves it shorter than it was is allowed, whether or not the result is under the limit. There is no `--force` — set `note_max_bytes = "off"` if you do not want the limit.

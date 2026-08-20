@@ -156,7 +156,7 @@ fr state EFF-014 active
 
 ```bash
 fr state EFF-014.1 done
-# appends a new finding — use --replace if you are updating what you said before
+# appends a new finding; --replace DISCARDS the note and writes this instead
 fr note EFF-014 "Row unification needs special handling for polymorphic effects"
 fr ref EFF-014 add src/effects/infer.rs src/effects/solve.rs:142
 fr state EFF-014 done
@@ -210,7 +210,8 @@ your text. It does not replace. `--replace` does.
 
 ```bash
 fr note EFF-014 "Row unification needs the polymorphic case"   # appends
-fr note EFF-014 "Superseded: see the design doc" --replace     # replaces
+fr note EFF-014 "Superseded: see the design doc" --replace     # DISCARDS, then writes
+fr note EFF-014 --file /tmp/finding.md                         # appends a long note
 ```
 
 Getting this backwards is the single most expensive mistake available here.
@@ -223,6 +224,34 @@ bodies.
 are about to say is already there. If you are updating a status you wrote
 earlier, `--replace` is almost always what you want; append is for adding a new
 finding beside the old ones.
+
+**`--replace` is total.** It discards the entire existing note, however long,
+and writes yours in its place. That is what it is for, and it is the right flag
+when you are superseding a status you wrote yourself — but read the note first,
+so you know what you are discarding. Frame tells you afterwards
+(`EFF-014 note replaced (780B → 3B)`), and the previous note is in git if it was
+committed; neither is a substitute for having looked.
+
+### Long or multi-line notes: use `--file`
+
+A note is markdown, and markdown lists start with `-` — which the argument
+parser reads as a flag. **A bulleted note cannot be passed as an argument at
+all.** Write it to a file and pass `--file`:
+
+```bash
+cat > /tmp/finding.md <<'EOF'
+- cache key includes a timestamp, so layout recomputes every frame
+- fix is to hoist the key out of the loop (src/widget/layout.rs:412)
+EOF
+fr note EFF-014 --file /tmp/finding.md
+```
+
+The path can be anywhere, including a scratch directory outside the project —
+it is text on its way into the note, not a `ref:`. An empty file is refused.
+
+**Frame has no stdin form.** `fr note <id> --replace -` does not read a piped
+note; `-` is refused as note text, as is any bare flag spelling that reaches the
+argument. Use `--file`.
 
 ### What belongs in a note
 
@@ -247,7 +276,7 @@ What does **not** belong in a note:
 
 ```
 error: EFF-014 note would be 19.5KB; limit is 16KB (limits.note_max_bytes)
-       nothing was written
+       nothing was written — shorten what you were going to say and retry
 ```
 
 Nothing is written when this happens — shorten what you were going to say and
@@ -339,7 +368,8 @@ the track ID is wrong.
 | `fr dep <id> add <dep-id>` | Add a dependency |
 | `fr dep <id> rm <dep-id>` | Remove a dependency |
 | `fr note <id> "text"` | **Append** to the task note (see [Notes](#notes)) |
-| `fr note <id> "text" --replace` | Replace the task note instead |
+| `fr note <id> "text" --replace` | **Discard** the note, write this instead |
+| `fr note <id> --file <path>` | Take note text from a file — required for multi-line or markdown |
 | `fr ref <id> add <path>...` | Add file references (`src/x.rs`, `src/x.rs:807`) |
 | `fr ref <id> rm <path>...` | Remove file references |
 | `fr ref <id> set <path>...` | Replace the whole ref list |

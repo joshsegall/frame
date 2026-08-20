@@ -366,9 +366,22 @@ pub struct DepArgs {
 pub struct NoteArgs {
     /// Task ID
     pub id: String,
-    /// Note text
-    pub text: String,
-    /// Replace existing note instead of appending
+    /// Note text. Omit when `--file` is given.
+    #[arg(required_unless_present = "file")]
+    pub text: Option<String>,
+    /// Read the note text from a file instead of the argument.
+    ///
+    /// The way to write anything multi-line, or anything starting with `-` —
+    /// a markdown bullet list cannot be passed as an argument at all, because
+    /// the parser reads a leading `-` as a flag. The path is read relative to
+    /// the working directory and may live anywhere, including outside the
+    /// project: it is text on its way into the note, not a `ref:`.
+    #[arg(long, value_name = "PATH", conflicts_with = "text")]
+    pub file: Option<std::path::PathBuf>,
+    /// Discard the existing note and write this instead, rather than appending.
+    ///
+    /// Total: the whole note goes, however long. What it discarded is reported
+    /// (`note replaced (780B → 3B)`), including under `--dry-run`.
     #[arg(long)]
     pub replace: bool,
     /// Preview without writing: report what would change, and change nothing

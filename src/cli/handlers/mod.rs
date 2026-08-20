@@ -2157,6 +2157,43 @@ fn report_task_write(
     tasks: Vec<&Task>,
     human: impl FnOnce(),
 ) -> Result<(), Box<dyn std::error::Error>> {
+    report_task_write_with(
+        json,
+        command,
+        changed,
+        track,
+        tasks,
+        WriteNotice::default(),
+        human,
+    )
+}
+
+/// The advisory half of a write report: what the write cost, and what the
+/// caller should notice about it. Fifteen of the sixteen write commands have
+/// nothing to say here, which is why [`report_task_write`] keeps its shape and
+/// this is the variant rather than the other way round.
+#[derive(Default)]
+struct WriteNotice {
+    displaced_bytes: Option<usize>,
+    warnings: Vec<String>,
+}
+
+/// [`report_task_write`], plus what the write destroyed on its way through.
+///
+/// The warnings go to **stderr, after the result line**, so that a human reads
+/// what happened and then why to look at it, and a caller parsing stdout is
+/// unaffected either way. Under `--json` they travel in the object instead —
+/// a warning a program cannot see is one that only reaches the surface that
+/// was already going to notice.
+fn report_task_write_with(
+    json: bool,
+    command: &'static str,
+    changed: bool,
+    track: Option<&str>,
+    tasks: Vec<&Task>,
+    notice: WriteNotice,
+    human: impl FnOnce(),
+) -> Result<(), Box<dyn std::error::Error>> {
     if json {
         println!(
             "{}",
@@ -2167,10 +2204,15 @@ fn report_task_write(
                 would_write: would_write_paths(),
                 track: track.map(str::to_string),
                 tasks: tasks.into_iter().map(task_to_json).collect(),
+                displaced_bytes: notice.displaced_bytes,
+                warnings: notice.warnings,
             })?
         );
     } else {
         human();
+        for warning in &notice.warnings {
+            eprintln!("warning: {}", warning);
+        }
     }
     Ok(())
 }
@@ -2333,15 +2375,41 @@ fn report_task_change(
     before: Option<Task>,
     human: impl FnOnce(),
 ) -> Result<(), Box<dyn std::error::Error>> {
+    report_task_change_with(
+        json,
+        command,
+        project,
+        track_id,
+        task_id,
+        before,
+        WriteNotice::default(),
+        human,
+    )
+}
+
+/// [`report_task_change`], carrying what the write destroyed. See
+/// [`report_task_write_with`].
+#[allow(clippy::too_many_arguments)]
+fn report_task_change_with(
+    json: bool,
+    command: &'static str,
+    project: &Project,
+    track_id: &str,
+    task_id: &str,
+    before: Option<Task>,
+    notice: WriteNotice,
+    human: impl FnOnce(),
+) -> Result<(), Box<dyn std::error::Error>> {
     let after =
         find_track(project, track_id).and_then(|t| task_ops::find_task_in_track(t, task_id));
     let changed = before.as_ref() != after;
-    report_task_write(
+    report_task_write_with(
         json,
         command,
         changed,
         Some(track_id),
         after.into_iter().collect(),
+        notice,
         human,
     )
 }
@@ -2628,7 +2696,13 @@ fn cmd_dep(args: DepArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> 
 }
 
 fn cmd_note(args: NoteArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::model::config::ByteSize;
     dryrun::arm(args.dry_run);
+
+    // Resolved before the project is touched: every way this fails is a way the
+    // caller did not supply note text, and none of them should take the lock.
+    let text = note_text(&args)?;
+
     let (mut project, _lock) = lock_and_load()?;
 
     let track_id = find_task_track(&project, &args.id)
@@ -2637,21 +2711,145 @@ fn cmd_note(args: NoteArgs, json: bool) -> Result<(), Box<dyn std::error::Error>
 
     // Taken before the write so the report can say whether anything changed.
     let before = snapshot(&project, &track_id, &args.id);
+    let prior_note = before.as_ref().and_then(task_note).unwrap_or_default();
 
     let limit = note_limit(&project);
     let track = find_track_mut(&mut project, &track_id)
         .ok_or_else(|| format!("track not found: {}", track_id))?;
 
     if args.replace {
-        task_ops::set_note(track, &args.id, args.text, limit).map_err(explain_note_limit)?;
+        task_ops::set_note(track, &args.id, text.clone(), limit).map_err(explain_note_limit)?;
     } else {
-        task_ops::append_note(track, &args.id, args.text, limit).map_err(explain_note_limit)?;
+        task_ops::append_note(track, &args.id, text.clone(), limit).map_err(explain_note_limit)?;
     }
 
     save_track(&project, &track_id)?;
-    report_task_change(json, "note", &project, &track_id, &args.id, before, || {
-        println!("{} note updated", args.id)
+
+    // What the replacement cost. A note that survives verbatim inside the new
+    // text displaced nothing — that is a read-modify-write, which is the shape
+    // `--replace` is *supposed* to have — so the sizes are reported only when
+    // content actually went away.
+    let displaced = args.replace && !prior_note.is_empty() && !text.contains(&prior_note);
+    let notice = if displaced {
+        let (was, now) = (prior_note.len(), text.len());
+        let mut warnings = Vec::new();
+        if task_ops::looks_like_clobbered_note(was, now) {
+            warnings.push(format!(
+                "{} note replaced {} with {} — if that was meant as a flag or a \
+                 filename rather than note text, the previous note is still in git",
+                args.id,
+                ByteSize(was as u64).human(),
+                ByteSize(now as u64).human(),
+            ));
+        }
+        WriteNotice {
+            displaced_bytes: Some(was),
+            warnings,
+        }
+    } else {
+        WriteNotice::default()
+    };
+
+    let human_line = if displaced {
+        format!(
+            "{} note replaced ({} → {})",
+            args.id,
+            ByteSize(prior_note.len() as u64).human(),
+            ByteSize(text.len() as u64).human(),
+        )
+    } else {
+        format!("{} note updated", args.id)
+    };
+
+    report_task_change_with(
+        json,
+        "note",
+        &project,
+        &track_id,
+        &args.id,
+        before,
+        notice,
+        || println!("{}", human_line),
+    )
+}
+
+/// A task's note, if it has one.
+fn task_note(task: &Task) -> Option<String> {
+    task.metadata.iter().find_map(|m| match m {
+        Metadata::Note(n) => Some(n.clone()),
+        _ => None,
     })
+}
+
+/// The note text a `fr note` invocation is asking to write.
+///
+/// Either the argument or `--file`, never both — clap enforces that, and that
+/// one of them is present.
+fn note_text(args: &NoteArgs) -> Result<String, Box<dyn std::error::Error>> {
+    let Some(path) = &args.file else {
+        let text = args.text.clone().unwrap_or_default();
+        reject_flag_as_note_text(&text)?;
+        return Ok(text);
+    };
+
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("could not read {}: {}", path.display(), e))?;
+
+    // One trailing newline, not all of them: every editor ends a file with one
+    // and no note wants to begin its life with a blank line on the end, but a
+    // note that deliberately ends in blank lines keeps the rest.
+    let text = raw.strip_suffix('\n').unwrap_or(&raw);
+    let text = text.strip_suffix('\r').unwrap_or(text);
+
+    // A file with nothing in it is a step upstream that produced nothing, not a
+    // request to blank the note — and under `--replace` the difference is the
+    // whole note. Refusing costs a caller who really wants an empty note one
+    // explicit `fr note ID "" --replace`.
+    if text.trim().is_empty() {
+        return Err(format!(
+            "{} is empty — nothing was written. To clear a note, pass an empty \
+             argument: fr note {} \"\" --replace",
+            path.display(),
+            args.id,
+        )
+        .into());
+    }
+
+    Ok(text.to_string())
+}
+
+/// Refuse note text that is one of this command's own flags.
+///
+/// Two spellings reach the text argument as ordinary values rather than being
+/// rejected as unknown flags, and both are silent when they land: a bare `-`,
+/// which every other tool reads as "stdin" and frame does not, and anything
+/// after a `--` terminator, which swallows the flag that followed it — `fr note
+/// ID -- --replace` stores the string `--replace` *and* appends rather than
+/// replacing. Both have destroyed real notes.
+///
+/// Deliberately an exact-match list and not a "starts with `-`" rule: a note is
+/// markdown, and a markdown bullet list starts with `-`. The rule that keeps
+/// those out of the text argument is clap's own, and `--file` is the way past
+/// it.
+fn reject_flag_as_note_text(text: &str) -> Result<(), Box<dyn std::error::Error>> {
+    const FLAG_SPELLINGS: &[&str] = &[
+        "-",
+        "--replace",
+        "--file",
+        "--dry-run",
+        "--json",
+        "--project-dir",
+    ];
+    if !FLAG_SPELLINGS.contains(&text) {
+        return Ok(());
+    }
+    Err(format!(
+        "\"{}\" is a flag, not note text — nothing was written.\n       \
+         frame does not read notes from stdin; pass the text as an argument, or \
+         `--file PATH` for anything multi-line or starting with `-`",
+        text,
+    )
+    .into())
 }
 
 /// `[limits]`' note settings as the ops layer wants them.
@@ -2679,13 +2877,11 @@ fn explain_note_limit(err: task_ops::TaskError) -> Box<dyn std::error::Error> {
             block_len,
         } => format!(
             "{} note already contains this text ({}):\n         \"{}…\"\n       \
-             nothing was written — `fr note` appends. If you meant to replace the \
-             note, use `fr note {} \"…\" --replace`; if you meant to add to it, \
-             leave out what is already there",
+             nothing was written — `fr note` appends. Send only what is new; or \
+             `--replace` to discard the whole note and write this in its place.",
             task_id,
             ByteSize(block_len as u64).human(),
             excerpt.replace('\n', " "),
-            task_id,
         )
         .into(),
         task_ops::TaskError::NoteTooLarge {
@@ -2695,7 +2891,8 @@ fn explain_note_limit(err: task_ops::TaskError) -> Box<dyn std::error::Error> {
             limit,
         } => {
             let mut msg = format!(
-                "{} note would be {}; limit is {} (limits.note_max_bytes)\n       nothing was written",
+                "{} note would be {}; limit is {} (limits.note_max_bytes)\n       \
+                 nothing was written — shorten what you were going to say and retry",
                 task_id,
                 ByteSize(would_be as u64).human(),
                 ByteSize(limit as u64).human(),
@@ -2705,10 +2902,10 @@ fn explain_note_limit(err: task_ops::TaskError) -> Box<dyn std::error::Error> {
             // rather than leaving `--replace` to be deduced from a bare number.
             if current > limit {
                 msg.push_str(&format!(
-                    "\n       this note is already {} and predates the limit; \
-                     `fr note {} --replace` with anything shorter is allowed",
+                    "\n       this note is already {}, from before the limit: any write \
+                     leaving it shorter\n       is allowed, so it can be edited down in \
+                     stages. `--replace` discards it entirely.",
                     ByteSize(current as u64).human(),
-                    task_id,
                 ));
             }
             msg.into()

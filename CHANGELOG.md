@@ -15,6 +15,16 @@ All notable changes to frame will be documented in this file.
 
 ### Added
 
+- **`fr note --file PATH` reads note text from a file.** A note is markdown, and markdown starts lists with `-` — which the argument parser reads as a flag, so `fr note EFF-014 "- found it in layout.rs"` was rejected outright. Passing a bulleted note as an argument was not awkward, it was impossible, and that is the pressure that sends people looking for a stdin form frame does not have.
+
+  The path resolves against the working directory and may live anywhere, including outside the project and in directories git ignores: it is text on its way into a note, not a `ref:`, so none of the containment rules that govern those apply. A file that is empty or only whitespace is refused — that is an upstream step that produced nothing rather than a request to blank the note, and under `--replace` the difference is the whole note. One trailing newline is stripped; anything more is kept.
+
+- **A `--replace` that discards content says what it discarded.** `EFF-014 note replaced (780B → 3B)` where the line used to read `EFF-014 note updated` whether one byte or a thousand words landed. The sizes appear under `--dry-run` too — the one place a caller could look before the write, and it named only the file that would change — and `--json` carries them as `displaced_bytes`. Text containing the existing note verbatim displaces nothing and still reports as `note updated`: that is a read-modify-write, the shape `--replace` is meant to have.
+
+  Frame notes are markdown in git, so an unstaged clobber is recoverable. What was missing was anything to notice *while* it was still unstaged — and frame commits are batched, so a clobber can ride along inside one as a legitimate-looking one-line change.
+
+- **A warning when a replacement has the shape of a note clobbered by something that was never note text**: under 64 bytes written over at least 128. Advisory, not a refusal — discarding a note is what `--replace` is for — and it reaches `--json` in a new `warnings` array, because a warning a program cannot see only reaches the surface that was already going to notice. The two bounds sit far apart on purpose, so shortening a note by hand stays quiet.
+
 - **`--dry-run` on every command that mutates state.** Previously six commands had it — `fr check --fix`, `fr clean`, `fr track rename`, `fr projects prune`, `fr actor merge`, `fr git setup` — and the other twenty-six did not, which meant they *rejected* the flag: `fr mv SEC-3 --track other --dry-run` exited 2 with `error: unexpected argument '--dry-run' found`. Reported against `fr mv`, which is the command that needs it most.
 
   The command runs in full — resolving the same tasks, taking the same lock, minting the same IDs — and then nothing lands. **The ID in a preview is the ID you get**, which is the whole point on `fr mv`: `--track`, `--promote` and `--parent` each re-mint the moved task and its entire subtree, and rewrite `dep:` references across every track, so what the task will be called afterwards is a question only frame can answer. The preview reserves nothing, so asking twice gives the same answer and asking does not consume the number.
@@ -153,6 +163,12 @@ All notable changes to frame will be documented in this file.
   `--json` changes key order only — no keys added, removed or retyped. A consumer using a JSON parser is unaffected; one reading the bytes positionally is not.
 
 ### Fixed
+
+- **`fr note`'s two refusals give the non-destructive fix first.** Both named `--replace` as the way through without saying what it costs, and the repeat guard fires precisely when an append was written as a whole-note rewrite — so the message that fires on a botched read-modify-write recommended discarding the note. It now asks for only the new text first, and offers `--replace` second, described as discarding. The size-limit message says what to do (`shorten what you were going to say and retry`) rather than leaving it to be inferred from two numbers.
+
+- **`fr note` no longer stores one of its own flags as the note.** Two spellings reached the text argument as ordinary values rather than being rejected as unknown flags, and both were silent when they landed. A bare `-` is the reflex spelling for "read from stdin", which frame does not support, so `fr note EFF-014 --replace -` left a note reading `-` where the note had been. And `--` is the options terminator, so `fr note EFF-014 -- --replace` fed `--replace` to the text argument *and* dropped the flag — storing the literal string and appending rather than replacing. Both have destroyed real notes; both now exit non-zero with nothing written, pointing at `--file`.
+
+  The check is an exact-match list of flag spellings, deliberately not "starts with `-`" — a note that opens with a bullet is ordinary markdown, and `--file` is how it gets in.
 
 - **`-C <path>` resolved upward into an enclosing project.** A `-C` at a directory with no `frame/` of its own but sitting inside a frame project silently operated on the enclosing project, reported success, and gave no indication it had used a project other than the one named — on writes as well as reads. Outside any project `-C` errored correctly, so the behaviour was inconsistent rather than uniformly "search upward".
 

@@ -377,6 +377,30 @@ pub fn note_write_allowed(current: usize, would_be: usize, limit: Option<usize>)
     }
 }
 
+/// The shapes a `--replace` takes when the replacement was never note text.
+///
+/// A replacement is refused by nothing — discarding a note is what `--replace`
+/// is for, and a one-line note superseding a long one is a real thing to want.
+/// But one shape is almost never meant: a few bytes written over a substantial
+/// note, which is what a flag or a filename that reached the text argument
+/// looks like once it is stored. `fr note ID --replace -` left a note reading
+/// `-` where 780 bytes had been.
+///
+/// So this is a **warning**, not a guard: the write goes through, and the
+/// caller is told what it just did while the change is still uncommitted. The
+/// two bounds are deliberately far apart, so that shortening a note by hand —
+/// the workflow [`note_write_allowed`]'s non-increasing rule exists to protect —
+/// stays quiet unless it lands in the same shape.
+pub const NOTE_CLOBBER_RESULT_MAX: usize = 64;
+/// The other half of [`NOTE_CLOBBER_RESULT_MAX`]: how much had to be there.
+pub const NOTE_CLOBBER_PRIOR_MIN: usize = 128;
+
+/// Whether a replacement of `prior` bytes by `now` bytes has the shape of a
+/// note clobbered by something that was never note text.
+pub fn looks_like_clobbered_note(prior: usize, now: usize) -> bool {
+    prior >= NOTE_CLOBBER_PRIOR_MIN && now < NOTE_CLOBBER_RESULT_MAX
+}
+
 /// The largest note `limits.note_max_bytes` allows to be *typed* into a field
 /// holding `current` bytes — the same rule as [`note_write_allowed`], solved
 /// for the cap the TUI enforces per keystroke.
@@ -1896,6 +1920,26 @@ mod tests {
                 .iter()
                 .any(|m| matches!(m, Metadata::Note(n) if n == "First note.\n\nSecond note."))
         );
+    }
+
+    /// The clobber shape is "a few bytes over a substantial note" — both halves
+    /// required, so that neither a short note being replaced nor a long note
+    /// being replaced by another long one is mistaken for one.
+    #[test]
+    fn clobber_shape_needs_both_a_big_loss_and_a_tiny_result() {
+        // The real incident: `-` over 780 bytes.
+        assert!(looks_like_clobbered_note(780, 1));
+        assert!(looks_like_clobbered_note(
+            NOTE_CLOBBER_PRIOR_MIN,
+            NOTE_CLOBBER_RESULT_MAX - 1
+        ));
+
+        // A short note replaced by a short note is ordinary editing.
+        assert!(!looks_like_clobbered_note(NOTE_CLOBBER_PRIOR_MIN - 1, 1));
+        // A real supersede clears the result bound, however much it discards.
+        assert!(!looks_like_clobbered_note(10_000, NOTE_CLOBBER_RESULT_MAX));
+        // Nothing there to lose.
+        assert!(!looks_like_clobbered_note(0, 0));
     }
 
     /// `ref:` and `spec:` take the same three actions and behave identically

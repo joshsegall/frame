@@ -1747,6 +1747,238 @@ fn test_note_replace() {
     assert!(track.contains("Replacement note."));
 }
 
+/// A bare `-` is the reflex spelling for "read from stdin", and frame has no
+/// stdin form — so it arrived as note text and stored itself over the note.
+/// Real incident: `fr note ID --replace -` left a note reading `-`.
+#[test]
+fn a_bare_dash_is_refused_as_note_text() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    let note = "A".repeat(200);
+    run_fr_ok(tmp.path(), &["note", "M-001", &note]);
+
+    let (_, stderr, ok) = run_fr(tmp.path(), &["note", "M-001", "-", "--replace"]);
+
+    assert!(!ok, "a bare - should be refused, not stored");
+    assert!(
+        stderr.contains("--file"),
+        "the message must offer the way to pass real text: {stderr}"
+    );
+    let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    assert!(track.contains(&note), "the note must survive");
+}
+
+/// `--` is the options terminator, so `fr note ID -- --replace` fed `--replace`
+/// to the text argument *and* dropped the flag: the note gained the literal
+/// string `--replace` and was appended to rather than replaced.
+#[test]
+fn a_swallowed_flag_is_refused_as_note_text() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    let note = "B".repeat(200);
+    run_fr_ok(tmp.path(), &["note", "M-001", &note]);
+
+    let (_, _, ok) = run_fr(tmp.path(), &["note", "M-001", "--", "--replace"]);
+
+    assert!(!ok, "a swallowed flag should be refused, not stored");
+    let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    assert!(!track.contains("--replace"), "the flag must not be stored");
+    assert!(track.contains(&note), "the note must survive");
+}
+
+/// The rule is an exact-match list, not "starts with `-`": a note is markdown,
+/// and a markdown bullet list starts with `-`. `--file` is how it gets in,
+/// since the argument parser reads a leading `-` as a flag.
+#[test]
+fn a_markdown_bullet_list_lands_through_file() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    let src = tmp.path().join("bullets.md");
+    fs::write(&src, "- found it in layout.rs\n- fix is one line\n").unwrap();
+
+    run_fr_ok(
+        tmp.path(),
+        &["note", "M-001", "--file", src.to_str().unwrap()],
+    );
+
+    let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    assert!(track.contains("- found it in layout.rs"));
+    assert!(track.contains("- fix is one line"));
+}
+
+/// A file with nothing in it is an upstream step that produced nothing, not a
+/// request to blank the note — and under `--replace` those differ by the whole
+/// note.
+#[test]
+fn an_empty_file_is_refused() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    let note = "C".repeat(200);
+    run_fr_ok(tmp.path(), &["note", "M-001", &note]);
+    let src = tmp.path().join("empty.md");
+    fs::write(&src, "\n  \n").unwrap();
+
+    let (_, _, ok) = run_fr(
+        tmp.path(),
+        &[
+            "note",
+            "M-001",
+            "--file",
+            src.to_str().unwrap(),
+            "--replace",
+        ],
+    );
+
+    assert!(!ok, "an empty file should be refused");
+    let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    assert!(track.contains(&note), "the note must survive");
+}
+
+/// One trailing newline goes, because every editor writes one; the note should
+/// not begin life with a blank line on the end.
+#[test]
+fn file_note_drops_one_trailing_newline() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    let src = tmp.path().join("n.md");
+    fs::write(&src, "the finding\n").unwrap();
+
+    let out = run_fr_ok(
+        tmp.path(),
+        &[
+            "--json",
+            "note",
+            "M-001",
+            "--file",
+            src.to_str().unwrap(),
+            "--replace",
+        ],
+    );
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["tasks"][0]["note"], "the finding");
+}
+
+/// A replacement that discards something says what it discarded — the result
+/// line is otherwise identical whether one byte or a thousand words landed, so
+/// there is nothing to notice while the change is still uncommitted.
+#[test]
+fn a_replacement_reports_what_it_displaced() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    run_fr_ok(tmp.path(), &["note", "M-001", &"D".repeat(200)]);
+
+    let stdout = run_fr_ok(tmp.path(), &["note", "M-001", "short", "--replace"]);
+    assert!(
+        stdout.contains("note replaced") && stdout.contains("200B"),
+        "the result line must name what went: {stdout}"
+    );
+
+    // Distinct text, not a superset: text containing the old note verbatim is a
+    // read-modify-write and displaces nothing, which the next test covers.
+    let out = run_fr_ok(
+        tmp.path(),
+        &["--json", "note", "M-001", "different", "--replace"],
+    );
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["displaced_bytes"], 5);
+}
+
+/// A note that survives verbatim inside the new text displaced nothing — that
+/// is a read-modify-write, the shape `--replace` is supposed to have.
+#[test]
+fn a_read_modify_write_displaces_nothing() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    let first = "E".repeat(200);
+    run_fr_ok(tmp.path(), &["note", "M-001", &first]);
+
+    let grown = format!("{first}\n\nAnd what I learned since.");
+    let out = run_fr_ok(
+        tmp.path(),
+        &["--json", "note", "M-001", &grown, "--replace"],
+    );
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(
+        v.get("displaced_bytes").is_none(),
+        "nothing was displaced: {v}"
+    );
+    assert!(v["warnings"].as_array().is_none_or(|w| w.is_empty()));
+}
+
+/// A few bytes over a substantial note is what a flag or a filename looks like
+/// once stored. The write still goes through — discarding a note is what
+/// `--replace` is for — but the caller is told.
+#[test]
+fn a_clobber_shaped_replacement_warns() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    run_fr_ok(tmp.path(), &["note", "M-001", &"F".repeat(200)]);
+
+    let (stdout, stderr, ok) = run_fr(tmp.path(), &["note", "M-001", "wip", "--replace"]);
+    assert!(ok, "the write still goes through: {stderr}");
+    assert!(stdout.contains("note replaced"));
+    assert!(
+        stderr.contains("warning:"),
+        "a clobber-shaped write must warn: {stderr}"
+    );
+
+    // And the same warning reaches a program, not just a terminal.
+    run_fr_ok(
+        tmp.path(),
+        &["note", "M-001", &"G".repeat(200), "--replace"],
+    );
+    let out = run_fr_ok(tmp.path(), &["--json", "note", "M-001", "wip", "--replace"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["warnings"].as_array().map(Vec::len), Some(1));
+}
+
+/// The bounds are far apart on purpose: shortening a note by hand is the
+/// workflow the non-increasing size rule exists to protect, and it must stay
+/// quiet unless it lands in the clobber shape.
+#[test]
+fn an_ordinary_short_supersede_does_not_warn() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    run_fr_ok(tmp.path(), &["note", "M-001", &"H".repeat(200)]);
+
+    let (stdout, stderr, ok) = run_fr(
+        tmp.path(),
+        &[
+            "note",
+            "M-001",
+            "Superseded: see doc/design.md, which now carries the whole rationale.",
+            "--replace",
+        ],
+    );
+    assert!(ok);
+    assert!(stdout.contains("note replaced"), "the cost is still named");
+    assert!(
+        !stderr.contains("warning:"),
+        "a real supersede must not warn: {stderr}"
+    );
+}
+
+/// A preview must show the cost too — it is the one place a caller can look
+/// before the write happens, and it said only which file would change.
+#[test]
+fn a_dry_run_replacement_reports_the_cost() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    let note = "I".repeat(200);
+    run_fr_ok(tmp.path(), &["note", "M-001", &note]);
+
+    let stdout = run_fr_ok(
+        tmp.path(),
+        &["note", "M-001", "oops", "--replace", "--dry-run"],
+    );
+    assert!(
+        stdout.contains("note replaced") && stdout.contains("200B"),
+        "a preview must name the cost: {stdout}"
+    );
+    let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    assert!(track.contains(&note), "a preview writes nothing");
+}
+
 /// `doc/design.md`, `doc/spec.md` and `src/parser.rs`, for the ref/spec tests —
 /// a path must exist before frame will point at it.
 fn create_ref_targets(root: &Path) {

@@ -144,6 +144,18 @@ pub struct TaskWriteJson {
     pub track: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tasks: Vec<TaskJson>,
+    /// Bytes of field content this write discarded — present only when a write
+    /// destroyed something, so its absence means nothing was lost. `fr note
+    /// --replace` is the only command that can currently set it: the note is
+    /// the one field with no length bound, and replacing it is the one write
+    /// whose result does not show what it cost.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub displaced_bytes: Option<usize>,
+    /// Advisory notes about a write that still went through. Not errors: a
+    /// command that emits one has done what it was asked. Human output sends
+    /// the same strings to stderr.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// What a track-writing command did. [`TaskWriteJson`]'s rules, one level up.
