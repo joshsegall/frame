@@ -1665,6 +1665,27 @@ fn cmd_check(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
                             ByteSize(*file_bytes as u64).human(),
                         );
                     }
+                    check::CheckWarning::DuplicatedNoteText {
+                        track_id,
+                        task_id,
+                        title,
+                        repeated_bytes,
+                        note_bytes,
+                    } => {
+                        use crate::model::config::ByteSize;
+                        let who = match task_id {
+                            Some(id) => id.clone(),
+                            None => format!("\"{}\"", title),
+                        };
+                        println!(
+                            "  [{}] {} note holds the same {} twice (note is {}) — an append that was meant to be a replacement; `fr show {}` and edit it down with `fr note --replace`",
+                            track_id,
+                            who,
+                            ByteSize(*repeated_bytes as u64).human(),
+                            ByteSize(*note_bytes as u64).human(),
+                            who,
+                        );
+                    }
                     check::CheckWarning::UnclosedNoteFence {
                         track_id,
                         task_id,
@@ -2874,13 +2895,13 @@ fn explain_note_limit(err: task_ops::TaskError) -> Box<dyn std::error::Error> {
         task_ops::TaskError::NoteRepeatsExisting {
             task_id,
             excerpt,
-            block_len,
+            repeated_bytes,
         } => format!(
             "{} note already contains this text ({}):\n         \"{}…\"\n       \
              nothing was written — `fr note` appends. Send only what is new; or \
              `--replace` to discard the whole note and write this in its place.",
             task_id,
-            ByteSize(block_len as u64).human(),
+            ByteSize(repeated_bytes as u64).human(),
             excerpt.replace('\n', " "),
         )
         .into(),

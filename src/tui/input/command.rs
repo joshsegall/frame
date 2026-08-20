@@ -859,6 +859,26 @@ pub(super) fn palette_check_project(app: &mut App) {
                         ByteSize(*limit_bytes as u64).human(),
                     )
                 }
+                check::CheckWarning::DuplicatedNoteText {
+                    track_id,
+                    task_id,
+                    title,
+                    repeated_bytes,
+                    note_bytes,
+                } => {
+                    use crate::model::config::ByteSize;
+                    let who = match task_id {
+                        Some(id) => id.clone(),
+                        None => format!("\"{}\"", title),
+                    };
+                    format!(
+                        "  [{}] {} note holds the same {} twice (note is {}) — a re-appended replacement",
+                        track_id,
+                        who,
+                        ByteSize(*repeated_bytes as u64).human(),
+                        ByteSize(*note_bytes as u64).human(),
+                    )
+                }
                 check::CheckWarning::UnclosedNoteFence {
                     track_id,
                     task_id,

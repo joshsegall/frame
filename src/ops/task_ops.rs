@@ -29,14 +29,16 @@ pub enum TaskError {
     /// The write would leave a note both over `limits.note_max_bytes` and
     /// larger than it already was. Carries the sizes so the caller can say what
     /// happened without recomputing them.
-    /// The appended text repeats a paragraph the note already holds — the
+    /// The appended text repeats a run of lines the note already holds — the
     /// signature of an append that was meant to be a replacement.
-    #[error("{task_id} note already contains this text ({block_len} bytes)")]
+    #[error("{task_id} note already contains this text ({repeated_bytes} bytes)")]
     NoteRepeatsExisting {
         task_id: String,
-        /// The start of the repeated paragraph, for the message.
+        /// The start of the repeated run, for the message.
         excerpt: String,
-        block_len: usize,
+        /// Length of the longest repeated run, which is the size of what the
+        /// append was about to duplicate.
+        repeated_bytes: usize,
     },
     #[error("{task_id} note would be {would_be} bytes; limit is {limit} (limits.note_max_bytes)")]
     NoteTooLarge {
@@ -414,30 +416,102 @@ pub fn note_input_cap(current: usize, limit: Option<usize>) -> usize {
     }
 }
 
-/// The paragraph blocks of a note, at or above `min_len`, trimmed.
+/// Each line of `text` as a byte range, newline excluded, alongside the line
+/// trimmed for comparison.
 ///
-/// Paragraphs rather than lines, because that is the unit an append re-pastes:
-/// `append_note` joins with a blank line, so text written twice comes back as
-/// the same blocks twice.
-fn note_blocks(text: &str, min_len: usize) -> Vec<&str> {
-    let mut out = Vec::new();
-    for block in text.split("\n\n") {
-        let trimmed = block.trim();
-        if trimmed.len() >= min_len {
-            out.push(trimmed);
-        }
+/// Trimmed for comparison and kept by range for reporting, so the message can
+/// quote the run exactly as it was written while the match itself ignores
+/// reindentation — text re-pasted into a different nesting level is the same
+/// text, and this is the one place that has to say so.
+fn note_lines(text: &str) -> (Vec<&str>, Vec<(usize, usize)>) {
+    let mut keys = Vec::new();
+    let mut spans = Vec::new();
+    let mut start = 0;
+    for line in text.split('\n') {
+        let end = start + line.len();
+        keys.push(line.trim());
+        spans.push((start, end));
+        start = end + 1; // past the '\n'
     }
-    out
+    (keys, spans)
 }
 
-/// The first paragraph of `addition` that the note already holds verbatim.
+/// The longest run of consecutive lines in `needle` that also appears as a run
+/// of consecutive lines in `hay`, returned as a trimmed slice of `needle`.
+///
+/// **Runs of lines, not paragraph blocks, and the difference is the whole
+/// point.** Block matching splits on a blank line, so how much duplication it
+/// catches depends on how the *author* punctuated the note rather than on how
+/// much text is being repeated. A note written as four sections with blank lines
+/// between them is four blocks and a re-sent section trips at 146 bytes; the
+/// same four sections written as consecutive lines are one block, and re-sending
+/// three of them verbatim matched nothing at all. That second shape is the
+/// tighter one, it is what a compact structured note naturally uses, and it let
+/// a note accumulate four copies of three of its sections without one refusal.
+///
+/// Still exact matching, so it cannot refuse a write that was fine on a
+/// similarity score's say-so; `min_len` is the only judgement, and it is applied
+/// to how much consecutive text is repeated rather than to where the blank lines
+/// fell. Line-run matching strictly subsumes the block matching it replaces —
+/// blocks are line-aligned, and a whole-block match is a run.
+///
+/// `same_text` is for looking inside one note, where a line trivially matches
+/// itself: it requires the two runs to start at different lines.
+fn longest_shared_run<'a>(hay: &str, needle: &'a str, same_text: bool) -> Option<&'a str> {
+    let (hay_keys, _) = note_lines(hay);
+    let (needle_keys, needle_spans) = note_lines(needle);
+
+    // Candidate starts by first line, so a run is only extended from somewhere
+    // its opening line actually occurs. A note is small, but the grandfathered
+    // ones are not, and this is on the write path.
+    let mut starts: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, key) in hay_keys.iter().enumerate() {
+        starts.entry(key).or_default().push(i);
+    }
+
+    let mut best: Option<&'a str> = None;
+    for i in 0..needle_keys.len() {
+        let Some(candidates) = starts.get(needle_keys[i]) else {
+            continue;
+        };
+        for &p in candidates {
+            if same_text && p == i {
+                continue;
+            }
+            let mut k = 0;
+            while i + k < needle_keys.len()
+                && p + k < hay_keys.len()
+                && needle_keys[i + k] == hay_keys[p + k]
+            {
+                k += 1;
+            }
+            if k == 0 {
+                continue;
+            }
+            let run = needle[needle_spans[i].0..needle_spans[i + k - 1].1].trim();
+            // Strictly longer, so ties go to the run that starts earliest — the
+            // excerpt then opens where the reader's eye already is.
+            if best.is_none_or(|b| run.len() > b.len()) {
+                best = Some(run);
+            }
+        }
+    }
+    best
+}
+
+/// The longest run of consecutive lines `addition` repeats from the note that is
+/// already there, if it reaches `min_len` bytes.
 ///
 /// This is the whole-note re-append, caught at the moment it happens. An agent
-/// that thinks `fr note` replaces writes the full note out again; every
-/// paragraph that did not change this round is already there, so the first one
-/// of them trips this. Left to run, the note ends up holding N copies of
+/// that thinks `fr note` replaces writes the full note out again; everything
+/// that did not change this round is already there, so the largest unchanged
+/// stretch of it trips this. Left to run, the note ends up holding N copies of
 /// itself — eight, in the case this was written for.
-pub fn repeated_note_block<'a>(
+///
+/// Reports the *longest* repeated run rather than the first, because the number
+/// in the message is then the size of what was about to be duplicated, which is
+/// what tells the reader whether they meant `--replace`.
+pub fn repeated_note_run<'a>(
     existing: &str,
     addition: &'a str,
     min_len: Option<usize>,
@@ -446,10 +520,19 @@ pub fn repeated_note_block<'a>(
     if existing.is_empty() {
         return None;
     }
-    let present = note_blocks(existing, min_len);
-    note_blocks(addition, min_len)
-        .into_iter()
-        .find(|block| present.contains(block))
+    longest_shared_run(existing, addition, false).filter(|run| run.len() >= min_len)
+}
+
+/// The longest run of consecutive lines a single note already holds twice.
+///
+/// The same rule as [`repeated_note_run`] turned on a note that is already
+/// written, which is what lets `fr check` report exactly the duplication the
+/// write guard would now refuse. Frame can stop a note from growing another copy
+/// of itself, but until this there was no way to *find* the copies already
+/// there — and the note this guard was written for had eight of them.
+pub fn self_repeated_note_run(note: &str, min_len: Option<usize>) -> Option<&str> {
+    let min_len = min_len?;
+    longest_shared_run(note, note, true).filter(|run| run.len() >= min_len)
 }
 
 fn current_note_len(task: &Task) -> usize {
@@ -508,12 +591,12 @@ pub fn append_note(
     // and the more useful one: a re-append is usually meant to be a replacement,
     // and saying so is what stops the next one.
     if let Some(old) = &existing
-        && let Some(block) = repeated_note_block(old, &note_text, limits.repeat_bytes)
+        && let Some(run) = repeated_note_run(old, &note_text, limits.repeat_bytes)
     {
         return Err(TaskError::NoteRepeatsExisting {
             task_id: task_id.to_string(),
-            excerpt: block.chars().take(120).collect(),
-            block_len: block.len(),
+            excerpt: run.chars().take(120).collect(),
+            repeated_bytes: run.len(),
         });
     }
 

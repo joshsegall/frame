@@ -765,6 +765,47 @@ const CASES: &[Case] = &[
         repair: Repair::Clears,
     },
     Case {
+        name: "duplicated-note-text",
+        provenance: "an agent that believes `fr note` replaces, re-sending the \
+                     unchanged sections of a note it revised — the shape that took \
+                     one real note to eight copies of itself",
+        covers: &["duplicated_note_text"],
+        build: |root| {
+            // Sections as consecutive lines with no blank line between them:
+            // one paragraph block, which is exactly the shape block matching
+            // missed. The first three lines come back verbatim; only OPEN moved.
+            append_backlog(
+                root,
+                "\
+- [ ] `M-004` Investigation with a re-appended note
+  - added: 2026-01-01
+  - note:
+    VERDICT: the constructor path aborts before the alias table is populated.
+    ANCHORS: src/resolve/alias.rs:412 populates it; src/eval/ctor.rs:88 arity.
+    FALSIFIED: wholesale deletion. The set is consulted again for diagnostics.
+    OPEN: whether the reorder is safe under the incremental path.
+
+    VERDICT: the constructor path aborts before the alias table is populated.
+    ANCHORS: src/resolve/alias.rs:412 populates it; src/eval/ctor.rs:88 arity.
+    FALSIFIED: wholesale deletion. The set is consulted again for diagnostics.
+    OPEN: reorder confirmed safe; the test landed.
+",
+            );
+            Built::Ok
+        },
+        expect: &[warning(
+            "duplicated_note_text",
+            &[
+                ("task_id", Match::Eq("M-004")),
+                // The three unchanged lines, joined. Pinned because a run
+                // measured wrong is exactly how this detector goes quiet.
+                ("repeated_bytes", Match::Eq("223")),
+            ],
+        )],
+        // Which copy to keep is not decidable once the copies have diverged.
+        repair: Repair::None,
+    },
+    Case {
         name: "stranded-line",
         provenance: "prose that lost its indent in an editor, or a fragment left by a merge",
         covers: &["stranded_line"],

@@ -152,7 +152,8 @@ pub struct LimitsConfig {
     /// `"off"` (or `0`) disables the warning.
     #[serde(default = "default_track_warn_bytes", deserialize_with = "de_limit")]
     pub track_warn_bytes: Option<ByteSize>,
-    /// Shortest paragraph an append may not repeat verbatim into a note.
+    /// Shortest run of lines an append may not repeat verbatim into a note, and
+    /// the same threshold `fr check` reports an existing note for holding twice.
     ///
     /// `fr note` appends, and an agent that believes it replaces will write the
     /// whole note out again each time. The note then holds N copies of
@@ -160,12 +161,20 @@ pub struct LimitsConfig {
     /// one note reached eight copies of itself, 110 KB of its 139 KB, and
     /// across the project 5.4% of all note text was duplication of this kind.
     ///
-    /// Compared block by block on exact text. The repetition it is after is
-    /// literally re-pasted, so exact matching finds it, and unlike a similarity
-    /// score it cannot refuse a write that was fine — the failure mode of a
-    /// guess here is blocking someone's legitimate note.
+    /// Compared as **runs of consecutive lines** on exact text. Lines rather
+    /// than paragraph blocks because blocks made the guard answer to the
+    /// author's punctuation instead of to the duplication: a note whose sections
+    /// are separated by blank lines is several blocks and a re-sent section is
+    /// caught, while the same sections written as consecutive lines are one
+    /// block and re-sending three of four verbatim matched nothing. Both notes
+    /// were duplicating the same text.
     ///
-    /// `"off"` (or `0`) disables the check.
+    /// Exact matching either way. The repetition it is after is literally
+    /// re-pasted, so exact matching finds it, and unlike a similarity score it
+    /// cannot refuse a write that was fine — the failure mode of a guess here is
+    /// blocking someone's legitimate note.
+    ///
+    /// `"off"` (or `0`) disables both the guard and the report.
     #[serde(default = "default_note_repeat_bytes", deserialize_with = "de_limit")]
     pub note_repeat_bytes: Option<ByteSize>,
 }
@@ -199,7 +208,9 @@ fn default_track_warn_bytes() -> Option<ByteSize> {
 /// real corpus, 40 bytes flags 19 notes and 120 flags 16, for 95% of the same
 /// duplicated text — so the value is chosen for the end that matters: high
 /// enough that a repeated one-line code fragment or error string, which a note
-/// may legitimately quote twice, is not a refused write.
+/// may legitimately quote twice, is not a refused write. That reasoning is why
+/// the unit moved from blocks to line runs and the number did not: it was always
+/// about how much text is repeated, and only the measure was wrong.
 fn default_note_repeat_bytes() -> Option<ByteSize> {
     Some(ByteSize(120))
 }

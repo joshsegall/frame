@@ -1600,6 +1600,74 @@ fn appending_a_grown_copy_of_the_note_is_refused() {
     assert!(track.contains("what I learned since"));
 }
 
+/// A note whose sections are consecutive lines with no blank line between them
+/// is **one paragraph block**, so block matching saw nothing when three of its
+/// four sections came back verbatim. Four rounds of that took a note to four
+/// copies of three sections without one refusal — the eight-copies failure
+/// arriving through the door the guard did not cover. Line-run matching is what
+/// closed it, and this is the fixed case for that.
+#[test]
+fn re_appending_part_of_a_blank_line_free_note_is_refused() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    let sections = "\
+VERDICT: the constructor path aborts because the arity check runs before the alias table is populated.
+ANCHORS: src/resolve/alias.rs:412 populates the table; src/eval/ctor.rs:88 checks arity.
+FALSIFIED: wholesale deletion of the candidacy set — the set is consulted again for the diagnostic path.";
+    let first =
+        format!("{sections}\nOPEN: whether the reorder is safe under the incremental path.");
+    run_fr_ok(tmp.path(), &["note", "M-001", &first]);
+
+    // The designed workflow: revise one section, re-send the other three.
+    let revised = format!("{sections}\nOPEN: reorder confirmed safe; the test landed.");
+    let (_, stderr, ok) = run_fr(tmp.path(), &["note", "M-001", &revised]);
+    assert!(!ok, "re-sending three unchanged sections should be refused");
+    assert!(
+        stderr.contains("--replace"),
+        "the message must point at --replace: {stderr}"
+    );
+
+    let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    assert_eq!(
+        track.matches("VERDICT: the constructor path").count(),
+        1,
+        "nothing should have been written"
+    );
+}
+
+/// The size in the message is the size of what was about to be duplicated, not
+/// of the first thing that happened to match — that number is what tells the
+/// reader whether they meant `--replace`.
+#[test]
+fn the_repeat_message_reports_the_longest_repeated_run() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    let short = "D".repeat(130);
+    let long = format!(
+        "{}\n{}\n{}",
+        "A".repeat(130),
+        "B".repeat(130),
+        "C".repeat(130)
+    );
+    run_fr_ok(
+        tmp.path(),
+        &["note", "M-001", &format!("{short}\n\n{long}")],
+    );
+
+    // Both runs are repeated; the message must name the 392-byte one.
+    let (_, stderr, ok) = run_fr(
+        tmp.path(),
+        &["note", "M-001", &format!("{long}\n\n{short}")],
+    );
+    assert!(!ok, "{stderr}");
+    assert!(
+        stderr.contains("392B"),
+        "expected the longest run's size, got: {stderr}"
+    );
+}
+
 /// Genuinely new text still appends, and a short repeated fragment — a code
 /// line, an error string — is not enough to refuse a write.
 #[test]

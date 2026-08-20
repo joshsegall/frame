@@ -232,6 +232,45 @@ so you know what you are discarding. Frame tells you afterwards
 (`EFF-014 note replaced (780B → 3B)`), and the previous note is in git if it was
 committed; neither is a substitute for having looked.
 
+**Preview a replace with `--dry-run`.** It reports the same displacement line
+without writing, which is the one check that runs *before* the damage rather
+than after it:
+
+```bash
+fr note EFF-014 --file scratch/note.md --replace --dry-run
+# EFF-014 note replaced (2.1KB → 2.3KB)
+```
+
+A large drop means you are about to clobber something. Frame stays silent only
+when your text contains the existing note verbatim — that is a read-modify-write,
+the shape `--replace` is meant to have, and it reports as `note updated`.
+
+### The repeat guard
+
+An append that repeats a run of lines the note already holds is **refused**, and
+nothing is written:
+
+```
+error: EFF-014 note already contains this text (663B):
+         "VERDICT: the constructor path aborts before the alias table is…"
+       nothing was written — `fr note` appends. Send only what is new; or
+       `--replace` to discard the whole note and write this in its place.
+```
+
+This is the whole-note re-append caught at the moment it happens, and the size
+it names is how much you were about to duplicate. If you revised a maintained
+note and re-sent the parts that did not change, `--replace` is what you meant.
+If you are adding a genuinely new finding, send only the new text.
+
+The threshold is 120 bytes by default, so a short repeated line — a file path, an
+error string — is not enough to refuse a write. It does not depend on how you
+punctuate the note: sections written as consecutive lines are caught the same as
+sections separated by blank lines.
+
+`fr check` reports notes that **already** hold the same text twice, at the same
+threshold. There is no automatic repair — read the note and edit it down with
+`fr note --replace`.
+
 ### Long or multi-line notes: use `--file`
 
 A note is markdown, and markdown lists start with `-` — which the argument

@@ -71,11 +71,13 @@ note_max_bytes = "16KB"      # largest note frame's commands will GROW a note to
                              # a note already over the limit is never touched,
                              # never truncated, and can still be edited down —
                              # only writes that lengthen it are refused
-note_repeat_bytes = 120      # shortest paragraph an append may not repeat verbatim
-                             # into a note. `fr note` appends, and an agent that
-                             # believes it replaces writes the whole note out each
-                             # time — one real note reached eight copies of itself.
-                             # 0 / "off" disables
+note_repeat_bytes = 120      # shortest run of consecutive lines an append may not
+                             # repeat verbatim into a note, and the same threshold
+                             # `fr check` reports a note for already holding twice.
+                             # `fr note` appends, and an agent that believes it
+                             # replaces writes the whole note out each time — one
+                             # real note reached eight copies of itself.
+                             # 0 / "off" disables both
 track_warn_bytes = "512KB"   # `fr check` warns past this much OPEN work in one
                              # track (## Backlog + ## Parked). Done is excluded
                              # because [clean] already bounds it, and does so by

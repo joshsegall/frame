@@ -273,6 +273,15 @@ It names no individual task, deliberately: no single task is the problem, the ag
 
 An **oversize note is not reported at all.** `limits.note_max_bytes` is a guardrail on frame's own commands, not an invariant on the file, and a note that predates the limit is a supported state rather than damage.
 
+A note that holds **the same text twice** is reported, and the difference from the size case is intent. A long note is a supported state; nobody, ever, means to store their note twice. It is also mechanically identifiable rather than a judgement about someone's writing — the same exact-match rule [`fr note`'s repeat guard](#fr-note-id-text--fr-note-id---file-path) applies, at the same [`limits.note_repeat_bytes`](concepts.md#limits) threshold, turned on a note already on disk. What check reports here is precisely what `fr note` would now refuse:
+
+```
+warning: [backend] BAC-b208 note holds the same 3.4KB twice (note is 41KB) — an append that was
+         meant to be a replacement; `fr show BAC-b208` and edit it down with `fr note --replace`
+```
+
+The guard only looks forward: it stops a note growing another copy of itself and can do nothing about the copies already there. This is how you find them — the note the guard was written for had eight, 110 KB of its 139 KB, and nothing short of reading every note in the project would have surfaced it. No `--fix`: which copy to keep is not decidable once the copies have diverged, which after a few rounds of section-rewriting they have. The later one is usually the current text and sometimes an unlucky re-paste of the older, and deleting the wrong one destroys the only record of a finding.
+
 It reports **unclaimed rescue copies**: files the TUI could not save and dumped into `frame/.rescue/` at exit (see [TUI save failures](tui.md)). The exit message names that directory once, on a terminal that is usually closed shortly afterwards — so without this the copies sit there being the only version of that work with nobody looking. A warning, and with no repair: moving a copy into place would overwrite a live file that may be newer, and deleting it destroys the thing the directory exists to protect. Clearing the directory clears the warning.
 
 It reports an **interrupted operation**: a multi-file operation that started and did not finish, recorded in `frame/.inflight`. Normally the next write command completes it and clears the marker, so seeing this means either nothing has been written since, or recovery declined to act because a precondition no longer held. See [Multi-file writes](architecture.md) and `fr recovery` for the detail.
@@ -504,7 +513,7 @@ The **warning** is advisory and the write still goes through: discarding a note 
 
 Refused if the result would exceed [`limits.note_max_bytes`](concepts.md#limits) (16 KB by default) *and* be longer than the note already is. Since appending can only lengthen a note, an append onto a note that is already over the limit is always refused — which is the point, as appending is how notes get that size. Nothing is written when a write is refused; the text is still yours to shorten and retry.
 
-Also refused if the appended text repeats a paragraph the note already holds (`limits.note_repeat_bytes`, 120 bytes by default) — the signature of an append that was meant to be a replacement:
+Also refused if the appended text repeats a run of consecutive lines the note already holds (`limits.note_repeat_bytes`, 120 bytes by default) — the signature of an append that was meant to be a replacement:
 
 ```
 error: MAI-b7 note already contains this text (663B):
@@ -512,6 +521,12 @@ error: MAI-b7 note already contains this text (663B):
        nothing was written — `fr note` appends. Send only what is new; or
        `--replace` to discard the whole note and write this in its place.
 ```
+
+The size is the longest repeated run, which is the size of what the append was about to duplicate — the number that tells you whether you meant `--replace`.
+
+**Runs of consecutive lines, not paragraphs, and the difference matters if you write structured notes.** Matching whole blank-line-delimited blocks made the guard answer to how the note was *punctuated* rather than to how much text was repeated. A note whose sections sit apart with blank lines between them is several blocks, and re-sending one section verbatim is caught at 146 bytes. Write those same sections as consecutive lines — which is what a compact four-section note naturally looks like — and the whole note is one block, so re-sending three of four sections matched nothing at all. That second shape let a note reach four copies of three of its sections without a single refusal. Line runs measure the duplication itself, so both shapes are caught identically.
+
+It is still exact matching, not a similarity score, so it cannot refuse a write that was fine on a guess; `note_repeat_bytes` is the only judgement, and 120 bytes is set high enough that a code line or an error string a note legitimately quotes twice goes through. Reindentation does not defeat it — the same text re-pasted at a different nesting level is the same text.
 
 A note that predates the limit keeps working and can be edited down in as many passes as you like: any write that leaves it shorter than it was is allowed, whether or not the result is under the limit. There is no `--force` — set `note_max_bytes = "off"` if you do not want the limit.
 

@@ -5,7 +5,7 @@ All notable changes to frame will be documented in this file.
 ## Unreleased
 
 > **Breaking, in one place each — read these five if you script `fr`, parse its JSON, or run `fr check` unattended:**
-> 1. `fr note` exits non-zero on an append that would leave a note over `limits.note_max_bytes` (16 KB) and longer than it was, or that repeats a paragraph the note already holds. There is no `--force`; set the limit to `"off"` for the old behaviour.
+> 1. `fr note` exits non-zero on an append that would leave a note over `limits.note_max_bytes` (16 KB) and longer than it was, or that repeats a run of lines the note already holds. There is no `--force`; set the limit to `"off"` for the old behaviour.
 > 2. `fr check` exits non-zero on two new errors — a duplicate section, and a `##` heading frame does not recognise. A project that passed on 0.2.0 can fail on this release with nothing on disk having changed.
 > 3. `fr clean` archives on a size trigger as well as a count one, `clean.done_bytes_threshold` (256 KB). The first clean after upgrading may move a large batch, and the TUI cleans on its own, so it can happen unattended. `"off"` keeps the count trigger alone.
 > 4. `--json` on the 24 write commands emits a document where it used to print human text, and refuses to answer a confirmation prompt: `fr delete`, `fr track rename --prefix` and `fr check --fix` need `--yes` alongside it.
@@ -72,11 +72,17 @@ All notable changes to frame will be documented in this file.
 
   The repair is on the write path rather than in `serialize_track` — which stays a pure function of the model, so the parse/serialize pair keeps round-tripping — and not at parse, so `fr check` can still report what is actually on disk. Tasks move in file order; the redundant heading goes; literal content between the sections stays where it is.
 
+- **`fr check` reports a note that already holds the same text twice**, at the same `limits.note_repeat_bytes` threshold, so what it names is precisely what `fr note` would now refuse. The write guard only looks forward — it stops a note growing another copy of itself and can do nothing about the copies already there, and the note it was written for had eight, 110 KB of its 139 KB, with nothing short of reading every note in the project to surface it.
+
+  Reported where an oversize note deliberately is not, and the difference is intent: a long note is a supported state, but nobody means to store their note twice. It is mechanically identifiable rather than a judgement about someone's writing. A warning, with no `--fix` — which copy to keep stops being decidable as soon as the copies diverge, and after a few rounds of section-rewriting they have.
+
 - **BREAKING: `fr check` errors on a `##` heading frame does not recognise**, in tracks, archives and the inbox alike. Reported even when nothing is behind it: in a track file the parser sends an unknown heading to literal text and every task line after it too, so the heading is a trapdoor rather than a decoration. `frame/archive/_tracks/` is exempt, being whole archived track files whose `## Backlog` is correct.
 
 - **BREAKING: `limits.note_repeat_bytes` (120) refuses an append that repeats text the note already holds.** `fr note` appends, and an agent that believes it replaces writes the whole note out again each round, so the note accumulates N copies of everything unchanged. Measured on a real project: one note reached eight copies of itself, 110 KB of its 139 KB, and 5.4% of all note text was duplication of this kind.
 
-  Paragraph blocks, exact text. Exact rather than fuzzy because the repetition is literally re-pasted, and because the failure mode of a similarity threshold is refusing a write that was fine. The error names `--replace`.
+  **Runs of consecutive lines, exact text.** Lines rather than paragraph blocks because blocks made the guard answer to the author's punctuation instead of to the duplication. A note whose sections sit apart with blank lines between them is several blocks, and re-sending one section verbatim is caught at 146 bytes; write those same sections as consecutive lines — what a compact four-section note naturally looks like — and the whole note is one block, so re-sending three of four matched nothing at all. That shape took a note to four copies of three of its sections without one refusal. Runs measure the duplication itself, so both shapes are caught identically, and reindentation does not defeat it.
+
+  Exact rather than fuzzy because the repetition is literally re-pasted, and because the failure mode of a similarity threshold is refusing a write that was fine. The error names `--replace`, and the size it reports is the longest repeated run — the size of what the append was about to duplicate.
 
 - **BREAKING: Every command now has a `--json` surface**, bar `fr merge`, whose interface is an exit status a VCS driver reads. The 24 write commands — task writes, track writes, `inbox`, `projects add/remove`, `recovery prune/path`, `init` — previously accepted the flag and printed human text, because `--json` is global and clap takes it whether or not the handler was ever given it.
 

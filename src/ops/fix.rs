@@ -50,6 +50,11 @@
 //!   to be created.
 //! - `BrokenRef` / `BrokenSpec` — a path can be legitimately absent on the
 //!   current branch. Deleting refs after a branch switch would be badly wrong.
+//! - `DuplicatedNoteText` — deleting the second copy assumes the copies are
+//!   still identical, and after a few rounds of section-rewriting they are not:
+//!   the later one is usually the current text and sometimes an unlucky
+//!   re-paste of the older. Picking wrong destroys the only record of a
+//!   finding, which is worse than leaving the duplication in place.
 
 use serde::Serialize;
 

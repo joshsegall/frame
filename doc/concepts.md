@@ -295,7 +295,8 @@ What frame's own commands will not do:
 ```toml
 [limits]
 note_max_bytes = "16KB"    # largest note frame will grow a note to (default: 16KB; 0/"off" disables)
-note_repeat_bytes = 120    # shortest paragraph an append may not repeat into a note (default: 120)
+note_repeat_bytes = 120    # shortest run of lines an append may not repeat into a note, and
+                           # the same threshold `fr check` reports one for holding twice (default: 120)
 track_warn_bytes = "512KB" # `fr check` warns past this much open work in one track (default: 512KB)
 ```
 
@@ -309,7 +310,9 @@ In the TUI the same rule is enforced at the keystroke: the note field caps at `m
 
 **`note_repeat_bytes` refuses an append that repeats text the note already holds.** `fr note` appends, and an agent that believes it replaces writes the whole note out again each time — so the note ends up holding N copies of everything that did not change that round. Measured on a real project: one note reached eight copies of itself, 110 KB of its 139 KB, and 5.4% of all note text across the project was duplication of this kind.
 
-The comparison is paragraph blocks, exact text, at or above the configured length. Exact rather than fuzzy because the repetition is literally re-pasted, so exact matching finds it — and because the failure mode of a similarity threshold is refusing a write that was fine. The refusal asks first for only the new text, since a repeat is usually an append written as a whole-note rewrite; `--replace` is offered second and named as discarding the note, because it is.
+The comparison is **runs of consecutive lines**, exact text, at or above the configured length. Lines rather than paragraph blocks because blocks made the guard answer to the author's punctuation instead of to the duplication: a note whose sections are separated by blank lines is several blocks and a re-sent section is caught, while the same sections written as consecutive lines are one block and re-sending three of four verbatim matched nothing. Both notes were duplicating the same text. Exact rather than fuzzy because the repetition is literally re-pasted, so exact matching finds it — and because the failure mode of a similarity threshold is refusing a write that was fine. The refusal asks first for only the new text, since a repeat is usually an append written as a whole-note rewrite; `--replace` is offered second and named as discarding the note, because it is.
+
+**The same threshold drives a `fr check` report**, so what check names is exactly what `fr note` would now refuse. The guard is forward-looking — it stops a note growing another copy of itself and can do nothing about copies already there — and unlike an oversize note, duplication is reported as something worth fixing: a long note is a supported state, but nobody means to store their note twice. No `--fix`, because which copy to keep stops being decidable as soon as the copies diverge.
 
 **`track_warn_bytes` measures open work — `## Backlog` plus `## Parked` — not file size.** Done is excluded because `[clean]` already bounds it, and bounds it by oscillating between `done_bytes_retain` and `done_bytes_threshold`. Folding that swing into the measurement would mean the same track warns just before a clean and goes quiet just after one with its open work untouched: a warning that answers to the archiver's schedule rather than to anything its reader did. The warning is one line per track and names no individual task, because no individual task is the problem — the aggregate is, and the remedy is splitting the track or closing work.
 

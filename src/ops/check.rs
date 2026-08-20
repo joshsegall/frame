@@ -311,6 +311,41 @@ pub enum CheckWarning {
         file_bytes: usize,
         limit_bytes: usize,
     },
+    /// A task note already holds the same run of lines twice — the residue of
+    /// appends that were meant to be replacements, before the write guard
+    /// existed or with it switched off.
+    ///
+    /// **Duplication is reported where an oversize note is not, and the
+    /// difference is intent.** `limits.note_max_bytes` is a guardrail on
+    /// frame's own commands, so a long note is a supported state and saying so
+    /// would be second-guessing the author. Nobody, ever, means to store their
+    /// note twice. It is also mechanically identifiable rather than a judgement
+    /// about writing: the same exact-match rule the write guard applies, turned
+    /// on a note already on disk. The threshold is `limits.note_repeat_bytes`,
+    /// so what this reports is precisely what `fr note` would now refuse.
+    ///
+    /// Worth reporting because the guard is only forward-looking. It stops a
+    /// note growing another copy of itself and can do nothing about the copies
+    /// already there — and the note it was written for had eight, 110 KB of its
+    /// 139 KB, with no way to find it but reading every note in the project.
+    ///
+    /// **No `--fix`.** Which copy to keep is not decidable once the copies have
+    /// diverged, which after a few rounds of section-rewriting they have: the
+    /// later one is usually current and sometimes an unlucky re-paste of the
+    /// older. Deleting the wrong one destroys the only record of a finding.
+    /// `fr show` the task and edit it down with `fr note --replace`.
+    #[serde(rename = "duplicated_note_text")]
+    DuplicatedNoteText {
+        track_id: String,
+        /// `None` for a task that has no ID yet; `title` identifies it instead.
+        task_id: Option<String>,
+        title: String,
+        /// Length of the longest run the note holds twice.
+        repeated_bytes: usize,
+        /// The whole note, for scale: 300 bytes repeated in a 600-byte note is a
+        /// different situation from 300 in 40 KB.
+        note_bytes: usize,
+    },
     /// A task note leaves a code fence open. Frame parses the note correctly
     /// either way — note extent is bound by indentation, not fence state — but
     /// markdown renderers will swallow the rest of the file into a code block.
@@ -734,6 +769,60 @@ fn check_track_sizes(project: &Project, result: &mut CheckResult) {
     }
 }
 
+/// Report notes that already hold the same run of lines twice.
+///
+/// A pass of its own rather than another argument threaded into `check_task`,
+/// for the same reason `check_track_sizes` is one: it is driven by `[limits]`
+/// rather than by anything about the task, and `check_task` already carries
+/// seven arguments under an `allow`.
+///
+/// Live tracks only, matching every other per-task check here. An archived note
+/// carrying duplication is not something anyone is going to edit, and the
+/// remedy — rewrite the note — does not apply to a file `fr clean` owns.
+///
+/// See [`CheckWarning::DuplicatedNoteText`] for why this is reported when an
+/// oversize note is not.
+fn check_note_duplication(project: &Project, result: &mut CheckResult) {
+    let Some(limit) = project.config.limits.note_repeat_bytes else {
+        return;
+    };
+    let min_len = limit.bytes() as usize;
+    for (track_id, track) in &project.tracks {
+        for node in &track.nodes {
+            let TrackNode::Section { tasks, .. } = node else {
+                continue;
+            };
+            for task in tasks {
+                check_task_note_duplication(task, track_id, min_len, result);
+            }
+        }
+    }
+}
+
+fn check_task_note_duplication(
+    task: &Task,
+    track_id: &str,
+    min_len: usize,
+    result: &mut CheckResult,
+) {
+    if let Some(note) = task.metadata.iter().find_map(|m| match m {
+        Metadata::Note(n) => Some(n),
+        _ => None,
+    }) && let Some(run) = crate::ops::task_ops::self_repeated_note_run(note, Some(min_len))
+    {
+        result.warnings.push(CheckWarning::DuplicatedNoteText {
+            track_id: track_id.to_string(),
+            task_id: task.id.as_ref().map(|id| id.to_string()),
+            title: task.title.clone(),
+            repeated_bytes: run.len(),
+            note_bytes: note.len(),
+        });
+    }
+    for sub in &task.subtasks {
+        check_task_note_duplication(sub, track_id, min_len, result);
+    }
+}
+
 /// Validate a project and return structured results.
 ///
 /// This is a read-only operation — it does not modify the project.
@@ -807,6 +896,10 @@ pub fn check_project(project: &Project) -> CheckResult {
 
     // Tracks carrying more open work than one track should.
     check_track_sizes(project, &mut result);
+
+    // Notes that already hold the same text twice — what the write guard now
+    // refuses, found where it has already happened.
+    check_note_duplication(project, &mut result);
 
     // Does the recovery log actually hold the other side of each conflict?
     resolve_conflict_evidence(&project.frame_dir, &mut result);
@@ -2958,6 +3051,86 @@ mod tests {
         assert_eq!(
             unclosed_fence("```\na\n```\nprose\n```py").as_deref(),
             Some("```py")
+        );
+    }
+
+    /// The note the write guard now refuses, found where it already happened.
+    /// Sections as consecutive lines — one paragraph block, which is the shape
+    /// the block-matching guard missed entirely.
+
+    #[test]
+    fn test_warn_duplicated_note_text() {
+        let tmp = TempDir::new().unwrap();
+        let project = make_project_at(
+            tmp.path(),
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Re-appended note
+  - added: 2025-05-01
+  - note:
+    VERDICT: the constructor path aborts before the alias table is populated.
+    ANCHORS: src/resolve/alias.rs:412 populates it; src/eval/ctor.rs:88 checks arity.
+    OPEN: whether the reorder is safe under the incremental path.
+
+    VERDICT: the constructor path aborts before the alias table is populated.
+    ANCHORS: src/resolve/alias.rs:412 populates it; src/eval/ctor.rs:88 checks arity.
+    OPEN: reorder confirmed safe; the test landed.
+",
+        );
+
+        let result = check_project(&project);
+        let found = result.warnings.iter().find_map(|w| match w {
+            CheckWarning::DuplicatedNoteText {
+                task_id,
+                repeated_bytes,
+                note_bytes,
+                ..
+            } if task_id.as_deref() == Some("M-001") => Some((*repeated_bytes, *note_bytes)),
+            _ => None,
+        });
+        let (repeated, total) = found.expect("expected a duplicated_note_text warning");
+        // The two repeated lines, joined by the newline between them: 73 + 1 + 81.
+        assert_eq!(repeated, 155, "the longest repeated run, measured trimmed");
+        assert!(
+            total > repeated,
+            "note_bytes is the whole note, for scale: {total} vs {repeated}"
+        );
+    }
+
+    /// A note that quotes the same short line twice is not duplication — the
+    /// same reasoning that sets the threshold on the write guard. A `fr check`
+    /// that fired on this would be unusable on any project with a note that
+    /// repeats a file path.
+    #[test]
+    fn test_short_repeats_are_not_duplicated_note_text() {
+        let tmp = TempDir::new().unwrap();
+        let project = make_project_at(
+            tmp.path(),
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Note quoting one line twice
+  - added: 2025-05-01
+  - note:
+    Seen first at src/eval/ctor.rs:88.
+    Then again, unchanged, after the reorder:
+    Seen first at src/eval/ctor.rs:88.
+",
+        );
+
+        let result = check_project(&project);
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| matches!(w, CheckWarning::DuplicatedNoteText { .. })),
+            "a 33-byte repeat is below limits.note_repeat_bytes: {:?}",
+            result.warnings
         );
     }
 
