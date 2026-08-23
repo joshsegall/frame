@@ -38,6 +38,7 @@
 
 use crate::cli::commands::MergeArgs;
 use crate::ops::merge_files::{self, FileKind, MergeReport};
+use crate::ops::reconcile;
 
 /// Merged cleanly.
 const EXIT_MERGED: i32 = 0;
@@ -96,12 +97,18 @@ pub fn cmd_merge(args: MergeArgs) -> i32 {
     if report.is_clean() {
         // Quiet unless something actually came across — a clean rebase should
         // not narrate itself once per file.
-        if report.took_theirs > 0 || report.deleted > 0 {
-            eprintln!(
-                "fr merge: {label} — merged {} {} from the other side",
-                report.took_theirs + report.deleted,
-                kind.unit()
-            );
+        if report.took_anything() {
+            let units = report.took_theirs + report.deleted;
+            // The text around the tasks is said separately, and said at all.
+            // A merge whose only change was their heading, title or note used
+            // to print nothing whatsoever, which is the shape of output a
+            // silent loss hides in.
+            let what = match (units, report.took_their_shell) {
+                (0, _) => kind.surroundings().to_string(),
+                (n, false) => format!("{n} {}", kind.unit()),
+                (n, true) => format!("{n} {} and the text around them", kind.unit()),
+            };
+            eprintln!("fr merge: {label} — merged {what} from the other side");
         }
         return EXIT_MERGED;
     }
@@ -188,18 +195,71 @@ fn resolve_kind(args: &MergeArgs, ours: &str) -> Option<FileKind> {
     merge_files::kind_for_path(ours)
 }
 
-/// Tell the user what was left undecided, where the other version went, and what
-/// to do next.
+/// Tell the user what was set aside, which side that was, where it went, and
+/// what to do next — in that order.
 ///
 /// Written to stderr because that is what a VCS surfaces while a merge is
 /// running, and repeated into the recovery log because stderr scrolls away.
+///
+/// # Why it leads with the loss and names the sides
+///
+/// It used to lead with the list and end with *"the merged file is valid frame
+/// markdown — no conflict markers were written"*. Both halves of that sentence
+/// are true and the second half is the most quotable line in the output, sitting
+/// directly under the news that a version had been discarded. Twice now a reader
+/// has come within one step of trusting it and pushing a merge that had eaten
+/// one side; both times what caught it was checking the file rather than reading
+/// this.
+///
+/// The other half of the problem is that **"kept ours" names different sides in
+/// different operations**. In a rebase HEAD is upstream, so "ours" is the branch
+/// being rebased onto and your own replayed commit is "theirs" — the exact
+/// inverse of a merge. A driver is never told which it is in, so it asks:
+/// [`crate::io::git::operation_kind`]. Without that line the report is not
+/// merely unhelpful, it reads as the opposite of the truth to half its readers.
 fn report_conflicts(
     report: &MergeReport,
     ours: &str,
     label: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) {
-    eprintln!("fr merge: conflict in {label}");
+    let owner = owning_project(ours);
+
+    // A conflict whose key carries no `#`/`~` sigil names no task, so nothing in
+    // the file can carry a marker for it and `fr merge --resolve` cannot clear
+    // one. The two kinds have to be reported in different words.
+    let task_conflicts = report.conflicts.iter().filter(|c| is_task_key(&c.key));
+    let unaccounted = report
+        .conflicts
+        .iter()
+        .any(|c| c.reason == reconcile::ConflictReason::UnaccountedLoss);
+
+    let n = report.conflicts.len();
+    eprintln!(
+        "fr merge: CONFLICT in {label} — {n} version{} set aside, NOT merged",
+        if n == 1 { "" } else { "s" }
+    );
+
+    let operation = match &owner {
+        Owner::Found(root) => crate::io::git::operation_kind(&root.join("frame")),
+        Owner::None { .. } => crate::io::git::VcsOperation::Unknown,
+    };
+    match operation.sides() {
+        Some(sides) => eprintln!("  {sides}"),
+        None => {
+            // Not "frame cannot tell" and nothing else: an unnamed operation is
+            // still an operation somebody is standing in, and the rule they need
+            // is the same one either way. Say the rule.
+            eprintln!(
+                "  \"ours\" and \"theirs\" below are the VCS's labels, not yours — and a rebase or"
+            );
+            eprintln!(
+                "  cherry-pick inverts them, so there \"ours\" is the branch being replayed onto"
+            );
+            eprintln!("  and \"theirs\" is your own commit");
+        }
+    }
+
     let mut ids = Vec::new();
     for conflict in &report.conflicts {
         // Keys are `#ID` or `~title`; the sigil is internal to the merge.
@@ -214,32 +274,35 @@ fn report_conflicts(
         }
     }
 
-    // No conflict markers were written, so say plainly that the file is intact
-    // and readable — otherwise the obvious next move is to open it looking for
-    // `<<<<<<<` and conclude the merge did nothing.
-    eprintln!("the merged file is valid frame markdown — no conflict markers were written");
-
     // Name the log by absolute path. The marker left in the file is committed
     // and travels; the log does not, and the reader may well be in a different
     // working copy by the time they follow this.
-    match log_conflicts(report, ours, label, now) {
+    match log_conflicts(report, &owner, label, now) {
         Logged::At(path) => {
             let lookup = ids
                 .first()
                 .map(|id| format!(" (`fr recovery --for {id}`)"))
                 .unwrap_or_default();
-            eprintln!(
-                "their version of each task above is in the recovery log{lookup}:\n  {}",
-                path.display()
-            );
+            eprintln!("the version set aside is in the recovery log{lookup}:");
+            eprintln!("  {}", path.display());
         }
         Logged::NoProject { searched } => {
-            eprintln!(
-                "WARNING: their version was NOT recorded — no frame project found from\n  \
-                 {}\nthe merged file keeps our side; recover theirs from version control",
-                searched.display()
-            );
+            eprintln!("WARNING: the version set aside was NOT recorded — no frame project found");
+            eprintln!("  from {}", searched.display());
+            eprintln!("recover it from version control before you stage this file");
         }
+    }
+
+    // The file parses, and saying so is still worth a line — but never as the
+    // last word, and never phrased as an all-clear.
+    eprintln!("this file has no <<<<<<< markers, by design, so frame's own tools still read it.");
+    eprintln!("that is NOT a sign the merge resolved anything: staging it as it stands commits");
+    eprintln!("one side and discards the other.");
+
+    if unaccounted {
+        eprintln!("one conflict above is a DEFECT IN fr merge rather than a decision it made:");
+        eprintln!("lines only the other side added did not reach the merged file. Please report");
+        eprintln!("it. The merge was halted rather than completed, and nothing was overwritten.");
     }
 
     // An archive carries no marker, so it must not be told it does. `fr check`'s
@@ -248,14 +311,33 @@ fn report_conflicts(
     // reported nor cleared. The halt is what carries the decision instead: the
     // one person who can make it is standing in front of it right now.
     if report.kind == FileKind::Archive {
-        eprintln!(
-            "the archive keeps our version of each task above; edit it by hand if theirs is the one you want,\n\
-             then stage the file to finish the merge"
-        );
+        eprintln!("this archive keeps one version of each task above; edit it by hand if the");
+        eprintln!("other is the one you want, then stage the file to finish the merge");
         return;
     }
 
-    eprintln!("each task above carries a `conflict:` line, which `fr check` reports as an error");
+    let marked = task_conflicts.count();
+    if marked == 0 {
+        // Nothing in the file records this, because there is no task to record
+        // it on. Say so, rather than pointing at a `conflict:` line that is not
+        // there and a `--resolve` that would report nothing to clear.
+        eprintln!(
+            "nothing in the file marks this — it names no task, so there is nothing to mark."
+        );
+        eprintln!("this message and the recovery log are the only record: settle the text by hand");
+        eprintln!("before you stage the file");
+        return;
+    }
+    if marked < n {
+        eprintln!(
+            "{marked} of those carry a `conflict:` line, which `fr check` reports as an error;"
+        );
+        eprintln!("the rest name no task and leave nothing in the file — settle those by hand");
+    } else {
+        eprintln!(
+            "each task above carries a `conflict:` line, which `fr check` reports as an error"
+        );
+    }
     if ids.is_empty() {
         eprintln!("resolve with `fr note` / `fr state`, then clear it with `fr merge --resolve`");
     } else {
@@ -266,6 +348,25 @@ fn report_conflicts(
     }
 }
 
+/// Whether a conflict key names a task, and so whether a `conflict:` marker can
+/// exist for it. The sigil is the whole test — see
+/// [`crate::ops::reconcile::SURROUNDING_TEXT_KEY`].
+fn is_task_key(key: &str) -> bool {
+    key.starts_with('#') || key.starts_with('~')
+}
+
+/// The project that owns the file being merged, or where we looked for one.
+///
+/// Wanted twice over — once to name which VCS operation is running, once to put
+/// the discarded side somewhere — so it is found once and passed around.
+enum Owner {
+    Found(std::path::PathBuf),
+    /// No project could be found holding the file being merged.
+    None {
+        searched: std::path::PathBuf,
+    },
+}
+
 /// Where the discarded side went, or why it went nowhere.
 enum Logged {
     /// Written to this log. Absolute — the reader may be standing anywhere.
@@ -274,8 +375,7 @@ enum Logged {
     NoProject { searched: std::path::PathBuf },
 }
 
-/// Record each conflict in the recovery log of the project that owns the file
-/// being merged.
+/// Find the project holding the file being merged.
 ///
 /// **Located from `--ours`, not just from the working directory.** A VCS runs
 /// the driver from the worktree root with `%A` as a temp file there, so both
@@ -284,17 +384,7 @@ enum Logged {
 /// declines — otherwise a merge of files in a scratch directory writes the
 /// discarded side into whatever unrelated project happens to sit above the
 /// current directory, which is a real way to lose it.
-///
-/// Best-effort by design: a merge that already succeeded must not be failed over
-/// a log write. But the caller is told which case it was, because "nothing was
-/// recorded" and "their version is in the log" are the two things a reader must
-/// never have confused.
-fn log_conflicts(
-    report: &MergeReport,
-    ours: &str,
-    label: &str,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Logged {
+fn owning_project(ours: &str) -> Owner {
     let ours_path = std::path::Path::new(ours);
     let ours_abs = ours_path
         .canonicalize()
@@ -317,8 +407,32 @@ fn log_conflicts(
             .filter(|root| ours_abs.starts_with(root));
     }
 
-    let Some(root) = found else {
-        return Logged::NoProject { searched };
+    match found {
+        Some(root) => Owner::Found(root),
+        None => Owner::None { searched },
+    }
+}
+
+/// Record each conflict in the recovery log of the project that owns the file
+/// being merged.
+///
+/// Best-effort by design: a merge that already succeeded must not be failed over
+/// a log write. But the caller is told which case it was, because "nothing was
+/// recorded" and "their version is in the log" are the two things a reader must
+/// never have confused.
+fn log_conflicts(
+    report: &MergeReport,
+    owner: &Owner,
+    label: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Logged {
+    let root = match owner {
+        Owner::Found(root) => root,
+        Owner::None { searched } => {
+            return Logged::NoProject {
+                searched: searched.clone(),
+            };
+        }
     };
     let frame_dir = root.join("frame");
 
@@ -329,7 +443,7 @@ fn log_conflicts(
                 timestamp: now,
                 category: crate::io::recovery::RecoveryCategory::Conflict,
                 description: format!(
-                    "merge conflict on {} in {label} — kept our version",
+                    "merge conflict on {} in {label} — kept the `ours` side",
                     conflict.key
                 ),
                 fields: vec![("Reason".to_string(), conflict.reason.describe().to_string())],

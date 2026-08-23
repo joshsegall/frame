@@ -64,10 +64,26 @@ use crate::model::inbox::{Inbox, InboxItem};
 use crate::model::task::Task;
 use crate::model::track::{SectionKind, Track, TrackNode};
 
+/// The conflict key for the text *around* a file's tasks — see
+/// [`ConflictReason::SurroundingTextDiverged`].
+///
+/// Deliberately carries no `#`/`~` sigil. Those mark a task key, and both the
+/// driver's report and [`crate::ops::merge_files`] decide what to say, and
+/// whether a `conflict:` marker can be written at all, by looking for one. A
+/// conflict that names no task must not be able to pass for one that does.
+pub const SURROUNDING_TEXT_KEY: &str = "the text around the tasks";
+
+/// The conflict key for [`ConflictReason::UnaccountedLoss`]. Sigil-less for the
+/// same reason as [`SURROUNDING_TEXT_KEY`], and named for what it is: the merge
+/// cannot say which task, or which part of the file, the missing lines belonged
+/// to — if it could, it would not have lost them.
+pub const UNACCOUNTED_KEY: &str = "text that went missing";
+
 /// A task the merge could not decide, kept as ours with theirs preserved.
 #[derive(Debug, Clone)]
 pub struct Conflict {
-    /// The task's ID, or its title when it has none.
+    /// The task's ID, or its title when it has none — or one of the two keys
+    /// above, for a conflict that is not about a task.
     pub key: String,
     pub reason: ConflictReason,
     /// Their version, as markdown lines, for the recovery log.
@@ -86,6 +102,26 @@ pub enum ConflictReason {
     DeletedAndEdited,
     /// Two tasks share a title and neither has an ID, so identity is ambiguous.
     AmbiguousTitle,
+    /// Both sides changed the text *around* the tasks differently — the `# Title`
+    /// line, the `> description`, a `##` heading frame does not model, or prose
+    /// between sections. Kept ours.
+    ///
+    /// The one conflict that names no task, and therefore the one that leaves no
+    /// `conflict:` marker behind: there is nothing in the file to hang it on.
+    /// The non-zero exit carries the decision instead, the same way it does for
+    /// an archive. Keyed [`SURROUNDING_TEXT_KEY`].
+    SurroundingTextDiverged,
+    /// Lines that exist only on their side, and only since the ancestor, did not
+    /// reach the merged file — and no conflict explains it.
+    ///
+    /// **This one is a defect report, not a merge outcome.** Every other reason
+    /// here names a decision the merge made on purpose; this one says the merge
+    /// dropped something without deciding to. It is unreachable when the merge
+    /// is correct, which is exactly why it is checked — the two silent losses
+    /// this driver has shipped were both invisible for the same reason, that
+    /// nothing ever asked whether the result still held what it was given.
+    /// Keyed [`UNACCOUNTED_KEY`].
+    UnaccountedLoss,
 }
 
 impl ConflictReason {
@@ -101,6 +137,8 @@ impl ConflictReason {
             ConflictReason::EditedAndDeleted => "edited-and-deleted",
             ConflictReason::DeletedAndEdited => "deleted-and-edited",
             ConflictReason::AmbiguousTitle => "ambiguous-title",
+            ConflictReason::SurroundingTextDiverged => "surrounding-text",
+            ConflictReason::UnaccountedLoss => "unaccounted-loss",
         }
     }
 
@@ -111,6 +149,12 @@ impl ConflictReason {
             ConflictReason::DeletedAndEdited => "we removed it, they edited it; took theirs",
             ConflictReason::AmbiguousTitle => {
                 "two untitled-ID tasks share a title, so identity is ambiguous; kept ours"
+            }
+            ConflictReason::SurroundingTextDiverged => {
+                "both sides changed it differently; kept ours"
+            }
+            ConflictReason::UnaccountedLoss => {
+                "lines only they added did not reach the merged file; this is a bug in fr merge"
             }
         }
     }
@@ -125,13 +169,99 @@ pub struct Reconciled {
     pub took_theirs: usize,
     /// Tasks removed because both sides agree they are gone.
     pub deleted: usize,
+    /// Whether the text around the tasks came from the other writer. Counted
+    /// separately from [`Self::took_theirs`] because it is not a task, and the
+    /// messages that report it say so — a merge announcing "1 task" for a track
+    /// somebody retitled would be wrong in the one direction that matters.
+    pub took_their_shell: bool,
 }
 
 impl Reconciled {
     /// Whether the merge took anything from them, which is what makes the result
     /// differ from what we already had.
     pub fn changed_anything(&self) -> bool {
-        self.took_theirs > 0 || self.deleted > 0
+        self.took_theirs > 0 || self.deleted > 0 || self.took_their_shell
+    }
+}
+
+/// Every line of a track that is *not* part of a task, in file order: the
+/// `# Title` line, the `> description`, every literal block — which is where a
+/// `##` heading frame does not model, and any prose at all, ends up — and each
+/// section's header and trailing lines.
+///
+/// # Why this has to exist
+///
+/// `parse_track` puts every line of the file in exactly one of two places: a
+/// task, or one of the nodes this walks. So tasks plus shell is the *whole
+/// file*, and a merge that handles both handles everything. A merge that
+/// handles only tasks silently keeps one side of everything else — which is
+/// what [`rebuild`] did, by starting from `ours.clone()` and refilling nothing
+/// but `Section.tasks`.
+///
+/// That is not a hypothetical gap. It is the same shape as the archive bug
+/// (`doc/architecture.md` § Merging Under Version Control): the driver returned
+/// our file verbatim, exited 0, and said nothing. There the trigger was a file
+/// whose tasks the merge could not see; here it was a heading it could not name.
+/// Both come back to the same missing question — *did the result still hold
+/// what we were given?*
+fn track_shell(track: &Track) -> Vec<String> {
+    let mut lines = Vec::new();
+    for node in &track.nodes {
+        match node {
+            TrackNode::Literal(literal) => lines.extend(literal.iter().cloned()),
+            TrackNode::Section {
+                header_lines,
+                trailing_lines,
+                ..
+            } => {
+                lines.extend(header_lines.iter().cloned());
+                lines.extend(trailing_lines.iter().cloned());
+            }
+        }
+    }
+    lines
+}
+
+/// A shell reduced to what a *change* to it would have to mean.
+///
+/// Blank lines come out, and trailing whitespace with them. Neither is content,
+/// and — the part that matters — **tasks move blank lines around**. Adding the
+/// first task under a bare `## Done` pulls the blank line after the header into
+/// that section's `header_lines`, so comparing shells verbatim would read every
+/// such addition as somebody rewriting the text around the tasks, and conflict
+/// two writers who were only adding tasks.
+pub(crate) fn shell_signature(shell: &[String]) -> Vec<String> {
+    shell
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.trim_end().to_string())
+        .collect()
+}
+
+/// Which side's non-task text the merged file keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShellChoice {
+    Ours,
+    Theirs,
+    /// Both sides changed it, differently. Ours is kept and theirs is set aside,
+    /// the same way a doubly-edited task is.
+    Diverged,
+}
+
+/// The three-way rule for a region the merge cannot take apart: whoever changed
+/// it wins, and if both did they have to agree.
+///
+/// The same rule [`reconcile_inbox`] applies to the inbox header, and the one a
+/// comment there has claimed the track applied since before the track did.
+pub(crate) fn decide_shell(base: &[String], ours: &[String], theirs: &[String]) -> ShellChoice {
+    if ours == theirs {
+        ShellChoice::Ours
+    } else if ours == base {
+        ShellChoice::Theirs
+    } else if theirs == base {
+        ShellChoice::Ours
+    } else {
+        ShellChoice::Diverged
     }
 }
 
@@ -175,15 +305,26 @@ pub fn reconcile_track(base: &Track, ours: &Track, theirs: &Track) -> Reconciled
         // An ambiguous title cannot be matched across sides with any
         // confidence, so the merge declines rather than guesses.
         if ambiguous.contains(key) {
-            if let Some(o) = o {
-                resolved.push((o.section, o.task.clone()));
-                if let Some(t) = t {
-                    conflicts.push(Conflict {
-                        key: key.clone(),
-                        reason: ConflictReason::AmbiguousTitle,
-                        theirs: own_lines(&t.task),
-                    });
+            match (o, t) {
+                (Some(o), t) => {
+                    resolved.push((o.section, o.task.clone()));
+                    if let Some(t) = t {
+                        conflicts.push(Conflict {
+                            key: key.clone(),
+                            reason: ConflictReason::AmbiguousTitle,
+                            theirs: own_lines(&t.task),
+                        });
+                    }
                 }
+                // Nothing of ours to keep, so there is no pairing to get wrong
+                // and theirs is taken whole. It used to fall out here — dropped
+                // from the result, with no conflict to say so and nothing in the
+                // recovery log, because the arm only ran `if let Some(o) = o`.
+                (None, Some(t)) => {
+                    took_theirs += 1;
+                    resolved.push((t.section, t.task.clone()));
+                }
+                (None, None) => {}
             }
             continue;
         }
@@ -252,11 +393,39 @@ pub fn reconcile_track(base: &Track, ours: &Track, theirs: &Track) -> Reconciled
         }
     }
 
+    // The text around the tasks is merged as one region, by the same rule the
+    // tasks get: whoever changed it wins, and if both did they have to agree.
+    // Whichever side wins supplies the *structure* the tasks are rebuilt into,
+    // which is how their version reaches the file without a second serializer.
+    let base_shell = shell_signature(&track_shell(base));
+    let our_shell = shell_signature(&track_shell(ours));
+    let their_shell = shell_signature(&track_shell(theirs));
+    let choice = decide_shell(&base_shell, &our_shell, &their_shell);
+    if choice == ShellChoice::Diverged {
+        conflicts.push(Conflict {
+            key: SURROUNDING_TEXT_KEY.to_string(),
+            reason: ConflictReason::SurroundingTextDiverged,
+            theirs: track_shell(theirs),
+        });
+    }
+    let structure = if choice == ShellChoice::Theirs {
+        theirs
+    } else {
+        ours
+    };
+
+    let mut track = rebuild(structure, theirs, resolved);
+    // The line ending is ours whichever way the text went: it is a property of
+    // the file we are writing, not of the content that went into it, and a CRLF
+    // track has to come out of a merge CRLF.
+    track.eol = ours.eol;
+
     Reconciled {
-        track: rebuild(ours, theirs, resolved),
+        track,
         conflicts,
         took_theirs,
         deleted,
+        took_their_shell: choice == ShellChoice::Theirs,
     }
 }
 
@@ -382,13 +551,27 @@ pub fn reconcile_inbox(base: &Inbox, ours: &Inbox, theirs: &Inbox) -> Reconciled
         }
     }
 
-    // Header follows the same rule as a track's literal content: take theirs
-    // only when we did not touch it ourselves.
+    // Header follows the same rule as a track's shell: take theirs only when we
+    // did not touch it ourselves.
     let mut header_lines = if ours.header_lines == base.header_lines {
         theirs.header_lines.clone()
     } else {
         ours.header_lines.clone()
     };
+    // ...and then, because this is the inbox, a line the *losing* side added and
+    // the ancestor never had is carried rather than dropped. A track conflicts
+    // here and hands the loser to the recovery log; the inbox has no such move —
+    // it reports no conflicts by construction — so the choice above, alone, was
+    // the one place in this merge where a side's content could go nowhere at
+    // all. Multiset arithmetic is what the items get and it is what this gets.
+    for line in &theirs.header_lines {
+        if !line.trim().is_empty()
+            && !base.header_lines.contains(line)
+            && !header_lines.contains(line)
+        {
+            header_lines.push(line.clone());
+        }
+    }
     // Nothing of ours survived to carry it, so it lands where it now sits:
     // straight after the header.
     header_lines.extend(orphaned);
@@ -1306,13 +1489,21 @@ fn same_content(a: &Task, b: &Task) -> bool {
 // Rebuilding
 // ---------------------------------------------------------------------------
 
-/// Put the resolved tasks back into a track, using ours for structure.
+/// Put the resolved tasks back into a track, using `structure` for everything
+/// that is not a task.
 ///
-/// Ours supplies the headers, literal blocks and section order, because it is
-/// the version the user is looking at. A section that exists only in theirs is
-/// appended, so a task they moved into a section we do not have still lands.
-fn rebuild(ours: &Track, theirs: &Track, resolved: Vec<(SectionKind, Task)>) -> Track {
-    let mut track = ours.clone();
+/// `structure` is whichever side won the shell — ours unless only they changed
+/// it, see [`decide_shell`]. It supplies the headers, literal blocks and section
+/// order. A section that exists only in `theirs` is appended, so a task they
+/// moved into a section it does not have still lands.
+///
+/// **This used to take `ours` and nothing else, and that was the defect.** Every
+/// literal block, every section header, the title and the description came from
+/// our side unconditionally, so a merge whose only change was on their side of
+/// one of those returned our file verbatim and exited 0. `structure` is the
+/// whole fix; the body below is unchanged.
+fn rebuild(structure: &Track, theirs: &Track, resolved: Vec<(SectionKind, Task)>) -> Track {
+    let mut track = structure.clone();
 
     let mut by_section: HashMap<SectionKind, Vec<Task>> = HashMap::new();
     for (kind, task) in resolved {
@@ -1718,6 +1909,174 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // The config
+
+    /// The text around the tasks, merged.
+    ///
+    /// Every case here was silent loss before: `rebuild` cloned ours and refilled
+    /// nothing but `Section.tasks`, so their side of any of this was read, never
+    /// compared, and dropped — with `conflicts` empty and the caller told the
+    /// merge was clean. Fixed cases rather than seeds, because they are the
+    /// regression and a `.proptest-regressions` line cannot be one.
+    mod surrounding_text {
+        use super::*;
+
+        /// The reported case: they repaired a heading frame does not model while
+        /// we added a different one. Neither side may vanish without a word.
+        #[test]
+        fn a_heading_frame_does_not_model_is_not_ours_to_discard() {
+            let base = t(BASE);
+            let ours = t(&BASE.replace(
+                "## Backlog",
+                "## OPEN:\n\n- what happens to the reds?\n\n## Backlog",
+            ));
+            let theirs = t(&BASE.replace(
+                "## Backlog",
+                "## Notes\n\nThe `_rejected` bucket (was `_reds`) is now authoritative.\n\n## Backlog",
+            ));
+
+            let r = reconcile_track(&base, &ours, &theirs);
+            let out = serialize_track(&r.track);
+
+            assert!(out.contains("## OPEN:"), "ours is kept: {out}");
+            assert_eq!(r.conflicts.len(), 1, "and theirs is not silently dropped");
+            assert_eq!(
+                r.conflicts[0].reason,
+                ConflictReason::SurroundingTextDiverged
+            );
+            assert_eq!(r.conflicts[0].key, SURROUNDING_TEXT_KEY);
+            assert!(
+                r.conflicts[0].theirs.join("\n").contains("_rejected"),
+                "their version has to reach the recovery log: {:?}",
+                r.conflicts[0].theirs
+            );
+        }
+
+        /// Only they touched it, so it is theirs — the same rule a task gets.
+        #[test]
+        fn their_change_is_taken_when_we_did_not_touch_it() {
+            let base = t(BASE);
+            let theirs = t(&BASE.replace(
+                "## Backlog",
+                "## Notes\n\nThe `_rejected` bucket is authoritative.\n\n## Backlog",
+            ));
+
+            let r = reconcile_track(&base, &base, &theirs);
+            let out = serialize_track(&r.track);
+
+            assert!(out.contains("_rejected"), "{out}");
+            assert!(r.conflicts.is_empty(), "{:?}", r.conflicts);
+            assert!(
+                r.took_their_shell,
+                "and the caller is told, so it can say so"
+            );
+        }
+
+        /// The title line and the description live in a literal block, so they
+        /// went the same way and come back the same way.
+        #[test]
+        fn a_title_and_a_description_are_content_too() {
+            let base = t("# A\n\n> the a track\n\n## Backlog\n\n- [ ] `A-001` One\n");
+            let theirs = t("# Alpha\n\n> the alpha track\n\n## Backlog\n\n- [ ] `A-001` One\n");
+
+            let r = reconcile_track(&base, &base, &theirs);
+            assert_eq!(r.track.title, "Alpha");
+            assert_eq!(r.track.description.as_deref(), Some("the alpha track"));
+        }
+
+        /// A note under the last task is below every section, so it is trailing
+        /// literal content, and it was going missing too.
+        #[test]
+        fn text_below_the_last_section_survives() {
+            let base = t(BASE);
+            let theirs = t(&format!("{BASE}\n<!-- generated by upstream tooling -->\n"));
+
+            let r = reconcile_track(&base, &base, &theirs);
+            assert!(
+                serialize_track(&r.track).contains("upstream tooling"),
+                "{}",
+                serialize_track(&r.track)
+            );
+        }
+
+        /// We changed it, they did not: ours stands, and nothing is reported.
+        #[test]
+        fn our_change_stands_over_an_untouched_side() {
+            let base = t(BASE);
+            let ours = t(&BASE.replace("# A", "# Alpha"));
+
+            let r = reconcile_track(&base, &ours, &base);
+            assert_eq!(r.track.title, "Alpha");
+            assert!(!r.took_their_shell);
+            assert!(r.conflicts.is_empty(), "{:?}", r.conflicts);
+        }
+
+        /// **The trap this rule has to survive.** Adding the first task under a
+        /// bare `## Done` pulls the blank line beneath the header into that
+        /// section's `header_lines` — so the shell text changes on both sides
+        /// whenever two writers each add a task, and comparing it verbatim would
+        /// conflict them for doing the one thing the merge exists to allow.
+        #[test]
+        fn two_writers_adding_tasks_have_not_touched_the_text() {
+            let base = t(BASE);
+            let ours = t(
+                "# A\n\n## Backlog\n\n- [ ] `A-001` One\n- [ ] `A-002` Two\n\n## Done\n\n- [x] `A-004` Ours\n",
+            );
+            let theirs = t(
+                "# A\n\n## Backlog\n\n- [ ] `A-001` One\n- [ ] `A-002` Two\n\n## Done\n\n- [x] `A-005` Theirs\n",
+            );
+
+            let r = reconcile_track(&base, &ours, &theirs);
+            let out = serialize_track(&r.track);
+
+            assert!(r.conflicts.is_empty(), "{:?}: {out}", r.conflicts);
+            assert!(out.contains("A-004"), "{out}");
+            assert!(out.contains("A-005"), "{out}");
+        }
+
+        /// The line ending belongs to the file being written, not to whichever
+        /// side won the text inside it.
+        #[test]
+        fn a_crlf_track_comes_out_crlf_even_when_their_text_wins() {
+            let base = t(&BASE.replace('\n', "\r\n"));
+            let theirs = t(&BASE.replace("# A", "# Alpha").replace('\n', "\r\n"));
+            let ours = base.clone();
+
+            let r = reconcile_track(&base, &ours, &theirs);
+            assert_eq!(r.track.eol, crate::parse::LineEnding::Crlf);
+            assert!(serialize_track(&r.track).contains("\r\n"));
+        }
+    }
+
+    /// A title-ambiguous task that exists **only on their side** used to fall
+    /// out of the merge entirely: the arm ran `if let Some(o) = o`, so with
+    /// nothing of ours there was nothing to push and no conflict to say so.
+    /// There is no pairing to get wrong when only one side has it.
+    #[test]
+    fn an_ambiguous_title_only_they_have_is_taken_not_dropped() {
+        let base = t("# A\n\n## Backlog\n\n- [ ] `A-001` One\n");
+        let ours = base.clone();
+        let theirs =
+            t("# A\n\n## Backlog\n\n- [ ] `A-001` One\n- [ ] Fix it\n\n## Done\n\n- [x] Fix it\n");
+
+        let r = reconcile_track(&base, &ours, &theirs);
+        let out = serialize_track(&r.track);
+        assert!(out.contains("Fix it"), "their task must survive: {out}");
+    }
+
+    /// The inbox never sets a side aside, and its header was the one place that
+    /// could: the losing side's lines went nowhere at all. Multiset arithmetic
+    /// is what its items get, and now what it gets.
+    #[test]
+    fn an_inbox_header_line_only_they_added_is_carried() {
+        let base = crate::parse::parse_inbox("# Inbox\n\n- a\n").0;
+        let ours = crate::parse::parse_inbox("# Inbox\n> ours\n\n- a\n").0;
+        let theirs = crate::parse::parse_inbox("# Inbox\n> theirs\n\n- a\n").0;
+
+        let r = reconcile_inbox(&base, &ours, &theirs);
+        let out = crate::parse::serialize_inbox(&r.inbox);
+        assert!(out.contains("> ours"), "{out}");
+        assert!(out.contains("> theirs"), "{out}");
+    }
 
     mod config {
         use super::*;

@@ -51,7 +51,7 @@ use std::path::Path;
 
 use crate::model::task::{Metadata, Task};
 use crate::model::track::{Track, TrackNode};
-use crate::ops::reconcile::{self, Conflict};
+use crate::ops::reconcile::{self, Conflict, ConflictReason};
 use crate::parse::{
     parse_archive, parse_inbox, parse_track, serialize_archive, serialize_inbox, serialize_track,
 };
@@ -89,6 +89,16 @@ impl FileKind {
         }
     }
 
+    /// What everything *around* the units is called in a message. Its own
+    /// phrase rather than `unit()` in a sentence, because "the text around the
+    /// task(s)" is not something anybody says.
+    pub fn surroundings(self) -> &'static str {
+        match self {
+            FileKind::Track | FileKind::Archive => "the text around the tasks",
+            FileKind::Inbox => "the text around the items",
+        }
+    }
+
     /// Parse the `--kind` flag.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
@@ -108,8 +118,13 @@ pub struct MergeReport {
     pub took_theirs: usize,
     /// Tasks or items removed because both sides agree they are gone.
     pub deleted: usize,
-    /// Tasks the merge declined to decide. Always empty for the inbox, which
-    /// never sets a side's content aside.
+    /// Whether the text around the tasks — headings, prose, the title — came
+    /// from the other side. Reported separately from [`Self::took_theirs`]
+    /// because it is not a task and the message has to be able to say so.
+    pub took_their_shell: bool,
+    /// Tasks the merge declined to decide, plus at most one conflict that names
+    /// no task: the surrounding text, or an unaccounted loss. Never empty
+    /// without the caller halting.
     pub conflicts: Vec<Conflict>,
 }
 
@@ -118,6 +133,12 @@ impl MergeReport {
     /// the file as merged rather than conflicted.
     pub fn is_clean(&self) -> bool {
         self.conflicts.is_empty()
+    }
+
+    /// Whether anything at all came across from the other side. What makes a
+    /// clean merge worth a line of output.
+    pub fn took_anything(&self) -> bool {
+        self.took_theirs > 0 || self.deleted > 0 || self.took_their_shell
     }
 }
 
@@ -220,6 +241,7 @@ pub fn merge_track_text(
             kind: FileKind::Track,
             took_theirs: result.took_theirs,
             deleted: result.deleted,
+            took_their_shell: result.took_their_shell,
             conflicts: result.conflicts,
         },
     )
@@ -291,11 +313,16 @@ fn mark_in_tasks(
 ///
 /// # What is carried across
 ///
-/// The merged task list goes back into **ours'** [`Archive`], so ours' header,
-/// whatever sits below the last task, and the file's line ending all survive —
-/// a CRLF archive comes out of a merge CRLF. Their header and trailing text are
-/// not merged: frame does not understand either, and a three-way text merge of
-/// prose is exactly what a VCS is already better at.
+/// The merged task list goes back into an [`Archive`] whose header and trailing
+/// text are decided the same way a track's are — [`reconcile::decide_shell`]'s
+/// rule, whoever changed it wins and both changing it is a conflict. The file's
+/// line ending stays ours either way: a CRLF archive comes out of a merge CRLF.
+///
+/// **Ours used to win that unconditionally, and nothing said so.** Frame
+/// understands neither region, which is a good reason not to merge them *line by
+/// line* and no reason at all to drop one side in silence and exit 0 — a header
+/// naming where the archive came from, or a note under the last task, is content
+/// somebody wrote, and losing it is the same loss as losing a task.
 ///
 /// `stamp` is unused. No `conflict:` marker is written into an archive — see
 /// [`crate::cli::handlers::cmd_merge`] for why the halt carries that job here.
@@ -312,7 +339,7 @@ pub fn merge_archive_text(
     let before: std::collections::HashSet<String> =
         ours.tasks.iter().map(reconcile::task_key).collect();
 
-    let (merged, conflicts) =
+    let (merged, mut conflicts) =
         reconcile::reconcile_archive_tasks(&base.tasks, &ours.tasks, &theirs.tasks);
 
     // Counted against what the file held, not per decided key: for an archive
@@ -324,12 +351,38 @@ pub fn merge_archive_text(
 
     ours.tasks = merged;
 
+    // An archive's shell is everything that is not a task: the `# Archive — x`
+    // heading and whatever a person wrote above the first task, plus the note,
+    // rule or comment below the last one.
+    let shell = |a: &crate::model::archive::Archive| {
+        let mut lines = a.header.clone();
+        lines.extend(a.trailing.iter().cloned());
+        lines
+    };
+    let choice = reconcile::decide_shell(
+        &reconcile::shell_signature(&shell(&base)),
+        &reconcile::shell_signature(&shell(&ours)),
+        &reconcile::shell_signature(&shell(&theirs)),
+    );
+    let took_their_shell = choice == reconcile::ShellChoice::Theirs;
+    if took_their_shell {
+        ours.header = theirs.header.clone();
+        ours.trailing = theirs.trailing.clone();
+    } else if choice == reconcile::ShellChoice::Diverged {
+        conflicts.push(Conflict {
+            key: reconcile::SURROUNDING_TEXT_KEY.to_string(),
+            reason: ConflictReason::SurroundingTextDiverged,
+            theirs: shell(&theirs),
+        });
+    }
+
     (
         serialize_archive(&ours),
         MergeReport {
             kind: FileKind::Archive,
             took_theirs,
             deleted,
+            took_their_shell,
             conflicts,
         },
     )
@@ -352,6 +405,9 @@ pub fn merge_inbox_text(base: &str, ours: &str, theirs: &str) -> (String, MergeR
             kind: FileKind::Inbox,
             took_theirs: result.took_theirs,
             deleted: result.deleted,
+            // The inbox has no shell decision to report: its header merges as a
+            // multiset, so neither side's lines are ever the ones set aside.
+            took_their_shell: false,
             conflicts: Vec::new(),
         },
     )
@@ -364,11 +420,75 @@ pub fn merge_text(
     theirs: &str,
     stamp: &str,
 ) -> (String, MergeReport) {
-    match kind {
+    let (merged, mut report) = match kind {
         FileKind::Track => merge_track_text(base, ours, theirs, stamp),
         FileKind::Archive => merge_archive_text(base, ours, theirs, stamp),
         FileKind::Inbox => merge_inbox_text(base, ours, theirs),
+    };
+
+    if report.conflicts.is_empty() {
+        let lost = unaccounted_additions(base, theirs, &merged);
+        if !lost.is_empty() {
+            report.conflicts.push(Conflict {
+                key: reconcile::UNACCOUNTED_KEY.to_string(),
+                reason: ConflictReason::UnaccountedLoss,
+                theirs: lost,
+            });
+        }
     }
+
+    (merged, report)
+}
+
+/// Lines only *they* added that did not reach the merged file.
+///
+/// # Why this is the question, and the only one worth asking here
+///
+/// A line in `theirs` that is missing from the result is usually right: we
+/// deleted the task it belonged to, or we edited it and they did not. Checking
+/// that every line survived would report a working merge as broken. But a line
+/// that **is not in the ancestor** is different — nobody can have deleted
+/// something that never existed for them to delete — so an addition of theirs
+/// that vanished is a loss with no decision behind it, every time.
+///
+/// That makes this the one audit a merge can be held to without re-deriving
+/// every decision it just made, and it is exactly the audit that was missing
+/// when this driver silently emptied one side of every archive merge, and again
+/// when it silently kept one side of every heading, title and note.
+///
+/// # It runs only on an otherwise-clean merge
+///
+/// A conflict already halts the operation and puts the discarded side in front
+/// of a person — and a conflicted task is *supposed* to lose their lines, so
+/// auditing then would report the merge working as designed. Silence is the
+/// failure mode; silence is what this watches.
+///
+/// # What counts as the same line
+///
+/// Whitespace-normalized, blanks dropped. Blank lines are moved around by tasks
+/// and by the serializer, and a line somebody respaced by hand is not a line
+/// anybody added.
+fn unaccounted_additions(base: &str, theirs: &str, merged: &str) -> Vec<String> {
+    fn normalize(line: &str) -> String {
+        line.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+    fn index(text: &str) -> std::collections::HashSet<String> {
+        text.lines()
+            .map(normalize)
+            .filter(|line| !line.is_empty())
+            .collect()
+    }
+
+    let base = index(base);
+    let merged = index(merged);
+    theirs
+        .lines()
+        .filter(|line| {
+            let normalized = normalize(line);
+            !normalized.is_empty() && !base.contains(&normalized) && !merged.contains(&normalized)
+        })
+        .map(|line| line.to_string())
+        .collect()
 }
 
 /// Why a file-level merge could not run at all.
@@ -1006,6 +1126,121 @@ mod tests {
                 "a bare LF survived into a CRLF file:\n{merged:?}"
             );
         }
+    }
+
+    // --- The text around the tasks, at the driver level ---
+
+    /// An archive's header used to be ours unconditionally, so a heading only
+    /// they changed came back as ours with exit 0 and nothing said.
+    #[test]
+    fn an_archive_header_only_they_changed_is_taken() {
+        let base = archive(&[A1]);
+        let theirs = base.replace(
+            "# Archive — main",
+            "# Archive — main (quarterly; see RUNBOOK)",
+        );
+
+        let (merged, report) = merge_archive_text(&base, &base, &theirs, STAMP);
+
+        assert!(report.is_clean(), "conflicts: {:?}", report.conflicts);
+        assert!(report.took_their_shell, "and the caller is told");
+        assert!(merged.contains("see RUNBOOK"), "{merged}");
+    }
+
+    /// Both sides changed it: ours stands and theirs is recorded, rather than
+    /// theirs going nowhere. The key names no task, so no marker is written —
+    /// the non-zero exit is what carries it, as it does for every archive
+    /// conflict.
+    #[test]
+    fn an_archive_header_both_sides_changed_conflicts() {
+        let base = archive(&[A1]);
+        let ours = base.replace("# Archive — main", "# Archive — main (ours)");
+        let theirs = base.replace("# Archive — main", "# Archive — main (theirs)");
+
+        let (merged, report) = merge_archive_text(&base, &ours, &theirs, STAMP);
+
+        assert!(!report.is_clean());
+        assert_eq!(report.conflicts.len(), 1);
+        assert_eq!(report.conflicts[0].key, reconcile::SURROUNDING_TEXT_KEY);
+        assert!(merged.contains("(ours)"), "{merged}");
+        assert!(
+            !merged.contains("conflict:"),
+            "no marker in an archive:\n{merged}"
+        );
+        assert!(
+            report.conflicts[0].theirs.join("\n").contains("(theirs)"),
+            "theirs reaches the recovery log: {:?}",
+            report.conflicts[0].theirs
+        );
+    }
+
+    /// The whole reported failure, at the level the VCS sees: a heading only
+    /// they repaired, against a different one only we added. It used to return
+    /// our file byte for byte and report the merge clean.
+    #[test]
+    fn a_track_heading_frame_does_not_model_no_longer_merges_clean() {
+        let base = "# Backend\n\n## Backlog\n\n- [ ] `BAC-254` Rework the reds\n";
+        let ours = base.replace(
+            "## Backlog",
+            "## OPEN:\n\n- what about the reds?\n\n## Backlog",
+        );
+        let theirs = base.replace(
+            "## Backlog",
+            "## Notes\n\nNow `_rejected`, was `_reds`.\n\n## Backlog",
+        );
+
+        let (merged, report) = merge_text(FileKind::Track, base, &ours, &theirs, STAMP);
+
+        assert!(!report.is_clean(), "it must not report clean:\n{merged}");
+        assert_eq!(merged, ours, "ours is what is kept");
+        assert!(
+            report.conflicts[0].theirs.join("\n").contains("_rejected"),
+            "and theirs is what is handed back: {:?}",
+            report.conflicts[0].theirs
+        );
+    }
+
+    /// The audit. It cannot be reached through the merge any more, so it is
+    /// exercised directly: a result that quietly failed to carry a line only
+    /// they added is a defect, whatever produced it.
+    #[test]
+    fn a_line_only_they_added_going_missing_is_caught() {
+        let base = "# A\n\n## Backlog\n";
+        let theirs = "# A\n\n## Note\n\nsomething they wrote\n\n## Backlog\n";
+
+        assert!(
+            unaccounted_additions(base, theirs, base)
+                .iter()
+                .any(|l| l.contains("something they wrote")),
+            "a line theirs added and the result lacks is unaccounted for"
+        );
+        assert!(
+            unaccounted_additions(base, theirs, theirs).is_empty(),
+            "and a result that carried it is not"
+        );
+    }
+
+    /// What the audit must *not* do. The overwhelmingly common merge is one
+    /// where we edited a line and they did not: their version of it is missing
+    /// from the result on purpose, and reporting that would make the check
+    /// useless by making it always fire.
+    #[test]
+    fn a_line_we_edited_and_they_did_not_is_accounted_for() {
+        let base = "# A\n\n## Backlog\n\n- [ ] `A-001` One\n";
+        let ours = base.replace("One", "One, edited here");
+
+        let (merged, report) = merge_text(FileKind::Track, base, &ours, base, STAMP);
+        assert!(report.is_clean(), "conflicts: {:?}", report.conflicts);
+        assert!(merged.contains("One, edited here"), "{merged}");
+    }
+
+    /// And whitespace is not content: a line somebody respaced by hand did not
+    /// become a line they added.
+    #[test]
+    fn respacing_a_line_is_not_adding_one() {
+        let base = "# A\n\n## Backlog\n\n- [ ] `A-001` One\n";
+        let theirs = "# A\n\n##   Backlog\n\n- [ ]  `A-001`  One\n";
+        assert!(unaccounted_additions(base, theirs, base).is_empty());
     }
 
     /// Two ID-less archived tasks sharing a title cannot be matched across

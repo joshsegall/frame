@@ -106,6 +106,7 @@ Each answers a different question; a new test usually belongs in one of them rat
 | `undo_properties.rs` | P9 on **TUI action sequences**: does undoing everything restore the project byte for byte, and redoing everything restore the result? |
 | `concurrency.rs` | P8 on **interleavings**: does a TUI session and a CLI writer over one project lose work either one acknowledged, set a version aside in the recovery log without the two having raced for it, move a track out of the state it is owed or point its row at a file that is not there, hand an ID out twice, or leave a file unsettled? |
 | `merge_simulation.rs` | do independent actors minting IDs concurrently ever collide? |
+| `merge_conservation.rs` | P10 on **three-way merges**: does a merge that reports clean still hold every line either side added since the ancestor — and does its own audit ever fire? |
 | `parity.rs` | do human and `--json` output, and CLI and TUI, agree? |
 | `cli_integration.rs` | the CLI surface, including crash injection via `FRAME_FAIL_WRITE` |
 

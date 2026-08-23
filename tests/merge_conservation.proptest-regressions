@@ -1,0 +1,29 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+#
+# ---------------------------------------------------------------------------
+# What a `cc` line is, and what it is not
+#
+# It is a seed for the generator, not a recording of an edit sequence. A seed
+# reproduces the ORIGINAL failing case; the comment records what that case
+# SHRANK to, which is shorter and always was. And a seed decodes through the
+# generator AS IT IS NOW — adding an arm to `arb_edit` re-maps the whole random
+# stream, so a line recorded before that change regenerates something else
+# entirely. Those are marked `found:`.
+#
+# BEFORE adding an arm to `arb_edit`, convert anything here that is load-bearing
+# into a fixed-case test. Nothing here is: both lines below were produced by
+# deliberately reverting the fix to check this property is not vacuous, and each
+# has its own named pin.
+# ---------------------------------------------------------------------------
+
+# --- `found:` — both recorded against a deliberately reverted `decide_shell`,
+#     which returned `ShellChoice::Ours` unconditionally (the pre-fix
+#     behaviour). They pass against the shipped code and pin nothing on their
+#     own; they are kept because they still exercise the generator.
+cc 6b91dbc74b71cd8781e9914e4e9d09fda523fe570471ba21c394c93cd7f5e916 # found: an archive header only theirs changed — pinned by `an_archive_header_only_they_changed_is_taken`
+cc c40ad86534b55fd34a155e382df2e060e3f5ce3e05636fc11e8d377ec69cbab3 # found: [AddHeading(0)] on theirs alone — pinned by `their_change_is_taken_when_we_did_not_touch_it` and `a_heading_frame_does_not_model_is_not_ours_to_discard`

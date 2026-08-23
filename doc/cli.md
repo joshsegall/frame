@@ -933,6 +933,12 @@ Not to be confused with [`fr actor merge`](#fr-actor-merge), which collapses one
 
 **Why this exists.** `fr done` moves a task from `## Backlog` to `## Done`. A line-based merge reads that as a deletion plus an unrelated insertion, conflicts, and — if the conflict is resolved by keeping both sides — leaves two copies of one task, one open and one done. Frame merges by task ID instead, so a relocation is just a task whose section changed, and that case stops being a conflict at all. Additions from both sides land; a change to a task the other side did not touch is taken; subtasks merge independently of their parent.
 
+**"Ours" and "theirs" are the VCS's labels, and they invert.** Under `git merge` "ours" is the branch you have checked out. Under `git rebase` — so also a pull configured to rebase, and every `--continue` in a long replay — HEAD is the branch being replayed *onto*, so **"ours" is upstream and your own commit is "theirs"**; `git cherry-pick` and `git revert` invert the same way. A merge driver is never told which operation invoked it, so frame looks, and every conflict report names the sides in the terms of the operation actually running. Where it cannot tell — git writes `MERGE_HEAD` only *after* the merge strategy has run, so a plain `git merge` is invisible from inside a driver — the report states the rule rather than assuming which side is yours.
+
+**Everything in the file is merged, not just the tasks.** The text around them — the `# Title` line, the `> description`, prose between sections, any `##` heading frame does not model, and a note under the last task — takes the same rule a task does: whoever changed it wins, and if both changed it differently that is a conflict, your version kept and theirs in the recovery log. Blank lines are not compared, because adding a task moves them.
+
+Such a conflict names no task, so **nothing in the file marks it** and `fr merge --resolve` has nothing to clear — there is no task to hang a `conflict:` line on. The non-zero exit and the message are what carry it, the same way they do for an archive. Settle the text by hand before you stage the file.
+
 **Exit status is the interface.**
 
 | Status | Meaning |
@@ -956,7 +962,7 @@ So `project.toml` and `actors.toml` merge line by line for a different reason th
 | `frame/archive/_tracks/*.md` | a track — `fr track archive` moved it there intact, sections and all |
 | `frame/inbox.md` | the inbox: content as a multiset |
 
-A **done archive** is not a track and does not merge as one: it has no `## Section` headers, so there is no relocation to reconcile and position carries no meaning. Both sides having run `fr clean` since the common ancestor is the ordinary case, and the answer is the union of what each archived. Your header, anything you wrote below the task list, and the file's line ending are kept from your side.
+A **done archive** is not a track and does not merge as one: it has no `## Section` headers, so there is no relocation to reconcile and position carries no meaning. Both sides having run `fr clean` since the common ancestor is the ordinary case, and the answer is the union of what each archived. Its header and whatever you wrote below the task list take the same rule as a track's surrounding text; the file's line ending is kept from your side.
 
 **On conflict, no conflict markers are written.** A file full of `<<<<<<<` is not valid frame markdown, so it breaks the parser, `fr check` and `fr show` at exactly the moment you need them. Instead:
 
@@ -976,6 +982,10 @@ fr merge --resolve BAC-179
 which clears the marker and nothing else. Clearing it is you recording the judgment; frame cannot check that the right thing came out.
 
 **An archive conflict carries no marker, and that is deliberate.** Everything above still holds — your version stays in the file, theirs goes to the recovery log by absolute path, the merge exits 1 and git stops — except the `conflict:` line and `fr merge --resolve`. Both of those are track-only: `fr check`'s conflict detector and `--resolve` walk the project's tracks, which archives are not part of, so a marker written into an archive could be neither reported nor cleared. A marker's job is to carry an unmade decision forward to another clone or a later session; an archive conflict has no such audience, because the halt puts it in front of the one person who can decide. Edit the archive by hand if theirs is the version you want, then stage the file.
+
+**A clean merge says what it took.** `fr merge: frame/tracks/backend.md — merged 2 task(s) and the text around them from the other side`, on stderr, and nothing at all when nothing came across. It used to count only tasks, so a merge whose sole change was the other side's heading printed nothing — which is the shape a silent loss hides in.
+
+**The merge audits its own result.** A line that is not in the common ancestor cannot have been deleted by anybody, so an addition of either side's that did not reach the merged file is a loss with no decision behind it. On a merge that would otherwise report clean, finding one is treated as a defect in `fr merge`: it conflicts, exits 1, and says so. Nothing is overwritten. If you see it, please report it.
 
 **Running it by hand.** The three file arguments and `--path` mirror what a VCS passes (`%O %A %B %P` in git). The merged result is written over `--ours`. `--path` decides which of the three kinds the file is merged as; `--kind` forces it when there is no meaningful path.
 

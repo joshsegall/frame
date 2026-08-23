@@ -83,6 +83,104 @@ pub fn repo_paths(frame_dir: &Path) -> Option<RepoPaths> {
     })
 }
 
+/// The version-control operation a merge driver has been invoked inside.
+///
+/// The driver is handed "ours" and "theirs" and is never told what they mean —
+/// and what they mean *inverts*. Under `git merge` and a plain `git pull`, ours
+/// is the branch checked out and theirs is what is being merged in. Under
+/// `git rebase` — so also a `pull` configured to rebase, and every
+/// `git rebase --continue` in a long replay — HEAD is the branch being rebased
+/// **onto**, so "ours" is upstream and "theirs" is your own commit being
+/// replayed. `git cherry-pick` and `git revert` invert the same way and for the
+/// same reason.
+///
+/// A report that says "kept ours" without saying which one that is has told the
+/// reader nothing, and has told two readers opposite things. This is how it
+/// finds out.
+///
+/// # What a driver can actually see, which is less than you would expect
+///
+/// Git writes `MERGE_HEAD` and `CHERRY_PICK_HEAD` **after** the merge strategy
+/// runs, so a driver invoked by `git merge` or by a single-commit
+/// `git cherry-pick` sees no marker at all and gets [`VcsOperation::Unknown`].
+/// Measured, not assumed.
+///
+/// What *is* visible is `rebase-merge`/`rebase-apply`, created before the replay
+/// begins and kept for its whole length, and `sequencer/` for a multi-commit
+/// pick. Which is the asymmetry worth having: the operations that **invert**
+/// ours and theirs are exactly the ones a driver can detect, and the silent case
+/// is the one where the intuitive reading — ours is your branch — is right.
+/// Callers must still say so rather than assume it, because `Unknown` also
+/// covers "not a git repo at all".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VcsOperation {
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+    /// Not one that routes files through a merge driver, but one
+    /// [`operation_in_progress`] still has to report.
+    Bisect,
+    /// No operation in progress, not a git repo, or `git` is unavailable — the
+    /// driver run by hand, or by an agent, or under another VCS entirely.
+    Unknown,
+}
+
+impl VcsOperation {
+    /// What "ours" and "theirs" name in this operation, for a person reading a
+    /// conflict report, or `None` when it cannot be said.
+    pub fn sides(self) -> Option<&'static str> {
+        match self {
+            VcsOperation::Merge => Some(
+                "in a merge, \"ours\" is the branch you have checked out and \"theirs\" is the one being merged in",
+            ),
+            VcsOperation::Rebase => Some(
+                "in a rebase, \"ours\" is the branch you are rebasing ONTO and \"theirs\" is your own commit being replayed",
+            ),
+            VcsOperation::CherryPick => Some(
+                "in a cherry-pick, \"ours\" is the branch you have checked out and \"theirs\" is the commit being picked",
+            ),
+            VcsOperation::Revert => Some(
+                "in a revert, \"ours\" is the branch you have checked out and \"theirs\" is the reverted change",
+            ),
+            VcsOperation::Bisect | VcsOperation::Unknown => None,
+        }
+    }
+}
+
+/// Which multi-step operation git is part-way through on the working tree
+/// containing `frame_dir`, or [`VcsOperation::Unknown`] when it is between
+/// operations, not in a repo, or `git` is unavailable.
+///
+/// The markers live in this worktree's own git dir, not the common dir, so an
+/// operation in one worktree does not report from another.
+pub fn operation_kind(frame_dir: &Path) -> VcsOperation {
+    let Some(paths) = repo_paths(frame_dir) else {
+        return VcsOperation::Unknown;
+    };
+    let has = |marker: &str| paths.git_dir.join(marker).exists();
+
+    // Order matters: an interactive replay that git resolves with a merge leaves
+    // MERGE_HEAD *inside* the replay, and the replay is the answer a reader
+    // needs — it is the one that inverted the sides.
+    if has("rebase-merge") || has("rebase-apply") {
+        VcsOperation::Rebase
+    } else if has("CHERRY_PICK_HEAD") || has("sequencer") {
+        // `sequencer/` is what a multi-commit pick leaves *while* it runs;
+        // CHERRY_PICK_HEAD only appears once one has stopped on a conflict —
+        // which, for a merge driver, is after it has already been asked.
+        VcsOperation::CherryPick
+    } else if has("REVERT_HEAD") {
+        VcsOperation::Revert
+    } else if has("MERGE_HEAD") {
+        VcsOperation::Merge
+    } else if has("BISECT_LOG") {
+        VcsOperation::Bisect
+    } else {
+        VcsOperation::Unknown
+    }
+}
+
 /// The absolute git common directory for the repo containing `frame_dir`, or
 /// `None` when `frame_dir` is not inside a git repository (or `git` is
 /// unavailable). All worktrees of one clone share a single common dir, so a file
@@ -344,31 +442,14 @@ fn modified_paths(toplevel: &Path, rel_paths: &[String]) -> Option<Vec<String>> 
     git_paths(toplevel, &["diff", "--name-only"], rel_paths)
 }
 
-/// Files and directories git leaves in a working tree's git dir while a
-/// multi-step operation is unfinished. Each is removed when the operation
-/// finishes or is aborted, so their presence means "git is mid-surgery".
-const OPERATION_MARKERS: [&str; 6] = [
-    "rebase-merge",     // rebase -i, rebase --merge (directory)
-    "rebase-apply",     // rebase --apply, am (directory)
-    "MERGE_HEAD",       // merge
-    "CHERRY_PICK_HEAD", // cherry-pick
-    "REVERT_HEAD",      // revert
-    "BISECT_LOG",       // bisect
-];
-
 /// Whether git is part-way through a multi-step operation (rebase, merge,
 /// cherry-pick, revert, bisect, am) on the working tree containing `frame_dir`.
 ///
-/// The markers live in this worktree's own git dir, not the common dir, so a
-/// rebase in one worktree does not report as in progress from another.
-/// `false` when `frame_dir` is not in a repo, or git is unavailable.
+/// The same question [`operation_kind`] answers, asked by callers that only need
+/// to know whether git is mid-surgery. Sharing the one marker probe is what
+/// keeps the two from drifting into disagreeing about what counts.
 pub fn operation_in_progress(frame_dir: &Path) -> bool {
-    let Some(paths) = repo_paths(frame_dir) else {
-        return false;
-    };
-    OPERATION_MARKERS
-        .iter()
-        .any(|marker| paths.git_dir.join(marker).exists())
+    operation_kind(frame_dir) != VcsOperation::Unknown
 }
 
 /// Of `abs_paths`, those whose current contents **git itself wrote**: the path is
@@ -549,6 +630,47 @@ mod tests {
             }
             other => panic!("expected Linked, got {other:?}"),
         }
+    }
+
+    /// The markers a driver can actually see, mapped to what they mean for the
+    /// sides. Written against the files rather than by running the operations,
+    /// because what is being pinned is the mapping — and because a rebase that
+    /// stops mid-replay is not something a unit test should leave behind.
+    #[test]
+    fn operation_kind_names_the_operations_that_invert_the_sides() {
+        let tmp = TempDir::new().unwrap();
+        let Some((frame_dir, _)) = testutil::repo_with_worktree(tmp.path()) else {
+            return; // git unavailable
+        };
+        let git_dir = repo_paths(&frame_dir).unwrap().git_dir;
+
+        assert_eq!(operation_kind(&frame_dir), VcsOperation::Unknown);
+        assert!(!operation_in_progress(&frame_dir));
+        assert_eq!(VcsOperation::Unknown.sides(), None);
+
+        std::fs::create_dir_all(git_dir.join("rebase-merge")).unwrap();
+        assert_eq!(operation_kind(&frame_dir), VcsOperation::Rebase);
+        assert!(operation_in_progress(&frame_dir));
+        assert!(
+            VcsOperation::Rebase.sides().unwrap().contains("ONTO"),
+            "a rebase report has to say which side upstream is"
+        );
+        std::fs::remove_dir(git_dir.join("rebase-merge")).unwrap();
+
+        // A multi-commit pick leaves this while it runs; CHERRY_PICK_HEAD only
+        // appears once one has already stopped.
+        std::fs::create_dir_all(git_dir.join("sequencer")).unwrap();
+        assert_eq!(operation_kind(&frame_dir), VcsOperation::CherryPick);
+        std::fs::remove_dir(git_dir.join("sequencer")).unwrap();
+
+        std::fs::write(git_dir.join("MERGE_HEAD"), "x").unwrap();
+        assert_eq!(operation_kind(&frame_dir), VcsOperation::Merge);
+
+        // A replay that git resolves with a merge leaves MERGE_HEAD inside it,
+        // and the replay is the answer that matters: it is the one that
+        // inverted the sides.
+        std::fs::create_dir_all(git_dir.join("rebase-apply")).unwrap();
+        assert_eq!(operation_kind(&frame_dir), VcsOperation::Rebase);
     }
 
     #[test]

@@ -4251,6 +4251,103 @@ fn run_merge(cwd: &Path, base: &Path, ours: &Path, theirs: &Path) -> (String, St
     )
 }
 
+/// The reported failure, end to end at the surface a person actually sees.
+///
+/// A heading frame does not model, repaired on one side and replaced by a
+/// different one on the other. The driver used to write a valid frame file with
+/// no markers, say nothing at all, and **exit 0** — a success status that had
+/// just discarded one side's repair. Anyone who read the status line rather than
+/// the file would have pushed it.
+#[test]
+fn merge_halts_rather_than_silently_keeping_one_sides_headings() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    let work = tmp.path().join("work");
+    fs::create_dir_all(&work).unwrap();
+
+    let base = "# Main Track\n\n## Backlog\n\n- [ ] `M-001` Rework the reds\n\n## Done\n";
+    let base_path = work.join("base.md");
+    let ours = work.join("ours.md");
+    let theirs = work.join("theirs.md");
+    fs::write(&base_path, base).unwrap();
+    fs::write(
+        &ours,
+        base.replace(
+            "## Backlog",
+            "## OPEN:\n\n- what about the reds?\n\n## Backlog",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &theirs,
+        base.replace(
+            "## Backlog",
+            "## Notes\n\nNow `_rejected`, was `_reds`.\n\n## Backlog",
+        ),
+    )
+    .unwrap();
+
+    let (_, stderr, ok) = run_merge(tmp.path(), &base_path, &ours, &theirs);
+
+    assert!(!ok, "a merge that kept one side must not exit 0:\n{stderr}");
+    assert!(
+        stderr.contains("CONFLICT") && stderr.contains("NOT merged"),
+        "and it has to lead with the loss:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("rebase"),
+        "and say which side \"ours\" is, since a rebase inverts it:\n{stderr}"
+    );
+    assert!(
+        !fs::read_to_string(&ours).unwrap().contains("<<<<<<<"),
+        "the file still parses as frame markdown"
+    );
+
+    // Their heading is somewhere it can be got back from.
+    let listed = run_fr_ok(tmp.path(), &["recovery"]);
+    assert!(
+        listed.contains("_rejected"),
+        "their version has to be in the recovery log:\n{listed}"
+    );
+}
+
+/// A clean merge that took only the text around the tasks used to print
+/// nothing, because the message counted tasks and nothing else. Silence is the
+/// shape a silent loss hides in, so it says what came across.
+#[test]
+fn merge_says_when_only_the_text_around_the_tasks_came_across() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    let work = tmp.path().join("work");
+    fs::create_dir_all(&work).unwrap();
+
+    let base = "# Main Track\n\n## Backlog\n\n- [ ] `M-001` One\n\n## Done\n";
+    let base_path = work.join("base.md");
+    let ours = work.join("ours.md");
+    let theirs = work.join("theirs.md");
+    fs::write(&base_path, base).unwrap();
+    fs::write(&ours, base).unwrap();
+    fs::write(
+        &theirs,
+        base.replace("# Main Track", "# Main Track\n\n> owned by platform"),
+    )
+    .unwrap();
+
+    let (_, stderr, ok) = run_merge(tmp.path(), &base_path, &ours, &theirs);
+
+    assert!(ok, "nobody disagreed, so it merges:\n{stderr}");
+    assert!(
+        stderr.contains("text around the tasks"),
+        "and it says what it took:\n{stderr}"
+    );
+    assert!(
+        fs::read_to_string(&ours)
+            .unwrap()
+            .contains("owned by platform"),
+        "their text landed"
+    );
+}
+
 #[test]
 fn merge_names_the_recovery_log_it_wrote_to_by_absolute_path() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -4299,7 +4396,7 @@ fn merge_declines_to_log_into_a_project_that_does_not_hold_the_merged_file() {
         "it must say the other side went nowhere:\n{stderr}"
     );
     assert!(
-        stderr.contains("recover theirs from version control"),
+        stderr.contains("recover it from version control"),
         "and where to look instead:\n{stderr}"
     );
     assert!(
