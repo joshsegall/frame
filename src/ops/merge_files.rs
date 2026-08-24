@@ -1412,20 +1412,54 @@ mod tests {
         assert!(merged.contains("note: theirs"), "{merged}");
     }
 
-    /// `BAC-b125` / `BAC-b150`: both appended to the note, at the same point,
-    /// in different words. **This must still conflict** — the note is one opaque
+    /// A multi-line note, in the block form `doc/format.md` documents: `note:`
+    /// alone on its line, the body indented under it. That form is one
+    /// `Metadata::Note` holding the whole body, which is what makes the note a
+    /// single field.
+    ///
+    /// Worth spelling out rather than writing inline, because the *other* shape
+    /// — text on the `note:` line **and** indented lines under it — is not a
+    /// note at all: the continuation lines are content the parser cannot
+    /// attribute, and they travel as `Task::trailing_lines`. A test written that
+    /// way passes for the wrong reason, exercising the stranded-line field
+    /// instead of the note.
+    fn block_note(body: &[&str]) -> String {
+        let mut text = "# Main\n\n## Backlog\n\n- [ ] `BAC-1` Task\n  - note:\n".to_string();
+        for line in body {
+            text.push_str(&format!("    {line}\n"));
+        }
+        text.push_str("\n## Done\n");
+        text
+    }
+
+    /// `BAC-b125` / `BAC-b150`: both appended to the note, at the same point, in
+    /// different words. **This must still conflict** — the note is one opaque
     /// value, and two writers disagreeing inside it is the case no automatic
     /// answer is right for.
     #[test]
     fn two_notes_appended_at_once_still_conflict() {
-        let with_tail = |tail: &str| {
-            format!(
-                "# Main\n\n## Backlog\n\n- [ ] `BAC-1` Task\n  - note: shared history\n{tail}\n## Done\n"
-            )
-        };
-        let base = with_tail("");
-        let ours = with_tail("    ours found it\n");
-        let theirs = with_tail("    theirs found it\n");
+        let base = block_note(&["shared history"]);
+        let ours = block_note(&["shared history", "ours found it"]);
+        let theirs = block_note(&["shared history", "theirs found it"]);
+
+        let (_, report) = merge_track_text(&base, &ours, &theirs, STAMP);
+        assert_eq!(report.conflicts.len(), 1, "{:?}", report.conflicts);
+        assert_eq!(report.conflicts[0].reason, ConflictReason::BothEdited);
+    }
+
+    /// The case field granularity does **not** reach, pinned so the limit is a
+    /// stated fact rather than something rediscovered later: two sides editing
+    /// one note in line ranges nowhere near each other. A plain three-way line
+    /// merge resolves this; the note is one value, so frame conflicts.
+    ///
+    /// It is the shape a dated-episode note accumulates — appends at the tail
+    /// against an edit far above — and it is what would have to change for the
+    /// note to merge. Flip this test when it does.
+    #[test]
+    fn a_note_both_sides_edited_far_apart_conflicts_for_now() {
+        let base = block_note(&["intro", "middle", "tail"]);
+        let ours = block_note(&["intro", "middle", "tail", "appended by us"]);
+        let theirs = block_note(&["intro, corrected", "middle", "tail"]);
 
         let (_, report) = merge_track_text(&base, &ours, &theirs, STAMP);
         assert_eq!(report.conflicts.len(), 1, "{:?}", report.conflicts);
