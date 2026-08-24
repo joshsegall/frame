@@ -126,6 +126,11 @@ pub struct MergeReport {
     /// no task: the surrounding text, or an unaccounted loss. Never empty
     /// without the caller halting.
     pub conflicts: Vec<Conflict>,
+    /// Lines of the other side that a field-level merge replaced rather than
+    /// dropped — see [`reconcile::Trace::superseded`]. Read only by
+    /// [`unaccounted_additions`], which would otherwise report every
+    /// field-merged task as a defect.
+    pub superseded: Vec<String>,
 }
 
 impl MergeReport {
@@ -243,6 +248,7 @@ pub fn merge_track_text(
             deleted: result.deleted,
             took_their_shell: result.took_their_shell,
             conflicts: result.conflicts,
+            superseded: result.superseded,
         },
     )
 }
@@ -339,7 +345,7 @@ pub fn merge_archive_text(
     let before: std::collections::HashSet<String> =
         ours.tasks.iter().map(reconcile::task_key).collect();
 
-    let (merged, mut conflicts) =
+    let (merged, mut trace) =
         reconcile::reconcile_archive_tasks(&base.tasks, &ours.tasks, &theirs.tasks);
 
     // Counted against what the file held, not per decided key: for an archive
@@ -369,7 +375,7 @@ pub fn merge_archive_text(
         ours.header = theirs.header.clone();
         ours.trailing = theirs.trailing.clone();
     } else if choice == reconcile::ShellChoice::Diverged {
-        conflicts.push(Conflict {
+        trace.conflicts.push(Conflict {
             key: reconcile::SURROUNDING_TEXT_KEY.to_string(),
             reason: ConflictReason::SurroundingTextDiverged,
             theirs: shell(&theirs),
@@ -383,7 +389,8 @@ pub fn merge_archive_text(
             took_theirs,
             deleted,
             took_their_shell,
-            conflicts,
+            conflicts: trace.conflicts,
+            superseded: trace.superseded,
         },
     )
 }
@@ -409,6 +416,9 @@ pub fn merge_inbox_text(base: &str, ours: &str, theirs: &str) -> (String, MergeR
             // multiset, so neither side's lines are ever the ones set aside.
             took_their_shell: false,
             conflicts: Vec::new(),
+            // The inbox merges by content as a multiset and has no fields to
+            // merge, so nothing is ever superseded there.
+            superseded: Vec::new(),
         },
     )
 }
@@ -427,7 +437,7 @@ pub fn merge_text(
     };
 
     if report.conflicts.is_empty() {
-        let lost = unaccounted_additions(base, theirs, &merged);
+        let lost = unaccounted_additions(base, theirs, &merged, &report.superseded);
         if !lost.is_empty() {
             report.conflicts.push(Conflict {
                 key: reconcile::UNACCOUNTED_KEY.to_string(),
@@ -468,7 +478,27 @@ pub fn merge_text(
 /// Whitespace-normalized, blanks dropped. Blank lines are moved around by tasks
 /// and by the serializer, and a line somebody respaced by hand is not a line
 /// anybody added.
-fn unaccounted_additions(base: &str, theirs: &str, merged: &str) -> Vec<String> {
+///
+/// # Why `superseded` has to exist
+///
+/// The premise above — an addition of theirs that vanished had no decision
+/// behind it — held exactly while a task was the unit of decision: the result
+/// took one side's task lines verbatim or the other's. A **field-merged** task
+/// breaks it honestly. Its task line is synthesized from both sides, so theirs'
+/// version of that line is absent from the result by decision, and reading the
+/// merge line by line cannot see the difference between that and a loss.
+///
+/// So the merge names the lines it superseded and this subtracts them. That is
+/// a hole in the audit only if the merge can supersede a line without deciding
+/// about it, which is what [`reconcile::merge_fields`]'s exhaustive `Task`
+/// destructuring rules out: it decides every field or it conflicts, and a
+/// conflict does not reach here at all.
+fn unaccounted_additions(
+    base: &str,
+    theirs: &str,
+    merged: &str,
+    superseded: &[String],
+) -> Vec<String> {
     fn normalize(line: &str) -> String {
         line.split_whitespace().collect::<Vec<_>>().join(" ")
     }
@@ -481,11 +511,19 @@ fn unaccounted_additions(base: &str, theirs: &str, merged: &str) -> Vec<String> 
 
     let base = index(base);
     let merged = index(merged);
+    let superseded: std::collections::HashSet<String> = superseded
+        .iter()
+        .map(|line| normalize(line))
+        .filter(|line| !line.is_empty())
+        .collect();
     theirs
         .lines()
         .filter(|line| {
             let normalized = normalize(line);
-            !normalized.is_empty() && !base.contains(&normalized) && !merged.contains(&normalized)
+            !normalized.is_empty()
+                && !base.contains(&normalized)
+                && !merged.contains(&normalized)
+                && !superseded.contains(&normalized)
         })
         .map(|line| line.to_string())
         .collect()
@@ -1209,13 +1247,13 @@ mod tests {
         let theirs = "# A\n\n## Note\n\nsomething they wrote\n\n## Backlog\n";
 
         assert!(
-            unaccounted_additions(base, theirs, base)
+            unaccounted_additions(base, theirs, base, &[])
                 .iter()
                 .any(|l| l.contains("something they wrote")),
             "a line theirs added and the result lacks is unaccounted for"
         );
         assert!(
-            unaccounted_additions(base, theirs, theirs).is_empty(),
+            unaccounted_additions(base, theirs, theirs, &[]).is_empty(),
             "and a result that carried it is not"
         );
     }
@@ -1240,7 +1278,7 @@ mod tests {
     fn respacing_a_line_is_not_adding_one() {
         let base = "# A\n\n## Backlog\n\n- [ ] `A-001` One\n";
         let theirs = "# A\n\n##   Backlog\n\n- [ ]  `A-001`  One\n";
-        assert!(unaccounted_additions(base, theirs, base).is_empty());
+        assert!(unaccounted_additions(base, theirs, base, &[]).is_empty());
     }
 
     /// Two ID-less archived tasks sharing a title cannot be matched across
@@ -1306,5 +1344,184 @@ mod tests {
             .filter_map(|t| t.id.as_ref().map(|i| i.to_string()))
             .collect();
         assert_eq!(order, vec!["MAI-001", "MAI-003", "MAI-005"]);
+    }
+
+    // --- Field-level conflict ---
+    //
+    // The six real conflicts a project running several concurrent writers
+    // reported, classified by which fields each side touched. Fixed cases, not
+    // property seeds: each names a shape the merge must get right, and a case
+    // that is a fixed test cannot be orphaned by a change to a generator.
+
+    /// A track with one task, built from the metadata lines given.
+    fn one_task(state: char, title: &str, meta: &[&str]) -> String {
+        let mut text = format!("# Main\n\n## Backlog\n\n- [{state}] `BAC-1` {title}\n");
+        for line in meta {
+            text.push_str(&format!("  - {line}\n"));
+        }
+        text.push_str("\n## Done\n");
+        text
+    }
+
+    /// `BAC-b243`, first shape: they edited the note, both made the *same* edit
+    /// to `ref:`. Whole-task equality already handled "both did the identical
+    /// thing"; this is one field identical and another one-sided, which it did
+    /// not, and the task conflicted for it.
+    #[test]
+    fn a_one_sided_note_and_an_identical_ref_edit_merge() {
+        let base = one_task(' ', "Task", &["ref: doc/a.md"]);
+        let ours = one_task(' ', "Task", &["ref: doc/a.md, doc/design/new.md"]);
+        let theirs = one_task(
+            ' ',
+            "Task",
+            &["ref: doc/a.md, doc/design/new.md", "note: what we found"],
+        );
+
+        let (merged, report) = merge_track_text(&base, &ours, &theirs, STAMP);
+        assert!(report.is_clean(), "{:?}", report.conflicts);
+        assert!(merged.contains("doc/design/new.md"), "{merged}");
+        assert!(merged.contains("what we found"), "{merged}");
+    }
+
+    /// `BAC-b243`, second shape: a note from us and a `ref:` from them. Two
+    /// fields, one writer each, and nothing to adjudicate between them.
+    #[test]
+    fn a_note_from_one_side_and_a_ref_from_the_other_merge() {
+        let base = one_task(' ', "Task", &["added: 2026-01-01"]);
+        let ours = one_task(' ', "Task", &["added: 2026-01-01", "note: ours"]);
+        let theirs = one_task(' ', "Task", &["added: 2026-01-01", "ref: doc/theirs.md"]);
+
+        let (merged, report) = merge_track_text(&base, &ours, &theirs, STAMP);
+        assert!(report.is_clean(), "{:?}", report.conflicts);
+        assert!(merged.contains("note: ours"), "{merged}");
+        assert!(merged.contains("doc/theirs.md"), "{merged}");
+    }
+
+    /// `SEC-b61`: we finished it — state and `resolved:` — while they wrote the
+    /// note. Three fields, no overlap.
+    #[test]
+    fn finishing_a_task_and_annotating_it_are_not_a_conflict() {
+        let base = one_task(' ', "Task", &["added: 2026-01-01"]);
+        let ours = one_task('x', "Task", &["added: 2026-01-01", "resolved: 2026-02-02"]);
+        let theirs = one_task(' ', "Task", &["added: 2026-01-01", "note: theirs"]);
+
+        let (merged, report) = merge_track_text(&base, &ours, &theirs, STAMP);
+        assert!(report.is_clean(), "{:?}", report.conflicts);
+        assert!(merged.contains("- [x]"), "our state survives:\n{merged}");
+        assert!(merged.contains("resolved: 2026-02-02"), "{merged}");
+        assert!(merged.contains("note: theirs"), "{merged}");
+    }
+
+    /// `BAC-b125` / `BAC-b150`: both appended to the note, at the same point,
+    /// in different words. **This must still conflict** — the note is one opaque
+    /// value, and two writers disagreeing inside it is the case no automatic
+    /// answer is right for.
+    #[test]
+    fn two_notes_appended_at_once_still_conflict() {
+        let with_tail = |tail: &str| {
+            format!(
+                "# Main\n\n## Backlog\n\n- [ ] `BAC-1` Task\n  - note: shared history\n{tail}\n## Done\n"
+            )
+        };
+        let base = with_tail("");
+        let ours = with_tail("    ours found it\n");
+        let theirs = with_tail("    theirs found it\n");
+
+        let (_, report) = merge_track_text(&base, &ours, &theirs, STAMP);
+        assert_eq!(report.conflicts.len(), 1, "{:?}", report.conflicts);
+        assert_eq!(report.conflicts[0].reason, ConflictReason::BothEdited);
+    }
+
+    /// Both sides removed the same path and added the same one: identical set
+    /// operations, which conflicted because the *value* differed from the
+    /// ancestor on both sides.
+    #[test]
+    fn identical_ref_set_edits_are_not_a_conflict() {
+        let base = one_task(' ', "Task", &["ref: doc/investigations/BAC-241.md"]);
+        let side = one_task(' ', "Task", &["ref: doc/design/effects.md"]);
+
+        let (merged, report) = merge_track_text(&base, &side, &side, STAMP);
+        assert!(report.is_clean(), "{:?}", report.conflicts);
+        assert!(merged.contains("doc/design/effects.md"), "{merged}");
+        assert!(!merged.contains("BAC-241"), "the removal holds:\n{merged}");
+    }
+
+    /// Each side added a different path. A `ref:` is a set of file paths, so two
+    /// writers adding to it have not disagreed about anything.
+    #[test]
+    fn refs_added_by_both_sides_are_unioned() {
+        let base = one_task(' ', "Task", &["ref: doc/a.md"]);
+        let ours = one_task(' ', "Task", &["ref: doc/a.md, doc/ours.md"]);
+        let theirs = one_task(' ', "Task", &["ref: doc/a.md, doc/theirs.md"]);
+
+        let (merged, report) = merge_track_text(&base, &ours, &theirs, STAMP);
+        assert!(report.is_clean(), "{:?}", report.conflicts);
+        for path in ["doc/a.md", "doc/ours.md", "doc/theirs.md"] {
+            assert!(merged.contains(path), "{path} missing from:\n{merged}");
+        }
+    }
+
+    /// A removal on one side is honoured against an addition on the other. The
+    /// alternative — a union that resurrects what somebody deleted — is the
+    /// failure a set merge is most likely to have.
+    #[test]
+    fn a_removed_ref_stays_removed_when_the_other_side_adds_one() {
+        let base = one_task(' ', "Task", &["ref: doc/a.md, doc/b.md"]);
+        let ours = one_task(' ', "Task", &["ref: doc/a.md, doc/b.md, doc/ours.md"]);
+        let theirs = one_task(' ', "Task", &["ref: doc/a.md"]);
+
+        let (merged, report) = merge_track_text(&base, &ours, &theirs, STAMP);
+        assert!(report.is_clean(), "{:?}", report.conflicts);
+        assert!(merged.contains("doc/a.md"), "{merged}");
+        assert!(merged.contains("doc/ours.md"), "{merged}");
+        assert!(
+            !merged.contains("doc/b.md"),
+            "their removal holds:\n{merged}"
+        );
+    }
+
+    /// Tags ride on the task line, which the P10 property excuses when both
+    /// sides changed it — so the one case the property cannot see gets a fixed
+    /// test instead. Two sides tagging one task differently is a divergent edit
+    /// to one field and still conflicts.
+    #[test]
+    fn tags_changed_by_both_sides_conflict_and_ours_survives() {
+        let base = one_task(' ', "Task #core", &[]);
+        let ours = one_task(' ', "Task #core #ours", &[]);
+        let theirs = one_task(' ', "Task #core #theirs", &[]);
+
+        let (merged, report) = merge_track_text(&base, &ours, &theirs, STAMP);
+        assert_eq!(report.conflicts.len(), 1, "{:?}", report.conflicts);
+        assert!(merged.contains("#ours"), "{merged}");
+    }
+
+    /// A title from one side and a state from the other rebuild the task line
+    /// from both. The merged line is neither side's, which is what
+    /// `Trace::superseded` exists to tell the audit — so this also checks the
+    /// audit stayed quiet rather than reporting the merge as a defect.
+    #[test]
+    fn a_title_and_a_state_recombine_into_one_task_line() {
+        let base = one_task(' ', "One", &["added: 2026-01-01"]);
+        let ours = one_task(' ', "Retitled", &["added: 2026-01-01"]);
+        let theirs = one_task('x', "One", &["added: 2026-01-01"]);
+
+        let (merged, report) = merge_text(FileKind::Track, &base, &ours, &theirs, STAMP);
+        assert!(report.is_clean(), "{:?}", report.conflicts);
+        assert!(merged.contains("- [x] `BAC-1` Retitled"), "{merged}");
+    }
+
+    /// Two sides moving one task to *different* sections is a divergent edit to
+    /// the one field `merge_fields` does not hold — the section — and
+    /// `section_for` prefers ours, so without an explicit check the two moves
+    /// would compose silently into ours.
+    #[test]
+    fn two_different_section_moves_still_conflict() {
+        let base = "# Main\n\n## Backlog\n\n- [ ] `BAC-1` Task\n\n## Parked\n\n## Done\n";
+        let ours = "# Main\n\n## Backlog\n\n## Parked\n\n- [~] `BAC-1` Task\n\n## Done\n";
+        let theirs = "# Main\n\n## Backlog\n\n## Parked\n\n## Done\n\n- [x] `BAC-1` Task\n";
+
+        let (_, report) = merge_track_text(base, ours, theirs, STAMP);
+        assert_eq!(report.conflicts.len(), 1, "{:?}", report.conflicts);
+        assert_eq!(report.conflicts[0].reason, ConflictReason::BothEdited);
     }
 }

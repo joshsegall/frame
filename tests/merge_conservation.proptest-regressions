@@ -27,3 +27,4 @@
 #     own; they are kept because they still exercise the generator.
 cc 6b91dbc74b71cd8781e9914e4e9d09fda523fe570471ba21c394c93cd7f5e916 # found: an archive header only theirs changed — pinned by `an_archive_header_only_they_changed_is_taken`
 cc c40ad86534b55fd34a155e382df2e060e3f5ce3e05636fc11e8d377ec69cbab3 # found: [AddHeading(0)] on theirs alone — pinned by `their_change_is_taken_when_we_did_not_touch_it` and `a_heading_frame_does_not_model_is_not_ours_to_discard`
+cc f67f33002286a6c13e18ad9f9415660f4fc7eb89a4ec816e4a2c42c02be67dea # shrinks to our_edits = [RetitleTask(0, 0)], their_edits = [FinishTask(0)]

@@ -26,12 +26,23 @@
 //! That is the whole property:
 //!
 //! > On a merge that reports no conflict, every non-blank line either side added
-//! > since the ancestor is in the merged file.
+//! > since the ancestor is in the merged file — except a **task line** the merge
+//! > rebuilt from both sides' fields.
 //!
 //! **A conflict excuses it, and has to.** A conflicted task is *supposed* to
 //! lose one side's lines — that is what the recovery log and the non-zero exit
 //! are for. Auditing a conflicted merge would report it working as designed.
 //! Silence is the failure mode, so silence is what this watches.
+//!
+//! **The exception is what field-level conflict costs this property.** A merge
+//! decides per field, so a task both sides edited comes out with a title from
+//! one and a state from the other, and its `- [ ] …` line is then neither
+//! side's. A reading at the level of lines cannot distinguish that from a loss,
+//! so it is excused — narrowly, by [`dropped_additions`]: only the task line,
+//! only where the other side changed that line too, only where the task is still
+//! in the result. Every metadata line stands on its own, so a dropped
+//! `resolved:`, `ref:` or `note:` still fails here, and so does a task that went
+//! missing outright.
 //!
 //! # Why it generates edits rather than text
 //!
@@ -205,13 +216,63 @@ fn audit_fired(report: &MergeReport) -> bool {
         .any(|c| c.reason == ConflictReason::UnaccountedLoss)
 }
 
-/// Every non-blank line `side` added since `base` that is missing from `merged`.
-fn dropped_additions(base: &str, side: &str, merged: &str) -> Vec<String> {
-    let base = lines(base);
-    let merged = lines(merged);
+/// The `- [ ] `ID` Title #tag` line for `id`, normalized, or `None`.
+///
+/// Text-only on purpose. This file is the independent statement of the property;
+/// re-using the merge's own indexing to decide what it may drop would make the
+/// two agree by construction, which is the failure mode a conservation test has.
+fn task_line(text: &str, id: &str) -> Option<String> {
+    let needle = format!("`{id}`");
+    text.lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .find(|line| line.starts_with("- [") && line.contains(&needle))
+}
+
+/// The task id a `- [ ] `ID` …` line names, if it is a task line at all.
+fn id_on(line: &str) -> Option<String> {
+    if !line.starts_with("- [") {
+        return None;
+    }
+    let (_, rest) = line.split_once('`')?;
+    let (id, _) = rest.split_once('`')?;
+    Some(id.to_string())
+}
+
+/// Every non-blank line `side` added since `base` that is missing from `merged`
+/// **and that the merge did not decide about**.
+///
+/// # The one exception, and why it is not a hole
+///
+/// A merge conflicts per *field*, not per task, so a task both sides edited
+/// comes out carrying a title from one and a state from the other. Its task line
+/// is then neither side's — synthesized, by decision — and a reading at the
+/// level of lines cannot tell that apart from a loss. So a **task line** is
+/// excused when all three of these hold: the other side changed that same task
+/// line too, so there was something to recombine; and the task is still in the
+/// merged result, so nothing was dropped, only rewritten.
+///
+/// Deliberately narrow. Only the task line is excusable, because only the fields
+/// it carries — state, id, title, tags — can be recombined into one line; every
+/// metadata line stands or falls on its own, and a merge that drops a
+/// `resolved:` or a `ref:` still fails here. And it is excused only where the
+/// *other* side moved too: a line of theirs vanishing while ours sat unchanged
+/// is a loss whatever else is true.
+fn dropped_additions(base: &str, side: &str, other: &str, merged: &str) -> Vec<String> {
+    let base_lines = lines(base);
+    let merged_lines = lines(merged);
     lines(side)
         .into_iter()
-        .filter(|line| !base.contains(line) && !merged.contains(line))
+        .filter(|line| !base_lines.contains(line) && !merged_lines.contains(line))
+        .filter(|line| {
+            let Some(id) = id_on(line) else {
+                return true;
+            };
+            let other_moved_too = match (task_line(base, &id), task_line(other, &id)) {
+                (Some(b), Some(o)) => b != o,
+                _ => false,
+            };
+            !(other_moved_too && task_line(merged, &id).is_some())
+        })
         .collect()
 }
 
@@ -235,14 +296,14 @@ proptest! {
         prop_assert!(!audit_fired(&report), "the merge's own audit fired:\n{merged}");
         prop_assume!(report.is_clean());
 
-        let lost_theirs = dropped_additions(ANCESTOR, &theirs, &merged);
+        let lost_theirs = dropped_additions(ANCESTOR, &theirs, &ours, &merged);
         prop_assert!(
             lost_theirs.is_empty(),
             "their additions vanished with no conflict: {lost_theirs:?}\n\
              --- ours ---\n{ours}\n--- theirs ---\n{theirs}\n--- merged ---\n{merged}"
         );
 
-        let lost_ours = dropped_additions(ANCESTOR, &ours, &merged);
+        let lost_ours = dropped_additions(ANCESTOR, &ours, &theirs, &merged);
         prop_assert!(
             lost_ours.is_empty(),
             "our additions vanished with no conflict: {lost_ours:?}\n\
@@ -277,8 +338,8 @@ proptest! {
         prop_assert!(!audit_fired(&report), "the merge's own audit fired:\n{merged}");
         prop_assume!(report.is_clean());
 
-        for (label, side) in [("theirs", &theirs), ("ours", &ours)] {
-            let lost = dropped_additions(base, side, &merged);
+        for (label, side, other) in [("theirs", &theirs, &ours), ("ours", &ours, &theirs)] {
+            let lost = dropped_additions(base, side, other, &merged);
             prop_assert!(
                 lost.is_empty(),
                 "{label} additions vanished with no conflict: {lost:?}\n--- merged ---\n{merged}"

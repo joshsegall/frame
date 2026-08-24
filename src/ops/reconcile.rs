@@ -61,7 +61,7 @@ use indexmap::IndexMap;
 
 use crate::model::config::{ProjectConfig, TrackConfig};
 use crate::model::inbox::{Inbox, InboxItem};
-use crate::model::task::Task;
+use crate::model::task::{Metadata, Task};
 use crate::model::track::{SectionKind, Track, TrackNode};
 
 /// The conflict key for the text *around* a file's tasks — see
@@ -160,11 +160,39 @@ impl ConflictReason {
     }
 }
 
+/// What a merge accumulates besides tasks: what it could not decide, and what it
+/// decided *about* in a way a line-level reading cannot see.
+///
+/// Threaded through the recursion the way `conflicts` alone used to be, because
+/// the two facts are produced at the same points and separating them is how one
+/// of them comes to be forgotten at a call site.
+#[derive(Debug, Default)]
+pub struct Trace {
+    pub conflicts: Vec<Conflict>,
+    /// Lines of the *other* side that a field-level merge deliberately replaced.
+    ///
+    /// [`crate::ops::merge_files`]'s audit reads a merge at the level of lines
+    /// and asks whether an addition of theirs vanished **without a decision
+    /// behind it**. A field-merged task breaks that reading through no fault of
+    /// either: its task line is synthesized from both sides, so theirs' version
+    /// of that line is legitimately absent from the result, and the audit would
+    /// report a correct merge as a defect. These are exactly the lines a
+    /// decision was made about.
+    ///
+    /// It is not an escape hatch, and the thing that stops it becoming one is in
+    /// [`merge_fields`]: it destructures a `Task` exhaustively, so it decides
+    /// about every field or fails the build. A field merge that reached this
+    /// list decided about all of them or it would have conflicted instead.
+    pub superseded: Vec<String>,
+}
+
 /// The result of merging one track.
 #[derive(Debug)]
 pub struct Reconciled {
     pub track: Track,
     pub conflicts: Vec<Conflict>,
+    /// See [`Trace::superseded`].
+    pub superseded: Vec<String>,
     /// Tasks whose version came from the other writer.
     pub took_theirs: usize,
     /// Tasks removed because both sides agree they are gone.
@@ -291,7 +319,7 @@ pub fn reconcile_track(base: &Track, ours: &Track, theirs: &Track) -> Reconciled
         }
     }
 
-    let mut conflicts = Vec::new();
+    let mut trace = Trace::default();
     let mut took_theirs = 0usize;
     let mut deleted = 0usize;
     // Resolved tasks, grouped by the section they belong in.
@@ -309,7 +337,7 @@ pub fn reconcile_track(base: &Track, ours: &Track, theirs: &Track) -> Reconciled
                 (Some(o), t) => {
                     resolved.push((o.section, o.task.clone()));
                     if let Some(t) = t {
-                        conflicts.push(Conflict {
+                        trace.conflicts.push(Conflict {
                             key: key.clone(),
                             reason: ConflictReason::AmbiguousTitle,
                             theirs: own_lines(&t.task),
@@ -339,12 +367,7 @@ pub fn reconcile_track(base: &Track, ours: &Track, theirs: &Track) -> Reconciled
                 let o = o.expect("Outcome::Ours requires our side");
                 resolved.push((
                     section_for(b, Some(o), t),
-                    merged_task(
-                        &o.task,
-                        b.map(|e| &e.task),
-                        t.map(|e| &e.task),
-                        &mut conflicts,
-                    ),
+                    merged_task(&o.task, b.map(|e| &e.task), t.map(|e| &e.task), &mut trace),
                 ));
             }
             Outcome::Theirs => {
@@ -352,12 +375,22 @@ pub fn reconcile_track(base: &Track, ours: &Track, theirs: &Track) -> Reconciled
                 took_theirs += 1;
                 resolved.push((
                     section_for(b, o, Some(t)),
-                    merged_task(
-                        &t.task,
-                        b.map(|e| &e.task),
-                        o.map(|e| &e.task),
-                        &mut conflicts,
-                    ),
+                    merged_task(&t.task, b.map(|e| &e.task), o.map(|e| &e.task), &mut trace),
+                ));
+            }
+            Outcome::Merged(task) => {
+                let o = o.expect("Outcome::Merged requires our side");
+                let t = t.expect("Outcome::Merged requires their side");
+                // Counted as taken from them, because it was: something of
+                // theirs is in this task that was not in ours. The message this
+                // drives says a task came across, which is the fact a reader
+                // needs — that it arrived a field at a time rather than whole is
+                // not a distinction worth a second counter.
+                took_theirs += 1;
+                trace.superseded.extend(own_lines(&t.task));
+                resolved.push((
+                    section_for(b, Some(o), Some(t)),
+                    merged_task(&task, b.map(|e| &e.task), Some(&t.task), &mut trace),
                 ));
             }
             Outcome::Conflict(reason) => {
@@ -365,18 +398,18 @@ pub fn reconcile_track(base: &Track, ours: &Track, theirs: &Track) -> Reconciled
                 // deleted-by-us versus edited-by-them, and theirs is taken.
                 match (o, t) {
                     (Some(o), Some(t)) => {
-                        conflicts.push(Conflict {
+                        trace.conflicts.push(Conflict {
                             key: key.clone(),
                             reason,
                             theirs: own_lines(&t.task),
                         });
                         resolved.push((
                             section_for(b, Some(o), Some(t)),
-                            merged_task(&o.task, b.map(|e| &e.task), Some(&t.task), &mut conflicts),
+                            merged_task(&o.task, b.map(|e| &e.task), Some(&t.task), &mut trace),
                         ));
                     }
                     (Some(o), None) => {
-                        conflicts.push(Conflict {
+                        trace.conflicts.push(Conflict {
                             key: key.clone(),
                             reason,
                             theirs: Vec::new(),
@@ -402,7 +435,7 @@ pub fn reconcile_track(base: &Track, ours: &Track, theirs: &Track) -> Reconciled
     let their_shell = shell_signature(&track_shell(theirs));
     let choice = decide_shell(&base_shell, &our_shell, &their_shell);
     if choice == ShellChoice::Diverged {
-        conflicts.push(Conflict {
+        trace.conflicts.push(Conflict {
             key: SURROUNDING_TEXT_KEY.to_string(),
             reason: ConflictReason::SurroundingTextDiverged,
             theirs: track_shell(theirs),
@@ -422,7 +455,8 @@ pub fn reconcile_track(base: &Track, ours: &Track, theirs: &Track) -> Reconciled
 
     Reconciled {
         track,
-        conflicts,
+        conflicts: trace.conflicts,
+        superseded: trace.superseded,
         took_theirs,
         deleted,
         took_their_shell: choice == ShellChoice::Theirs,
@@ -1099,6 +1133,14 @@ enum Outcome {
     Ours,
     Theirs,
     Delete,
+    /// Both sides changed the task, and the changes **composed**: no field was
+    /// changed divergently by both. Carries the merged task, which is neither
+    /// side's — see [`merge_fields`].
+    ///
+    /// Boxed because a `Task` is large and every other variant is a word; an
+    /// un-boxed one makes the whole enum the size of a task, on a value returned
+    /// once per key per merge.
+    Merged(Box<Task>),
     Conflict(ConflictReason),
 }
 
@@ -1138,21 +1180,302 @@ fn decide(b: Option<&Entry>, o: Option<&Entry>, t: Option<&Entry>) -> Outcome {
             }
         }
 
-        // Present all round: whoever changed it wins, and if both did they must
-        // agree.
+        // Present all round: whoever changed it wins, and if both did, the two
+        // edits have to compose field by field.
         (Some(b), Some(o), Some(t)) => match (!same(b, o), !same(b, t)) {
             (false, false) => Outcome::Ours,
             (true, false) => Outcome::Ours,
             (false, true) => Outcome::Theirs,
             (true, true) => {
                 if same(o, t) {
-                    Outcome::Ours
+                    return Outcome::Ours;
+                }
+                // Both changed it. That is not yet a conflict: a task is a
+                // record of independent fields, and two writers who touched
+                // different ones have not disagreed about anything.
+                let merged = merge_fields(&b.task, &o.task, &t.task);
+                // The section is a field too, decided separately by
+                // `section_for` — which prefers ours when both moved the task.
+                // Without this, two sides moving one task to *different*
+                // sections would compose silently into ours.
+                let section_diverged =
+                    o.section != b.section && t.section != b.section && o.section != t.section;
+                if merged.conflicted.is_empty() && !section_diverged {
+                    Outcome::Merged(Box::new(merged.task))
                 } else {
                     Outcome::Conflict(ConflictReason::BothEdited)
                 }
             }
         },
     }
+}
+
+// ---------------------------------------------------------------------------
+// Merging one task, field by field
+// ---------------------------------------------------------------------------
+
+/// One task merged three ways, and what could not be decided.
+struct FieldMerge {
+    /// Ours, with every field only they changed taken from them, and every
+    /// set-valued field unioned. Marked dirty: it is neither side's text, so it
+    /// cannot be re-emitted from either side's stored source lines.
+    task: Task,
+    /// The fields both sides changed, differently. Empty means the two edits
+    /// composed and [`Self::task`] holds both of them.
+    conflicted: Vec<&'static str>,
+}
+
+/// Merge two versions of one task **field by field**.
+///
+/// # Why a task is not the unit of conflict
+///
+/// It used to be. [`same_content`] compared state, title, tags, the whole
+/// metadata vec and the stranded-line fields as one value, so any two divergent
+/// edits to one task conflicted however unrelated they were — a state change on
+/// one side and a `ref:` on the other, a note appended by them and a `resolved:`
+/// filled by us. In a sample of real conflicts from a project running several
+/// concurrent writers, two thirds were of exactly that shape, and the merge had
+/// nothing to adjudicate in any of them.
+///
+/// A task is a record of independent fields. Each gets the ordinary three-way
+/// rule on its own: changed on one side only, take that side; changed
+/// identically on both, take it; changed divergently, conflict. Only a field
+/// that actually diverged makes the *task* conflict.
+///
+/// This is not a new idea in this module — [`reconcile_config`] has merged
+/// `project.toml` per field since it was written. The two halves of one file
+/// simply disagreed about what a merge unit is.
+///
+/// # `ref:` and `spec:` are sets, and so never conflict
+///
+/// Both are documented as comma-separated file paths and nothing else, and are
+/// already `Vec<String>` in the model. Two sides each adding paths is a union,
+/// not a disagreement; a removal is honoured against the other side's additions.
+/// There is no "edit an element" for a set — an edit is a removal and an
+/// addition — so there is no divergence left for these two to have. That alone
+/// resolves conflicts where both sides made the *identical* edit, which is what
+/// a shared investigation graduating to a new path looks like from two clones.
+///
+/// A side effect worth knowing: a task carrying two `ref:` lines comes out of a
+/// merged field with one. Frame's own writes never produce two, the serializer
+/// emits the field as a single line either way, and the alternative is matching
+/// paths to lines they were never attached to.
+///
+/// # `note:` is still one opaque value
+///
+/// It is the field both sides touch most, and merging it properly means a
+/// three-way merge of its *lines* — a different piece of work, with a different
+/// failure mode (text nobody wrote, landing mid-rebase). Until then a note both
+/// sides changed differently conflicts, exactly as it did before, and the rest
+/// of the task still merges around it.
+///
+/// # Unknown metadata keys ride with the note
+///
+/// An unrecognised `key: value` line parses to a [`Metadata::Note`] carrying its
+/// own text, so `Metadata::key` calls it `"note"` and it merges as part of that
+/// group. Conservative in the right direction: it can conflict where a finer
+/// rule would have merged, never the reverse.
+fn merge_fields(base: &Task, ours: &Task, theirs: &Task) -> FieldMerge {
+    // Destructured rather than read field by field, and the bindings are then
+    // ignored: this is a **build-time guard**, not code. A field merge is only
+    // safe to report as clean because it decided about every field of the task —
+    // that is the whole basis on which `Trace::superseded` may subtract lines
+    // from the merge's own audit. A new field on `Task` that nobody thought
+    // about here would be silently taken from ours and the audit would be told
+    // to look away from the evidence. So adding one fails the build instead.
+    //
+    // The four that are deliberately not fields of the merge:
+    // `subtasks` recurse in their own right through `merged_task`; `depth` is
+    // positional and follows the task; `source_text` and `dirty` are carried
+    // source rather than content, and this task gets neither of them anyway.
+    let Task {
+        state: _,
+        id: _,
+        title: _,
+        tags: _,
+        metadata: _,
+        subtasks: _,
+        depth: _,
+        leading_lines: _,
+        trailing_lines: _,
+        source_text: _,
+        dirty: _,
+    } = ours;
+
+    let mut task = ours.clone();
+    let mut conflicted: Vec<&'static str> = Vec::new();
+
+    macro_rules! scalar {
+        ($name:literal, $field:ident) => {
+            match pick(&base.$field, &ours.$field, &theirs.$field) {
+                Some(value) => task.$field = value,
+                None => conflicted.push($name),
+            }
+        };
+    }
+
+    scalar!("state", state);
+    // Invariant in practice — the two sides were matched *by* id, so a `#` key
+    // has the same one on both and a `~` key has none on either. Merged anyway
+    // rather than assumed, because the assumption is the kind that stops being
+    // true when the key scheme changes and says nothing when it does.
+    scalar!("id", id);
+    scalar!("title", title);
+    // A set in spirit, and merged as one only once the machinery below has a
+    // second customer for that rule. Today two sides tagging one task
+    // differently conflicts, as it always has.
+    scalar!("tags", tags);
+    scalar!("leading_lines", leading_lines);
+    scalar!("trailing_lines", trailing_lines);
+
+    let (metadata, mut metadata_conflicts) =
+        merge_metadata(&base.metadata, &ours.metadata, &theirs.metadata);
+    task.metadata = metadata;
+    conflicted.append(&mut metadata_conflicts);
+
+    // Neither side's stored source lines describe this task any more, so it has
+    // to be re-emitted from the model. The serializer writes a dirty task in
+    // canonical field order, which is why a field-merged task can differ from
+    // both sides in spacing and field order as well as in content.
+    task.dirty = true;
+    task.source_text = None;
+
+    FieldMerge { task, conflicted }
+}
+
+/// The ordinary three-way rule for one scalar field. `None` is a divergence.
+fn pick<T: PartialEq + Clone>(base: &T, ours: &T, theirs: &T) -> Option<T> {
+    if ours == theirs {
+        Some(ours.clone())
+    } else if ours == base {
+        Some(theirs.clone())
+    } else if theirs == base {
+        Some(ours.clone())
+    } else {
+        None
+    }
+}
+
+/// Merge a task's metadata, one key at a time.
+///
+/// Entries are grouped by [`Metadata::key`] and the whole run of a key is one
+/// field, so a task holding several notes merges them together rather than
+/// pairing them off by position — position is not identity, and two notes that
+/// happen to be second on each side are not the same note.
+///
+/// Key order follows ours, with keys only the other two carry appended. It
+/// barely matters: a merged task is dirty, and the serializer emits a dirty
+/// task's fields in `Metadata::rank` order regardless. What it does preserve is
+/// the relative order of entries *sharing* a key, which is text somebody wrote.
+fn merge_metadata(
+    base: &[Metadata],
+    ours: &[Metadata],
+    theirs: &[Metadata],
+) -> (Vec<Metadata>, Vec<&'static str>) {
+    let bg = group_metadata(base);
+    let og = group_metadata(ours);
+    let tg = group_metadata(theirs);
+
+    let mut out = Vec::new();
+    let mut conflicted = Vec::new();
+
+    let empty: Vec<Metadata> = Vec::new();
+    // Ours' key order, then theirs' new keys, then — last — a key only the
+    // ancestor had, which is one both sides deleted. Walking that one keeps the
+    // deletion a decision rather than an omission.
+    let mut keys: Vec<&'static str> = Vec::new();
+    for key in og.keys().chain(tg.keys()).chain(bg.keys()) {
+        if !keys.contains(key) {
+            keys.push(key);
+        }
+    }
+
+    for key in keys {
+        let b = bg.get(key).unwrap_or(&empty);
+        let o = og.get(key).unwrap_or(&empty);
+        let t = tg.get(key).unwrap_or(&empty);
+
+        if key == "ref" || key == "spec" {
+            let merged = merge_path_field(key, b, o, t);
+            out.extend(merged);
+            continue;
+        }
+
+        match pick(b, o, t) {
+            Some(entries) => out.extend(entries),
+            None => {
+                conflicted.push(key);
+                // Ours is kept for the conflicted field, matching what the
+                // task-level conflict has always done — the caller turns this
+                // into a `Conflict` and puts theirs in the recovery log.
+                out.extend(o.iter().cloned());
+            }
+        }
+    }
+
+    (out, conflicted)
+}
+
+/// The union rule for `ref:` / `spec:`.
+///
+/// Ours in ours' order, minus anything the ancestor had that they removed, plus
+/// their additions in theirs' order. Never conflicts; see [`merge_fields`].
+fn merge_path_field(
+    key: &'static str,
+    base: &[Metadata],
+    ours: &[Metadata],
+    theirs: &[Metadata],
+) -> Option<Metadata> {
+    let flatten = |entries: &[Metadata]| -> Vec<String> {
+        let mut paths: Vec<String> = Vec::new();
+        for entry in entries {
+            for path in path_values(entry) {
+                if !paths.contains(path) {
+                    paths.push(path.clone());
+                }
+            }
+        }
+        paths
+    };
+
+    let b = flatten(base);
+    let o = flatten(ours);
+    let t = flatten(theirs);
+
+    let mut merged: Vec<String> = o
+        .iter()
+        .filter(|p| !(b.contains(p) && !t.contains(p)))
+        .cloned()
+        .collect();
+    for path in &t {
+        if !b.contains(path) && !merged.contains(path) {
+            merged.push(path.clone());
+        }
+    }
+
+    if merged.is_empty() {
+        return None;
+    }
+    Some(match key {
+        "ref" => Metadata::Ref(merged),
+        _ => Metadata::Spec(merged),
+    })
+}
+
+fn path_values(entry: &Metadata) -> &[String] {
+    match entry {
+        Metadata::Ref(paths) | Metadata::Spec(paths) => paths,
+        _ => &[],
+    }
+}
+
+/// A task's metadata grouped by key, in first-seen order.
+fn group_metadata(entries: &[Metadata]) -> IndexMap<&'static str, Vec<Metadata>> {
+    let mut groups: IndexMap<&'static str, Vec<Metadata>> = IndexMap::new();
+    for entry in entries {
+        groups.entry(entry.key()).or_default().push(entry.clone());
+    }
+    groups
 }
 
 /// Which section the task ends up in.
@@ -1181,7 +1504,7 @@ fn merged_task(
     winner: &Task,
     base: Option<&Task>,
     other: Option<&Task>,
-    conflicts: &mut Vec<Conflict>,
+    trace: &mut Trace,
 ) -> Task {
     let mut out = winner.clone();
     let Some(other) = other else {
@@ -1194,13 +1517,13 @@ fn merged_task(
     // `winner` and `other` may be either side; reconcile is symmetric enough
     // here because the winner's own lines are already chosen and only the
     // subtask lists are being merged.
-    let (subs, mut sub_conflicts) =
-        reconcile_task_lists(base_subs, &winner.subtasks, &other.subtasks);
+    let (subs, mut sub_trace) = reconcile_task_lists(base_subs, &winner.subtasks, &other.subtasks);
     // The parent's own lines can stay verbatim: `serialize_task` recurses into
     // subtasks regardless of the dirty flag, so a changed child is re-emitted
     // without the parent needing to be marked dirty.
     out.subtasks = subs;
-    conflicts.append(&mut sub_conflicts);
+    trace.conflicts.append(&mut sub_trace.conflicts);
+    trace.superseded.append(&mut sub_trace.superseded);
     out
 }
 
@@ -1217,7 +1540,7 @@ pub(crate) fn reconcile_task_lists(
     base: &[Task],
     ours: &[Task],
     theirs: &[Task],
-) -> (Vec<Task>, Vec<Conflict>) {
+) -> (Vec<Task>, Trace) {
     reconcile_flat(base, ours, theirs, &std::collections::HashSet::new())
 }
 
@@ -1235,7 +1558,7 @@ pub(crate) fn reconcile_archive_tasks(
     base: &[Task],
     ours: &[Task],
     theirs: &[Task],
-) -> (Vec<Task>, Vec<Conflict>) {
+) -> (Vec<Task>, Trace) {
     let ambiguous = ambiguous_in_lists(&[base, ours, theirs]);
     reconcile_flat(base, ours, theirs, &ambiguous)
 }
@@ -1247,7 +1570,7 @@ fn reconcile_flat(
     ours: &[Task],
     theirs: &[Task],
     ambiguous: &std::collections::HashSet<String>,
-) -> (Vec<Task>, Vec<Conflict>) {
+) -> (Vec<Task>, Trace) {
     let bi = index_tasks(base, SectionKind::Backlog);
     let oi = index_tasks(ours, SectionKind::Backlog);
     let ti = index_tasks(theirs, SectionKind::Backlog);
@@ -1266,7 +1589,7 @@ fn reconcile_flat(
     }
 
     let mut out = Vec::new();
-    let mut conflicts = Vec::new();
+    let mut trace = Trace::default();
 
     for key in &keys {
         let b = bi.entries.get(key);
@@ -1280,7 +1603,7 @@ fn reconcile_flat(
             if let Some(o) = o {
                 out.push(o.task.clone());
                 if let Some(t) = t {
-                    conflicts.push(Conflict {
+                    trace.conflicts.push(Conflict {
                         key: key.clone(),
                         reason: ConflictReason::AmbiguousTitle,
                         theirs: own_lines(&t.task),
@@ -1298,7 +1621,7 @@ fn reconcile_flat(
                         &o.task,
                         b.map(|e| &e.task),
                         t.map(|e| &e.task),
-                        &mut conflicts,
+                        &mut trace,
                     ));
                 }
             }
@@ -1308,13 +1631,24 @@ fn reconcile_flat(
                         &t.task,
                         b.map(|e| &e.task),
                         o.map(|e| &e.task),
-                        &mut conflicts,
+                        &mut trace,
                     ));
                 }
             }
+            Outcome::Merged(task) => {
+                if let Some(t) = t {
+                    trace.superseded.extend(own_lines(&t.task));
+                }
+                out.push(merged_task(
+                    &task,
+                    b.map(|e| &e.task),
+                    t.map(|e| &e.task),
+                    &mut trace,
+                ));
+            }
             Outcome::Conflict(reason) => match (o, t) {
                 (Some(o), t) => {
-                    conflicts.push(Conflict {
+                    trace.conflicts.push(Conflict {
                         key: key.clone(),
                         reason,
                         theirs: t.map(|e| own_lines(&e.task)).unwrap_or_default(),
@@ -1323,7 +1657,7 @@ fn reconcile_flat(
                         &o.task,
                         b.map(|e| &e.task),
                         t.map(|e| &e.task),
-                        &mut conflicts,
+                        &mut trace,
                     ));
                 }
                 (None, Some(t)) => out.push(t.task.clone()),
@@ -1332,7 +1666,7 @@ fn reconcile_flat(
         }
     }
 
-    (out, conflicts)
+    (out, trace)
 }
 
 // ---------------------------------------------------------------------------

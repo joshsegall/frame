@@ -162,6 +162,14 @@ All notable changes to frame will be documented in this file.
 
 ### Changed
 
+- **`fr merge` conflicts per field, not per task.** A task is a record of independent fields, and two writers who touched different ones have not disagreed about anything — but the merge compared state, title, tags and every metadata line as one value, so any two divergent edits to one task conflicted however unrelated they were. Reported from a project running seven to ten concurrent writers, where two thirds of real conflicts were of that shape: a `resolved:` filled by one side against a note appended by the other, a state change against a `ref:`.
+
+  Each field now takes the ordinary three-way rule on its own. Only a field that actually diverged conflicts, and the task merges around it. `ref:` and `spec:` merge as **sets** of file paths — two sides adding to one is a union, a removal is honoured against the other side's additions, and there is no "edit an element" for a set, so those two fields cannot conflict at all. `note:` is still one opaque value: two writers appending to one note in different words is the case no automatic answer is right for, and it still conflicts, as does a task both sides moved to different sections.
+
+  **A task both sides edited is rewritten.** Its lines are now neither side's, so it is re-emitted from the model in canonical field order — the same rewrite any edited task already gets, new only for the merge path.
+
+  The merge's self-audit is unchanged in what it catches. It reads the result line by line and asks whether an addition of theirs vanished without a decision behind it; a rebuilt task line is absent *by* decision, so the merge names the lines it superseded and the audit subtracts exactly those. What keeps that honest is that the field merge destructures a task exhaustively — it decides about every field or fails the build.
+
 - **Dependencies refreshed, including three major bumps**: `ratatui` 0.29 → 0.30, `crossterm` 0.28 → 0.29, `notify` 7 → 8. No source change was needed for any of them, and the suite passes unchanged — noted here only because ratatui is what draws every TUI frame, so it is the first thing to look at if a rendering oddity appears in this release and not the last.
 
 - **BREAKING: Task fields have a canonical order**, used by the markdown, `fr show`, `--json` and the TUI Detail view alike: `conflict`, `added`, `resolved`, `dep`, `spec`, `ref`, `note`. Short fields first, the note last, because a note has no length bound and anything after one is past the fold.
