@@ -1269,12 +1269,13 @@ struct FieldMerge {
 /// sides changed differently conflicts, exactly as it did before, and the rest
 /// of the task still merges around it.
 ///
-/// # Unknown metadata keys ride with the note
+/// # A key can name more than one entry
 ///
-/// An unrecognised `key: value` line parses to a [`Metadata::Note`] carrying its
-/// own text, so `Metadata::key` calls it `"note"` and it merges as part of that
-/// group. Conservative in the right direction: it can conflict where a finer
-/// rule would have merged, never the reverse.
+/// A task with two `- note:` lines parses to two [`Metadata::Note`] entries, so
+/// the whole run of a key is treated as one field rather than paired off by
+/// position — position is not identity, and two notes that happen to be second
+/// on each side are not the same note. Conservative in the right direction: it
+/// can conflict where a finer rule would have merged, never the reverse.
 fn merge_fields(base: &Task, ours: &Task, theirs: &Task) -> FieldMerge {
     // Destructured rather than read field by field, and the bindings are then
     // ignored: this is a **build-time guard**, not code. A field merge is only
@@ -1359,7 +1360,7 @@ fn pick<T: PartialEq + Clone>(base: &T, ours: &T, theirs: &T) -> Option<T> {
 /// Merge a task's metadata, one key at a time.
 ///
 /// Entries are grouped by [`Metadata::key`] and the whole run of a key is one
-/// field, so a task holding several notes merges them together rather than
+/// field, so a task holding two `- note:` lines merges them together rather than
 /// pairing them off by position — position is not identity, and two notes that
 /// happen to be second on each side are not the same note.
 ///
@@ -1398,6 +1399,13 @@ fn merge_metadata(
         if key == "ref" || key == "spec" {
             let merged = merge_path_field(key, b, o, t);
             out.extend(merged);
+            continue;
+        }
+
+        if key == "note"
+            && let Some(merged) = merge_note_field(b, o, t)
+        {
+            out.push(Metadata::Note(merged));
             continue;
         }
 
@@ -1460,6 +1468,113 @@ fn merge_path_field(
         "ref" => Metadata::Ref(merged),
         _ => Metadata::Spec(merged),
     })
+}
+
+/// Merge a `note:` three ways **by its lines**, or `None` to fall back to the
+/// ordinary whole-value rule.
+///
+/// # Why the note gets its own rule
+///
+/// It is the field two writers touch most, and notes are append-structured by
+/// convention: dated episodes accumulate at the tail while earlier sections stay
+/// where they are. So the dominant shape of a note both sides changed is *append
+/// at the end* against *edit far above* — two changes that do not overlap and
+/// have nothing to disagree about. Treating the note as one opaque value made
+/// every one of those a conflict, and they are the residue field-level merging
+/// left behind: of the six real conflicts this work started from, two were
+/// exactly this.
+///
+/// # Conflict means the changed line ranges actually overlap
+///
+/// Nothing else. Two sides appending different text at the same point is a
+/// genuine disagreement and still conflicts; two sides editing lines forty apart
+/// is not, and no longer does.
+///
+/// # No markers reach the file, structurally
+///
+/// `similar` can render conflicts with `<<<<<<<`, and a note carrying those
+/// would make the file unparseable — which is the one thing the whole
+/// no-conflict-markers design exists to prevent. So the marker path is never
+/// called: the merged text is assembled here from the resolved regions, and a
+/// conflicted merge returns `None` before any rendering happens. The invariant
+/// is held by the shape of the code rather than by a setting.
+///
+/// # When it declines
+///
+/// Unless **both** sides carry exactly one note, this returns `None` and the
+/// caller applies the whole-value rule. A task with two `- note:` lines has two
+/// of them, and line-merging one against the other would splice text that was
+/// never the same text. An absent ancestor is treated as an empty note, which is
+/// right: with nothing in common, two independently written notes overlap from
+/// their first line and conflict, as they should.
+fn merge_note_field(base: &[Metadata], ours: &[Metadata], theirs: &[Metadata]) -> Option<String> {
+    let only_note = |entries: &[Metadata]| match entries {
+        [Metadata::Note(text)] => Some(text.clone()),
+        _ => None,
+    };
+    let ours = only_note(ours)?;
+    let theirs = only_note(theirs)?;
+    // An empty ancestor group is a note neither side had; more than one entry is
+    // a shape this cannot pair up.
+    let base = match base {
+        [] => String::new(),
+        _ => only_note(base)?,
+    };
+    merge_lines(&base, &ours, &theirs)
+}
+
+/// The three-way line merge itself. `None` when any region conflicts.
+///
+/// Lines are pulled from the side each resolved region names, so every line of
+/// the result is a line one of the two writers actually wrote — the merge never
+/// invents text. That is what keeps it transparent to
+/// [`crate::ops::merge_files`]'s audit: a merged note holds both sides' added
+/// lines verbatim, so nothing has to be excused for it.
+fn merge_lines(base: &str, ours: &str, theirs: &str) -> Option<String> {
+    // **Each side is terminated first, and it is not cosmetic.** The differ
+    // splits lines keeping their terminators, and a note is stored without a
+    // trailing one — so the moment either side appends, the ancestor's last line
+    // (`"tail"`) and that side's copy of it (`"tail\n"`) stop being equal. The
+    // append is then read as a *rewrite of the last line*, which widens its
+    // region, and any edit the other side made near the end collides with a
+    // change that never happened. Measured on the reported case: an append at
+    // the tail against a rename two lines above it conflicted, and had no reason
+    // to.
+    let terminated = |text: &str| format!("{text}\n");
+    let (base, ours, theirs) = (terminated(base), terminated(ours), terminated(theirs));
+
+    let merge = similar::TextMerge::from_lines(base.as_str(), ours.as_str(), theirs.as_str());
+    if merge.is_conflicted() {
+        return None;
+    }
+
+    let mut lines: Vec<&str> = Vec::new();
+    for region in merge.regions() {
+        match region.resolution() {
+            similar::MergeResolution::Theirs => {
+                for i in region.theirs_range() {
+                    lines.push(merge.theirs_line(i)?);
+                }
+            }
+            // `Both` means the two sides made the same change, so either side
+            // serves and ours is the one already on disk.
+            _ => {
+                for i in region.ours_range() {
+                    lines.push(merge.ours_line(i)?);
+                }
+            }
+        }
+    }
+    // `from_lines` keeps each line's terminator, and a note is stored without
+    // one. Trim per line and rejoin so the result is in the model's shape rather
+    // than the differ's.
+    Some(
+        lines
+            .iter()
+            .map(|line| line.trim_end_matches(['\n', '\r']))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 fn path_values(entry: &Metadata) -> &[String] {

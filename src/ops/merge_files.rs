@@ -1447,19 +1447,128 @@ mod tests {
         assert_eq!(report.conflicts[0].reason, ConflictReason::BothEdited);
     }
 
-    /// The case field granularity does **not** reach, pinned so the limit is a
-    /// stated fact rather than something rediscovered later: two sides editing
-    /// one note in line ranges nowhere near each other. A plain three-way line
-    /// merge resolves this; the note is one value, so frame conflicts.
-    ///
-    /// It is the shape a dated-episode note accumulates — appends at the tail
-    /// against an edit far above — and it is what would have to change for the
-    /// note to merge. Flip this test when it does.
+    /// The shape a dated-episode note accumulates: appends at the tail against an
+    /// edit far above. Two changes that do not overlap and have nothing to
+    /// disagree about — and the whole reason the note is merged by its lines.
     #[test]
-    fn a_note_both_sides_edited_far_apart_conflicts_for_now() {
+    fn a_note_both_sides_edited_far_apart_merges() {
         let base = block_note(&["intro", "middle", "tail"]);
         let ours = block_note(&["intro", "middle", "tail", "appended by us"]);
         let theirs = block_note(&["intro, corrected", "middle", "tail"]);
+
+        let (merged, report) = merge_track_text(&base, &ours, &theirs, STAMP);
+        assert!(report.is_clean(), "{:?}", report.conflicts);
+        assert!(merged.contains("intro, corrected"), "their edit:\n{merged}");
+        assert!(merged.contains("appended by us"), "our append:\n{merged}");
+        assert!(
+            !merged.contains("<<<<<<<"),
+            "a note must never carry conflict markers — the file would stop \
+             parsing, which is what the whole no-markers design prevents:\n{merged}"
+        );
+    }
+
+    /// `SEC-b41` at its reported proportions: a long append at the tail against a
+    /// small rename far above it. The size is the point — the two changes are
+    /// nowhere near each other, and nothing about that should depend on how much
+    /// was appended.
+    #[test]
+    fn a_long_tail_append_merges_with_an_edit_far_above_it() {
+        let mut body: Vec<String> = (0..50).map(|n| format!("line {n}")).collect();
+        body[3] = "fixture: old_name.rs".to_string();
+        fn as_refs(v: &[String]) -> Vec<&str> {
+            v.iter().map(String::as_str).collect()
+        }
+
+        let base = block_note(&as_refs(&body));
+
+        let mut ours_body = body.clone();
+        ours_body.extend((0..51).map(|n| format!("RESOLVED 2026-08-13: step {n}")));
+        let ours = block_note(&as_refs(&ours_body));
+
+        let mut theirs_body = body.clone();
+        theirs_body[3] = "fixture: new_name.rs".to_string();
+        let theirs = block_note(&as_refs(&theirs_body));
+
+        let (merged, report) = merge_track_text(&base, &ours, &theirs, STAMP);
+        assert!(report.is_clean(), "{:?}", report.conflicts);
+        assert!(merged.contains("new_name.rs"), "their rename:\n{merged}");
+        assert!(
+            merged.contains("RESOLVED 2026-08-13: step 50"),
+            "our append"
+        );
+        assert!(
+            !merged.contains("old_name.rs"),
+            "and it is a rename:\n{merged}"
+        );
+    }
+
+    /// An append at the tail against an edit **two lines above it** — close
+    /// enough that the two regions nearly touch, which is where a line merge is
+    /// most likely to give up too early.
+    ///
+    /// It did. A note is stored with no trailing newline, and the differ keeps
+    /// line terminators, so the ancestor's last line and the appending side's
+    /// copy of it stopped being equal the moment anything followed it. The
+    /// append read as a rewrite of the last line, which widened its region until
+    /// it collided with their rename. Found by hand on the reported shape, after
+    /// the same pattern with fifty lines between passed — the distance is what
+    /// hid it.
+    #[test]
+    fn an_append_does_not_collide_with_an_edit_just_above_it() {
+        let base = block_note(&[
+            "REOPENED 2026-08-13: looking",
+            "fixture: old.rs",
+            "still open",
+        ]);
+        let ours = block_note(&[
+            "REOPENED 2026-08-13: looking",
+            "fixture: old.rs",
+            "still open",
+            "RESOLVED 2026-08-24: fixed in @abc123",
+        ]);
+        let theirs = block_note(&[
+            "REOPENED 2026-08-13: looking",
+            "fixture: new.rs",
+            "still open",
+        ]);
+
+        let (merged, report) = merge_track_text(&base, &ours, &theirs, STAMP);
+        assert!(report.is_clean(), "{:?}", report.conflicts);
+        assert!(merged.contains("fixture: new.rs"), "{merged}");
+        assert!(merged.contains("RESOLVED 2026-08-24"), "{merged}");
+    }
+
+    /// Every line of a merged note is a line one of the two writers wrote, so the
+    /// merge's own audit sees them all and nothing has to be excused for the
+    /// note. Asserted directly, through `merge_text`, which is where the audit
+    /// runs.
+    #[test]
+    fn a_merged_note_keeps_every_line_either_side_added() {
+        let base = block_note(&["a", "b", "c"]);
+        let ours = block_note(&["a", "b", "c", "ours one", "ours two"]);
+        let theirs = block_note(&["theirs zero", "a", "b", "c"]);
+
+        let (merged, report) = merge_text(FileKind::Track, &base, &ours, &theirs, STAMP);
+        assert!(report.is_clean(), "{:?}", report.conflicts);
+        for line in ["theirs zero", "ours one", "ours two", "a", "b", "c"] {
+            assert!(merged.contains(line), "{line} missing from:\n{merged}");
+        }
+    }
+
+    /// A task with two `- note:` lines holds two notes. Pairing them off by
+    /// position would line-merge text that was never the same text, so the line
+    /// merge declines and the whole-value rule applies — which for two divergent
+    /// edits is a conflict.
+    #[test]
+    fn a_task_holding_more_than_one_note_falls_back_to_the_whole_value_rule() {
+        let with = |first: &str, second: &str| {
+            format!(
+                "# Main\n\n## Backlog\n\n- [ ] `BAC-1` Task\n  - note: {first}\n  - note: {second}\n\n## Done\n"
+            )
+        };
+        let base = with("one", "two");
+        let ours = with("one", "two ours");
+        let theirs = with("one changed", "two");
 
         let (_, report) = merge_track_text(&base, &ours, &theirs, STAMP);
         assert_eq!(report.conflicts.len(), 1, "{:?}", report.conflicts);

@@ -129,9 +129,11 @@ impl Metadata {
 /// from every surface at once.
 ///
 /// **Stable, so duplicate keys keep their relative order.** That is reachable,
-/// not theoretical — an *unknown* metadata key parses to a `Note` carrying its
-/// own `key: value` text, so one task can hold several notes, and reordering
-/// them against each other would scramble text a user wrote.
+/// not theoretical — a task with two `- note:` lines parses to two
+/// [`Metadata::Note`] entries, and reordering them against each other would
+/// scramble text a user wrote. (An *un*recognised key is a different matter: it
+/// is not metadata at all, since `is_metadata_key` is a closed list, so it never
+/// reaches this.)
 ///
 /// Display surfaces call this unconditionally. The **serializer** does not: a
 /// task whose stranded lines would be absorbed by a note moved last keeps its

@@ -16,15 +16,19 @@
 # entirely. Those are marked `found:`.
 #
 # BEFORE adding an arm to `arb_edit`, convert anything here that is load-bearing
-# into a fixed-case test. Nothing here is: both lines below were produced by
-# deliberately reverting the fix to check this property is not vacuous, and each
-# has its own named pin.
+# into a fixed-case test. Nothing here is, and nothing here is live: `arb_edit`
+# gained `AppendTaskNote` and `RewriteTaskNote`, and `ANCESTOR` gained a multi-line
+# note, so every line below now decodes to a different case than the one its
+# comment names. Each is kept only because it still exercises the generator, and
+# each names the fixed test that actually pins what it found.
 # ---------------------------------------------------------------------------
 
-# --- `found:` — both recorded against a deliberately reverted `decide_shell`,
-#     which returned `ShellChoice::Ours` unconditionally (the pre-fix
-#     behaviour). They pass against the shipped code and pin nothing on their
-#     own; they are kept because they still exercise the generator.
+# --- `found:` — the first two were recorded against a deliberately reverted
+#     `decide_shell`, which returned `ShellChoice::Ours` unconditionally (the
+#     pre-fix behaviour). The third was recorded live, when field-level merging
+#     first made the merge's own audit fire on a task line rebuilt from both
+#     sides. All three pass against the shipped code and pin nothing on their
+#     own.
 cc 6b91dbc74b71cd8781e9914e4e9d09fda523fe570471ba21c394c93cd7f5e916 # found: an archive header only theirs changed — pinned by `an_archive_header_only_they_changed_is_taken`
 cc c40ad86534b55fd34a155e382df2e060e3f5ce3e05636fc11e8d377ec69cbab3 # found: [AddHeading(0)] on theirs alone — pinned by `their_change_is_taken_when_we_did_not_touch_it` and `a_heading_frame_does_not_model_is_not_ours_to_discard`
-cc f67f33002286a6c13e18ad9f9415660f4fc7eb89a4ec816e4a2c42c02be67dea # shrinks to our_edits = [RetitleTask(0, 0)], their_edits = [FinishTask(0)]
+cc f67f33002286a6c13e18ad9f9415660f4fc7eb89a4ec816e4a2c42c02be67dea # found: shrank to our_edits = [RetitleTask(0, 0)], their_edits = [FinishTask(0)] — a title and a state recombining into one task line, pinned by `a_title_and_a_state_recombine_into_one_task_line`

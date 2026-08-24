@@ -30,6 +30,7 @@ libc = "0.2"
 unicode-width = "0.2"
 unicode-segmentation = "1"
 tempfile = "3"
+similar = "3.2.0"
 
 [dev-dependencies]
 pretty_assertions = "1"

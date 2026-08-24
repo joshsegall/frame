@@ -49,8 +49,15 @@
 //! Random markdown mostly produces files with no tasks in them, which is the one
 //! shape this cannot learn anything from. Instead both sides start from one
 //! ancestor and each applies a random run of the edits real writers make —
-//! adding a task, retitling one, finishing one, deleting one, and the four kinds
-//! of change to the text around them that the merge used to be blind to.
+//! adding a task, retitling one, finishing one, deleting one, appending to and
+//! rewriting a line of a task's note, and the four kinds of change to the text
+//! around them that the merge used to be blind to.
+//!
+//! The two note arms are what exercise the merge of a note's *lines*. They are
+//! deliberately a pair that lands far apart — an append at the tail and a
+//! rewrite near the top — because that is the shape a real note takes and the
+//! one a line merge has to resolve. A note line has no exception in
+//! [`dropped_additions`], so a line merge that dropped one fails here.
 
 use std::collections::HashSet;
 
@@ -67,6 +74,12 @@ enum Edit {
     RetitleTask(usize, u32),
     FinishTask(usize),
     DeleteTask(usize),
+    /// A line appended to a task's own `note:`, and a line of it rewritten.
+    /// Together they are the shape a note really accumulates — dated episodes at
+    /// the tail, corrections above them — and the pair a three-way merge of the
+    /// note's lines has to resolve when the two land far apart.
+    AppendTaskNote(usize, u32),
+    RewriteTaskNote(usize, u32),
     /// The four regions the merge could not see: a heading frame does not model,
     /// the `# Title` line, the `> description`, and a note under everything.
     AddHeading(u32),
@@ -83,6 +96,8 @@ fn arb_edit() -> impl Strategy<Value = Edit> {
         3 => (0usize..4, 0u32..900).prop_map(|(i, n)| Edit::RetitleTask(i, n)),
         2 => (0usize..4).prop_map(Edit::FinishTask),
         2 => (0usize..4).prop_map(Edit::DeleteTask),
+        3 => (0usize..4, 0u32..900).prop_map(|(i, n)| Edit::AppendTaskNote(i, n)),
+        3 => (0usize..4, 0u32..900).prop_map(|(i, n)| Edit::RewriteTaskNote(i, n)),
         2 => (0u32..900).prop_map(Edit::AddHeading),
         1 => (0u32..900).prop_map(Edit::Retitle),
         1 => (0u32..900).prop_map(Edit::Describe),
@@ -100,6 +115,11 @@ const ANCESTOR: &str = "\
 
 - [ ] `MAI-001` One
   - added: 2026-01-01
+  - note:
+    first line of the note
+    second line
+    third line
+    fourth line
 - [ ] `MAI-002` Two
 - [ ] `MAI-003` Three
 
@@ -147,6 +167,21 @@ fn apply(text: &str, side: char, edits: &[Edit]) -> String {
                     }
                 }
             }
+            Edit::AppendTaskNote(i, n) => {
+                edit_note(&mut track, *i, |body| {
+                    body.push(format!("{side}{n}: appended at the tail"));
+                });
+            }
+            Edit::RewriteTaskNote(i, n) => {
+                edit_note(&mut track, *i, |body| {
+                    if !body.is_empty() {
+                        // Rewrite an early line, so an append and an edit land
+                        // far apart rather than on top of each other.
+                        let at = (*n as usize) % body.len().clamp(1, 2);
+                        body[at] = format!("{side}{n}: rewritten");
+                    }
+                });
+            }
             Edit::DeleteTask(i) => {
                 if let Some(tasks) = track.section_tasks_mut(frame::model::SectionKind::Backlog)
                     && *i < tasks.len()
@@ -183,6 +218,29 @@ fn apply(text: &str, side: char, edits: &[Edit]) -> String {
         }
     }
     frame::parse::serialize_track(&track)
+}
+
+/// Apply `change` to the lines of the first `note:` on backlog task `i`, if
+/// there is one. A task with no note, or an index past the end, is a no-op — the
+/// generator picks indices blind and that is fine, it just produces a run with
+/// one fewer effective edit.
+fn edit_note(track: &mut frame::model::Track, i: usize, change: impl FnOnce(&mut Vec<String>)) {
+    let Some(tasks) = track.section_tasks_mut(frame::model::SectionKind::Backlog) else {
+        return;
+    };
+    let Some(task) = tasks.get_mut(i) else {
+        return;
+    };
+    let Some(note) = task.metadata.iter_mut().find_map(|m| match m {
+        frame::model::task::Metadata::Note(text) => Some(text),
+        _ => None,
+    }) else {
+        return;
+    };
+    let mut body: Vec<String> = note.lines().map(str::to_string).collect();
+    change(&mut body);
+    *note = body.join("\n");
+    task.dirty = true;
 }
 
 /// The text-level edits above rewrite the whole file, so they return early and
@@ -277,7 +335,15 @@ fn dropped_additions(base: &str, side: &str, other: &str, merged: &str) -> Vec<S
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(256))]
+    #![proptest_config(ProptestConfig {
+        // A conflicted run is discarded by `prop_assume!`, and a good fraction
+        // of generated runs conflict on purpose — two writers editing one task
+        // is what this file is about. The default cap of 1024 discards is well
+        // clear of 256 cases but is the first thing hit when stress-running with
+        // `PROPTEST_CASES`, which aborts the run before it has proved anything.
+        max_global_rejects: 65536,
+        ..ProptestConfig::with_cases(256)
+    })]
 
     /// P10: a merge that reports clean has kept every line either side added.
     #[test]
