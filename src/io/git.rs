@@ -127,6 +127,24 @@ pub enum VcsOperation {
 }
 
 impl VcsOperation {
+    /// A stable identifier for the operation, for `--json`.
+    ///
+    /// Kept separate from [`Self::sides`] for the reason
+    /// [`crate::ops::reconcile::ConflictReason::slug`] is kept separate from its
+    /// `describe`: the prose is written for a person mid-merge and will be
+    /// rewritten again, while a consumer branching on which side is which needs
+    /// something that does not move.
+    pub fn slug(self) -> &'static str {
+        match self {
+            VcsOperation::Merge => "merge",
+            VcsOperation::Rebase => "rebase",
+            VcsOperation::CherryPick => "cherry-pick",
+            VcsOperation::Revert => "revert",
+            VcsOperation::Bisect => "bisect",
+            VcsOperation::Unknown => "unknown",
+        }
+    }
+
     /// What "ours" and "theirs" name in this operation, for a person reading a
     /// conflict report, or `None` when it cannot be said.
     pub fn sides(self) -> Option<&'static str> {

@@ -3,7 +3,7 @@
 The frame CLI binary is `fr`. Run with no arguments to launch the TUI.
 
 **Global flags**:
-- `--json` — output as JSON. Every command has a JSON surface except `fr merge`, whose interface is an exit status a VCS driver reads
+- `--json` — output as JSON. Every command has a JSON surface
 - `-C <path>` / `--project-dir <path>` — run against a different project directory without changing the working directory. Resolves **exactly**: `<path>/frame/` must exist ([see below](#the--c-flag))
 - `-V` / `--version` — version plus the commit the binary was built from (`fr 0.1.6 (ad763b0)`); omits the commit when the build didn't come from a git checkout
 
@@ -988,6 +988,12 @@ which clears the marker and nothing else. Clearing it is you recording the judgm
 **The merge audits its own result.** A line that is not in the common ancestor cannot have been deleted by anybody, so an addition of either side's that did not reach the merged file is a loss with no decision behind it. On a merge that would otherwise report clean, finding one is treated as a defect in `fr merge`: it conflicts, exits 1, and says so. Nothing is overwritten. If you see it, please report it.
 
 **Running it by hand.** The three file arguments and `--path` mirror what a VCS passes (`%O %A %B %P` in git). The merged result is written over `--ours`. `--path` decides which of the three kinds the file is merged as; `--kind` forces it when there is no meaningful path.
+
+**Which project the set-aside version goes to.** A conflict writes the losing side to a recovery log, so the driver has to know which project the merged file belongs to — and the three files it is handed may be temporary ones anywhere on disk. It takes the strongest evidence available, in order: `-C <dir>` if you named a project; then `--path`, which names the destination and therefore the project holding it; then the project containing `--ours`, then the one you are standing in. Git passes `--path` and runs the driver from the worktree root, so it always resolves. **Running it by hand with all three files outside the project, and without `-C` or `--path`, is the case where it cannot tell** — it says so, loudly, rather than guessing, and nothing is recorded. Pass one of the two.
+
+**`--json`.** The driver emits a document on stdout for every verdict it reaches — `merged`, `conflict` and `declined` — so a program does not have to branch on exit status before it can parse. It carries the conflicts with their stable reason slugs, the set-aside lines themselves, whether each one left a `conflict:` marker in the file, and `recorded` plus `recovery_log` for where the losing side went. `recorded: false` with `dry_run: false` is the one shape that means the other side reached no log and exists only in the document you are holding. A run that could not *start* — missing arguments, an unreadable file — prints nothing on stdout, as every other command does on failure.
+
+**`--dry-run` writes nothing and says nothing else.** No merged file, so no `conflict:` marker; no recovery entry, so no set-aside version. The report names where that version *would* go and states plainly that nothing was written. It still exits 1 on a conflict: the preview's answer is whether the merge would need a human, and that is the answer.
 
 ## Project Registry
 

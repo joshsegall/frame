@@ -67,16 +67,19 @@ fn dispatch_command(
             // Init is handled in main.rs before project discovery
             Commands::Init(args) => cmd_init(args, json),
 
-            // Merge is handled in main.rs too — it owns its exit status, which
-            // is how it reports a conflict to the version control system.
-            // `--resolve` writes to the project, so it takes the normal path;
-            // the driver form is handled in main.rs, which owns its exit status.
+            // `--resolve` writes to the project, so it takes the normal path.
+            // The driver form never arrives here: `main.rs` matches it before
+            // `dispatch` is reached, because it owns its exit status — and
+            // because it must be handed the global flags directly rather than
+            // through a path that has already discovered and registered a
+            // project. Calling it here would be a second, differently-wired
+            // entry point to the same driver, which is worth an error rather
+            // than a duplicate.
             Commands::Merge(args) => {
                 if args.resolve.is_empty() {
-                    cmd_merge(args);
-                } else {
-                    cmd_merge_resolve(&args.resolve, args.dry_run)?;
+                    return Err("fr merge: the driver form is dispatched in main.rs".into());
                 }
+                cmd_merge_resolve(&args.resolve, json, args.dry_run)?;
                 Ok(())
             }
 

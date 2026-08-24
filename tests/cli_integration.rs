@@ -4396,8 +4396,15 @@ fn merge_declines_to_log_into_a_project_that_does_not_hold_the_merged_file() {
         "it must say the other side went nowhere:\n{stderr}"
     );
     assert!(
-        stderr.contains("recover it from version control"),
+        stderr.contains("recover this side from version control"),
         "and where to look instead:\n{stderr}"
+    );
+    // And what to pass so it does not have to guess next time. Without this the
+    // warning names a problem with no action attached, which is how a reader
+    // concludes the driver simply cannot do it.
+    assert!(
+        stderr.contains("-C") && stderr.contains("--path"),
+        "and how to name the project:\n{stderr}"
     );
     assert!(
         !bystander.path().join("frame/.recovery.log").exists(),
@@ -4407,6 +4414,351 @@ fn merge_declines_to_log_into_a_project_that_does_not_hold_the_merged_file() {
     assert!(
         !listed.contains("M-001"),
         "nor its listing polluted:\n{listed}"
+    );
+}
+
+/// `--path` names the destination, so it names the project — even when all three
+/// temp files sit somewhere else entirely.
+///
+/// The reported failure: a wrapper running the driver by hand, with the sides
+/// extracted to a scratch directory and `--path frame/tracks/<track>.md` passed
+/// exactly as git passes `%P`, got *"no frame project found"* and lost the side
+/// that was set aside. The one flag that said where the file belonged was being
+/// used to label the message and nothing else.
+#[test]
+fn merge_locates_the_project_from_the_path_the_result_belongs_at() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    let elsewhere = tempfile::TempDir::new().unwrap();
+    let (base, ours, theirs) = write_conflict_sides(elsewhere.path());
+
+    let (_, stderr, ok) = run_fr(
+        tmp.path(),
+        &[
+            "merge",
+            "--base",
+            base.to_str().unwrap(),
+            "--ours",
+            ours.to_str().unwrap(),
+            "--theirs",
+            theirs.to_str().unwrap(),
+            "--path",
+            "frame/tracks/main.md",
+        ],
+    );
+    assert!(!ok, "it still conflicts; only the bookkeeping changed");
+    assert!(
+        stderr.contains("is in the recovery log"),
+        "the set-aside version must be recorded, not merely reported:\n{stderr}"
+    );
+
+    let listed = run_fr_ok(tmp.path(), &["recovery", "--for", "M-001"]);
+    assert!(
+        listed.contains("Their edit"),
+        "and retrievable from the project --path named:\n{listed}"
+    );
+}
+
+/// `-C` names the project outright, which is the answer when there is no
+/// `--path` to go on either.
+#[test]
+fn merge_locates_the_project_from_the_c_flag() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    let elsewhere = tempfile::TempDir::new().unwrap();
+    let (base, ours, theirs) = write_conflict_sides(elsewhere.path());
+
+    // Run from a third directory that is no project at all, so nothing but `-C`
+    // can supply the answer.
+    let nowhere = tempfile::TempDir::new().unwrap();
+    let (_, stderr, ok) = run_fr(
+        nowhere.path(),
+        &[
+            "-C",
+            tmp.path().to_str().unwrap(),
+            "merge",
+            "--kind",
+            "track",
+            "--base",
+            base.to_str().unwrap(),
+            "--ours",
+            ours.to_str().unwrap(),
+            "--theirs",
+            theirs.to_str().unwrap(),
+        ],
+    );
+    assert!(!ok);
+    assert!(
+        stderr.contains("is in the recovery log"),
+        "-C is explicit, so it is trusted:\n{stderr}"
+    );
+
+    let listed = run_fr_ok(tmp.path(), &["recovery", "--for", "M-001"]);
+    assert!(listed.contains("Their edit"), "{listed}");
+}
+
+/// A preview must not claim the file or the log holds something they do not.
+///
+/// `--dry-run` already wrote nothing — the `io::dryrun` barrier covers the
+/// recovery log — but the report said *"the version set aside is in the recovery
+/// log"* and *"each task above carries a `conflict:` line"* regardless. On the
+/// one path where the reader's question is "was my work recorded?", those are
+/// the two sentences that must never be able to lie.
+#[test]
+fn merge_dry_run_does_not_claim_it_recorded_anything() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    let (base, ours, theirs) = write_conflict_sides(&tmp.path().join("work"));
+    let before = fs::read_to_string(&ours).unwrap();
+
+    let (_, stderr, ok) = run_fr(
+        tmp.path(),
+        &[
+            "merge",
+            "--kind",
+            "track",
+            "--dry-run",
+            "--base",
+            base.to_str().unwrap(),
+            "--ours",
+            ours.to_str().unwrap(),
+            "--theirs",
+            theirs.to_str().unwrap(),
+        ],
+    );
+    assert!(!ok, "a preview of a conflict still reports the conflict");
+    assert!(
+        !stderr.contains("is in the recovery log"),
+        "nothing was recorded, so nothing may be said to be there:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("carries a `conflict:` line"),
+        "no file was written, so no task carries a marker:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--dry-run: nothing was written"),
+        "and it has to say so plainly:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("would"),
+        "while still naming where the version would go:\n{stderr}"
+    );
+
+    assert_eq!(before, fs::read_to_string(&ours).unwrap(), "ours is intact");
+    let listed = run_fr_ok(tmp.path(), &["recovery"]);
+    assert!(
+        !listed.contains("M-001"),
+        "and the log is untouched:\n{listed}"
+    );
+}
+
+/// The driver's `--json` document, which a push wrapper reads instead of parsing
+/// prose off stderr to decide whether a rebase can proceed unattended.
+#[test]
+fn merge_json_reports_the_conflict_and_where_the_other_side_went() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    let (base, ours, theirs) = write_conflict_sides(&tmp.path().join("work"));
+
+    let (stdout, _, ok) = run_fr(
+        tmp.path(),
+        &[
+            "--json",
+            "merge",
+            "--kind",
+            "track",
+            "--base",
+            base.to_str().unwrap(),
+            "--ours",
+            ours.to_str().unwrap(),
+            "--theirs",
+            theirs.to_str().unwrap(),
+        ],
+    );
+    assert!(!ok);
+    let doc: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout is not JSON ({e}):\n{stdout}"));
+
+    assert_eq!(doc["outcome"], "conflict");
+    assert_eq!(doc["exit"], 1);
+    assert_eq!(doc["dry_run"], false);
+    assert_eq!(doc["kind"], "track");
+    assert_eq!(doc["recorded"], true);
+    assert!(doc["recovery_log"].is_string(), "{doc}");
+
+    let conflicts = doc["conflicts"].as_array().unwrap();
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0]["task"], "M-001");
+    // The stable slug, not the prose — it is the same string the `conflict:`
+    // line in the file carries.
+    assert_eq!(conflicts[0]["reason"], "both-edited");
+    assert_eq!(conflicts[0]["marker_written"], true);
+    let theirs_lines = conflicts[0]["theirs"].as_array().unwrap();
+    assert!(
+        theirs_lines
+            .iter()
+            .any(|l| l.as_str().unwrap().contains("Their edit")),
+        "the set-aside side travels in the document:\n{doc}"
+    );
+}
+
+/// The one alarming shape a consumer has to be able to see: a version was set
+/// aside and reached no log. It exists in the document and nowhere else, so the
+/// document has to say which fields mean that.
+#[test]
+fn merge_json_says_when_the_other_side_reached_no_log() {
+    let elsewhere = tempfile::TempDir::new().unwrap();
+    let (base, ours, theirs) = write_conflict_sides(elsewhere.path());
+    let nowhere = tempfile::TempDir::new().unwrap();
+
+    let (stdout, _, _) = run_fr(
+        nowhere.path(),
+        &[
+            "--json",
+            "merge",
+            "--kind",
+            "track",
+            "--base",
+            base.to_str().unwrap(),
+            "--ours",
+            ours.to_str().unwrap(),
+            "--theirs",
+            theirs.to_str().unwrap(),
+        ],
+    );
+    let doc: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(doc["outcome"], "conflict");
+    assert_eq!(doc["recorded"], false);
+    assert!(doc["recovery_log"].is_null(), "{doc}");
+    assert!(doc["project"].is_null(), "{doc}");
+    // Which is why the losing side has to be in the document itself.
+    let theirs_lines = doc["conflicts"][0]["theirs"].as_array().unwrap();
+    assert!(
+        theirs_lines
+            .iter()
+            .any(|l| l.as_str().unwrap().contains("Their edit")),
+        "{doc}"
+    );
+}
+
+/// A preview's document says nothing was written — twice, so a consumer reading
+/// either field alone still gets it right.
+#[test]
+fn merge_json_dry_run_records_nothing_and_marks_nothing() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    let (base, ours, theirs) = write_conflict_sides(&tmp.path().join("work"));
+
+    let (stdout, _, _) = run_fr(
+        tmp.path(),
+        &[
+            "--json",
+            "merge",
+            "--kind",
+            "track",
+            "--dry-run",
+            "--base",
+            base.to_str().unwrap(),
+            "--ours",
+            ours.to_str().unwrap(),
+            "--theirs",
+            theirs.to_str().unwrap(),
+        ],
+    );
+    let doc: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(doc["dry_run"], true);
+    assert_eq!(doc["recorded"], false);
+    assert_eq!(doc["conflicts"][0]["marker_written"], false);
+    // Still named, because "where it would go" is the useful half of a preview.
+    assert!(doc["recovery_log"].is_string(), "{doc}");
+}
+
+/// A clean merge is a document too. A wrapper that only got one on conflict
+/// would have to branch on exit status before it could parse, which is the
+/// habit `--json` exists to remove.
+#[test]
+fn merge_json_reports_a_clean_merge() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    let work = tmp.path().join("work");
+    fs::create_dir_all(&work).unwrap();
+    let shell = |task: &str| format!("# Main Track\n\n## Backlog\n\n{task}\n## Done\n");
+    let base = work.join("base.md");
+    let ours = work.join("ours.md");
+    let theirs = work.join("theirs.md");
+    fs::write(&base, shell("- [ ] `M-001` Original\n")).unwrap();
+    fs::write(&ours, shell("- [ ] `M-001` Original\n")).unwrap();
+    fs::write(&theirs, shell("- [ ] `M-001` Their edit\n")).unwrap();
+
+    let (stdout, _, ok) = run_fr(
+        tmp.path(),
+        &[
+            "--json",
+            "merge",
+            "--kind",
+            "track",
+            "--base",
+            base.to_str().unwrap(),
+            "--ours",
+            ours.to_str().unwrap(),
+            "--theirs",
+            theirs.to_str().unwrap(),
+        ],
+    );
+    assert!(ok);
+    let doc: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(doc["outcome"], "merged");
+    assert_eq!(doc["exit"], 0);
+    assert_eq!(doc["took_theirs"], 1);
+    assert!(doc["conflicts"].as_array().is_none_or(|c| c.is_empty()));
+}
+
+/// Declining is a verdict about a named file, so it gets a document. The two
+/// failures around it — missing arguments, an unreadable file — are the driver
+/// failing to run, and keep the sweep's rule: stderr, non-zero, stdout empty.
+#[test]
+fn merge_json_reports_a_decline_but_not_a_broken_run() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    let work = tmp.path().join("work");
+    fs::create_dir_all(&work).unwrap();
+    for name in ["base.md", "ours.md", "theirs.md"] {
+        fs::write(work.join(name), "whatever\n").unwrap();
+    }
+
+    let (stdout, _, ok) = run_fr(
+        tmp.path(),
+        &[
+            "--json",
+            "merge",
+            "--base",
+            work.join("base.md").to_str().unwrap(),
+            "--ours",
+            work.join("ours.md").to_str().unwrap(),
+            "--theirs",
+            work.join("theirs.md").to_str().unwrap(),
+            "--path",
+            "src/lib.rs",
+        ],
+    );
+    assert!(!ok);
+    let doc: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("a decline is a verdict ({e}):\n{stdout}"));
+    assert_eq!(doc["outcome"], "declined");
+    assert_eq!(doc["exit"], 2);
+    assert!(
+        doc["kind"].is_null(),
+        "nothing was parsed, so no kind:\n{doc}"
+    );
+
+    // A run that could not start prints no document at all.
+    let (stdout, _, ok) = run_fr(tmp.path(), &["--json", "merge", "--kind", "track"]);
+    assert!(!ok);
+    assert!(
+        stdout.trim().is_empty(),
+        "a broken run must not describe changes that did not land:\n{stdout}"
     );
 }
 

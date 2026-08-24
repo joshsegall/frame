@@ -873,8 +873,9 @@ const CLASSIFICATION: &[(&str, Class)] = &[
         Class::Deferred("reads the recovery log, which is empty on a healthy fixture"),
     ),
     ("init", Class::Write),
-    // Writes the merged file the VCS handed it. Its real interface is an exit
-    // status, not a listing, and `--json` has nothing to describe.
+    // Writes the merged file the VCS handed it. Not a listing of project
+    // content, so the human/JSON matrix has nothing to compare — but it *does*
+    // have a `--json` document; see its row in [`JSON_SURFACE`].
     ("merge", Class::Write),
     // Writes .gitignore/.gitattributes/.git/config. Its `--json` surface reports
     // what it did, not a listing of project content.
@@ -1492,6 +1493,20 @@ enum Json {
     /// Emits a JSON document, verified by running it.
     Yes,
     /// No JSON surface. The reason is what someone reads before adding one.
+    ///
+    /// **Unconstructed, and that is the finished state, not a dead branch.**
+    /// `4cf0c60` closed every command but the merge driver; closing that one
+    /// leaves nothing declaring itself without a surface. The variant stays
+    /// because the *next* command to be added may legitimately have none, and
+    /// deleting it would leave that command with nowhere to say so — the table
+    /// would then have only one thing it could express, which is how a guard
+    /// stops being one.
+    ///
+    /// It is also the shape that failed here: the reason string is prose nothing
+    /// re-examines, and merge's named its primary caller ("the VCS") as though
+    /// it were the only one. A reason that names an *audience* rather than the
+    /// data is the kind that goes stale.
+    #[expect(dead_code)]
     No(&'static str),
 }
 
@@ -1587,10 +1602,31 @@ const JSON_SURFACE: &[JsonRow] = &[
         argv: &["track", "archive", "tmp"],
         json: Json::Yes,
     },
+    // The driver form, run against three real files so the row exercises a
+    // merge rather than a clap error. It conflicts, which is the outcome worth
+    // measuring: a conflict is the one a consumer has to act on.
+    //
+    // It used to read `Json::No("its interface is an exit status for the VCS,
+    // not a document")`. The guard was green the whole time, because the table
+    // honestly recorded a decision — and the decision was what was wrong. That
+    // reason names the driver's *primary* caller and silently assumes it is the
+    // only one; a push wrapper deciding whether a rebase can proceed unattended
+    // was left parsing prose off stderr.
     jrow(
-        &["merge"],
-        Json::No("its interface is an exit status for the VCS, not a document"),
+        &[
+            "merge",
+            "--kind",
+            "track",
+            "--base",
+            "merge-base.md",
+            "--ours",
+            "merge-ours.md",
+            "--theirs",
+            "merge-theirs.md",
+        ],
+        Json::Yes,
     ),
+    jrow(&["merge", "--resolve", "M-001"], Json::Yes),
 ];
 
 /// Run `fr` without requiring success — a row may legitimately fail, and what
@@ -1622,6 +1658,24 @@ fn json_surfaces_are_what_the_table_says() {
         if r.argv != ["init"] {
             create_fixture(root);
             fs::write(root.join("import.md"), "- [ ] an imported task\n").unwrap();
+            // Three sides for the merge driver row: both edited `M-001`
+            // differently, so the merge conflicts and has something to report.
+            let shell = |task: &str| format!("# Main Track\n\n## Backlog\n\n{task}\n## Done\n");
+            fs::write(
+                root.join("merge-base.md"),
+                shell("- [ ] `M-001` First task #core\n"),
+            )
+            .unwrap();
+            fs::write(
+                root.join("merge-ours.md"),
+                shell("- [ ] `M-001` Our edit #core\n"),
+            )
+            .unwrap();
+            fs::write(
+                root.join("merge-theirs.md"),
+                shell("- [ ] `M-001` Their edit #core\n"),
+            )
+            .unwrap();
         }
         for pre in r.setup {
             run_fr_raw(root, pre);

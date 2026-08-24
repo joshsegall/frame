@@ -169,6 +169,117 @@ pub struct TrackWriteJson {
     pub track: TrackInfoJson,
 }
 
+/// What the merge driver did with one file, for `--json`.
+///
+/// # Why the driver has a document at all
+///
+/// It was exempted from the `--json` sweep (`4cf0c60`) on the grounds that "its
+/// interface is an exit status for the VCS, not a document". That is true of the
+/// caller the driver was written for and false of the one it acquired: a push
+/// wrapper deciding whether to attempt an *unattended* rebase has to know which
+/// tasks conflicted and whether the set-aside side was recorded, and was left
+/// parsing prose off stderr to find out.
+///
+/// # It is emitted for a conflict, which is not an error
+///
+/// The sweep's rule — a failed run prints nothing on stdout, so no document ever
+/// describes changes that did not land — still holds, and a conflict is not that
+/// case. The merge ran, wrote a file, and reached a verdict; `outcome` and
+/// `exit` carry it. What stays silent on stdout is the driver failing to *run*:
+/// missing arguments, or a file it could not read.
+///
+/// # Fields a consumer must not skip
+///
+/// `recorded` is whether the set-aside versions actually reached the recovery
+/// log. It is the one field that can be false while `conflicts` is non-empty,
+/// and it means the losing side exists nowhere but this document.
+///
+/// `dry_run` is whether anything was written at all — with it set, `merged` is
+/// what *would* have been written, no `conflict:` marker reached the file, and
+/// nothing reached the log. Always present, never skipped, for the reason
+/// [`TaskWriteJson`] gives.
+///
+/// `operation` names which VCS operation is running, because "ours" and "theirs"
+/// are the VCS's labels and a rebase inverts them relative to a merge. A
+/// consumer attributing a conflict to a branch needs it; `"unknown"` means it
+/// could not be determined, not that no operation is running.
+#[derive(Serialize)]
+pub struct MergeJson {
+    pub command: &'static str,
+    /// `"merged"`, `"conflict"`, or `"declined"`.
+    pub outcome: &'static str,
+    /// The exit status the driver is returning, so a consumer reading the
+    /// document alone does not have to have captured it separately.
+    pub exit: i32,
+    pub dry_run: bool,
+    /// The path the result belongs at — `--path` when the VCS supplied one,
+    /// otherwise our own file.
+    pub path: String,
+    /// `"track"`, `"archive"` or `"inbox"`; absent when the driver declined
+    /// because it could not name the file's shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<&'static str>,
+    /// The VCS operation in progress: `"merge"`, `"rebase"`, `"cherry-pick"`,
+    /// `"revert"`, `"bisect"` or `"unknown"`.
+    pub operation: &'static str,
+    /// Tasks or items whose version came from the other side.
+    pub took_theirs: usize,
+    /// Tasks or items removed because both sides agree they are gone.
+    pub deleted: usize,
+    /// Whether the text around the tasks — headings, prose, the title — came
+    /// from the other side.
+    pub took_their_shell: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<MergeConflictJson>,
+    /// Whether every set-aside version reached the recovery log. Read it
+    /// **with** `dry_run`: false under a preview means only that a preview
+    /// writes nothing, while `recorded: false, dry_run: false` alongside a
+    /// non-empty `conflicts` is the alarming case — the losing side exists in
+    /// this document and nowhere else. Vacuously true when nothing was set
+    /// aside, so the false value never has to carry two meanings.
+    pub recorded: bool,
+    /// Absolute path of the recovery log the set-aside versions went to, or
+    /// would have gone to under `--dry-run`. Absent when no owning project could
+    /// be found, which is the case `recorded: false` names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_log: Option<String>,
+    /// Root of the project the merged file belongs to, absent when none was
+    /// found. Pass `-C` or `--path` to name it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+}
+
+/// One conflict the merge declined to decide.
+///
+/// `theirs` carries the set-aside lines in full, so a consumer holds the losing
+/// side without opening the recovery log — which matters most in exactly the
+/// case where there is no log to open.
+#[derive(Serialize)]
+pub struct MergeConflictJson {
+    /// The task's ID, or its title when it has none, or a phrase naming the part
+    /// of the file that conflicted. The merge's internal `#`/`~` sigil is
+    /// stripped; `task` is what says which of the three this is.
+    pub key: String,
+    /// The task ID, when the conflict names a task that has one. Absent for a
+    /// title-keyed task and for a conflict that names no task at all — the
+    /// surrounding text, or an unaccounted loss.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    /// The stable reason slug, the same one written into the `conflict:` line:
+    /// `both-edited`, `edited-and-deleted`, `deleted-and-edited`,
+    /// `ambiguous-title`, `surrounding-text`, `unaccounted-loss`.
+    pub reason: &'static str,
+    /// The same reason in prose, as the human report states it.
+    pub description: &'static str,
+    /// Whether a `conflict:` line was written into the merged file for this one.
+    /// False for a conflict naming no task, for every archive conflict, and for
+    /// every conflict under `--dry-run` — in each of those the file carries no
+    /// record and this document is it.
+    pub marker_written: bool,
+    /// The version that was set aside, as markdown lines.
+    pub theirs: Vec<String>,
+}
+
 #[derive(Serialize)]
 pub struct TaskListJson {
     pub track: String,

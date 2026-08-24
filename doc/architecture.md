@@ -235,6 +235,14 @@ The third piece is the awkward one: `.git/config` is per-clone and cannot be com
 
 **Patterns are relative to the file holding them, and the check asks git rather than reading them.** Both written files live beside `frame/`, at the project root, so their prefix is always `frame` — there is nothing to compute, and computing it was a bug: setup used the frame directory's path relative to the git *toplevel*, so a project in `sub/` got `sub/frame/archive/*.md` written into `sub/.gitattributes`, where it means `sub/sub/frame/…`. Nothing routed and nothing was ignored, in a file that read correctly at a glance. The general shape is the same one the archive merge had — two things that must agree, decided in different places, with no mechanism keeping them honest — so the answer is the same: `fr check` runs `git check-attr` against a representative path per routed shape and warns on anything that does not come back `frame`. A presence test is a proxy; this is the thing itself. `check-attr` matches patterns rather than inspecting files, so the probe works for an archive a project has not written yet.
 
+### The owner of a set-aside version is named, not guessed
+
+A conflict writes the losing side to a recovery log, which makes "which project does this file belong to?" the one lookup in the driver whose wrong answer destroys data. It was answered from where the *temporary* files sat. Git puts `%A` at the worktree root, so git's own runs resolved correctly and the gap stayed invisible; a driver run by hand or by a wrapper, with the three sides extracted elsewhere, either found no project and recorded nothing, or found whatever unrelated project sat above them and wrote the losing side into it.
+
+Both failures are the same missing idea: the driver was inferring the owner from an accident of the caller's file layout when the caller had *told* it. `--path` is git's `%P`, the repo-relative path the result belongs at; `-C` names a project outright. So evidence is taken strongest first — `-C`, then `--path`, then the project containing `--ours`, then the working directory — and where none of it resolves, the warning names the two flags rather than merely reporting failure. The prerequisite was mechanical: `main.rs` dispatches the driver *before* project discovery and was handing it neither global flag, which is also why `--json` was accepted and ignored there.
+
+What it deliberately does not do is tighten containment from `root` to `root/frame`. That looks stricter and breaks the one caller that matters, whose temp files are at the worktree root, outside `frame/` — the same shape of mistake as the `.gitattributes` prefix above: a rule that reads correctly and matches nothing.
+
 **Code**: `src/ops/merge_files.rs`, `src/ops/git_setup.rs`, `src/cli/handlers/merge.rs`, `src/cli/handlers/git.rs`
 
 ## Done Task Lifecycle

@@ -8,7 +8,7 @@ All notable changes to frame will be documented in this file.
 > 1. `fr note` exits non-zero on an append that would leave a note over `limits.note_max_bytes` (16 KB) and longer than it was, or that repeats a run of lines the note already holds. There is no `--force`; set the limit to `"off"` for the old behaviour.
 > 2. `fr check` exits non-zero on two new errors — a duplicate section, and a `##` heading frame does not recognise. A project that passed on 0.2.0 can fail on this release with nothing on disk having changed.
 > 3. `fr clean` archives on a size trigger as well as a count one, `clean.done_bytes_threshold` (256 KB). The first clean after upgrading may move a large batch, and the TUI cleans on its own, so it can happen unattended. `"off"` keeps the count trigger alone.
-> 4. `--json` on the 24 write commands emits a document where it used to print human text, and refuses to answer a confirmation prompt: `fr delete`, `fr track rename --prefix` and `fr check --fix` need `--yes` alongside it.
+> 4. `--json` on the 25 write commands emits a document where it used to print human text, and refuses to answer a confirmation prompt: `fr delete`, `fr track rename --prefix` and `fr check --fix` need `--yes` alongside it. `fr merge --resolve` is the twenty-fifth; the `fr merge` driver form printed nothing on stdout before and now prints a document, which is additive.
 > 5. `--json` task output changes key order, and a task's metadata lines are reordered in the markdown the first time frame edits that task. No keys added, removed or retyped.
 >
 > Each is detailed below.
@@ -154,6 +154,12 @@ All notable changes to frame will be documented in this file.
 
 - **`fr check` verifies that merge routing actually works, rather than assuming it.** It asks `git check-attr` whether a representative file of each frame shape really reaches the merge driver, and warns naming the ones that do not. Testing that the patterns are *present* in `.gitattributes` would not do: a pattern containing a slash resolves against the directory of the file holding it, so a line can look exactly right and match nothing — which is what `fr git setup` wrote for every project below the repo root (below). The probed paths need not exist, since attributes match against the path rather than the file, so a project that has never run `fr clean` still gets a real answer about its archives. Silent outside a repo and when `git` cannot be run, like the other git checks. `--json`: `merge_routing_broken`.
 
+- **`fr merge` has a `--json` surface.** The one command the `--json` sweep left out, on the reasoning that "its interface is an exit status for the VCS, not a document". That is true of the caller it was written for and false of the one it acquired: a push wrapper deciding whether a rebase can proceed unattended was left parsing prose off stderr to find out which tasks conflicted and whether the losing side had been recorded anywhere.
+
+  The driver emits a document for every verdict it reaches — `merged`, `conflict` and `declined` — so a program never has to branch on exit status before it can parse. It carries each conflict's stable reason slug (the same string written into the `conflict:` line), the set-aside lines themselves, whether a marker reached the file, and `recorded` plus `recovery_log` for where the other side went. `recorded: false` alongside `dry_run: false` is the one shape that means the losing side exists in the document and nowhere else. A run that could not *start* still prints nothing on stdout, like every other command on failure.
+
+  `fr merge --resolve` reports as the write it is, in the shape every other task-writing command uses.
+
 ### Changed
 
 - **Dependencies refreshed, including three major bumps**: `ratatui` 0.29 → 0.30, `crossterm` 0.28 → 0.29, `notify` 7 → 8. No source change was needed for any of them, and the suite passes unchanged — noted here only because ratatui is what draws every TUI frame, so it is the first thing to look at if a rendering oddity appears in this release and not the last.
@@ -169,6 +175,12 @@ All notable changes to frame will be documented in this file.
   `--json` changes key order only — no keys added, removed or retyped. A consumer using a JSON parser is unaffected; one reading the bytes positionally is not.
 
 ### Fixed
+
+- **`fr merge` could write the version it set aside into the wrong project, or into none.** A conflict keeps your side and sends the other to a recovery log, so the driver has to know which project the merged file belongs to — and it was working that out from where the *temporary* files sat. Git puts those at the worktree root, so git's own runs were fine. A driver run by hand or by a wrapper, with the three sides extracted somewhere else, was not: it either reported `no frame project found` and recorded nothing, or resolved to whatever unrelated project happened to sit above them and wrote the losing side there. This is the one path in frame where data is actually destroyed.
+
+  The owner is now named rather than guessed, strongest evidence first: `-C <dir>` if you gave one, then `--path` — which names the destination and so the project holding it, and which git always passes — then the project containing `--ours`, then the one you are standing in. Both global flags now reach the driver at all, which they did not: it is dispatched before project discovery and was handed neither. With neither `-C` nor `--path` the answer is still a guess and the warning now says which flag to pass.
+
+- **`fr merge --dry-run` claimed to have recorded a version it had not.** The preview wrote nothing — the dry-run barrier already covered the recovery log — but the report still ended on *"the version set aside is in the recovery log: `<path>`"* and *"each task above carries a `conflict:` line"*, for a log that was untouched and tasks that carried nothing. On the one path where the reader's question is "was my work recorded?", both sentences read as a yes. A preview now names where the version *would* go and says plainly that nothing was written. It still exits 1 on a conflict: what a preview answers is whether the merge would need a human.
 
 - **`fr merge` no longer keeps one side of everything that is not a task, silently, on a clean exit.** A track file is tasks *plus* the text around them — the `# Title` line, the `> description`, prose between sections, any `##` heading frame does not model, and a note under the last one. The merge read only the tasks and took all the rest from `--ours` unconditionally, so a merge whose only change was on the other side of any of it wrote our file back byte for byte, reported no conflict, and **exited 0**. The same held for a done archive's header and trailing text.
 

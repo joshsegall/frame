@@ -35,7 +35,13 @@ fn main() {
             // conflicted, 2 declined — so it reports its own rather than being
             // flattened into the generic error path. Runs before project
             // discovery: it must neither lock the project nor register it.
-            std::process::exit(handlers::cmd_merge(args));
+            //
+            // The two global flags are passed rather than left behind. Not
+            // wiring them is why `--json` was silently ignored here for the
+            // driver's whole life, and why `-C` — the one way to *name* the
+            // project a hand-run driver belongs to — could not reach the code
+            // that decides where the set-aside version goes.
+            std::process::exit(handlers::cmd_merge(args, cli.json, project_dir.as_deref()));
         }
         Some(_) => {
             if let Err(e) = handlers::dispatch(cli) {
