@@ -162,6 +162,16 @@ All notable changes to frame will be documented in this file.
 
 ### Changed
 
+- **A project in a temporary directory is no longer registered automatically.** Any `fr` command run inside a project registers it in the global list — silently, as a side effect — which is right for a project somebody works in and wrong for one that will not exist tomorrow. The list's whole value is being short, and a throwaway project touched once by one command stayed in it forever. Reported after four such entries accumulated from agent scratch directories.
+
+  Automatic registration now skips anything under `$TMPDIR`, `/tmp` or `/var/tmp`. The path is resolved before the question is asked, because macOS records `/tmp/x` as `/private/tmp/x` and puts the per-user `$TMPDIR` under `/var/folders` — a literal prefix test misses both, which is exactly how the reported entries got in.
+
+  `fr projects add` still registers such a project: an explicit request is not a guess, and it is what makes a wrong skip cost one command rather than being a wall. `fr init` in a temporary directory says it did not register and names that command, because that is the one moment a person is watching. The skip is silent everywhere else, for the same reason registration is. And the rule applies only where there is something to protect: a registry that is itself under a temporary directory skips nothing.
+
+- **`fr projects prune` reports projects in temporary directories, and removes them only with `--ephemeral`.** They can be in the registry from an older frame, or because somebody added one deliberately — and a destructive command quietly widening what it covers would undo an explicit `fr projects add` on an automatic rule. So prune keeps meaning what it meant, names the rest, and acts on them when told.
+
+  Removals are now grouped by reason so `--dry-run` says which rows go for which. `--json` gains that reason and grows a second array: `{removed: [{name, path, reason}], ephemeral_kept: [...]}` where it used to be a bare array. A consumer that only read the old array reads `removed` unchanged, but has to read the new one to know whether the registry is actually tidy.
+
 - **`fr merge` conflicts per field, not per task.** A task is a record of independent fields, and two writers who touched different ones have not disagreed about anything — but the merge compared state, title, tags and every metadata line as one value, so any two divergent edits to one task conflicted however unrelated they were. Reported from a project running seven to ten concurrent writers, where two thirds of real conflicts were of that shape: a `resolved:` filled by one side against a note appended by the other, a state change against a `ref:`.
 
   Each field now takes the ordinary three-way rule on its own. Only a field that actually diverged conflicts, and the task merges around it. `ref:` and `spec:` merge as **sets** of file paths — two sides adding to one is a union, a removal is honoured against the other side's additions, and there is no "edit an element" for a set, so those two fields cannot conflict at all. `note:` is still one opaque value: two writers appending to one note in different words is the case no automatic answer is right for, and it still conflicts, as does a task both sides moved to different sections.

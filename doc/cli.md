@@ -69,7 +69,7 @@ Every write command's document carries `dry_run`, always present so a consumer n
   "track": "other", "tasks": [ … ] }
 ```
 
-`fr projects prune --json` is the one exception: its document is a bare array of the entries it would remove, which has nowhere to put a flag. The `--dry-run` behaviour is the same.
+`fr projects prune --json` is the one exception: its document is `{removed, ephemeral_kept}`, which has nowhere to put a flag. The `--dry-run` behaviour is the same.
 
 **"Would change" means the bytes differ.** A write that lays down exactly what the file already holds is not listed — `fr clean` saves every track, on the grounds that a task it did not touch serializes verbatim, and listing all of them would report the shape of the save loop rather than the effect of the command.
 
@@ -1003,6 +1003,12 @@ which clears the marker and nothing else. Clearing it is you recording the judgm
 
 Frame maintains a global project registry at `~/.config/frame/projects.toml` (or `$XDG_CONFIG_HOME/frame/projects.toml`). Projects register automatically when you run `fr init`, use `fr` in a project directory, or add them explicitly.
 
+**A project in a temporary directory is not registered automatically.** The registry is a list you navigate by, and its value is being short; a throwaway project that one command happened to run inside would sit in it forever. So automatic registration skips anything under `$TMPDIR`, `/tmp` or `/var/tmp` — asked of the resolved path, since macOS records `/tmp/x` as `/private/tmp/x` and puts the per-user `$TMPDIR` under `/var/folders`.
+
+`fr projects add` still registers it: an explicit request is not a guess, and it is what makes a wrong skip cost one command. `fr init` in such a directory says it did not register, because that is the moment somebody is watching and the moment the rule is most likely to be wrong for them. Nothing else mentions it — the skip is silent for the same reason registration is.
+
+The rule applies only to a registry worth protecting: if the registry itself is under a temporary directory, every entry in it is throwaway already and nothing is skipped.
+
 ### `fr projects`
 
 List registered projects sorted by most recently accessed via CLI.
@@ -1051,14 +1057,17 @@ If the name is ambiguous (multiple projects share the same name — which every 
 
 ### `fr projects prune`
 
-Remove every registry entry whose project directory no longer exists (the same `(not found)` entries shown by `fr projects`). Useful for clearing out stale entries left behind by deleted or temporary projects.
+Remove every registry entry whose project directory no longer exists (the same `(not found)` entries shown by `fr projects`). Useful for clearing out stale entries left behind by deleted projects.
 
 ```
-fr projects prune            # remove all not-found entries
-fr projects prune --dry-run  # list what would be removed, change nothing
+fr projects prune              # remove all not-found entries
+fr projects prune --ephemeral  # also remove projects in temporary directories
+fr projects prune --dry-run    # list what would be removed, change nothing
 ```
 
-Add `--json` for machine-readable output (an array of `{name, path}`). Only registry entries are removed — no project files are touched.
+**Projects in a temporary directory are reported, not removed, unless you pass `--ephemeral`.** They can only be there because an older frame registered them, or because you added one deliberately — and removing a project somebody explicitly added, on an automatic rule, would put this command in conflict with `fr projects add`. So prune keeps meaning what it has always meant, names the others, and acts on them when told to.
+
+Removals are grouped by reason, so `--dry-run` says which rows go for which. Add `--json` for machine-readable output: `{removed: [{name, path, reason}], ephemeral_kept: [...]}`, where `reason` is `not-found` or `ephemeral`. Only registry entries are removed — no project files are touched.
 
 For a **worktree** the test is its own directory rather than the `frame/` inside it: a live worktree checked out to a branch that predates the project has no `frame/`, shows `(not found)`, and must not be pruned — it is sitting right there. Removed worktrees rarely reach this command at all, since a listing retires them first.
 

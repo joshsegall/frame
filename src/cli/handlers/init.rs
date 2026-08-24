@@ -199,8 +199,20 @@ pub fn cmd_init(args: InitArgs, json: bool) -> Result<(), Box<dyn std::error::Er
         crate::io::actors::write_actor_token(&frame_dir, "null")?;
     }
 
-    // Register in global project registry
-    crate::io::registry::register_project(&name, &cwd);
+    // Register in global project registry.
+    //
+    // `Automatic`, not `Explicit`, even though creating a project here is about
+    // as deliberate as it gets: `fr init` in a temp directory is overwhelmingly
+    // somebody trying frame out or scripting a test, and the registry is a list
+    // you navigate back to. **But this is the one place the decline is reported**
+    // — a person is watching, it is the moment the rule is most likely to be
+    // wrong for them, and there is one command that settles it.
+    let registered = crate::io::registry::register_project(
+        &name,
+        &cwd,
+        crate::io::registry::Registration::Automatic,
+    );
+    let declined = registered == crate::io::registry::Registered::DeclinedEphemeral;
 
     // Configure git, if this is a repo.
     let git_configured = update_git_config(&cwd);
@@ -214,6 +226,7 @@ pub fn cmd_init(args: InitArgs, json: bool) -> Result<(), Box<dyn std::error::Er
                 "frame_dir": frame_dir.display().to_string(),
                 "tracks": track_pairs.iter().map(|(id, _)| id).collect::<Vec<_>>(),
                 "git_configured": git_configured,
+                "registered": !declined,
             })))?
         );
         return Ok(());
@@ -231,6 +244,12 @@ pub fn cmd_init(args: InitArgs, json: bool) -> Result<(), Box<dyn std::error::Er
     if !git_configured.is_empty() {
         println!();
         println!("  configured git: {}", git_configured.join(", "));
+    }
+
+    if declined {
+        println!();
+        println!("  not added to your project list: this is a temporary directory.");
+        println!("  `fr projects add .` adds it anyway.");
     }
 
     Ok(())

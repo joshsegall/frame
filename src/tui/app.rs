@@ -5231,7 +5231,11 @@ pub fn run(project_dir_override: Option<&str>) -> Result<(), Box<dyn std::error:
     }
 
     // Auto-register and touch TUI timestamp
-    crate::io::registry::register_project(&project.config.project.name, &project.root);
+    crate::io::registry::register_project(
+        &project.config.project.name,
+        &project.root,
+        crate::io::registry::Registration::Automatic,
+    );
     crate::io::registry::touch_tui(&project.root);
 
     let mut app = App::new(project);

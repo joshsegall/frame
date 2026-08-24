@@ -652,6 +652,9 @@ pub struct ProjectsAddArgs {
 
 #[derive(Args)]
 pub struct ProjectsPruneArgs {
+    /// Also remove projects that live in a temporary directory
+    #[arg(long)]
+    pub ephemeral: bool,
     /// Show what would be removed without modifying the registry
     #[arg(long)]
     pub dry_run: bool,

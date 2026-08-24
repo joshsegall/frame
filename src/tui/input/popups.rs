@@ -594,6 +594,7 @@ pub(super) fn handle_project_picker_key(app: &mut App, key: KeyEvent) {
                         crate::io::registry::register_project(
                             &project.config.project.name,
                             &project.root,
+                            crate::io::registry::Registration::Automatic,
                         );
                         crate::io::registry::touch_tui(&project.root);
 

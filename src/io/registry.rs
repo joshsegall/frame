@@ -107,11 +107,121 @@ pub enum Provenance {
     Known(Option<String>),
 }
 
-/// Register a project in the registry. If already registered (by path), updates the name.
-/// Returns true if this was a new registration.
-pub fn register_project(name: &str, abs_path: &Path) -> bool {
+/// Whether an entry was asked for, or fell out of touching a project.
+///
+/// The registry is a navigation aid: it exists so the TUI picker and
+/// `fr projects list` can get you back to something. Almost every entry in it
+/// arrives as a **side effect** — any command run inside a project registers it,
+/// and nobody is told. That is right for a project somebody works in and wrong
+/// for one that will not exist tomorrow, and the two are told apart by whether
+/// anyone asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Registration {
+    /// A side effect of touching the project. Declined under a temporary
+    /// directory — see [`under_temp_root`].
+    Automatic,
+    /// Somebody named this project: `fr projects add`. Always registered, which
+    /// is what makes a wrong decline cost one command rather than being a wall.
+    Explicit,
+}
+
+/// What [`register_project`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Registered {
+    /// A new entry was written.
+    New,
+    /// The path was already registered; its name was refreshed.
+    Already,
+    /// Under a temporary directory, and nobody asked for it, so nothing was
+    /// written. The caller reports this **only where a person is watching and
+    /// the decision could be wrong** — `fr init`. Saying it on every command run
+    /// in such a project would be noise about a registry nobody was thinking
+    /// about.
+    DeclinedEphemeral,
+}
+
+/// Whether `path` lives under a directory the operating system will empty.
+///
+/// # Why the registry cares
+///
+/// A throwaway project registered by one command that happened to run inside it
+/// stays in the list forever, and the list's whole value is being short. The
+/// existing defences do not cover this: the test suites isolate through
+/// `XDG_CONFIG_HOME` and `scripts/fr-dev` does the same for manual runs, but
+/// both are things somebody has to remember, and `scripts/check-registry.sh`
+/// only warns about entries whose directory is *already gone*. A temp project
+/// that still exists trips nothing.
+///
+/// # Why not a `/tmp` prefix test
+///
+/// Because that misses both real cases. macOS symlinks `/tmp` to `/private/tmp`,
+/// so a path handed in as `/tmp/x` is recorded as `/private/tmp/x` and a literal
+/// prefix match never fires — that is exactly the shape of the entry that
+/// prompted this. And on macOS the per-user `TMPDIR` is somewhere under
+/// `/var/folders/…/T/`, which resembles nothing. So the question is asked of
+/// `std::env::temp_dir`, which honours `TMPDIR`, plus the two conventional
+/// roots, and both sides are canonicalized before comparing.
+///
+/// Either side may be handed over in either form, so **both forms of both sides
+/// are compared**. `/tmp/x` resolves to `/private/tmp/x` only while `x` exists,
+/// and a path that does not exist yet cannot be canonicalized at all — so
+/// resolving one side alone answers differently depending on whether the
+/// directory happens to be there, which is not something the answer may turn on.
+/// Four comparisons, and the question stops having a spelling.
+pub fn under_temp_root(path: &Path) -> bool {
+    let forms = |p: &Path| {
+        let mut out = vec![p.to_path_buf()];
+        if let Ok(resolved) = p.canonicalize()
+            && resolved != out[0]
+        {
+            out.push(resolved);
+        }
+        out
+    };
+
+    let paths = forms(path);
+    [
+        std::env::temp_dir(),
+        PathBuf::from("/tmp"),
+        PathBuf::from("/var/tmp"),
+    ]
+    .iter()
+    .flat_map(|root| forms(root))
+    // A root that resolved to `/` would swallow every path there is.
+    .filter(|root| root.parent().is_some())
+    .any(|root| paths.iter().any(|p| p.starts_with(&root)))
+}
+
+/// Whether this registry is a durable list worth protecting from throwaway
+/// entries.
+///
+/// # Why the rule asks about the registry as well as the project
+///
+/// [`under_temp_root`] exists to keep a list somebody navigates by from filling
+/// with projects that will not exist tomorrow. **If the list is itself
+/// temporary, there is nothing to protect** — every entry in it is throwaway by
+/// construction, and declining to write them makes the registry unable to record
+/// anything at all.
+///
+/// That is not a hypothetical: it is how the registry is exercised. Every test
+/// points `XDG_CONFIG_HOME` at a temporary directory and creates its projects in
+/// temporary directories, so a rule that looked only at the project would make
+/// automatic registration — the path every command takes — untestable through
+/// the real binary, and would have had to be bought off with an environment
+/// variable that exists solely to disable it in tests. Asking the question of
+/// both sides needs no such bypass, because the condition it turns on is the one
+/// that actually matters: *am I writing to a registry anybody will read again?*
+///
+/// `scripts/fr-dev` is unaffected either way — its sandbox lives under `target/`
+/// and the projects it is pointed at do too, so neither side is temporary.
+fn declines_ephemeral(reg_path: &Path) -> bool {
+    !under_temp_root(reg_path)
+}
+
+/// Register a project in the registry, unless it is ephemeral and nobody asked.
+pub fn register_project(name: &str, abs_path: &Path, how: Registration) -> Registered {
     let reg_path = registry_path();
-    register_project_in(&reg_path, name, abs_path, Provenance::Detect)
+    register_project_in(&reg_path, name, abs_path, Provenance::Detect, how)
 }
 
 /// Register a project in a specific registry file.
@@ -120,7 +230,8 @@ pub fn register_project_in(
     name: &str,
     abs_path: &Path,
     provenance: Provenance,
-) -> bool {
+    how: Registration,
+) -> Registered {
     let path_str = abs_path.to_string_lossy().to_string();
     let mut reg = read_registry_from(reg_path);
 
@@ -128,9 +239,19 @@ pub fn register_project_in(
         // Already registered — update name in case it changed. Provenance is
         // deliberately not revisited: it was resolved when the entry was created,
         // and re-resolving it here would put a `git` call on every command.
+        //
+        // Refreshed even for a path that is now under a temp root: the entry is
+        // already there, and letting its name go stale would make the row harder
+        // to recognise without making it any less present.
         entry.name = name.to_string();
         let _ = write_registry_to(reg_path, &reg);
-        return false;
+        return Registered::Already;
+    }
+
+    // Asked only for a *new* entry, so the `canonicalize` calls stay off the path
+    // every command takes.
+    if how == Registration::Automatic && declines_ephemeral(reg_path) && under_temp_root(abs_path) {
+        return Registered::DeclinedEphemeral;
     }
 
     let worktree_of = match provenance {
@@ -146,7 +267,7 @@ pub fn register_project_in(
         worktree_of,
     });
     let _ = write_registry_to(reg_path, &reg);
-    true
+    Registered::New
 }
 
 /// The main working tree's root, when `root` is a linked git worktree.
@@ -258,40 +379,117 @@ pub fn entry_exists(entry: &ProjectEntry) -> bool {
     Path::new(&entry.path).join("frame").exists()
 }
 
-/// Whether `fr projects prune` should remove this entry.
+/// Why `fr projects prune` would remove an entry.
 ///
-/// For a project this is [`entry_exists`]'s criterion. For a **worktree** it is
-/// the working tree's own directory instead: a live worktree checked out to a
-/// branch that predates the project has no `frame/` in it, and pruning that row
-/// would remove something that is sitting right there.
-pub fn is_prunable(entry: &ProjectEntry) -> bool {
-    if entry.worktree_of.is_some() {
-        return !Path::new(&entry.path).exists();
-    }
-    !entry_exists(entry)
+/// Carried rather than collapsed to a bool because the two reasons are not
+/// interchangeable to a reader: one says the project is gone, the other says it
+/// is right there and should never have been listed. A prune that removed both
+/// under one heading would be a destructive command quietly widening what it
+/// means — so the reason travels to the report, and `--dry-run` names it per
+/// row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PruneReason {
+    /// The project directory is no longer there.
+    NotFound,
+    /// It exists, under a directory the operating system will empty. Only ever
+    /// reachable for an entry written before [`under_temp_root`] was consulted,
+    /// or added explicitly and since regretted.
+    Ephemeral,
 }
 
-/// Remove registry entries whose project directory no longer exists.
-/// Returns the removed entries (empty if nothing was pruned).
-pub fn prune_missing() -> Vec<ProjectEntry> {
-    prune_missing_from(&registry_path())
-}
-
-/// Remove not-found entries from a specific registry file.
-pub fn prune_missing_from(reg_path: &Path) -> Vec<ProjectEntry> {
-    let mut reg = read_registry_from(reg_path);
-    let mut removed = Vec::new();
-    reg.projects.retain(|e| {
-        let keep = !is_prunable(e);
-        if !keep {
-            removed.push(e.clone());
+impl PruneReason {
+    /// The phrase a report uses for a group of entries with this reason.
+    pub fn describe(self) -> &'static str {
+        match self {
+            PruneReason::NotFound => "not found",
+            PruneReason::Ephemeral => "in a temporary directory",
         }
-        keep
-    });
-    if !removed.is_empty() {
+    }
+
+    /// A stable identifier, for `--json`.
+    pub fn slug(self) -> &'static str {
+        match self {
+            PruneReason::NotFound => "not-found",
+            PruneReason::Ephemeral => "ephemeral",
+        }
+    }
+}
+
+/// Whether `fr projects prune` should remove this entry, and why.
+///
+/// Not-found is asked first and answers for both kinds of row. For a project it
+/// is [`entry_exists`]'s criterion; for a **worktree** it is the working tree's
+/// own directory instead, because a live worktree checked out to a branch that
+/// predates the project has no `frame/` in it and pruning that row would remove
+/// something sitting right there.
+///
+/// `ephemeral_applies` is [`declines_ephemeral`]'s answer for the registry being
+/// pruned, passed in rather than recomputed per row.
+pub fn prune_reason(entry: &ProjectEntry, ephemeral_applies: bool) -> Option<PruneReason> {
+    let missing = if entry.worktree_of.is_some() {
+        !Path::new(&entry.path).exists()
+    } else {
+        !entry_exists(entry)
+    };
+    if missing {
+        return Some(PruneReason::NotFound);
+    }
+    // A worktree row is exempt: it is derivative of a project that has its own
+    // row, `heal_worktrees` retires it when the worktree goes, and a worktree
+    // under a temp root is a deliberate short-lived checkout of a real project
+    // rather than a throwaway project.
+    if ephemeral_applies && entry.worktree_of.is_none() && under_temp_root(Path::new(&entry.path)) {
+        return Some(PruneReason::Ephemeral);
+    }
+    None
+}
+
+/// What a prune did, and what it deliberately left alone.
+#[derive(Debug, Default)]
+pub struct Pruned {
+    /// Entries removed, each with the reason.
+    pub removed: Vec<(ProjectEntry, PruneReason)>,
+    /// Entries in a temporary directory that were **kept**, because
+    /// `--ephemeral` was not given.
+    pub ephemeral_kept: Vec<ProjectEntry>,
+}
+
+/// Remove registry entries `fr projects prune` should not be keeping.
+pub fn prune_missing(include_ephemeral: bool) -> Pruned {
+    prune_missing_from(&registry_path(), include_ephemeral)
+}
+
+/// Remove prunable entries from a specific registry file.
+///
+/// # Why an ephemeral entry is reported rather than removed by default
+///
+/// `prune` has always meant one thing — the directory is gone — and it is
+/// destructive. Widening it to a second, differently-shaped reason would make
+/// every existing `fr projects prune` in a script do something nobody asked it
+/// to, and would put it in direct conflict with `fr projects add`: an entry
+/// somebody deliberately added under `/tmp` would be removed by the next prune,
+/// with the explicit request losing to an automatic rule. So the second reason
+/// is **advisory by default** and acts only when named.
+pub fn prune_missing_from(reg_path: &Path, include_ephemeral: bool) -> Pruned {
+    let mut reg = read_registry_from(reg_path);
+    let mut out = Pruned::default();
+    let ephemeral_applies = declines_ephemeral(reg_path);
+    reg.projects
+        .retain(|e| match prune_reason(e, ephemeral_applies) {
+            Some(PruneReason::Ephemeral) if !include_ephemeral => {
+                out.ephemeral_kept.push(e.clone());
+                true
+            }
+            Some(reason) => {
+                out.removed.push((e.clone(), reason));
+                false
+            }
+            None => true,
+        });
+    if !out.removed.is_empty() {
         let _ = write_registry_to(reg_path, &reg);
     }
-    removed
+    out
 }
 
 /// Retire the entries of git worktrees that no longer exist.
@@ -631,8 +829,41 @@ mod tests {
 
     /// Register without asking git, so ordering and healing stay testable
     /// without a repo on disk.
-    fn register(reg_path: &Path, name: &str, path: &Path) -> bool {
-        register_project_in(reg_path, name, path, Provenance::Known(None))
+    ///
+    /// `Explicit`, so these tests are about the registry's bookkeeping rather
+    /// than about [`under_temp_root`] — which has its own tests below, and would
+    /// otherwise decide the outcome of every one of these, since a test's paths
+    /// are stand-ins and stand-ins are exactly what gets written under `/tmp`.
+    /// The paths here read `/home/dev/projects/...` for the same reason: an
+    /// absolute path that resembles a real home directory says what the row is
+    /// *about* without tripping a rule it is not testing.
+    fn register(reg_path: &Path, name: &str, path: &Path) -> Registered {
+        register_project_in(
+            reg_path,
+            name,
+            path,
+            Provenance::Known(None),
+            Registration::Explicit,
+        )
+    }
+
+    /// A registry file that is **not** under a temporary root, so
+    /// [`declines_ephemeral`] answers yes for it and the ephemeral rule is live.
+    ///
+    /// [`temp_registry`] cannot serve here: it is a `TempDir` by construction, so
+    /// the rule is inert for it — which is the whole point of asking the question
+    /// of the registry too, and therefore the one thing a test of the rule cannot
+    /// borrow. `target/` is the honest place for a durable-looking scratch file:
+    /// it is not temporary, `cargo clean` takes it, and `scripts/fr-dev` already
+    /// treats it as where a real-looking config directory goes.
+    fn durable_registry(name: &str) -> PathBuf {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-registries")
+            .join(name);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir.join("projects.toml")
     }
 
     fn entry(name: &str, path: &str, worktree_of: Option<&str>) -> ProjectEntry {
@@ -655,20 +886,32 @@ mod tests {
     #[test]
     fn test_register_and_read() {
         let (_tmp, path) = temp_registry();
-        let is_new = register(&path, "test-proj", Path::new("/tmp/test"));
-        assert!(is_new);
+        let is_new = register(
+            &path,
+            "test-proj",
+            Path::new(concat!("/home/dev/projects", "/test")),
+        );
+        assert_eq!(is_new, Registered::New);
         let reg = read_registry_from(&path);
         assert_eq!(reg.projects.len(), 1);
         assert_eq!(reg.projects[0].name, "test-proj");
-        assert_eq!(reg.projects[0].path, "/tmp/test");
+        assert_eq!(reg.projects[0].path, concat!("/home/dev/projects", "/test"));
     }
 
     #[test]
     fn test_register_duplicate_path() {
         let (_tmp, path) = temp_registry();
-        register(&path, "proj", Path::new("/tmp/test"));
-        let is_new = register(&path, "proj-renamed", Path::new("/tmp/test"));
-        assert!(!is_new);
+        register(
+            &path,
+            "proj",
+            Path::new(concat!("/home/dev/projects", "/test")),
+        );
+        let is_new = register(
+            &path,
+            "proj-renamed",
+            Path::new(concat!("/home/dev/projects", "/test")),
+        );
+        assert_eq!(is_new, Registered::Already);
         let reg = read_registry_from(&path);
         assert_eq!(reg.projects.len(), 1);
         assert_eq!(reg.projects[0].name, "proj-renamed");
@@ -677,7 +920,11 @@ mod tests {
     #[test]
     fn test_remove_by_name() {
         let (_tmp, path) = temp_registry();
-        register(&path, "my-proj", Path::new("/tmp/my-proj"));
+        register(
+            &path,
+            "my-proj",
+            Path::new(concat!("/home/dev/projects", "/my-proj")),
+        );
         let removed = remove_project_from(&path, "my-proj").unwrap();
         assert!(removed.is_some());
         assert_eq!(removed.unwrap().name, "my-proj");
@@ -700,11 +947,16 @@ mod tests {
         fs::create_dir_all(live.path().join("frame")).unwrap();
         register(&path, "live", live.path());
         // A stale entry whose directory no longer exists.
-        register(&path, "ghost", Path::new("/tmp/does-not-exist-xyz"));
+        register(
+            &path,
+            "ghost",
+            Path::new(concat!("/home/dev/projects", "/does-not-exist-xyz")),
+        );
 
-        let removed = prune_missing_from(&path);
-        assert_eq!(removed.len(), 1);
-        assert_eq!(removed[0].name, "ghost");
+        let result = prune_missing_from(&path, false);
+        assert_eq!(result.removed.len(), 1);
+        assert_eq!(result.removed[0].0.name, "ghost");
+        assert_eq!(result.removed[0].1, PruneReason::NotFound);
 
         let reg = read_registry_from(&path);
         assert_eq!(reg.projects.len(), 1);
@@ -717,8 +969,106 @@ mod tests {
         let live = TempDir::new().unwrap();
         fs::create_dir_all(live.path().join("frame")).unwrap();
         register(&path, "live", live.path());
-        assert!(prune_missing_from(&path).is_empty());
+        // `live` is a `TempDir`, so it is also ephemeral — and a default prune
+        // must still leave it exactly where it is. That is the whole point of
+        // the second reason being advisory: a live project is not a stale one.
+        let result = prune_missing_from(&path, false);
+        assert!(result.removed.is_empty());
         assert_eq!(read_registry_from(&path).projects.len(), 1);
+    }
+
+    /// `/tmp`, `$TMPDIR` and macOS's `/private/tmp` realisation of the first.
+    #[test]
+    fn temp_roots_are_recognised_through_their_symlinks() {
+        let tmp = TempDir::new().unwrap();
+        assert!(
+            under_temp_root(tmp.path()),
+            "a TempDir is under $TMPDIR by construction: {}",
+            tmp.path().display()
+        );
+        // The shape that prompted this: handed in as `/tmp/...`, recorded as
+        // `/private/tmp/...` on macOS, and missed by any literal prefix test.
+        if Path::new("/tmp").exists() {
+            assert!(under_temp_root(Path::new("/tmp/frame-probe-xyz")));
+        }
+        assert!(!under_temp_root(Path::new(concat!(
+            "/home/dev/projects",
+            "/real"
+        ))));
+    }
+
+    /// The rule is inert when the registry is itself throwaway, because then
+    /// there is no durable list to keep clean — and because every test in this
+    /// file, and every integration test, points at exactly such a registry.
+    #[test]
+    fn a_throwaway_registry_declines_nothing() {
+        let (_tmp, path) = temp_registry();
+        assert!(!declines_ephemeral(&path));
+        assert!(declines_ephemeral(Path::new(concat!(
+            "/home/dev",
+            "/.config/frame/projects.toml"
+        ))));
+    }
+
+    /// An automatic registration under a temp root writes nothing; naming the
+    /// project still does.
+    #[test]
+    fn an_ephemeral_project_registers_only_when_asked() {
+        let path = durable_registry("registers-only-when-asked");
+        let throwaway = TempDir::new().unwrap();
+        fs::create_dir_all(throwaway.path().join("frame")).unwrap();
+
+        let auto = register_project_in(
+            &path,
+            "throwaway",
+            throwaway.path(),
+            Provenance::Known(None),
+            Registration::Automatic,
+        );
+        assert_eq!(auto, Registered::DeclinedEphemeral);
+        assert!(read_registry_from(&path).projects.is_empty());
+
+        let asked = register_project_in(
+            &path,
+            "throwaway",
+            throwaway.path(),
+            Provenance::Known(None),
+            Registration::Explicit,
+        );
+        assert_eq!(asked, Registered::New);
+        assert_eq!(read_registry_from(&path).projects.len(), 1);
+
+        // And once it is there, an automatic touch keeps its name current rather
+        // than declining a row that already exists.
+        let again = register_project_in(
+            &path,
+            "renamed",
+            throwaway.path(),
+            Provenance::Known(None),
+            Registration::Automatic,
+        );
+        assert_eq!(again, Registered::Already);
+        assert_eq!(read_registry_from(&path).projects[0].name, "renamed");
+    }
+
+    /// The entry the rule exists for: already in the registry, directory still
+    /// there, and nothing that used to run would ever have mentioned it.
+    #[test]
+    fn an_ephemeral_entry_is_reported_and_removed_only_when_named() {
+        let path = durable_registry("reported-and-removed-when-named");
+        let throwaway = TempDir::new().unwrap();
+        fs::create_dir_all(throwaway.path().join("frame")).unwrap();
+        register(&path, "throwaway", throwaway.path());
+
+        let kept = prune_missing_from(&path, false);
+        assert!(kept.removed.is_empty(), "not removed without being asked");
+        assert_eq!(kept.ephemeral_kept.len(), 1, "but reported");
+        assert_eq!(read_registry_from(&path).projects.len(), 1);
+
+        let gone = prune_missing_from(&path, true);
+        assert_eq!(gone.removed.len(), 1);
+        assert_eq!(gone.removed[0].1, PruneReason::Ephemeral);
+        assert!(read_registry_from(&path).projects.is_empty());
     }
 
     /// A removed worktree's row goes without being asked; a project's does not.
@@ -743,8 +1093,11 @@ mod tests {
         reg.projects
             .push(entry("demo", &live_wt.to_string_lossy(), Some(&main_str)));
         // A missing *project* is left for `fr projects prune` to ask about.
-        reg.projects
-            .push(entry("ghost", "/tmp/does-not-exist-xyz", None));
+        reg.projects.push(entry(
+            "ghost",
+            concat!("/home/dev/projects", "/does-not-exist-xyz"),
+            None,
+        ));
         write_registry_to(&path, &reg).unwrap();
 
         let removed = heal_worktrees_from(&path);
@@ -761,7 +1114,7 @@ mod tests {
             vec![
                 main_str,
                 live_wt.to_string_lossy().to_string(),
-                "/tmp/does-not-exist-xyz".to_string()
+                concat!("/home/dev/projects", "/does-not-exist-xyz").to_string()
             ]
         );
     }
@@ -905,10 +1258,10 @@ mod tests {
         let mut reg = ProjectRegistry::default();
         reg.projects.push(ProjectEntry {
             name: "test".to_string(),
-            path: "/tmp/test".to_string(),
+            path: concat!("/home/dev/projects", "/test").to_string(),
             last_accessed_tui: Some(Utc::now()),
             last_accessed_cli: None,
-            worktree_of: Some("/tmp/main".to_string()),
+            worktree_of: Some(concat!("/home/dev/projects", "/main").to_string()),
         });
         write_registry_to(&path, &reg).unwrap();
         let loaded = read_registry_from(&path);
@@ -916,7 +1269,10 @@ mod tests {
         assert_eq!(loaded.projects[0].name, "test");
         assert!(loaded.projects[0].last_accessed_tui.is_some());
         assert!(loaded.projects[0].last_accessed_cli.is_none());
-        assert_eq!(loaded.projects[0].worktree_of.as_deref(), Some("/tmp/main"));
+        assert_eq!(
+            loaded.projects[0].worktree_of.as_deref(),
+            Some(concat!("/home/dev/projects", "/main"))
+        );
     }
 
     /// A registry written before frame recorded provenance still loads, and its

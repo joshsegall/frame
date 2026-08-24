@@ -250,16 +250,86 @@ fn test_projects_prune_removes_not_found() {
     let still = run_fr_ok(base.path(), &["projects", "list", "--json"]);
     assert!(still.contains("/ghost"), "dry-run must not remove anything");
 
-    // Real prune drops the ghost, keeps the live project.
+    // Real prune drops the ghost, keeps the live project. The count leads and the
+    // reason names its own group, so a reader of `--dry-run` can tell which rows
+    // went for which reason.
     let pruned = run_fr_ok(base.path(), &["projects", "prune"]);
-    assert!(pruned.contains("Removed 1 not-found project"));
+    assert!(pruned.contains("Removed 1 project"), "{pruned}");
+    assert!(pruned.contains("not found:"), "{pruned}");
     let after = run_fr_ok(base.path(), &["projects", "list", "--json"]);
     assert!(after.contains("/live"));
     assert!(!after.contains("/ghost"));
 
     // Pruning again is a no-op.
     let again = run_fr_ok(base.path(), &["projects", "prune"]);
-    assert!(again.contains("No not-found projects"));
+    assert!(again.contains("Nothing to prune"), "{again}");
+}
+
+/// The rule that keeps throwaway projects out of a durable list, at the surface.
+///
+/// Both halves have to be checked here rather than in `registry`'s own tests,
+/// because the binary is where the two conditions actually meet: the registry
+/// must be one somebody will read again, and the project must be one that will
+/// not be there tomorrow. `HOME`/`XDG_CONFIG_HOME` point at a directory under
+/// `target/` for exactly that reason — a `TempDir` registry makes the rule inert
+/// by design, which is what lets every other test in this file keep working.
+#[test]
+fn a_throwaway_project_stays_out_of_a_durable_registry() {
+    let xdg = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .parent()
+        .unwrap()
+        .join("test-registries")
+        .join("cli-ephemeral");
+    let _ = fs::remove_dir_all(&xdg);
+    fs::create_dir_all(&xdg).unwrap();
+    // Bail rather than assert a falsehood if `target/` ever moves somewhere the
+    // OS calls temporary: the rule would be inert and the test would be testing
+    // its own fixture.
+    if xdg
+        .canonicalize()
+        .unwrap()
+        .starts_with(std::env::temp_dir())
+    {
+        return;
+    }
+
+    let throwaway = tempfile::TempDir::new().unwrap();
+    let project = throwaway.path().join("scratch");
+    create_test_project(&project);
+
+    // Touching it from the CLI would have registered it. It does not.
+    run_fr_registry(&project, &["list"], &xdg);
+    let listed = run_fr_registry(&project, &["projects", "list", "--json"], &xdg);
+    assert!(
+        !listed.contains("scratch"),
+        "a temp-directory project must not land in a durable registry: {listed}"
+    );
+
+    // Naming it does, because an explicit request is not a guess.
+    run_fr_registry(
+        &project,
+        &["projects", "add", project.to_str().unwrap()],
+        &xdg,
+    );
+    let listed = run_fr_registry(&project, &["projects", "list", "--json"], &xdg);
+    assert!(
+        listed.contains("scratch"),
+        "`projects add` is explicit: {listed}"
+    );
+
+    // And prune reports it without removing it, until asked.
+    let kept = run_fr_registry(&project, &["projects", "prune"], &xdg);
+    assert!(kept.contains("temporary directory, kept"), "{kept}");
+    assert!(kept.contains("--ephemeral"), "and names the flag: {kept}");
+    let still = run_fr_registry(&project, &["projects", "list", "--json"], &xdg);
+    assert!(still.contains("scratch"), "not removed by default: {still}");
+
+    let gone = run_fr_registry(&project, &["projects", "prune", "--ephemeral"], &xdg);
+    assert!(gone.contains("Removed 1 project"), "{gone}");
+    let after = run_fr_registry(&project, &["projects", "list", "--json"], &xdg);
+    assert!(!after.contains("scratch"), "{after}");
+
+    let _ = fs::remove_dir_all(&xdg);
 }
 
 /// Run `fr` against a registry shared with the other calls in a test, rather
@@ -381,7 +451,7 @@ fn test_worktree_registers_nests_and_self_heals() {
 
     // Nothing left for prune to do — the point of the exercise.
     let prune = run_fr_registry(base.path(), &["projects", "prune"], &xdg);
-    assert!(prune.contains("No not-found projects"), "{prune}");
+    assert!(prune.contains("Nothing to prune"), "{prune}");
 }
 
 /// An entry registered before frame recorded provenance — or by another `fr` on
@@ -470,7 +540,7 @@ fn test_prune_keeps_a_live_worktree_without_a_frame_dir() {
     );
     let prune = run_fr_registry(base.path(), &["projects", "prune"], &xdg);
     assert!(
-        prune.contains("No not-found projects"),
+        prune.contains("Nothing to prune"),
         "prune must not remove a directory that is right there: {prune}"
     );
 }

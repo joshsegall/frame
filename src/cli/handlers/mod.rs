@@ -167,7 +167,11 @@ fn load_project_at(root: &Path) -> Result<Project, ProjectError> {
     // teach people to stop reading the list. `fr projects add` registers through
     // its own call, which does report.
     if !dryrun::is_active() {
-        registry::register_project(&project.config.project.name, &project.root);
+        registry::register_project(
+            &project.config.project.name,
+            &project.root,
+            registry::Registration::Automatic,
+        );
         registry::touch_cli(&project.root);
     }
 
@@ -4496,7 +4500,10 @@ fn cmd_projects_add(args: ProjectsAddArgs, json: bool) -> Result<(), Box<dyn std
     let config: crate::model::config::ProjectConfig = toml::from_str(&config_text)?;
     let name = config.project.name;
 
-    registry::register_project(&name, &abs_path);
+    // Explicit: somebody named this path, so it registers even under a temp
+    // root. That is the escape hatch that makes an automatic decline cost one
+    // command instead of being a wall.
+    registry::register_project(&name, &abs_path, registry::Registration::Explicit);
     if json {
         println!(
             "{}",
@@ -4550,45 +4557,110 @@ fn cmd_projects_prune(
     // while the removals still come back to be reported. The fork this replaces
     // recomputed the same list through a second filter, which is one more place
     // for the preview and the real run to disagree about what "prunable" means.
-    let removed = registry::prune_missing();
+    let result = registry::prune_missing(args.ephemeral);
 
     if json {
         #[derive(serde::Serialize)]
         struct PrunedJson {
             name: String,
             path: String,
+            /// `not-found` or `ephemeral`. Added when prune learned the second
+            /// reason; a consumer that ignores it reads the array as before.
+            reason: &'static str,
         }
-        let items: Vec<PrunedJson> = removed
-            .iter()
-            .map(|e| PrunedJson {
-                name: e.name.clone(),
-                path: e.path.clone(),
-            })
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&items)?);
+        #[derive(serde::Serialize)]
+        struct PruneReportJson {
+            removed: Vec<PrunedJson>,
+            /// Entries in a temporary directory that were **kept**, because
+            /// `--ephemeral` was not passed. A consumer deciding whether the
+            /// registry is tidy has to read this as well as `removed`.
+            ephemeral_kept: Vec<PrunedJson>,
+        }
+        let row = |e: &registry::ProjectEntry, reason: registry::PruneReason| PrunedJson {
+            name: e.name.clone(),
+            path: e.path.clone(),
+            reason: reason.slug(),
+        };
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&PruneReportJson {
+                removed: result
+                    .removed
+                    .iter()
+                    .map(|(e, reason)| row(e, *reason))
+                    .collect(),
+                ephemeral_kept: result
+                    .ephemeral_kept
+                    .iter()
+                    .map(|e| row(e, registry::PruneReason::Ephemeral))
+                    .collect(),
+            })?
+        );
         return Ok(());
     }
 
-    if removed.is_empty() {
-        println!("No not-found projects to prune.");
-        return Ok(());
-    }
-
-    let verb = if args.dry_run {
-        "Would remove"
+    if !result.removed.is_empty() {
+        // "Would remove" leads, and has to: `scripts/check-registry.sh` greps
+        // the first word of this line to decide whether to warn at commit time.
+        let verb = if args.dry_run {
+            "Would remove"
+        } else {
+            "Removed"
+        };
+        println!(
+            "{} {} project{}:",
+            verb,
+            result.removed.len(),
+            if result.removed.len() == 1 { "" } else { "s" }
+        );
+        // Grouped by reason rather than listed flat. A destructive command that
+        // covers two differently-shaped reasons has to say which rows it covered
+        // for which, or `--dry-run` stops being something you can agree to
+        // precisely.
+        for reason in [
+            registry::PruneReason::NotFound,
+            registry::PruneReason::Ephemeral,
+        ] {
+            let group: Vec<_> = result
+                .removed
+                .iter()
+                .filter(|(_, r)| *r == reason)
+                .collect();
+            if group.is_empty() {
+                continue;
+            }
+            println!();
+            println!("  {}:", reason.describe());
+            for (entry, _) in group {
+                println!("    {}  {}", entry.name, entry.path);
+            }
+        }
     } else {
-        "Removed"
-    };
-    println!(
-        "{} {} not-found project{}:",
-        verb,
-        removed.len(),
-        if removed.len() == 1 { "" } else { "s" }
-    );
-    for entry in &removed {
-        println!("  {}  {}", entry.name, entry.path);
+        println!("Nothing to prune.");
     }
-    if args.dry_run {
+
+    // Said whether or not anything was removed: an otherwise-clean registry
+    // holding four throwaway projects is exactly the state this is for, and
+    // "Nothing to prune." on its own would be the wrong answer to it.
+    if !result.ephemeral_kept.is_empty() {
+        println!();
+        println!(
+            "{} project{} in a temporary directory, kept:",
+            result.ephemeral_kept.len(),
+            if result.ephemeral_kept.len() == 1 {
+                ""
+            } else {
+                "s"
+            }
+        );
+        for entry in &result.ephemeral_kept {
+            println!("  {}  {}", entry.name, entry.path);
+        }
+        println!();
+        println!("`fr projects prune --ephemeral` removes those too.");
+    }
+
+    if args.dry_run && !result.removed.is_empty() {
         println!();
         println!("Run `fr projects prune` to remove them.");
     }
