@@ -271,16 +271,25 @@ warning: backend — 1.5MB of open work exceeds the 512KB limit (file is 3.0MB) 
 
 It names no individual task, deliberately: no single task is the problem, the aggregate is, and the remedy is splitting the track or closing work rather than editing any one of them. The measure is `## Backlog` plus `## Parked` — Done is excluded because [`[clean]`](concepts.md#clean) already bounds it automatically, and does so by swinging between `done_bytes_retain` and `done_bytes_threshold`; a warning that counted that swing would fire before a clean and clear after one with the open work untouched. The file size is shown for context and decides nothing. No `--fix`: open work cannot be archived, and how much of it belongs in one track is not frame's judgement to make.
 
-An **oversize note is not reported at all.** `limits.note_max_bytes` is a guardrail on frame's own commands, not an invariant on the file, and a note that predates the limit is a supported state rather than damage.
+A note past [`limits.note_soft_max_bytes`](concepts.md#limits) (8 KB by default) is reported as an **error**:
 
-A note that holds **the same text twice** is reported, and the difference from the size case is intent. A long note is a supported state; nobody, ever, means to store their note twice. It is also mechanically identifiable rather than a judgement about someone's writing — the same exact-match rule [`fr note`'s repeat guard](#fr-note-id-text--fr-note-id---file-path) applies, at the same [`limits.note_repeat_bytes`](concepts.md#limits) threshold, turned on a note already on disk. What check reports here is precisely what `fr note` would now refuse:
+```
+error: [backend] BAC-b208 note is 11KB, past the 8KB limit (limits.note_soft_max_bytes) —
+       `fr show BAC-b208` and edit it down with `fr note --replace`
+```
+
+This is the one finding here that is not about something being wrong, and the reason it is an error is that nothing else would get it cleared. The condition stays exactly as true as it was until someone rewrites the note, and an advisory nobody ever has to clear is one nobody clears — which is how the notes it exists to prevent get written. It is set below `note_max_bytes` on purpose: the cap is a wall that asks for curation at the moment it costs most, with 16 KB of note to read before a line can be cut, and this asks earlier while a paragraph still comes out easily. No `--fix`: what the note should say once it is shorter is the whole task, and truncating one destroys the record it exists to be. Live tracks only — an archived note is not one anyone is going to edit.
+
+A note past **`limits.note_max_bytes`** itself is *not* reported. That limit is a guardrail on frame's own commands, not an invariant on the file: a note that predates it or was hand-written is a supported state rather than damage. The two numbers divide the job — the cap governs what frame will write, the soft threshold is the judgement — and nothing clamps them together. The test is only ever "is this note longer than `note_soft_max_bytes`". Setting it above the cap therefore stops the finding for the band between the two and keeps it for everything above itself, which is where the notes that matter are: a note only gets past the cap by predating it, and nothing trims it afterwards, so a project can carry dormant 140 KB notes indefinitely. Raising the knob chooses which of them to hear about; `"off"` is the only setting that silences it outright.
+
+A note that holds **the same text twice** is reported as a warning. Nobody, ever, means to store their note twice, and it is mechanically identifiable rather than a judgement about someone's writing — the same exact-match rule [`fr note`'s repeat guard](#fr-note-id-text--fr-note-id---file-path) applies, at the same [`limits.note_repeat_bytes`](concepts.md#limits) threshold, turned on a note already on disk. What check reports here is precisely what `fr note` would now refuse:
 
 ```
 warning: [backend] BAC-b208 note holds the same 3.4KB twice (note is 41KB) — an append that was
          meant to be a replacement; `fr show BAC-b208` and edit it down with `fr note --replace`
 ```
 
-The guard only looks forward: it stops a note growing another copy of itself and can do nothing about the copies already there. This is how you find them — the note the guard was written for had eight, 110 KB of its 139 KB, and nothing short of reading every note in the project would have surfaced it. No `--fix`: which copy to keep is not decidable once the copies have diverged, which after a few rounds of section-rewriting they have. The later one is usually the current text and sometimes an unlucky re-paste of the older, and deleting the wrong one destroys the only record of a finding.
+A warning where an oversize note is an error, because the work it names is bounded — delete one copy — and because it is the finding a long note most often carries as well; one overgrown note failing check twice for a single afternoon's work would teach the reader to skim both. The guard only looks forward: it stops a note growing another copy of itself and can do nothing about the copies already there. This is how you find them — the note the guard was written for had eight, 110 KB of its 139 KB, and nothing short of reading every note in the project would have surfaced it. No `--fix`: which copy to keep is not decidable once the copies have diverged, which after a few rounds of section-rewriting they have. The later one is usually the current text and sometimes an unlucky re-paste of the older, and deleting the wrong one destroys the only record of a finding.
 
 It reports **unclaimed rescue copies**: files the TUI could not save and dumped into `frame/.rescue/` at exit (see [TUI save failures](tui.md)). The exit message names that directory once, on a terminal that is usually closed shortly afterwards — so without this the copies sit there being the only version of that work with nobody looking. A warning, and with no repair: moving a copy into place would overwrite a live file that may be newer, and deleting it destroys the thing the directory exists to protect. Clearing the directory clears the warning.
 
@@ -510,6 +519,16 @@ warning: EFF-014 note replaced 780B with 3B — if that was meant as a flag or a
 The sizes appear whenever `--replace` discarded content, including under `--dry-run`; `--json` carries them as `displaced_bytes`. Text that contains the existing note verbatim displaces nothing — that is a read-modify-write, the shape `--replace` is meant to have — and reports plainly as `note updated`.
 
 The **warning** is advisory and the write still goes through: discarding a note is what `--replace` is for. It fires only on the shape that is almost never meant — under 64 bytes written over at least 128 — which is what a flag or a filename looks like once stored. `--json` carries it in `warnings`. The two bounds sit far apart on purpose, so that shortening a note by hand stays quiet.
+
+**Warned about, and written anyway, once the note passes [`limits.note_soft_max_bytes`](concepts.md#limits)** (8 KB by default):
+
+```
+$ fr note EFF-014 --file finding.md
+EFF-014 note updated
+warning: EFF-014 note is 9.4KB, past the 8KB soft limit (limits.note_soft_max_bytes) — `fr check` reports it as an error until it is edited down
+```
+
+The write is never refused for this — the soft threshold exists to ask for curation while the note is still small enough to curate cheaply, which is the opposite end from where the cap below asks. It fires on any write that *leaves* the note over the threshold, including one that shortened it: a note over the threshold is over it however it got there, so a curation done in stages keeps being told there is more to do until there isn't. It appears under `--dry-run` too, and `--json` carries it in `warnings`. `fr check` reports the same notes as errors.
 
 Refused if the result would exceed [`limits.note_max_bytes`](concepts.md#limits) (16 KB by default) *and* be longer than the note already is. Since appending can only lengthen a note, an append onto a note that is already over the limit is always refused — which is the point, as appending is how notes get that size. Nothing is written when a write is refused; the text is still yours to shorten and retry.
 

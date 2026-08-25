@@ -379,6 +379,25 @@ pub fn note_write_allowed(current: usize, would_be: usize, limit: Option<usize>)
     }
 }
 
+/// Whether a note of `len` bytes has passed `limits.note_soft_max_bytes`.
+///
+/// Absolute where [`note_write_allowed`] is non-increasing, and the asymmetry is
+/// the point: the cap refuses writes, so it has to leave a way down off a note
+/// that is already over it, while this one only ever *says something*. A note
+/// over the soft threshold is over it whether the last write grew it, shrank it
+/// or was the first one — so the answer depends on the note, not on how it got
+/// there, and a curation done in stages keeps being told there is more to do
+/// until there isn't.
+///
+/// The one chokepoint for both consumers: `fr note`'s advisory warning and
+/// `fr check`'s `oversize_note`. They are the same question asked at write time
+/// and at read time, and they must not be able to disagree.
+///
+/// `None` for `limit` is the threshold switched off.
+pub fn note_wants_curation(len: usize, limit: Option<usize>) -> bool {
+    limit.is_some_and(|limit| len > limit)
+}
+
 /// The shapes a `--replace` takes when the replacement was never note text.
 ///
 /// A replacement is refused by nothing — discarding a note is what `--replace`
@@ -2003,6 +2022,58 @@ mod tests {
                 .iter()
                 .any(|m| matches!(m, Metadata::Note(n) if n == "First note.\n\nSecond note."))
         );
+    }
+
+    /// The soft threshold is absolute where the cap is non-increasing, so a
+    /// note over it stays over it however the last write got there. That is what
+    /// makes curation-in-stages work: each pass is told there is still more.
+    #[test]
+    fn curation_is_wanted_by_the_note_not_by_the_write() {
+        assert!(note_wants_curation(201, Some(200)));
+        assert!(
+            !note_wants_curation(200, Some(200)),
+            "at the limit is not past it"
+        );
+        assert!(!note_wants_curation(0, Some(200)));
+
+        // A shrinking write that lands still over says so; the one that lands
+        // under goes quiet. The cap would have allowed both.
+        assert!(note_wants_curation(500, Some(200)));
+        assert!(note_write_allowed(900, 500, Some(200)));
+        assert!(!note_wants_curation(150, Some(200)));
+
+        // Off is off, at any size.
+        assert!(!note_wants_curation(usize::MAX, None));
+    }
+
+    /// The soft threshold never consults the cap, and the case that depends on
+    /// it is the one that actually exists: a note only gets past
+    /// `note_max_bytes` by predating it, and the non-increasing rule then leaves
+    /// it exactly that long until someone rewrites it. Those dormant notes are
+    /// the whole reason to report anything, so a soft threshold raised *above*
+    /// the cap has to keep naming the ones above itself — it silences the band
+    /// between the two and nothing else.
+    #[test]
+    fn the_soft_threshold_does_not_consult_the_cap() {
+        let (cap, soft) = (Some(16 * 1024), Some(20 * 1024));
+
+        // A dormant 140 KB note: past both, and past a soft threshold that sits
+        // above the cap. Still reported.
+        assert!(note_wants_curation(140 * 1024, soft));
+        // And frame will not grow it, so it stays 140 KB until rewritten.
+        assert!(!note_write_allowed(140 * 1024, 140 * 1024 + 1, cap));
+        // A shrinking rewrite is legal and still leaves it reportable.
+        assert!(note_write_allowed(140 * 1024, 30 * 1024, cap));
+        assert!(note_wants_curation(30 * 1024, soft));
+
+        // The band between the cap and the raised threshold is the only thing
+        // raising it gave up: past the cap, under the threshold, not reported.
+        assert!(note_wants_curation(18 * 1024, cap));
+        assert!(!note_wants_curation(18 * 1024, soft));
+
+        // Nothing about the cap can bring it back — only the threshold decides.
+        assert!(!note_wants_curation(18 * 1024, Some(19 * 1024)));
+        assert!(note_wants_curation(18 * 1024, Some(17 * 1024)));
     }
 
     /// The clobber shape is "a few bytes over a substantial note" — both halves

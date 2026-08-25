@@ -71,6 +71,17 @@ note_max_bytes = "16KB"      # largest note frame's commands will GROW a note to
                              # a note already over the limit is never touched,
                              # never truncated, and can still be edited down —
                              # only writes that lengthen it are refused
+note_soft_max_bytes = "8KB"  # the size past which a note wants editing down. `fr note`
+                             # warns and writes anyway; `fr check` reports it as an
+                             # ERROR. Below the cap on purpose: the cap refuses a
+                             # write, which asks for curation at the moment it costs
+                             # most, and this asks earlier while a paragraph still
+                             # comes out easily. Independent of the cap — the test
+                             # is only "is the note longer than this". Set above
+                             # note_max_bytes it stops reporting the band between
+                             # the two and still reports everything above itself,
+                             # which is where the dormant pre-limit notes are.
+                             # 0 / "off" is the only setting that silences it
 note_repeat_bytes = 120      # shortest run of consecutive lines an append may not
                              # repeat verbatim into a note, and the same threshold
                              # `fr check` reports a note for already holding twice.

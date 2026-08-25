@@ -1545,6 +1545,27 @@ fn cmd_check(args: CheckArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
                             track_ids.join(", ")
                         );
                     }
+                    check::CheckError::OversizeNote {
+                        track_id,
+                        task_id,
+                        title,
+                        note_bytes,
+                        limit_bytes,
+                    } => {
+                        use crate::model::config::ByteSize;
+                        let who = match task_id {
+                            Some(id) => id.clone(),
+                            None => format!("\"{}\"", title),
+                        };
+                        println!(
+                            "  [{}] {} note is {}, past the {} limit (limits.note_soft_max_bytes) — `fr show {}` and edit it down with `fr note --replace`",
+                            track_id,
+                            who,
+                            ByteSize(*note_bytes as u64).human(),
+                            ByteSize(*limit_bytes as u64).human(),
+                            who,
+                        );
+                    }
                 }
             }
         }
@@ -2758,7 +2779,7 @@ fn cmd_note(args: NoteArgs, json: bool) -> Result<(), Box<dyn std::error::Error>
     // `--replace` is *supposed* to have — so the sizes are reported only when
     // content actually went away.
     let displaced = args.replace && !prior_note.is_empty() && !text.contains(&prior_note);
-    let notice = if displaced {
+    let mut notice = if displaced {
         let (was, now) = (prior_note.len(), text.len());
         let mut warnings = Vec::new();
         if task_ops::looks_like_clobbered_note(was, now) {
@@ -2777,6 +2798,37 @@ fn cmd_note(args: NoteArgs, json: bool) -> Result<(), Box<dyn std::error::Error>
     } else {
         WriteNotice::default()
     };
+
+    // The soft limit, on every write that leaves the note past it — the write
+    // itself is never refused for this. Read back off the task rather than
+    // computed from `text`, because an append joins with a blank line and a
+    // `--replace` does not, and this number has to be the one `fr check` will
+    // later measure off disk. Fires under `--dry-run` too: the in-memory write
+    // has happened, and the whole value of the warning is arriving before the
+    // note is that size.
+    //
+    // It fires on a shrinking write as well, which is deliberate — a note over
+    // the threshold is over it, and a curation done in stages should keep being
+    // told there is more to do until there isn't.
+    let resulting = snapshot(&project, &track_id, &args.id)
+        .as_ref()
+        .and_then(task_note)
+        .map(|n| n.len())
+        .unwrap_or(0);
+    let soft_limit = project
+        .config
+        .limits
+        .note_soft_max_bytes
+        .map(|b| b.bytes() as usize);
+    if task_ops::note_wants_curation(resulting, soft_limit) {
+        notice.warnings.push(format!(
+            "{} note is {}, past the {} soft limit (limits.note_soft_max_bytes) — \
+             `fr check` reports it as an error until it is edited down",
+            args.id,
+            ByteSize(resulting as u64).human(),
+            ByteSize(soft_limit.unwrap_or(0) as u64).human(),
+        ));
+    }
 
     let human_line = if displaced {
         format!(

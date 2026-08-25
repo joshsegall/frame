@@ -118,8 +118,14 @@ impl Default for CleanConfig {
 /// **A guardrail on authoring, not an invariant on the file.** Markdown is the
 /// source of truth and stays hand-editable, and `fr import` is exempt because
 /// it is how pre-existing content enters frame. Neither is a hole to be closed
-/// later: a project that already holds an oversize note is a supported state,
-/// and `fr check` does not report one as damage.
+/// later: no write here is ever undone, nothing on disk is ever truncated to
+/// fit, and a project that already exceeds one of these keeps working.
+///
+/// What `fr check` says about them varies by limit, and says which of the two
+/// jobs that limit is doing. [`LimitsConfig::note_max_bytes`] is the wall
+/// frame's own commands stop at and check is silent about it — a note already
+/// past it is a supported state, not damage. [`LimitsConfig::note_soft_max_bytes`]
+/// exists to be acted on, so check reports it as an error.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LimitsConfig {
     /// The largest note frame's own commands will *grow* a note to.
@@ -136,6 +142,42 @@ pub struct LimitsConfig {
     /// `"off"` (or `0`) disables the limit.
     #[serde(default = "default_note_max_bytes", deserialize_with = "de_limit")]
     pub note_max_bytes: Option<ByteSize>,
+    /// The size past which a note is considered to want curation.
+    ///
+    /// **The soft half of [`Self::note_max_bytes`], and the one meant to be
+    /// felt.** The hard cap is a wall: a write arrives, is refused, and the
+    /// text the caller was holding is theirs to shorten and resend — which is
+    /// most expensive exactly where it lands, because by then there is 16 KB of
+    /// note to read before anything can be cut. This threshold is the same
+    /// pressure applied while curation is still cheap: `fr note` warns on any
+    /// write that leaves the note past it and writes anyway, and `fr check`
+    /// reports one as an error.
+    ///
+    /// **`fr check` errors here where it says nothing about `note_max_bytes`,
+    /// and the difference is what each number is for.** The cap governs frame's
+    /// own commands and nothing else — a project that already holds a 148 KB
+    /// note is a supported state, and calling it damage would be second-guessing
+    /// an author who may well have hand-written it. This one exists to be acted
+    /// on. It sits below the cap precisely so that reaching it means "edit this
+    /// down before it becomes a wall", and an advisory nobody ever has to clear
+    /// is one nobody clears.
+    ///
+    /// **Independent of the cap, deliberately: nothing clamps it either way, and
+    /// the question asked is only ever "is this note longer than this number".**
+    /// At the default it fires well before the wall. Set equal to
+    /// `note_max_bytes` it fires only at it. Set *above* the cap it stops
+    /// reporting the band between the two — and keeps reporting everything above
+    /// itself, which is the part that matters, because a note only gets past the
+    /// cap by predating it and then sitting there. Nothing trims such a note;
+    /// the non-increasing rule leaves it exactly as long as it was until someone
+    /// rewrites it, so a project can hold dormant 140 KB notes indefinitely and
+    /// those are precisely the ones worth naming. Raising this knob is how a
+    /// project picks *which* of them it wants to hear about, not a way to stop
+    /// hearing about any.
+    ///
+    /// `"off"` (or `0`) is the only setting that silences it outright.
+    #[serde(default = "default_note_soft_max_bytes", deserialize_with = "de_limit")]
+    pub note_soft_max_bytes: Option<ByteSize>,
     /// Live content — `## Backlog` plus `## Parked` — past which `fr check`
     /// warns that a track holds too much open work.
     ///
@@ -183,6 +225,7 @@ impl Default for LimitsConfig {
     fn default() -> Self {
         LimitsConfig {
             note_max_bytes: default_note_max_bytes(),
+            note_soft_max_bytes: default_note_soft_max_bytes(),
             track_warn_bytes: default_track_warn_bytes(),
             note_repeat_bytes: default_note_repeat_bytes(),
         }
@@ -195,6 +238,16 @@ impl Default for LimitsConfig {
 /// the class of note that has stopped being a record and become a document.
 fn default_note_max_bytes() -> Option<ByteSize> {
     Some(ByteSize(16 * 1024))
+}
+
+/// 8 KB. Half [`default_note_max_bytes`], and clear of the band a note that is
+/// doing its job occupies: a dated investigation record with file:line citations
+/// — the thing a note is *for* — runs 2–6 KB, so the threshold passes over the
+/// ordinary case entirely and catches the note that has started becoming a
+/// document. Half rather than nearer the cap so that what remains above it, a
+/// further 8 KB, is room enough to keep working in while the curation happens.
+fn default_note_soft_max_bytes() -> Option<ByteSize> {
+    Some(ByteSize(8 * 1024))
 }
 
 /// 512 KB of open work. At a ~2.7 KB median note that is roughly 190 live

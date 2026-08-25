@@ -295,6 +295,7 @@ What frame's own commands will not do:
 ```toml
 [limits]
 note_max_bytes = "16KB"    # largest note frame will grow a note to (default: 16KB; 0/"off" disables)
+note_soft_max_bytes = "8KB" # size past which `fr note` warns and `fr check` errors (default: 8KB)
 note_repeat_bytes = 120    # shortest run of lines an append may not repeat into a note, and
                            # the same threshold `fr check` reports one for holding twice (default: 120)
 track_warn_bytes = "512KB" # `fr check` warns past this much open work in one track (default: 512KB)
@@ -306,17 +307,33 @@ There is no `--force`. Setting `note_max_bytes = 0` (or `"off"`) is the escape h
 
 In the TUI the same rule is enforced at the keystroke: the note field caps at `max(note_max_bytes, the note's length when opened)`, so an oversize note opens intact and can only shrink, and a paste that will not fit is rejected whole rather than clipped to fit — keeping its first N bytes would silently discard the tail.
 
-**A guardrail on authoring, not an invariant on the file.** Markdown is the source of truth and stays hand-editable, and `fr import` is exempt, because importing is how content that predates a limit gets in. `fr check` does not report an oversize note as damage.
+**A guardrail on authoring, not an invariant on the file.** Markdown is the source of truth and stays hand-editable, and `fr import` is exempt, because importing is how content that predates a limit gets in. No write is ever undone and nothing on disk is truncated to fit; `fr check` does not report a note past `note_max_bytes` as damage, because a note that predates the limit or was hand-written is a supported state.
+
+**`note_soft_max_bytes` asks for the same curation earlier, where it is cheap.** The cap is a wall: an append arrives, is refused, and whoever sent it now has to read 16 KB of note before they can cut a line — the most expensive possible moment to be asked, and the moment the wall picks. The soft threshold moves the request to where the note is half that size and a paragraph still comes out easily. `fr note` warns on any write that leaves the note past it and writes anyway:
+
+```
+$ fr note EFF-014 --file finding.md
+EFF-014 note updated
+warning: EFF-014 note is 9.4KB, past the 8KB soft limit (limits.note_soft_max_bytes) — `fr check` reports it as an error until it is edited down
+```
+
+It fires on a write that *shrank* the note too, if the result is still over — a note over the threshold is over it however it got there, and a curation done in stages should keep being told there is more to do until there isn't.
+
+**`fr check` reports it as an error**, where it says nothing about the cap. The two numbers divide the job: the cap governs frame's own writes, and this one is the judgement, said out loud. It is an error rather than a warning because the condition stays exactly as true as it was until someone rewrites the note, and an advisory nobody ever has to clear is one nobody clears.
+
+The two are **independent — nothing clamps them together**, and the test is only ever "is this note longer than `note_soft_max_bytes`". At the defaults the soft threshold fires at half the cap. Set it equal to `note_max_bytes` and it fires only at the wall. Set it *above* the cap and it stops reporting the band between the two while still reporting everything above itself — which is the part worth keeping, because a note only gets past the cap by predating it, and the non-increasing rule then leaves it exactly that long until someone rewrites it. A project can carry dormant 140 KB notes indefinitely; raising this knob picks which of them to hear about. `0` / `"off"` is the only setting that silences the warning and the finding outright.
+
+The default is 8 KB because that clears the band a note doing its job occupies: a dated investigation record with file:line citations — the thing a note is *for* — runs 2–6 KB. Half the cap rather than nearer it so that what remains above, a further 8 KB, is room enough to keep working in while the curation happens.
 
 **`note_repeat_bytes` refuses an append that repeats text the note already holds.** `fr note` appends, and an agent that believes it replaces writes the whole note out again each time — so the note ends up holding N copies of everything that did not change that round. Measured on a real project: one note reached eight copies of itself, 110 KB of its 139 KB, and 5.4% of all note text across the project was duplication of this kind.
 
 The comparison is **runs of consecutive lines**, exact text, at or above the configured length. Lines rather than paragraph blocks because blocks made the guard answer to the author's punctuation instead of to the duplication: a note whose sections are separated by blank lines is several blocks and a re-sent section is caught, while the same sections written as consecutive lines are one block and re-sending three of four verbatim matched nothing. Both notes were duplicating the same text. Exact rather than fuzzy because the repetition is literally re-pasted, so exact matching finds it — and because the failure mode of a similarity threshold is refusing a write that was fine. The refusal asks first for only the new text, since a repeat is usually an append written as a whole-note rewrite; `--replace` is offered second and named as discarding the note, because it is.
 
-**The same threshold drives a `fr check` report**, so what check names is exactly what `fr note` would now refuse. The guard is forward-looking — it stops a note growing another copy of itself and can do nothing about copies already there — and unlike an oversize note, duplication is reported as something worth fixing: a long note is a supported state, but nobody means to store their note twice. No `--fix`, because which copy to keep stops being decidable as soon as the copies diverge.
+**The same threshold drives a `fr check` report**, so what check names is exactly what `fr note` would now refuse. The guard is forward-looking — it stops a note growing another copy of itself and can do nothing about copies already there — and this is how the copies already there get found. A **warning** where an oversize note is an error, because the work it names is bounded — delete one copy — and it is the finding a long note most often carries as well; a single overgrown note failing check twice for one afternoon's work would teach the reader to skim both. No `--fix`, because which copy to keep stops being decidable as soon as the copies diverge.
 
 **`track_warn_bytes` measures open work — `## Backlog` plus `## Parked` — not file size.** Done is excluded because `[clean]` already bounds it, and bounds it by oscillating between `done_bytes_retain` and `done_bytes_threshold`. Folding that swing into the measurement would mean the same track warns just before a clean and goes quiet just after one with its open work untouched: a warning that answers to the archiver's schedule rather than to anything its reader did. The warning is one line per track and names no individual task, because no individual task is the problem — the aggregate is, and the remedy is splitting the track or closing work.
 
-Both accept a plain number of bytes or a string with a unit (`"16KB"`, `"512KB"`), 1024-based, as `[recovery]` does.
+All of them accept a plain number of bytes or a string with a unit (`"16KB"`, `"512KB"`), 1024-based, as `[recovery]` does.
 
 ### `[recovery]`
 

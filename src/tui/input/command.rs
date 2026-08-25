@@ -729,6 +729,26 @@ pub(super) fn palette_check_project(app: &mut App) {
                 check::CheckError::DuplicateId { task_id, track_ids } => {
                     format!("  {} duplicated in: {}", task_id, track_ids.join(", "))
                 }
+                check::CheckError::OversizeNote {
+                    track_id,
+                    task_id,
+                    title,
+                    note_bytes,
+                    limit_bytes,
+                } => {
+                    use crate::model::config::ByteSize;
+                    let who = match task_id {
+                        Some(id) => id.clone(),
+                        None => format!("\"{}\"", title),
+                    };
+                    format!(
+                        "  [{}] {} note is {}, past the {} limit — edit it down",
+                        track_id,
+                        who,
+                        ByteSize(*note_bytes as u64).human(),
+                        ByteSize(*limit_bytes as u64).human(),
+                    )
+                }
                 check::CheckError::UnresolvedMergeConflict {
                     track_id,
                     task_id,

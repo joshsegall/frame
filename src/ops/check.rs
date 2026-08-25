@@ -170,6 +170,46 @@ pub enum CheckError {
         /// the track if it is adopted.
         title: Option<String>,
     },
+    /// A task note has passed `limits.note_soft_max_bytes` and wants editing
+    /// down.
+    ///
+    /// **The one finding here that is not about something being wrong**, and the
+    /// only reason it is an error is that nothing else would get it cleared. Its
+    /// sibling `limits.note_max_bytes` is a wall: an append arrives, is refused,
+    /// and whoever sent it now has to read 16 KB of note before they can cut a
+    /// line of it. That is the most expensive possible moment to ask for
+    /// curation, and it is the moment the wall picks. This threshold moves the
+    /// same request earlier, to where the note is half that size and a paragraph
+    /// still comes out easily — and an advisory that never has to be cleared is
+    /// one that never is, which is how the notes it is trying to prevent got
+    /// written in the first place.
+    ///
+    /// **Deliberately reversing the older rule that check said nothing about
+    /// note size.** That rule was right about `note_max_bytes` and is unchanged
+    /// for it: a note past the cap may have been hand-written, may predate the
+    /// limit, and is a supported state rather than damage. It is wrong as a rule
+    /// about *every* size threshold, because it left frame with no way to say
+    /// "this one is on its way to being a problem" at any size at all. The two
+    /// numbers now divide that: the cap governs frame's own writes and stays
+    /// silent here, this one is the judgement and is said out loud. A project
+    /// that disagrees sets `note_soft_max_bytes` to its own number, to
+    /// `note_max_bytes`, above it, or to `"off"`.
+    ///
+    /// Live tracks only, matching every other per-task check: an archived note
+    /// is not one anyone is going to edit.
+    ///
+    /// **No `--fix`.** What a note should say once it is shorter is the whole
+    /// task, and truncating one destroys the record it exists to be. `fr show`
+    /// the task and rewrite it with `fr note --replace`.
+    #[serde(rename = "oversize_note")]
+    OversizeNote {
+        track_id: String,
+        /// `None` for a task that has no ID yet; `title` identifies it instead.
+        task_id: Option<String>,
+        title: String,
+        note_bytes: usize,
+        limit_bytes: usize,
+    },
 }
 
 /// A validation warning (non-critical issue).
@@ -315,14 +355,19 @@ pub enum CheckWarning {
     /// appends that were meant to be replacements, before the write guard
     /// existed or with it switched off.
     ///
-    /// **Duplication is reported where an oversize note is not, and the
-    /// difference is intent.** `limits.note_max_bytes` is a guardrail on
-    /// frame's own commands, so a long note is a supported state and saying so
-    /// would be second-guessing the author. Nobody, ever, means to store their
-    /// note twice. It is also mechanically identifiable rather than a judgement
-    /// about writing: the same exact-match rule the write guard applies, turned
-    /// on a note already on disk. The threshold is `limits.note_repeat_bytes`,
-    /// so what this reports is precisely what `fr note` would now refuse.
+    /// **A warning, where [`CheckError::OversizeNote`] is an error, and the
+    /// difference is what each asks of its reader.** An oversize note has to be
+    /// rewritten, and until someone does that the condition is exactly as true
+    /// as it was — so it stays red. Duplication names a specific run of text and
+    /// the work is bounded: delete one copy. It is also the finding a long note
+    /// most often carries *as well*, and a single overgrown note failing check
+    /// twice for one afternoon's work would teach the reader to skim both.
+    ///
+    /// Nobody, ever, means to store their note twice. It is mechanically
+    /// identifiable rather than a judgement about writing: the same exact-match
+    /// rule the write guard applies, turned on a note already on disk. The
+    /// threshold is `limits.note_repeat_bytes`, so what this reports is
+    /// precisely what `fr note` would now refuse.
     ///
     /// Worth reporting because the guard is only forward-looking. It stops a
     /// note growing another copy of itself and can do nothing about the copies
@@ -769,57 +814,83 @@ fn check_track_sizes(project: &Project, result: &mut CheckResult) {
     }
 }
 
-/// Report notes that already hold the same run of lines twice.
+/// The two things `[limits]` has to say about a note already on disk: that it
+/// holds the same run of lines twice, and that it has outgrown
+/// `note_soft_max_bytes`.
 ///
-/// A pass of its own rather than another argument threaded into `check_task`,
-/// for the same reason `check_track_sizes` is one: it is driven by `[limits]`
+/// A pass of its own rather than more arguments threaded into `check_task`, for
+/// the same reason `check_track_sizes` is one: both are driven by `[limits]`
 /// rather than by anything about the task, and `check_task` already carries
-/// seven arguments under an `allow`.
+/// seven arguments under an `allow`. One pass rather than two because they ask
+/// their questions of the same note in the same walk, and a second traversal
+/// would be two places to remember that this is live tracks only.
 ///
 /// Live tracks only, matching every other per-task check here. An archived note
-/// carrying duplication is not something anyone is going to edit, and the
-/// remedy — rewrite the note — does not apply to a file `fr clean` owns.
+/// is not something anyone is going to edit, and the remedy for either finding —
+/// rewrite the note — does not apply to a file `fr clean` owns.
 ///
-/// See [`CheckWarning::DuplicatedNoteText`] for why this is reported when an
-/// oversize note is not.
-fn check_note_duplication(project: &Project, result: &mut CheckResult) {
-    let Some(limit) = project.config.limits.note_repeat_bytes else {
+/// Either threshold may be off independently; with both off the walk is skipped
+/// entirely.
+fn check_note_limits(project: &Project, result: &mut CheckResult) {
+    let repeat = project
+        .config
+        .limits
+        .note_repeat_bytes
+        .map(|b| b.bytes() as usize);
+    let soft_max = project
+        .config
+        .limits
+        .note_soft_max_bytes
+        .map(|b| b.bytes() as usize);
+    if repeat.is_none() && soft_max.is_none() {
         return;
-    };
-    let min_len = limit.bytes() as usize;
+    }
     for (track_id, track) in &project.tracks {
         for node in &track.nodes {
             let TrackNode::Section { tasks, .. } = node else {
                 continue;
             };
             for task in tasks {
-                check_task_note_duplication(task, track_id, min_len, result);
+                check_task_note_limits(task, track_id, repeat, soft_max, result);
             }
         }
     }
 }
 
-fn check_task_note_duplication(
+fn check_task_note_limits(
     task: &Task,
     track_id: &str,
-    min_len: usize,
+    repeat: Option<usize>,
+    soft_max: Option<usize>,
     result: &mut CheckResult,
 ) {
     if let Some(note) = task.metadata.iter().find_map(|m| match m {
         Metadata::Note(n) => Some(n),
         _ => None,
-    }) && let Some(run) = crate::ops::task_ops::self_repeated_note_run(note, Some(min_len))
-    {
-        result.warnings.push(CheckWarning::DuplicatedNoteText {
-            track_id: track_id.to_string(),
-            task_id: task.id.as_ref().map(|id| id.to_string()),
-            title: task.title.clone(),
-            repeated_bytes: run.len(),
-            note_bytes: note.len(),
-        });
+    }) {
+        if let Some(min_len) = repeat
+            && let Some(run) = crate::ops::task_ops::self_repeated_note_run(note, Some(min_len))
+        {
+            result.warnings.push(CheckWarning::DuplicatedNoteText {
+                track_id: track_id.to_string(),
+                task_id: task.id.as_ref().map(|id| id.to_string()),
+                title: task.title.clone(),
+                repeated_bytes: run.len(),
+                note_bytes: note.len(),
+            });
+        }
+        if crate::ops::task_ops::note_wants_curation(note.len(), soft_max) {
+            result.errors.push(CheckError::OversizeNote {
+                track_id: track_id.to_string(),
+                task_id: task.id.as_ref().map(|id| id.to_string()),
+                title: task.title.clone(),
+                note_bytes: note.len(),
+                limit_bytes: soft_max.unwrap_or(0),
+            });
+        }
     }
     for sub in &task.subtasks {
-        check_task_note_duplication(sub, track_id, min_len, result);
+        check_task_note_limits(sub, track_id, repeat, soft_max, result);
     }
 }
 
@@ -899,7 +970,7 @@ pub fn check_project(project: &Project) -> CheckResult {
 
     // Notes that already hold the same text twice — what the write guard now
     // refuses, found where it has already happened.
-    check_note_duplication(project, &mut result);
+    check_note_limits(project, &mut result);
 
     // Does the recovery log actually hold the other side of each conflict?
     resolve_conflict_evidence(&project.frame_dir, &mut result);

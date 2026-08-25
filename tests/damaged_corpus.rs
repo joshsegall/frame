@@ -806,6 +806,45 @@ const CASES: &[Case] = &[
         repair: Repair::None,
     },
     Case {
+        name: "oversize-note",
+        provenance: "a note that kept being appended to — the ordinary way a \
+                     record of an investigation turns into a document. Nothing \
+                     here is malformed and no repair can help: what the note \
+                     should say once it is shorter is the whole task. It is an \
+                     error rather than an advisory because the note stays exactly \
+                     this long until someone rewrites it, and an advisory nobody \
+                     has to clear is one nobody clears. The case tightens \
+                     `limits.note_soft_max_bytes` rather than writing 8 KB of \
+                     fixture, which is the same condition at a workable size",
+        covers: &["oversize_note"],
+        build: |root| {
+            let toml_path = root.join("frame/project.toml");
+            let text = fs::read_to_string(&toml_path).unwrap();
+            fs::write(
+                &toml_path,
+                format!("{text}\n[limits]\nnote_soft_max_bytes = 200\n"),
+            )
+            .unwrap();
+            append_backlog(
+                root,
+                &format!(
+                    "- [ ] `M-004` Carries a note that outgrew itself\n  - added: 2026-01-01\n  - note:\n    {}\n",
+                    "x".repeat(400)
+                ),
+            );
+            Built::Ok
+        },
+        expect: &[error(
+            "oversize_note",
+            &[
+                ("task_id", Match::Eq("M-004")),
+                ("note_bytes", Match::Eq("400")),
+                ("limit_bytes", Match::Eq("200")),
+            ],
+        )],
+        repair: Repair::None,
+    },
+    Case {
         name: "stranded-line",
         provenance: "prose that lost its indent in an editor, or a fragment left by a merge",
         covers: &["stranded_line"],

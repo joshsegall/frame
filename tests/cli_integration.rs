@@ -1517,6 +1517,124 @@ fn set_note_limit(root: &Path, value: &str) {
     .unwrap();
 }
 
+/// Set `limits.note_soft_max_bytes` on a project the helpers just built.
+fn set_note_soft_limit(root: &Path, value: &str) {
+    let path = root.join("frame/project.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    fs::write(
+        &path,
+        format!("{text}\n[limits]\nnote_soft_max_bytes = {value}\n"),
+    )
+    .unwrap();
+}
+
+/// The soft threshold warns; only the cap refuses. Having both is the point —
+/// this is the same request for curation the wall makes, delivered while the
+/// note is still small enough to curate cheaply.
+#[test]
+fn a_note_past_the_soft_limit_warns_and_still_writes() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    set_note_soft_limit(tmp.path(), "200");
+
+    let (_, stderr, ok) = run_fr(tmp.path(), &["note", "M-001", &"x".repeat(300)]);
+    assert!(ok, "a soft-limit note is written, not refused: {stderr}");
+    assert!(
+        stderr.contains("note_soft_max_bytes"),
+        "the warning should name the knob: {stderr}"
+    );
+
+    let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    assert!(
+        track.contains(&"x".repeat(300)),
+        "the write went through, warning or not"
+    );
+
+    // And the same note is an *error* from check, not a warning — the finding
+    // has to be cleared rather than lived with.
+    let (stdout, _, ok) = run_fr(tmp.path(), &["check"]);
+    assert!(
+        stdout.contains("note_soft_max_bytes"),
+        "check should report the note: {stdout}"
+    );
+    assert!(!ok, "an oversize note fails check: {stdout}");
+}
+
+/// The two thresholds are independent, and the only question the soft one asks
+/// is whether the note is longer than it. Raising it above `note_max_bytes`
+/// therefore stops reporting the *band between the two* and keeps reporting
+/// everything above itself — which is the half that matters, because a note only
+/// gets past the cap by predating it and nothing trims it afterwards. A project
+/// can carry dormant 140 KB notes indefinitely, and a soft limit above the cap
+/// must still name them.
+#[test]
+fn a_soft_limit_above_the_cap_still_reports_notes_above_itself() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    // Written while the default cap was in force, then the limits tighten
+    // around it: the shape of a note that predates its project's settings, and
+    // that the non-increasing rule will now leave at exactly this length until
+    // someone rewrites it.
+    run_fr_ok(tmp.path(), &["note", "M-001", &"x".repeat(400)]);
+    let path = tmp.path().join("frame/project.toml");
+    let base = fs::read_to_string(&path).unwrap();
+    let set_limits = |soft: &str| {
+        fs::write(
+            &path,
+            format!("{base}\n[limits]\nnote_max_bytes = 200\nnote_soft_max_bytes = {soft}\n"),
+        )
+        .unwrap();
+    };
+
+    // Both above the 200-byte cap, so both are notes frame would refuse to
+    // grow. The soft limit is what decides, and it decides them differently.
+    set_limits("10000");
+    let (stdout, _, _) = run_fr(tmp.path(), &["check"]);
+    assert!(
+        !stdout.contains("note_soft_max_bytes"),
+        "400 bytes is inside the band between the cap and the soft limit, so \
+         check says nothing about it: {stdout}"
+    );
+
+    set_limits("300");
+    let (stdout, _, ok) = run_fr(tmp.path(), &["check"]);
+    assert!(
+        stdout.contains("note_soft_max_bytes"),
+        "the note is past the soft limit and must be reported, even though the \
+         soft limit sits above the cap: {stdout}"
+    );
+    assert!(!ok, "and it is an error, so check fails: {stdout}");
+
+    // Neither setting touched the cap, which still refuses to grow the note.
+    let (_, stderr, ok) = run_fr(tmp.path(), &["note", "M-001", "one more line"]);
+    assert!(!ok, "the cap still refuses an append: {stderr}");
+}
+
+/// Only `"off"` silences the finding outright. A note far past every limit is
+/// still not reported when the threshold is switched off — that is the escape
+/// hatch, and raising the number is not.
+#[test]
+fn the_soft_limit_switched_off_reports_nothing_at_any_size() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    run_fr_ok(tmp.path(), &["note", "M-001", &"x".repeat(400)]);
+    set_note_soft_limit(tmp.path(), "\"off\"");
+
+    let (_, stderr, ok) = run_fr(tmp.path(), &["note", "M-001", "another finding"]);
+    assert!(ok, "{stderr}");
+    assert!(
+        !stderr.contains("note_soft_max_bytes"),
+        "switched off means no warning: {stderr}"
+    );
+
+    let (stdout, _, _) = run_fr(tmp.path(), &["check"]);
+    assert!(
+        !stdout.contains("note_soft_max_bytes"),
+        "switched off means no finding: {stdout}"
+    );
+}
+
 /// A duplicate `## Done` is reported as an error, and healed by the next write
 /// with every task kept and in order.
 #[test]
