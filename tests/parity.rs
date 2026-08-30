@@ -1251,6 +1251,19 @@ const SURFACE_CASES: &[SurfaceCase] = &[
         cli_refuses: true,
         known_divergence: None,
     },
+    // The same track state, the other question: `accepts_new_tasks` keeps a task
+    // from entering a shelved track, `accepts_active_tasks` keeps the ones
+    // already there from being started. The TUI reaches such a task through the
+    // Recent view — which lists done tasks from shelved tracks too — so the
+    // detail view it opens is exactly this start state.
+    SurfaceCase {
+        what: "start a task in a shelved track",
+        cli: &["state", "H-001", "active"],
+        start: Start::Detail("shelf", "H-001"),
+        keys: &[Char(' ')],
+        cli_refuses: true,
+        known_divergence: None,
+    },
     // -- stated divergence ---------------------------------------------------
     // The one place the two surfaces are deliberately not the same. `fr ref add`
     // refuses a path that leaves the project; the detail-view editor stores it

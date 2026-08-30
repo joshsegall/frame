@@ -1803,6 +1803,19 @@ impl App {
             .unwrap_or(track_id)
     }
 
+    /// The configured state of a track ("active"/"shelved"/"archived"), if the
+    /// track is in the config. The CLI reads the same field through its own
+    /// `track_state`; both feed the `track_ops` predicates that decide what a
+    /// track in that state will accept.
+    pub fn track_state(&self, track_id: &str) -> Option<&str> {
+        self.project
+            .config
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .map(|t| t.state.as_str())
+    }
+
     /// The tracks view's flat order: every active track, then every shelved
     /// one, then every archived one, each group in `project.toml` order.
     ///

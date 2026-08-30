@@ -2653,9 +2653,13 @@ fn cmd_state(args: StateArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
     let before = snapshot(&project, &track_id, &args.id);
 
     // A shelved track is paused work — nothing in it should be marked active.
-    if new_state == TaskState::Active && track_state(&project, &track_id) == Some("shelved") {
+    // The same predicate the TUI asks, so both surfaces refuse the same thing.
+    if new_state == TaskState::Active
+        && let Some(state) = track_state(&project, &track_id)
+        && !track_ops::accepts_active_tasks(state)
+    {
         return Err(format!(
-            "cannot mark '{}' active: its track '{track_id}' is shelved; \
+            "cannot mark '{}' active: its track '{track_id}' is {state}; \
              activate it first with `fr track activate {track_id}`",
             args.id
         )

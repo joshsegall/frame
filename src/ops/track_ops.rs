@@ -108,6 +108,23 @@ pub fn accepts_new_tasks(state: &str) -> bool {
     state == "active"
 }
 
+/// Whether a track's tasks may be *in progress*.
+///
+/// A shelved track is paused work, so nothing in it is being worked on. This is
+/// the companion to [`accepts_new_tasks`] and a separate question: shelving
+/// keeps new tasks out, and this keeps the existing ones from being started
+/// where nobody is looking — a `[>]` task in a shelved track is invisible to
+/// `fr ready`, which is exactly where an in-progress task should show up.
+///
+/// One predicate, two consumers: the CLI's `cmd_state` and the TUI's
+/// `task_state_action`. The CLI refused first and the TUI did not, and the
+/// Recent view is what made that reachable — it lists done tasks from every
+/// loaded track, shelved ones included, so opening one leaves a shelved track
+/// in `View::Detail`, which is where the TUI reads the track to write to.
+pub fn accepts_active_tasks(state: &str) -> bool {
+    state == "active"
+}
+
 /// Whether a track can be renamed — its name, its id, or its ID prefix.
 ///
 /// **An archived track is frozen**, which is what every other mutation already

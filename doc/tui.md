@@ -39,7 +39,7 @@ Shows inbox items with numbered indices and tags. Switch to it with `i`.
 
 ### Recent View
 
-Done tasks grouped by resolved date, with a tree structure for subtasks. Switch to it with `r`.
+Done tasks grouped by resolved date, with a tree structure for subtasks. Switch to it with `r`. It lists done tasks from every loaded track, [shelved](concepts.md#tracks) ones included, so the Detail view opened from here (`Enter`) can sit on a shelved track. The state keys there do what `fr state` does: every transition is allowed except marking a task active, which is refused with a status message until the track is re-activated.
 
 ### Search View
 

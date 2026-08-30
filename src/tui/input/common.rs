@@ -1063,6 +1063,37 @@ pub(super) fn task_state_action(app: &mut App, action: StateAction) {
         return;
     };
 
+    // A shelved track is paused work — nothing in it is in progress, which is
+    // what `fr state <id> active` already refuses. The TUI reaches such a task
+    // through the Recent view: it lists done tasks from every loaded track,
+    // shelved ones included, and opening one leaves a shelved track in
+    // `View::Detail` — the track this function then writes to. Two presses of
+    // the cycle key marked the task `[>]` in a track `fr start` refuses, where
+    // `fr ready` cannot see it.
+    //
+    // Asked before the track is borrowed mutably, and asked of the cycle rather
+    // than assumed: cycle is the only action that can land on active without
+    // naming it, and the rest (done, todo, blocked, parked) stay allowed —
+    // shelved is paused, not frozen.
+    let paused_state = app
+        .track_state(&track_id)
+        .filter(|state| !crate::ops::track_ops::accepts_active_tasks(state))
+        .map(str::to_string);
+    if let Some(state) = paused_state
+        && matches!(action, StateAction::Cycle)
+        && App::find_track_in_project(&app.project, &track_id)
+            .and_then(|t| task_ops::find_task_in_track(t, &task_id))
+            .is_some_and(|t| {
+                task_ops::cycled_state(t.state) == crate::model::task::TaskState::Active
+            })
+    {
+        app.status_message = Some(format!(
+            "cannot start {task_id}: track {track_id} is {state}"
+        ));
+        app.status_is_error = true;
+        return;
+    }
+
     let track = match app.find_track_mut(&track_id) {
         Some(t) => t,
         None => return,
@@ -1993,5 +2024,94 @@ mod tests {
             std::fs::metadata(&path).and_then(|m| m.modified()).ok(),
             "and the mtime is the restored file's, not the deleted one's"
         );
+    }
+
+    /// A task in a shelved track may not be marked active — and the Recent view
+    /// is how the TUI can reach one at all.
+    ///
+    /// [`build_recent_entries`](crate::tui::input::recent) lists done tasks from
+    /// every *loaded* track, shelved ones included, and opening one leaves that
+    /// shelved track in `View::Detail` — which is where [`task_state_action`]
+    /// reads the track it writes to. Two presses of the cycle key (done → todo →
+    /// active) put a `[>]` task in a track `fr state <id> active` refuses, and
+    /// `fr ready` does not look at shelved tracks, so the one task claiming to be
+    /// in progress was the one nobody could see.
+    #[test]
+    fn a_shelved_tracks_task_cannot_be_started_from_the_recent_view() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = shelved_track_with_a_done_task(tmp.path());
+
+        // Recent still lists it, and opening it lands in the shelved track.
+        let entries = crate::tui::input::recent::build_recent_entries(&app);
+        app.recent_cursor = entries
+            .iter()
+            .position(|e| e.id == "A-001")
+            .expect("recent lists the shelved track's done task");
+        crate::tui::input::recent::open_recent_detail(&mut app);
+        assert!(
+            matches!(&app.view, View::Detail { track_id, .. } if track_id == "a"),
+            "view: {:?}",
+            app.view
+        );
+
+        // done → todo is allowed; todo → active is not.
+        task_state_action(&mut app, StateAction::Cycle);
+        task_state_action(&mut app, StateAction::Cycle);
+        app.flush_all_pending_moves();
+
+        let text = track_text(&app);
+        assert!(
+            !text.contains("- [>] `A-001`"),
+            "a task in a shelved track was marked active: {text:?}"
+        );
+        assert!(
+            app.status_is_error
+                && app
+                    .status_message
+                    .as_deref()
+                    .is_some_and(|m| m.contains("shelved")),
+            "the refusal is reported: {:?}",
+            app.status_message
+        );
+    }
+
+    /// Shelved is paused, not frozen. The guard above refuses exactly one
+    /// transition — the one the CLI refuses — and leaves the rest alone, so a
+    /// task in a shelved track can still be reopened, parked or blocked.
+    #[test]
+    fn a_shelved_tracks_task_can_still_be_reopened_and_parked() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut app = shelved_track_with_a_done_task(tmp.path());
+        app.view = View::Detail {
+            track_id: "a".into(),
+            task_id: "A-001".into(),
+        };
+
+        task_state_action(&mut app, StateAction::SetTodo);
+        app.flush_all_pending_moves();
+        assert!(
+            track_text(&app).contains("- [ ] `A-001`"),
+            "reopening is allowed: {:?}",
+            track_text(&app)
+        );
+
+        task_state_action(&mut app, StateAction::ToggleParked);
+        app.flush_all_pending_moves();
+        assert!(
+            track_text(&app).contains("- [~] `A-001`"),
+            "parking is allowed: {:?}",
+            track_text(&app)
+        );
+    }
+
+    /// One done task sitting in a shelved track, saved to disk.
+    fn shelved_track_with_a_done_task(dir: &std::path::Path) -> App {
+        let mut app = app_on_disk(dir);
+        task_state_action(&mut app, StateAction::Done);
+        app.flush_all_pending_moves();
+        app.project.config.tracks[0].state = "shelved".into();
+        app.rebuild_active_track_ids();
+        assert!(app.active_track_ids.is_empty());
+        app
     }
 }

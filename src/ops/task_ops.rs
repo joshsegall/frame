@@ -72,17 +72,26 @@ pub struct ReparentResult {
 // 2.1 — State transitions
 // ---------------------------------------------------------------------------
 
-/// Cycle state: todo → active → done → todo
-pub fn cycle_state(task: &mut Task) {
-    let new_state = match task.state {
+/// The state one press of the cycle key lands on: todo → active → done → todo.
+///
+/// Split out of [`cycle_state`] so a caller can ask where the cycle goes
+/// *before* it goes there. The TUI has to: a task in a shelved track may not be
+/// marked active, and cycle is the only action that can land on active without
+/// naming it.
+pub fn cycled_state(state: TaskState) -> TaskState {
+    match state {
         TaskState::Todo => TaskState::Active,
         TaskState::Active => TaskState::Done,
         TaskState::Done => TaskState::Todo,
         // Blocked/Parked cycle back to todo
         TaskState::Blocked => TaskState::Todo,
         TaskState::Parked => TaskState::Todo,
-    };
-    set_state(task, new_state);
+    }
+}
+
+/// Cycle state: todo → active → done → todo
+pub fn cycle_state(task: &mut Task) {
+    set_state(task, cycled_state(task.state));
 }
 
 /// Set blocked: any → blocked, blocked → todo
