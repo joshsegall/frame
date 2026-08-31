@@ -670,8 +670,14 @@ pub enum DepPopupEntry {
         is_expanded: bool,
         /// True if this is a circular reference
         is_circular: bool,
-        /// True if the task ID was not found in any track
+        /// True if the task ID was not found in any track, and no archive holds
+        /// it either
         is_dangling: bool,
+        /// True if the task ID was found in an archive rather than a live track:
+        /// the dependency is done, and its record moved out of the working file.
+        /// Never set together with `is_dangling` — they are the two halves of
+        /// what "not in any track" used to mean.
+        is_archived: bool,
         /// True if this is in the "Blocked by" section (vs "Blocking")
         is_upstream: bool,
     },
@@ -2739,6 +2745,10 @@ impl App {
         let task_id = state.root_task_id.clone();
         state.entries.clear();
 
+        // Built once for the whole rebuild rather than per entry: it reads the
+        // archives at most once, and only if some dep misses the live tracks.
+        let archive = crate::ops::deps::ArchiveIndex::new(&self.project.frame_dir);
+
         // Gather direct upstream deps (what this task depends on)
         let mut upstream_ids: Vec<String> = Vec::new();
         for (_, track) in &self.project.tracks {
@@ -2786,7 +2796,7 @@ impl App {
             for dep_id in &upstream_ids {
                 let mut visited = HashSet::new();
                 visited.insert(task_id.to_string());
-                self.add_dep_entry(state, dep_id, 0, true, &mut visited);
+                self.add_dep_entry(state, &archive, dep_id, 0, true, &mut visited);
             }
         }
 
@@ -2800,7 +2810,7 @@ impl App {
             for dep_id in &downstream_ids {
                 let mut visited = HashSet::new();
                 visited.insert(task_id.to_string());
-                self.add_dep_entry(state, dep_id, 0, false, &mut visited);
+                self.add_dep_entry(state, &archive, dep_id, 0, false, &mut visited);
             }
         }
     }
@@ -2809,6 +2819,7 @@ impl App {
     fn add_dep_entry(
         &self,
         state: &mut DepPopupState,
+        archive: &crate::ops::deps::ArchiveIndex<'_>,
         dep_id: &str,
         depth: usize,
         is_upstream: bool,
@@ -2826,6 +2837,7 @@ impl App {
                 is_expanded: false,
                 is_circular: true,
                 is_dangling: false,
+                is_archived: false,
                 is_upstream,
             });
             return;
@@ -2870,6 +2882,7 @@ impl App {
                 is_expanded,
                 is_circular: false,
                 is_dangling: false,
+                is_archived: false,
                 is_upstream,
             });
 
@@ -2877,10 +2890,27 @@ impl App {
             if is_expanded && has_children {
                 visited.insert(dep_id.to_string());
                 for child_id in &children_ids {
-                    self.add_dep_entry(state, child_id, depth + 1, is_upstream, visited);
+                    self.add_dep_entry(state, archive, child_id, depth + 1, is_upstream, visited);
                 }
                 visited.remove(dep_id);
             }
+        } else if let Some(archived) = archive.get(dep_id) {
+            // Not in a live track, but an archive holds it: the dependency is
+            // done and its record moved when it was archived. The same reading
+            // `fr deps` and `fr check` take — see `ops::deps::ArchiveIndex`.
+            state.entries.push(DepPopupEntry::Task {
+                task_id: dep_id.to_string(),
+                title: archived.title.clone(),
+                state: Some(archived.state),
+                track_id: Some(archived.track_id.clone()),
+                depth,
+                has_children: false,
+                is_expanded: false,
+                is_circular: false,
+                is_dangling: false,
+                is_archived: true,
+                is_upstream,
+            });
         } else {
             // Dangling reference
             state.entries.push(DepPopupEntry::Task {
@@ -2893,6 +2923,7 @@ impl App {
                 is_expanded: false,
                 is_circular: false,
                 is_dangling: true,
+                is_archived: false,
                 is_upstream,
             });
         }
