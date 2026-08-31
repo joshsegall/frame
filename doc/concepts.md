@@ -117,7 +117,7 @@ Tasks can have metadata lines indented below the task line:
 |-------|--------|-------------|
 | `added` | `added: 2025-05-14` | Date the task was created |
 | `resolved` | `resolved: 2025-05-14` | Date the task was completed |
-| `dep` | `dep: EFF-003, INFRA-007` | Task dependencies (comma-separated IDs) |
+| `dep` | `dep: EFF-003, INFRA-007` | Task dependencies (comma-separated IDs). A dep on an archived task is satisfied — archives hold done work — so archiving a blocker does not break its dependents |
 | `ref` | `ref: doc/design.md, src/lib.rs:807` | Files the task touches (comma-separated paths) |
 | `spec` | `spec: doc/spec.md#section, doc/rfc.md` | Files the task implements (comma-separated paths) |
 | `note` | `note: Free text` | Note (single-line or multi-line block) |

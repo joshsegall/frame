@@ -5,7 +5,9 @@
 //! rendering it twice is deliberate — a listing implemented separately per
 //! surface is what `b664a3e` was, and `tests/parity.rs` exists because of it.
 
-use std::collections::HashSet;
+use std::cell::OnceCell;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use crate::model::Project;
 use crate::model::task::{Metadata, Task, TaskState};
@@ -26,16 +28,26 @@ pub enum DepStatus {
     /// Already expanded elsewhere in this tree. Not an error — the full record
     /// is somewhere else in the same output.
     Repeat,
-    /// No task anywhere in the project holds this id.
+    /// Found in an archive rather than a live track: the dependency is **done**,
+    /// and its record moved out of the working file when it was archived.
+    ///
+    /// Terminal, like `Cycle` and `Repeat`, but for a different reason: an
+    /// archived task's own dependencies are history — every one of them was
+    /// satisfied before it could be marked done — so expanding them answers a
+    /// question nobody asked and reads a second file per node to do it.
+    Archived,
+    /// No task anywhere in the project holds this id — not a live track, not an
+    /// archive.
     Missing,
 }
 
 /// A node in a dependency tree.
 ///
-/// `track_id`, `title`, `state` and `tags` are populated only for
-/// [`DepStatus::Resolved`]: a `Cycle` or `Repeat` node is a pointer to a record
-/// that appears elsewhere in the same tree, and a `Missing` one has no record
-/// at all.
+/// `track_id`, `title` and `state` are populated for [`DepStatus::Resolved`]
+/// and [`DepStatus::Archived`], the two statuses that found a task: a `Cycle` or
+/// `Repeat` node is a pointer to a record that appears elsewhere in the same
+/// tree, and a `Missing` one has no record at all. `tags` is `Resolved` only —
+/// an archived task's tags describe work that is over.
 #[derive(Debug, Clone)]
 pub struct DepNode {
     pub id: String,
@@ -61,6 +73,92 @@ impl DepNode {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The archive, as part of the dependency universe
+// ---------------------------------------------------------------------------
+
+/// What an archive still knows about a task it holds.
+///
+/// Enough to name it in a dependency tree and no more. The task's own `dep:`
+/// lines are deliberately not carried: nothing expands an archived node.
+#[derive(Debug, Clone)]
+pub struct ArchivedTask {
+    /// The track it was archived from, derived from the archive's filename.
+    pub track_id: String,
+    pub title: String,
+    pub state: TaskState,
+}
+
+/// The tasks the archives hold, read at most once and only if something asks.
+///
+/// **A dep pointing into an archive is satisfied, not missing.** An archive
+/// holds done work — `fr clean` moves tasks there once they are resolved, and
+/// `fr track archive` moves a track whole — so a `dep:` whose target was
+/// archived describes a blocker that is finished, which is the most benign
+/// state a dependency can be in. Resolving deps against live tracks alone made
+/// `fr clean` manufacture errors: archiving a task past the done threshold
+/// turned every dep on it into a `dangling_dep`, reported by the *next* `fr
+/// check` rather than the run that caused it. `tests/conservation.rs` has read
+/// the archives as part of the project since it was written (claim 5, "every
+/// dep that resolved still resolves"); this is the product agreeing with it.
+///
+/// **Lazy, because auto-clean is not.** `clean.auto_clean` runs a full clean
+/// after every file reload in the TUI, and an archive is the one frame file
+/// with no size ceiling — megabytes, in a project that has been running a
+/// while. Nothing here is read until a dep actually fails against the live
+/// tracks, which in a healthy project is never.
+pub struct ArchiveIndex<'a> {
+    frame_dir: &'a Path,
+    tasks: OnceCell<HashMap<String, ArchivedTask>>,
+}
+
+impl<'a> ArchiveIndex<'a> {
+    pub fn new(frame_dir: &'a Path) -> Self {
+        ArchiveIndex {
+            frame_dir,
+            tasks: OnceCell::new(),
+        }
+    }
+
+    /// Whether any archive holds this id.
+    pub fn contains(&self, id: &str) -> bool {
+        self.get(id).is_some()
+    }
+
+    /// The archived task with this id, reading the archives on first use.
+    ///
+    /// **First archive wins**, matching how a live lookup takes the first match
+    /// in track order — `archived_task_lists` returns done-task archives sorted
+    /// by track id, then whole archived tracks, so the answer is stable across
+    /// runs rather than dependent on `read_dir` order.
+    pub fn get(&self, id: &str) -> Option<&ArchivedTask> {
+        self.tasks.get_or_init(|| self.load()).get(id)
+    }
+
+    fn load(&self) -> HashMap<String, ArchivedTask> {
+        let mut out = HashMap::new();
+        for list in crate::io::project_io::archived_task_lists(self.frame_dir) {
+            for task in &list.tasks {
+                index_task(task, &list.track_id, &mut out);
+            }
+        }
+        out
+    }
+}
+
+fn index_task(task: &Task, track_id: &str, out: &mut HashMap<String, ArchivedTask>) {
+    if let Some(id) = &task.id {
+        out.entry(id.to_string()).or_insert_with(|| ArchivedTask {
+            track_id: track_id.to_string(),
+            title: task.title.clone(),
+            state: task.state,
+        });
+    }
+    for sub in &task.subtasks {
+        index_task(sub, track_id, out);
+    }
+}
+
 /// The ids a task declares as dependencies, in declaration order.
 pub fn task_deps(task: &Task) -> Vec<String> {
     let mut deps = Vec::new();
@@ -81,11 +179,15 @@ fn find_task<'a>(project: &'a Project, id: &str) -> Option<(&'a str, &'a Task)> 
 /// Build the dependency tree rooted at `root_id`.
 ///
 /// The root is a [`DepStatus::Missing`] node when no task holds that id; the
-/// caller decides whether that is an error.
+/// caller decides whether that is an error. It is [`DepStatus::Archived`] when
+/// the id belongs to work that has been archived — which for a *root* the
+/// caller also decides about, since a tree rooted at history has nothing under
+/// it to walk.
 pub fn dep_tree(project: &Project, root_id: &str) -> DepNode {
     let mut path = Vec::new();
     let mut expanded = HashSet::new();
-    build(project, root_id, &mut path, &mut expanded)
+    let archive = ArchiveIndex::new(&project.frame_dir);
+    build(project, &archive, root_id, &mut path, &mut expanded)
 }
 
 /// Two sets, checked in this order, and the order matters.
@@ -101,6 +203,7 @@ pub fn dep_tree(project: &Project, root_id: &str) -> DepNode {
 /// expanding combinatorially. Each id is expanded at most once per tree.
 fn build(
     project: &Project,
+    archive: &ArchiveIndex<'_>,
     id: &str,
     path: &mut Vec<String>,
     expanded: &mut HashSet<String>,
@@ -109,6 +212,21 @@ fn build(
         return DepNode::terminal(id, DepStatus::Cycle);
     }
     let Some((track_id, task)) = find_task(project, id) else {
+        // The live tracks do not have it. Before calling it missing, ask the
+        // archives — a dep on archived work is satisfied, not broken. This is
+        // the only place the archives are read, and only for an id that has
+        // already failed everywhere else.
+        if let Some(archived) = archive.get(id) {
+            return DepNode {
+                id: id.to_string(),
+                status: DepStatus::Archived,
+                track_id: Some(archived.track_id.clone()),
+                title: Some(archived.title.clone()),
+                state: Some(archived.state),
+                tags: Vec::new(),
+                deps: Vec::new(),
+            };
+        }
         // Not recorded as expanded: there is nothing to expand, so a second
         // reference to the same dangling id should report Missing again rather
         // than pointing at a record that does not exist.
@@ -121,7 +239,7 @@ fn build(
     path.push(id.to_string());
     let deps = task_deps(task)
         .iter()
-        .map(|dep_id| build(project, dep_id, path, expanded))
+        .map(|dep_id| build(project, archive, dep_id, path, expanded))
         .collect();
     path.pop();
 
@@ -227,6 +345,55 @@ mod tests {
         assert_eq!(dangling.id, "M-999");
         assert_eq!(dangling.status, DepStatus::Missing);
         assert_eq!(dangling.title, None);
+    }
+
+    /// A dep whose target was archived resolves — as done work, in the file it
+    /// went to. The alternative is what `fr check` used to say about every task
+    /// `fr clean` archived out from under a dependent: "not found".
+    #[test]
+    fn a_dep_into_the_archive_is_archived_not_missing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(frame_dir.join("archive")).unwrap();
+        std::fs::write(
+            frame_dir.join("archive/main.md"),
+            "# Archive \u{2014} main\n\n- [x] `M-900` Finished long ago\n  - resolved: 2025-04-01\n",
+        )
+        .unwrap();
+
+        let mut p =
+            project("# Main\n\n## Backlog\n\n- [ ] `M-001` Root\n  - dep: M-900\n\n## Done\n");
+        p.root = tmp.path().to_path_buf();
+        p.frame_dir = frame_dir;
+
+        let tree = dep_tree(&p, "M-001");
+        let dep = kid(&tree, 0);
+        assert_eq!(dep.id, "M-900");
+        assert_eq!(dep.status, DepStatus::Archived);
+        assert_eq!(dep.title.as_deref(), Some("Finished long ago"));
+        assert_eq!(dep.track_id.as_deref(), Some("main"));
+        assert!(dep.deps.is_empty(), "an archived node expands nothing");
+    }
+
+    /// The archives are read only when the live tracks come up empty, and a
+    /// project with no archive directory at all still answers.
+    #[test]
+    fn an_id_in_neither_place_is_still_missing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let frame_dir = tmp.path().join("frame");
+        std::fs::create_dir_all(frame_dir.join("archive")).unwrap();
+        std::fs::write(
+            frame_dir.join("archive/main.md"),
+            "# Archive \u{2014} main\n\n- [x] `M-900` Finished long ago\n  - resolved: 2025-04-01\n",
+        )
+        .unwrap();
+
+        let mut p = fixture();
+        p.root = tmp.path().to_path_buf();
+        p.frame_dir = frame_dir;
+
+        let tree = dep_tree(&p, "M-007");
+        assert_eq!(kid(&tree, 0).status, DepStatus::Missing);
     }
 
     #[test]

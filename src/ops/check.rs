@@ -68,7 +68,11 @@ pub enum CheckError {
         heading: String,
         stranded_tasks: usize,
     },
-    /// A dep references a task ID that doesn't exist anywhere
+    /// A dep references a task ID that doesn't exist anywhere — **including the
+    /// archives**, which are searched before this is raised.
+    ///
+    /// An archived target is a satisfied dependency, not a missing one: see
+    /// [`crate::ops::deps::ArchiveIndex`] and [`drop_deps_the_archive_holds`].
     #[serde(rename = "dangling_dep")]
     DanglingDep {
         track_id: String,
@@ -990,8 +994,33 @@ pub fn check_project(project: &Project) -> CheckResult {
         });
     }
 
+    // Last, and after everything that pushes a `DanglingDep`: a dep whose target
+    // was archived is satisfied, not broken.
+    drop_deps_the_archive_holds(&mut result, &project.frame_dir);
+
     result.valid = result.errors.is_empty();
     result
+}
+
+/// Withdraw every `dangling_dep` whose target an archive holds.
+///
+/// **Filtered afterwards rather than resolved during the walk**, because the
+/// archives are worth reading only if something failed against the live tracks.
+/// `ArchiveIndex` is lazy, and this is the shape that lets it stay lazy: a
+/// healthy project asks `contains` zero times and never opens an archive.
+///
+/// The condition this exists for is `fr clean`'s own: archiving a done task past
+/// the threshold takes it out of the live id set, so every dep on it became an
+/// error — reported by the *next* `fr check`, with no clue that the archive run
+/// before it was the cause. Withdrawing it here needs no file edit, which is the
+/// tell that this was a reader's mistake and not damage. A dep on an id that
+/// exists nowhere at all is still an error, unchanged.
+fn drop_deps_the_archive_holds(result: &mut CheckResult, frame_dir: &Path) {
+    let archive = crate::ops::deps::ArchiveIndex::new(frame_dir);
+    result.errors.retain(|e| match e {
+        CheckError::DanglingDep { dep_id, .. } => !archive.contains(dep_id),
+        _ => true,
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -2439,6 +2468,81 @@ mod tests {
             &result.errors[0],
             CheckError::DanglingDep { dep_id, .. } if dep_id == "NONEXIST-999"
         ));
+    }
+
+    /// The condition `fr clean` creates for itself: it archives a done task past
+    /// the threshold, and every live `dep:` on it points at an id no live track
+    /// holds any more. That is a **satisfied** dependency — archives hold done
+    /// work — and reporting it as an error made routine maintenance look like
+    /// damage, one run after the run that caused it.
+    #[test]
+    fn a_dep_on_an_archived_task_is_not_dangling() {
+        let tmp = TempDir::new().unwrap();
+        let project = make_project_at(
+            tmp.path(),
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Task one
+  - added: 2025-05-01
+  - dep: M-900
+
+## Done
+",
+        );
+        std::fs::create_dir_all(project.frame_dir.join("archive")).unwrap();
+        std::fs::write(
+            project.frame_dir.join("archive/main.md"),
+            "# Archive \u{2014} main\n\n- [x] `M-900` The blocker, finished and archived\n  - resolved: 2025-04-01\n",
+        )
+        .unwrap();
+
+        let result = check_project(&project);
+        assert!(result.valid, "errors: {:?}", result.errors);
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| matches!(e, CheckError::DanglingDep { .. }))
+        );
+    }
+
+    /// The archive is searched, not assumed: an id no file holds is still an
+    /// error, and a project with an archive does not get a blanket amnesty.
+    #[test]
+    fn an_id_no_archive_holds_is_still_dangling() {
+        let tmp = TempDir::new().unwrap();
+        let project = make_project_at(
+            tmp.path(),
+            "\
+# Main
+
+## Backlog
+
+- [ ] `M-001` Task one
+  - added: 2025-05-01
+  - dep: M-404
+
+## Done
+",
+        );
+        std::fs::create_dir_all(project.frame_dir.join("archive")).unwrap();
+        std::fs::write(
+            project.frame_dir.join("archive/main.md"),
+            "# Archive \u{2014} main\n\n- [x] `M-900` Someone else\n  - resolved: 2025-04-01\n",
+        )
+        .unwrap();
+
+        let result = check_project(&project);
+        assert!(!result.valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| matches!(e, CheckError::DanglingDep { dep_id, .. } if dep_id == "M-404"))
+        );
     }
 
     #[test]

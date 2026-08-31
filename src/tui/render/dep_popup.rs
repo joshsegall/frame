@@ -93,6 +93,7 @@ pub fn render_dep_popup(frame: &mut Frame, app: &App, area: Rect) {
                 is_expanded,
                 is_circular,
                 is_dangling,
+                is_archived,
                 is_upstream: _,
             } => {
                 let is_selected = entry_idx == dp.cursor;
@@ -179,11 +180,17 @@ pub fn render_dep_popup(frame: &mut Frame, app: &App, area: Rect) {
                 // Calculate space for title and track name
                 // Layout: indent + arrow(2) + checkbox(4) + id + 2 + title + gap + track
                 let fixed_left = indent + 2 + 4 + task_id.len() + 2;
-                let track_name = track_id
-                    .as_ref()
-                    .map(|tid| app.track_name(tid))
-                    .unwrap_or("");
-                let right_part_len = track_name.len() + 2; // 2 for spacing before track name
+                // An archived dep says so in the right-hand column, where the
+                // live track name goes. It is the one thing that column can say
+                // that the row does not already: the checkbox reads `[x]` and
+                // the whole row dims, so without this the entry looks like an
+                // ordinary done task sitting in a file it is no longer in.
+                let track_name = match track_id.as_ref().map(|tid| app.track_name(tid)) {
+                    Some(name) if *is_archived => format!("{} \u{00B7} archived", name),
+                    Some(name) => name.to_string(),
+                    None => String::new(),
+                };
+                let right_part_len = unicode::display_width(&track_name) + 2; // 2 for spacing before track name
                 let title_max = usable_w
                     .saturating_sub(fixed_left)
                     .saturating_sub(right_part_len);
@@ -345,6 +352,7 @@ mod tests {
                     is_expanded: false,
                     is_circular: false,
                     is_dangling: false,
+                    is_archived: false,
                     is_upstream: false,
                 },
             ],
