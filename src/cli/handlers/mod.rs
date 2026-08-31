@@ -1392,10 +1392,15 @@ fn cmd_deps(args: DepsArgs, json: bool) -> Result<(), Box<dyn std::error::Error>
     let project = load_project_cwd()?;
 
     let tree = deps::dep_tree(&project, &args.id);
-    if tree.status == deps::DepStatus::Missing {
-        // `fr deps` reads live tracks only — whether an archived dep counts as
-        // satisfied is its own question — but the miss is the same one `fr show`
-        // used to report, so it says where the task went.
+    if matches!(
+        tree.status,
+        deps::DepStatus::Missing | deps::DepStatus::Archived
+    ) {
+        // An archived *dependency* resolves and prints as one. An archived
+        // **root** does not: nothing expands an archived node, so a tree rooted
+        // at one would be a single line claiming "(no dependencies)" about a
+        // task whose deps are simply not being read. `task_not_found` already
+        // says where the task went and which command reads it.
         return Err(task_not_found(&project.frame_dir, &args.id).into());
     }
 
@@ -2295,23 +2300,21 @@ fn report_track_write(
 // The `--dry-run` surface
 // ---------------------------------------------------------------------------
 
-/// The files a dry run would have changed, as a reader would name them.
+/// The files this run changed, as a reader would name them.
 ///
-/// Relative to the working directory where they are under it: a preview is read
+/// Relative to the working directory where they are under it: the list is read
 /// next to the command that produced it, and `frame/tracks/main.md` is the name
 /// the reader already has for the file.
 ///
 /// Under `-C` that name comes from the named project instead, which is the same
-/// rule: the reader's frame of reference is the project the preview is about,
-/// and relativizing it against an unrelated working directory only produced
-/// absolute paths.
+/// rule: the reader's frame of reference is the project the list is about, and
+/// relativizing it against an unrelated working directory only produced absolute
+/// paths.
 ///
-/// **Drains the record**, so exactly one surface may call it per run. `--json`
-/// does, embedding the list in its document; the human surface leaves it for
-/// [`print_dry_run_trailer`] at the end of dispatch.
-fn would_write_paths() -> Vec<String> {
+/// **Drains the ledger**, so exactly one surface may call it per run.
+fn changed_paths() -> Vec<String> {
     let base = project_dir_override().or_else(|| std::env::current_dir().ok());
-    dryrun::would_write()
+    dryrun::changed()
         .iter()
         .map(|p| {
             let shown = base
@@ -2321,6 +2324,57 @@ fn would_write_paths() -> Vec<String> {
             shown.display().to_string()
         })
         .collect()
+}
+
+/// The files a run changed that the reader is going to be **committing**.
+///
+/// Two exclusions, both from rules frame already keeps.
+///
+/// *Outside the project root* — the global registry at
+/// `~/.config/frame/projects.toml`, which every command touches on its way past.
+/// It is machine state about which projects exist, it is not in anyone's repo,
+/// and telling a reader to commit it would be wrong.
+///
+/// *Anything under a dot-prefixed component* — `frame/.actor`, `frame/.ids.toml`,
+/// the frontier and recovery log under `.git/`. This is the same rule
+/// `.gitignore` coverage rests on ([`project_io::gitignore_pattern`]): every
+/// working-copy-local frame file is a dotfile, and **nothing under `frame/` that
+/// needs committing may start with a dot**. Testing the shape rather than
+/// enumerating [`project_io::LOCAL_ONLY_FRAME_FILES`] means the next local file
+/// added is covered before anyone remembers this list exists.
+///
+/// **Drains the ledger.** Same contract as [`would_write_paths`], and the two
+/// must not both be called for one run.
+fn committed_changed_paths(root: &Path) -> Vec<String> {
+    dryrun::changed()
+        .iter()
+        .filter_map(|p| {
+            let rel = p.strip_prefix(root).ok()?;
+            let hidden = rel
+                .components()
+                .any(|c| c.as_os_str().to_string_lossy().starts_with('.'));
+            (!hidden).then(|| rel.display().to_string())
+        })
+        .collect()
+}
+
+/// The `would_write` field: what a **preview** would have changed, and nothing
+/// on a live run.
+///
+/// The ledger now records both, so this is where the field's documented meaning
+/// is kept — `would_write` says what did not happen, and a real run's files are
+/// reported by whoever is reporting them (see [`report_clean_files`]). Drains
+/// either way, so a live run does not leave its files for the next reader.
+///
+/// `--json` calls this, embedding the list in its document; the human surface
+/// leaves it for [`print_dry_run_trailer`] at the end of dispatch.
+fn would_write_paths() -> Vec<String> {
+    let paths = changed_paths();
+    if dryrun::is_active() {
+        paths
+    } else {
+        Vec::new()
+    }
 }
 
 /// Close a human-surface dry run by saying what it did not do.
@@ -4214,6 +4268,18 @@ fn cmd_clean(args: CleanArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
         }
     }
 
+    // Read after the saves, so the list is what clean actually left on disk.
+    //
+    // `--json` takes it in both modes. The human surface takes it only on a live
+    // run: under a preview [`print_dry_run_trailer`] prints this same list, from
+    // this same ledger, at the end of dispatch, and draining it here would leave
+    // that trailer saying nothing would change.
+    let files = if json || !dryrun::is_active() {
+        committed_changed_paths(&project.root)
+    } else {
+        Vec::new()
+    };
+
     // Emitted after the save, so a document saying what changed is never printed
     // for a run whose write failed — the `?` above returns first.
     if json {
@@ -4224,11 +4290,39 @@ fn cmd_clean(args: CleanArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
                 normalize: args.normalize,
                 result: &result,
                 field_order: &normalized,
+                files_changed: files,
             })?
         );
+    } else {
+        report_clean_files(&files);
     }
 
     Ok(())
+}
+
+/// Name the files a clean changed, and say what they are.
+///
+/// Clean is the one command that routinely rewrites files nobody named. It runs
+/// unattended — `auto_clean` after every TUI reload — and `doc/agent-setup.md`
+/// puts `fr clean` in the standard agent loop, so its diff lands in someone
+/// else's working copy, attached to work that has nothing to do with it. The
+/// report used to describe the change in task terms only: "28 tasks archived"
+/// says nothing about which files moved, and a reader who then finds two
+/// unexpected files in `git status` has to work out whether frame did something
+/// wrong. Naming them, and saying they are routine, is the whole point.
+///
+/// Silent when nothing changed, which is the common case: a clean that finds
+/// nothing to do writes nothing, because a task it did not touch serializes
+/// verbatim and the ledger only records bytes that actually differ.
+fn report_clean_files(files: &[String]) {
+    if files.is_empty() {
+        return;
+    }
+    println!("Files changed:");
+    for file in files {
+        println!("  {file}");
+    }
+    println!("Routine maintenance, not damage — commit these with your next change.");
 }
 
 /// The human surface for [`cmd_clean`].

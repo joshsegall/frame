@@ -110,6 +110,16 @@ pub struct CleanJson<'a> {
     #[serde(flatten)]
     pub result: &'a crate::ops::clean::CleanResult,
     pub field_order: &'a crate::ops::clean::NormalizeResult,
+    /// Every file the run changed, named the way the human surface names them
+    /// and read from the same ledger — or, when `dry_run`, the files it would
+    /// have changed. Read with the flag, like `field_order.reordered` is read
+    /// with `normalize`.
+    ///
+    /// Present because clean is the command that writes files nobody named: it
+    /// archives, renumbers and re-sections on its own schedule, and a caller
+    /// that has to hand the result to `git add` cannot get the list any other
+    /// way. Empty when a clean found nothing to change.
+    pub files_changed: Vec<String>,
 }
 
 /// What a task-writing command did, for `--json`.
@@ -861,6 +871,16 @@ fn format_dep_node(node: &DepNode, indent: usize, lines: &mut Vec<String>) {
         // of splitting the status.
         DepStatus::Cycle => lines.push(format!("{}└─ {} (circular)", prefix, node.id)),
         DepStatus::Repeat => lines.push(format!("{}└─ {} (already shown)", prefix, node.id)),
+        // Found, and finished: the record moved to an archive when the task was
+        // archived. Named with its title, unlike the three above, because this
+        // one *has* a record — it is simply not in a file anyone is working in.
+        DepStatus::Archived => lines.push(format!(
+            "{}└─ [{}] {} {} (archived)",
+            prefix,
+            state_char(node.state.unwrap_or(TaskState::Done)),
+            node.id,
+            node.title.clone().unwrap_or_default()
+        )),
         DepStatus::Missing => lines.push(format!("{}└─ {} (not found)", prefix, node.id)),
     }
 }

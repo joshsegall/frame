@@ -587,6 +587,8 @@ The popup has two sections: **Blocked by** (tasks this task depends on) and **Bl
 
 Circular dependencies marked with `↻`. Missing deps shown as `[?]`.
 
+A dep whose task has been **archived** is not missing: it shows as the done task it is, with its title, and the right-hand column reads `<track> · archived` instead of the track name alone. Archives hold finished work, so the dependency is satisfied — the same reading `fr deps` and `fr check` take. Without the marker the row would look like an ordinary done task sitting in a file it is no longer in.
+
 ### Project Picker (`P`)
 
 Switch between registered frame projects without leaving the TUI. If `fr` is launched outside any project, the picker opens automatically.
@@ -661,6 +663,8 @@ Inline edit undo (`Ctrl+Z`/`Ctrl+Y` in Edit mode) operates within the current ed
 The TUI watches `frame/` for `.md` and `.toml` changes. Self-writes are detected and ignored. External changes trigger a reload; if an edit is in progress, the reload is queued until the edit completes.
 
 Reload is deferred during both Edit and Move modes, applied when the mode exits. After reload, if `auto_clean` is enabled (default: true), frame automatically assigns missing IDs/dates and archives excess done tasks. This can cause visible changes to the file that weren't made by the user. Each reload inserts an undo sync marker, which clears the redo stack.
+
+**The status line names the tracks it wrote** — `Auto-cleaned: 5 fixes — wrote main, backend`. This is a write nobody asked for: the reload that triggered it may have been someone else's `git pull`, and the files it rewrote turn up in `git status` attached to whatever the session is actually doing. A fix count alone left the reader guessing which files those were.
 
 **Auto-clean stands down for git.** Cleaning after a reload exists to normalise *human* edits — ticking a checkbox in an editor gets its `resolved:` date filled in silently. But the watcher only reports that a file changed, and git rewriting a track file looks exactly like a hand edit. Cleaning then fights the git operation: every done task a checkout restores without a `resolved:` is stamped with today, the next `git restore` removes it, and the watcher fires again. So the reload still happens — the TUI shows what is on disk — but the clean is skipped, and the status bar says why, when either:
 

@@ -6016,16 +6016,26 @@ fn run_auto_clean(app: &mut App, changed: &[PathBuf]) {
         // Add sync marker to undo stack so user can't undo past the external change
         app.undo_stack.push(crate::tui::undo::Operation::SyncMarker);
 
-        // Show subtle status message
+        // Show subtle status message.
+        //
+        // It names the tracks, because this is a write nobody asked for: the
+        // reload that triggered it may have been someone else's `git pull`, and
+        // the files it rewrote turn up in `git status` afterwards attached to
+        // whatever the session is actually doing. "5 fixes" left the reader
+        // guessing which files those were. Sorted, so the message does not
+        // reshuffle between two runs that did the same thing.
         let count = result.ids_assigned.len()
             + result.dates_assigned.len()
             + result.duplicates_resolved.len()
             + result.sections_reconciled.len()
             + result.tasks_archived.len();
+        let mut wrote: Vec<&str> = affected_tracks.iter().map(String::as_str).collect();
+        wrote.sort_unstable();
         app.status_message = Some(format!(
-            "Auto-cleaned: {} fix{}",
+            "Auto-cleaned: {} fix{} — wrote {}",
             count,
-            if count == 1 { "" } else { "es" }
+            if count == 1 { "" } else { "es" },
+            wrote.join(", ")
         ));
     }
 }

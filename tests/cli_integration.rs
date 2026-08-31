@@ -183,6 +183,159 @@ fn run_fr_ok(dir: &Path, args: &[&str]) -> String {
 // Read command tests
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Maintenance: what `fr clean` changed, and what it must not break
+// ---------------------------------------------------------------------------
+
+/// Append a `[clean]` section that archives everything done, immediately.
+fn archive_everything(root: &Path) {
+    let path = root.join("frame/project.toml");
+    let mut toml = fs::read_to_string(&path).unwrap();
+    toml.push_str("\n[clean]\ndone_threshold = 0\ndone_retain = 0\n");
+    fs::write(&path, toml).unwrap();
+}
+
+/// The incident: `fr clean` archives a done task another task still depends on,
+/// and the *next* `fr check` fails a project nobody touched. Archiving is
+/// maintenance frame does on its own schedule; it does not get to invent errors
+/// for the reader to chase.
+#[test]
+fn clean_archiving_a_blocker_leaves_check_passing() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    archive_everything(tmp.path());
+
+    // M-002 depends on M-001 in the fixture. Finish M-001 and let clean take it.
+    run_fr_ok(tmp.path(), &["state", "M-001", "done"]);
+    run_fr_ok(tmp.path(), &["clean"]);
+
+    let archive = fs::read_to_string(tmp.path().join("frame/archive/main.md")).unwrap();
+    assert!(
+        archive.contains("M-001"),
+        "clean should have archived M-001"
+    );
+
+    let (stdout, stderr, ok) = run_fr(tmp.path(), &["check"]);
+    assert!(
+        ok,
+        "check must pass after clean archived a dep target:\n{stdout}\n{stderr}"
+    );
+    assert!(!stdout.contains("dangling"), "{stdout}");
+
+    // And the dep still reads as a real dependency, not a hole.
+    let deps = run_fr_ok(tmp.path(), &["deps", "M-002"]);
+    assert!(
+        deps.contains("M-001") && deps.contains("archived"),
+        "an archived dep should say so: {deps}"
+    );
+    assert!(!deps.contains("not found"), "{deps}");
+}
+
+/// A dep on an id that exists nowhere is still an error. The archive is
+/// searched, not assumed.
+#[test]
+fn a_dep_on_a_task_that_never_existed_still_fails_check() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    // Written by hand: `fr dep add` refuses a target that does not exist, which
+    // is why a dangling dep only ever arrives by an edit, a deletion, or a
+    // renumbering — the provenance `tests/damaged_corpus.rs` states.
+    let track = tmp.path().join("frame/tracks/main.md");
+    let text = fs::read_to_string(&track).unwrap().replace(
+        "  - added: 2025-05-03\n  - [ ] `M-003.1`",
+        "  - added: 2025-05-03\n  - dep: M-404\n  - [ ] `M-003.1`",
+    );
+    fs::write(&track, text).unwrap();
+
+    let (stdout, _, ok) = run_fr(tmp.path(), &["check"]);
+    assert!(!ok, "a dep on nothing is still an error: {stdout}");
+    assert!(stdout.contains("M-404"), "{stdout}");
+}
+
+/// Clean names the files it changed and says they are routine, on both surfaces.
+/// A `fr clean` in an agent's loop rewrites files nobody named, and its diff
+/// turns up in somebody's `git status` attached to unrelated work.
+#[test]
+fn clean_names_the_files_it_changed() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    archive_everything(tmp.path());
+    run_fr_ok(tmp.path(), &["state", "M-001", "done"]);
+
+    let human = run_fr_ok(tmp.path(), &["clean"]);
+    assert!(human.contains("Files changed:"), "{human}");
+    assert!(human.contains("frame/tracks/main.md"), "{human}");
+    assert!(human.contains("frame/archive/main.md"), "{human}");
+    assert!(
+        human.contains("Routine maintenance, not damage"),
+        "the reader has to be told this is expected: {human}"
+    );
+
+    // A second clean has nothing left to do, and says nothing about files.
+    let quiet = run_fr_ok(tmp.path(), &["clean"]);
+    assert!(
+        !quiet.contains("Files changed:"),
+        "a clean that changed nothing must not claim it did: {quiet}"
+    );
+
+    // The same list in `--json`, where a caller can hand it to `git add`.
+    run_fr_ok(tmp.path(), &["state", "M-002", "done"]);
+    let out = run_fr_ok(tmp.path(), &["clean", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let files: Vec<&str> = v["files_changed"]
+        .as_array()
+        .expect("files_changed")
+        .iter()
+        .map(|f| f.as_str().unwrap())
+        .collect();
+    assert!(files.contains(&"frame/tracks/main.md"), "{files:?}");
+    assert!(files.contains(&"frame/archive/main.md"), "{files:?}");
+    assert!(
+        !files.contains(&"frame/tracks/side.md"),
+        "a track the clean did not change is not a file it changed: {files:?}"
+    );
+}
+
+/// Under a preview the same list is the dry-run trailer's, printed once.
+#[test]
+fn clean_dry_run_lists_the_files_once() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    archive_everything(tmp.path());
+    run_fr_ok(tmp.path(), &["state", "M-001", "done"]);
+
+    let human = run_fr_ok(tmp.path(), &["clean", "--dry-run"]);
+    assert!(
+        human.contains("dry run \u{2014} nothing was written"),
+        "{human}"
+    );
+    // The trailer names the archive it would create. That is new: the archive
+    // write used to be skipped ahead of the barrier rather than by it, so a
+    // preview listed the tracks and never the file it was about to write.
+    let trailer = human
+        .split("dry run \u{2014} nothing was written")
+        .nth(1)
+        .unwrap();
+    assert!(trailer.contains("frame/archive/main.md"), "{human}");
+    assert!(trailer.contains("frame/tracks/main.md"), "{human}");
+    // And the maintenance block stays out of a preview: the trailer is already
+    // saying this, from the same ledger.
+    assert!(!human.contains("Files changed:"), "{human}");
+
+    // Nothing was written, so the next real clean still has the work to do.
+    assert!(!tmp.path().join("frame/archive/main.md").exists());
+
+    // `--json` has no trailer, so it carries the list itself.
+    let out = run_fr_ok(tmp.path(), &["clean", "--dry-run", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["dry_run"], serde_json::json!(true));
+    let files = v["files_changed"].as_array().expect("files_changed");
+    assert!(
+        files.iter().any(|f| f == "frame/archive/main.md"),
+        "{files:?}"
+    );
+}
+
 #[test]
 fn test_list_default() {
     let tmp = tempfile::TempDir::new().unwrap();

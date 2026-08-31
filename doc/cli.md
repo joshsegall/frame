@@ -50,6 +50,8 @@ Re-run without --dry-run to apply.
 
 Nothing under `frame/`, nothing in the [ID frontier](architecture.md), no [actor token](concepts.md#minting-in-a-token-namespace) claimed, no recovery-log entry, no `project.toml` edit, no file moved or removed. Commands that reach outside `frame/` are covered too: `fr projects` leaves the global registry alone and `fr git setup` leaves `.gitignore`, `.gitattributes` and `.git/config` alone.
 
+The list is the run's **write ledger**, which frame keeps in both modes: a live run records what it changed, a preview records what it would have, and the two are the same list built the same way. That is where [`fr clean`](#fr-clean)'s `Files changed:` block comes from as well. A file written with the bytes it already held is in neither — "would change" means the content differs, not that a save loop reached the file.
+
 Rather than each command remembering to skip its own saves, a single write barrier sits under every write frame makes, armed for the length of the command. That is not a stylistic preference: the six commands that had `--dry-run` before this each guarded their own writes, and `fr clean --dry-run` guarded the archive it wrote while the ID mint underneath it went on reserving numbers in a store shared by every worktree of the clone.
 
 **One exemption, and it is deliberate.** A dry run still takes `frame/.lock` (and the frontier and recovery-log locks), so the preview is computed against a project no other process is halfway through writing. Creating an empty lock file is the one thing the guarantee does not cover. They are working-copy-local and gitignored — see [`fr check`](#fr-check).
@@ -222,25 +224,32 @@ Show the dependency tree for a task.
 fr deps EFF-014 [--json]
 ```
 
-Each node in the tree is one of four kinds, and the distinction matters:
+Each node in the tree is one of five kinds, and the distinction matters:
 
 | Marker | Meaning |
 |--------|---------|
 | *(none)* | resolved — the task was found and its own dependencies are expanded below |
 | `(circular)` | the id is its own ancestor on this branch: a genuine cycle |
 | `(already shown)` | the task was expanded elsewhere in the same tree — a shared dependency, not a problem |
-| `(not found)` | no task anywhere in the project holds this id |
+| `(archived)` | the task is done, and its record moved to an archive |
+| `(not found)` | no task anywhere in the project holds this id — not a live track, not an archive |
 
 `(already shown)` is what a *diamond* looks like: two tasks depending on the same third. That is the ordinary shape of a real backlog, and it is not a cycle — each id is expanded once per tree, and the second reference points at the expansion rather than repeating it.
 
-With `--json`, the same tree is emitted nested, each node carrying `id` and `status` (`resolved` / `cycle` / `repeat` / `missing`). A `resolved` node also carries `track`, `title`, `state`, `tags` and its own `deps`; the other three carry `id` and `status` only, since their full record is either elsewhere in the same document or nonexistent.
+`(archived)` is the ordinary end of any blocker finished before its dependent: [`fr clean`](#fr-clean) moves done tasks out of the working file on its own schedule, and a dep pointing at one is **satisfied**, not broken. It prints with its title and checkbox, because unlike the three markers around it this node has a record — it is simply in a file nobody is working in. It is terminal: an archived task's own dependencies are history, every one of them resolved before it could be marked done.
+
+An archived **root** is refused rather than printed, since there is nothing under it to walk; the error says which archive holds it and that `fr show` reads it.
+
+With `--json`, the same tree is emitted nested, each node carrying `id` and `status` (`resolved` / `cycle` / `repeat` / `archived` / `missing`). A `resolved` node also carries `track`, `title`, `state`, `tags` and its own `deps`; an `archived` one carries `track`, `title` and `state` but no `deps` and no `tags` — an archived task's tags describe work that is over. `cycle`, `repeat` and `missing` carry `id` and `status` only, since their full record is either elsewhere in the same document or nonexistent.
 
 ### `fr check`
 
 Validate project integrity. Read-only unless `--fix` is passed.
 
 **Exit status: 0 when the project has no errors, 1 when it has any** — so `fr check && git commit` and a CI step both work without grepping stdout. Warnings do not affect it: the status answers "is this project sound", and a warning is by definition something frame is willing to live with. `--json` sets the same status, agreeing with the `valid` field. `--fix` follows the rule on the state it leaves behind, including when it had nothing to repair — most errors have no repair by design, so "nothing to repair" is the common way a broken project leaves `--fix`.
- Reports dangling dependencies, broken refs/specs, duplicate IDs, missing metadata, and format warnings. Also flags actor issues: this clone's token drifting from `actors.toml`, and **multiple active tokens sharing one provenance name** (a sign a machine has accumulated tokens — e.g. a git-worktree-per-session workflow — with a suggested `fr actor merge` to collapse them).
+ Reports dangling dependencies, broken refs/specs, duplicate IDs, missing metadata, and format warnings.
+
+**A dep pointing into an archive is not dangling.** Archives hold done work, so a `dep:` whose target was archived describes a blocker that is finished — the most benign state a dependency can be in. Resolving deps against live tracks alone made maintenance manufacture errors: `fr clean` archives done tasks past the threshold, which took them out of the live id set, and the *next* `fr check` failed a project nobody had touched, naming a task the run before it had filed away. Both archive shapes count — `archive/<track>.md` and a whole track under `archive/_tracks/` — and an id that exists in neither a track nor an archive is still an error. The archives are read only when something fails against the live tracks, so a healthy project never opens one. Also flags actor issues: this clone's token drifting from `actors.toml`, and **multiple active tokens sharing one provenance name** (a sign a machine has accumulated tokens — e.g. a git-worktree-per-session workflow — with a suggested `fr actor merge` to collapse them).
 
 It flags **refs that resolve here and nowhere else** — a `ref:`/`spec:` path that is absolute or escapes the project root, and one git is ignoring. These are the same paths `fr ref add` refuses, applied to values already in a file: written by `--force`, by an older `fr`, in the TUI, or by hand. They are **warnings**, not errors, because they resolve — nothing about the project is invalid here, and a passing project should not go red because a rule was added later. There is no `--fix`: which file inside the project was meant is a guess, and un-ignoring one is a decision about the repository rather than the task. The gitignore half is silent outside a git repository, and never fires on a file that is tracked despite a rule.
 
@@ -778,7 +787,7 @@ Actions performed:
 - Resolve duplicate IDs — the first occurrence in track order keeps the ID. A duplicated **subtask** is renumbered under its own parent (`M-003.3` → `M-003.4`), not given a top-level number, so its ID keeps saying where it lives. This is the resolution path for the one ID collision the frontier doesn't prevent: two worktrees of a clone adding a subtask to the same parent.
 - Archive done tasks exceeding either archival threshold — `done_threshold` (how many) or `done_bytes_threshold` (how much text). Whichever trips, the drain goes down to the corresponding retain level rather than back to the trigger; see [`[clean]`](concepts.md#clean).
 - Move top-level tasks into the section matching their state
-- Report dangling dependencies and broken refs
+- Report dangling dependencies and broken refs — a dep whose target was archived is satisfied, not dangling, so archiving a blocker does not make the next run report the dependent
 - Report tasks whose fields are out of [canonical order](format.md#field-order) — counted, not changed, unless `--normalize` is given
 - Suggest actions (e.g., "all subtasks done — consider marking done")
 
@@ -809,9 +818,23 @@ IDs assigned or reassigned by a clean are minted in this clone's [actor-token na
   "field_order": {
     "reordered": [{ "track_id": "main", "task": "M-001", "was": ["added", "note", "dep"], "now": ["added", "dep", "note"] }],
     "skipped": []
-  }
+  },
+  "files_changed": ["frame/tracks/main.md", "frame/archive/main.md"]
 }
 ```
+
+`files_changed` is every file the run actually changed — or, when `dry_run`, every file it would have. It is the same list the human surface prints and comes from the same write ledger, so a file laid down with the bytes it already held is not in it: a clean that touched nothing reports nothing, and clean's habit of saving every track is not mistaken for changing every track. Working-copy-local files (`frame/.actor`, `frame/.ids.toml`) and the global registry are left out; the list is what a reader is about to commit.
+
+**Clean is the command that writes files nobody named.** It archives, renumbers and re-sections on its own schedule, `auto_clean` runs it after every TUI reload, and `doc/agent-setup.md` puts it in the standard agent loop — so its diff lands in someone's working copy attached to work that has nothing to do with it. The report used to describe the change in task terms only, and "28 tasks archived" says nothing about which files moved. The human surface closes with the same list and says what it is:
+
+```
+Files changed:
+  frame/archive/backend.md
+  frame/tracks/backend.md
+Routine maintenance, not damage — commit these with your next change.
+```
+
+Under `--dry-run` the human surface prints nothing here: the [dry-run trailer](#--dry-run) already names the same files, from the same ledger, at the end of the run.
 
 The flags carry what the arrays cannot. `dry_run` is whether anything was written. `normalize` is what `field_order.reordered` *means*: with it those tasks were rewritten, without it they were only found. A consumer that ignores it reads a preview as a result. The document is printed after the write succeeds, so a run that failed to save prints nothing.
 

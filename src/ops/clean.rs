@@ -447,6 +447,14 @@ pub fn reconcile_sections(project: &mut Project) -> Vec<String> {
 /// walk, before the Done section is emptied, so that a crash between the two
 /// loses nothing. That ordering is right and worth keeping; it just means the
 /// dry run has to be told, because "don't save afterwards" does not reach it.
+///
+/// **A dry run still tells the write ledger what it would have written.** The
+/// file list a command reports — `files_changed`, and the `--dry-run` trailer —
+/// is [`crate::io::dryrun`]'s record of writes that went past, so a write simply
+/// skipped records nothing: previews named the tracks and never the archive they
+/// were about to create. The mode stays authoritative rather than deferring to
+/// the barrier, because the barrier is a CLI handler's flag and this runs under
+/// the TUI's `:clean --dry-run` too, where nothing arms it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CleanMode {
     Apply,
@@ -512,7 +520,31 @@ pub fn clean_project_with(project: &mut Project, scope: IdScope, mode: CleanMode
         assign_missing_resolved_dates(track, track_id, &mut result);
     }
 
+    // 9. Withdraw the deps that only looked dangling. After step 7, so a task
+    //    this very run archived is read out of the archive it was just written
+    //    to rather than reported as a dependency clean broke.
+    drop_deps_the_archive_holds(&mut result, &project.frame_dir);
+
     result
+}
+
+/// Withdraw every dangling dep whose target an archive holds.
+///
+/// The counterpart of `check`'s filter of the same name, and for the same
+/// reason: a dep on archived work is satisfied. Clean is where it matters most,
+/// because clean is what does the archiving — with the live id set alone, a run
+/// that drained a Done section reported the deps it had just orphaned, or worse,
+/// stayed quiet and left them for the next `fr check` to find.
+///
+/// Reading the archives is guarded by there being anything to resolve:
+/// [`crate::ops::deps::ArchiveIndex`] loads on first use, and a clean with no
+/// dangling candidates never asks. That matters here more than in `check` —
+/// `clean.auto_clean` runs this after every file reload in the TUI.
+fn drop_deps_the_archive_holds(result: &mut CleanResult, frame_dir: &Path) {
+    let archive = crate::ops::deps::ArchiveIndex::new(frame_dir);
+    result
+        .dangling_deps
+        .retain(|d| !archive.contains(&d.dep_id));
 }
 
 // ---------------------------------------------------------------------------
@@ -1281,7 +1313,7 @@ fn archive_done_tasks(project: &mut Project, result: &mut CleanResult, mode: Cle
         // Nothing new to append (every task was already archived): skip the
         // write, but still extract below — leaving them in Done would make every
         // future clean retry the same no-op.
-        if !fresh.is_empty() && !mode.is_dry_run() {
+        if !fresh.is_empty() {
             // Appending used to be string concatenation onto the raw existing
             // text, which is how a CRLF archive ended up with LF blocks glued
             // under CRLF ones — a file with both, that no later reader could put
@@ -1298,8 +1330,19 @@ fn archive_done_tasks(project: &mut Project, result: &mut CleanResult, mode: Cle
                 .extend(fresh.iter().map(|task| (*task).clone()));
             let new_content = crate::parse::serialize_archive(&archive);
 
+            // A preview does not write, but it must still **name** the file.
+            // The file list a run reports is the write ledger, and a write that
+            // never happens records nothing — which is why `fr clean --dry-run`
+            // used to say it would archive 163 tasks while listing only the
+            // tracks. `blocked_with` records the same bytes-differ case the real
+            // write below records on its way past, and writes nothing itself.
+            if mode.is_dry_run() {
+                let _ = crate::io::dryrun::blocked_with(&archive_path, new_content.as_bytes());
+            }
             // Write archive — if this fails, leave tasks in place
-            if crate::io::recovery::atomic_write(&archive_path, new_content.as_bytes()).is_err() {
+            else if crate::io::recovery::atomic_write(&archive_path, new_content.as_bytes())
+                .is_err()
+            {
                 eprintln!(
                     "warning: could not write archive for {}, skipping",
                     track_id
@@ -1996,6 +2039,65 @@ mod tests {
         // Archive file should exist
         let archive_path = root.join("frame/archive/main.md");
         assert!(archive_path.exists());
+    }
+
+    /// The incident this pair of filters exists for, end to end: an open task
+    /// depends on a done one, clean archives the done one past the threshold,
+    /// and the *next* run reports a `dangling_dep` on a project nobody touched.
+    /// Archiving is maintenance; maintenance does not get to invent errors.
+    #[test]
+    fn archiving_a_blocker_does_not_leave_a_dangling_dep_behind() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("frame/tracks")).unwrap();
+
+        let mut done_lines = String::new();
+        for i in 0..20 {
+            done_lines.push_str(&format!(
+                "- [x] `M-{:03}` Done task {}\n  - added: 2025-01-01\n  - resolved: 2025-05-{:02}\n",
+                i,
+                i,
+                (i % 28) + 1
+            ));
+        }
+        let src = format!(
+            "# Main\n\n## Backlog\n\n- [ ] `M-200` Still open\n  - added: 2025-01-01\n  - dep: M-005\n\n## Done\n\n{}",
+            done_lines.trim_end()
+        );
+
+        let mut config = make_config(vec![("main", "M")]);
+        config.clean.done_threshold = 5;
+        config.clean.done_retain = 0;
+
+        let mut project = Project {
+            root: root.to_path_buf(),
+            frame_dir: root.join("frame"),
+            config,
+            tracks: vec![("main".to_string(), parse_track(&src))],
+            inbox: None,
+        };
+
+        // The run that archives M-005 says nothing about the dep on it — it was
+        // still live when deps were validated, and it is in the archive by the
+        // time the run ends.
+        let first = clean_project(&mut project, IdScope::Mint(None));
+        assert_eq!(first.tasks_archived.len(), 20);
+        assert!(first.dangling_deps.is_empty(), "{:?}", first.dangling_deps);
+
+        // And the run after it, where the old reading found its error.
+        let second = clean_project(&mut project, IdScope::Mint(None));
+        assert!(
+            second.dangling_deps.is_empty(),
+            "{:?}",
+            second.dangling_deps
+        );
+
+        // A dep on an id nothing holds is untouched by any of this.
+        let third_src = "# Main\n\n## Backlog\n\n- [ ] `M-201` Open\n  - added: 2025-01-01\n  - dep: M-404\n\n## Done\n";
+        project.tracks = vec![("main".to_string(), parse_track(third_src))];
+        let third = clean_project(&mut project, IdScope::Mint(None));
+        assert_eq!(third.dangling_deps.len(), 1);
+        assert_eq!(third.dangling_deps[0].dep_id, "M-404");
     }
 
     /// Build a project whose Done section holds `n` tasks of roughly

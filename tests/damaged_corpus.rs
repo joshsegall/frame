@@ -341,6 +341,33 @@ const CASES: &[Case] = &[
         repair: Repair::None,
     },
     Case {
+        name: "dep-into-the-archive",
+        provenance: "`fr clean` archiving a done task past the threshold, with an \
+                     open task still declaring `dep:` on it — the ordinary end of \
+                     any blocker that was finished before its dependent",
+        // Covers nothing by design — this case exists to assert *silence*. The
+        // case above carries the `dangling_dep` tag.
+        covers: &[],
+        build: |root| {
+            write_archive(
+                root,
+                "# Archive \u{2014} main\n\n- [x] `M-900` The blocker, finished\n  - resolved: 2026-01-02\n",
+            );
+            append_backlog(
+                root,
+                "- [ ] `M-004` Waiting on archived work\n  - added: 2026-01-01\n  - dep: M-900\n",
+            );
+            Built::Ok
+        },
+        // **Nothing.** An archive holds done work, so a dep pointing into one is
+        // satisfied — the most benign state a dependency can be in. Reported as
+        // `dangling_dep`, it made `fr clean` manufacture an error for itself:
+        // the run that archived the blocker was silent, and the next `fr check`
+        // failed a project nobody had touched.
+        expect: &[],
+        repair: Repair::None,
+    },
+    Case {
         name: "duplicate-section",
         provenance: "a line-by-line git merge of a track file. Observed in a real \
                      project: a merge commit six weeks before frame's merge driver \

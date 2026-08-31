@@ -1,4 +1,11 @@
-//! The write barrier behind `--dry-run`.
+//! The write ledger, and the barrier behind `--dry-run` that reads from it.
+//!
+//! Two jobs, and the second one came from the first. The barrier has to know
+//! which files a run *would* have changed, so it keeps a record; that record is
+//! just as true when the writes are landing, and a command that does more than
+//! it was asked — `fr clean` archiving a Done section — has no other way to say
+//! which files it touched. So the ledger runs in both modes and the barrier is
+//! the flag on top of it. See [`changed`].
 //!
 //! A preview flag can be built two ways. The first is to teach every handler to
 //! skip its own saves — which is what frame did, on six commands, each with its
@@ -26,8 +33,8 @@
 //!
 //! Every write entry point asks [`blocked`] before it touches the filesystem, and
 //! returns success without doing so when the answer is yes. The path is recorded
-//! on the way past, so [`would_write`] can hand the handler the list of files the
-//! run would have changed — which is what makes the preview worth printing.
+//! on the way past — armed or not — so [`changed`] can hand the handler the list
+//! of files the run changed, or under the barrier would have.
 //!
 //! Process-global rather than threaded through, for the same reason
 //! [`crate::io::fault`] is: the alternative is a mode parameter on every function
@@ -56,11 +63,15 @@ thread_local! {
 }
 
 /// Arm or disarm the barrier. Called once by a handler, before anything else.
+///
+/// **Clears the ledger either way.** It used to reset only when arming, which was
+/// right when only a preview recorded anything; now that a live run does too, a
+/// command that starts by disarming has to start from an empty record — in the
+/// test harness, where one thread runs many commands, it would otherwise inherit
+/// the previous one's files.
 pub fn arm(on: bool) {
     ACTIVE.with(|a| a.set(on));
-    if on {
-        record_reset();
-    }
+    record_reset();
 }
 
 /// Whether writes are currently being suppressed.
@@ -82,6 +93,13 @@ pub fn is_active() -> bool {
 ///
 /// For a write that knows the bytes it was about to lay down, prefer
 /// [`blocked_with`]: it records only a file whose content would actually differ.
+///
+/// **Records under the barrier only**, unlike every other entry point here. Its
+/// one caller is the recovery-log append, which cannot say whether it changed
+/// anything (it appends, trims and absorbs in one guarded stretch) and is
+/// machine-local bookkeeping rather than project content. A live run listing the
+/// recovery log among the files it changed would be reporting frame's own
+/// paperwork as the user's diff.
 pub fn blocked(path: &Path) -> bool {
     if !is_active() {
         return false;
@@ -99,21 +117,28 @@ pub fn blocked(path: &Path) -> bool {
 /// loop rather than the effect of the command. "Would change" means the bytes
 /// differ.
 pub fn blocked_with(path: &Path, content: &[u8]) -> bool {
-    if !is_active() {
-        return false;
-    }
     // An unreadable or absent file is a change: the write would create it.
+    //
+    // Read on a live run too, which costs one read per write and buys the only
+    // honest answer to "what did this command change" — the file is about to be
+    // rewritten and fsynced either way, so the read is not what makes the write
+    // expensive.
     match std::fs::read(path) {
         Ok(existing) if existing == content => {}
         _ => record(path),
     }
-    true
+    is_active()
 }
 
-/// The files this run would have written, in the order they were first reached.
+/// The files this run changed, in the order they were first reached — or under
+/// the barrier, the ones it would have changed.
+///
+/// Which of the two it is, the caller already knows from [`is_active`]; the list
+/// is built the same way for both, and that is the point of keeping one ledger.
+/// A file written with the bytes it already held is not in it.
 ///
 /// Drains the record, so a handler that prints them does not print them twice.
-pub fn would_write() -> Vec<PathBuf> {
+pub fn changed() -> Vec<PathBuf> {
     WOULD_WRITE.with(|w| std::mem::take(&mut *w.borrow_mut()))
 }
 
@@ -155,17 +180,24 @@ pub fn write(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> {
 /// at the destination, and a preview that named only one would be describing half
 /// the operation.
 pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
+    record(from);
+    record(to);
     if is_active() {
-        record(from);
-        record(to);
         return Ok(());
     }
     std::fs::rename(from, to)
 }
 
 /// [`std::fs::remove_file`], suppressed under a dry run.
+///
+/// Recorded on a live run as well — an unlink changes the tree as surely as a
+/// write does. A removal that then fails is recorded anyway, which is the same
+/// small imprecision every entry point here has: the ledger says what the run
+/// set out to change, and a run whose write failed is reporting an error rather
+/// than a file list.
 pub fn remove_file(path: &Path) -> io::Result<()> {
-    if blocked(path) {
+    record(path);
+    if is_active() {
         return Ok(());
     }
     std::fs::remove_file(path)
@@ -196,11 +228,18 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("a.md");
 
-        // Disarmed: writes land, nothing is recorded.
+        // Disarmed: writes land, and are recorded — the ledger runs in both
+        // modes, because `fr clean` has to be able to say what it changed.
         arm(false);
         write(&path, b"real").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "real");
-        assert!(would_write().is_empty());
+        assert_eq!(changed(), vec![path.clone()]);
+
+        // A live write laying down bytes the file already holds is not a change
+        // either. This is what keeps `fr clean`'s save-every-track loop from
+        // reporting every track in the project.
+        write(&path, b"real").unwrap();
+        assert!(changed().is_empty());
 
         // Armed: writes are suppressed and recorded.
         arm(true);
@@ -214,20 +253,21 @@ mod tests {
         write(&path, b"real").unwrap();
 
         // Recorded once each, and a directory is not listed.
-        let seen = would_write();
+        let seen = changed();
         assert_eq!(seen, vec![path.clone()]);
         // Draining leaves the record empty.
-        assert!(would_write().is_empty());
+        assert!(changed().is_empty());
 
         // A rename records both ends and moves nothing.
         let to = tmp.path().join("b.md");
         rename(&path, &to).unwrap();
         assert!(path.exists() && !to.exists());
-        assert_eq!(would_write(), vec![path, to]);
+        assert_eq!(changed(), vec![path, to]);
 
-        // Arming again clears whatever the last run left behind.
+        // Arming again clears whatever the last run left behind, and so does
+        // disarming — every command starts from an empty ledger.
         arm(true);
-        assert!(would_write().is_empty());
+        assert!(changed().is_empty());
         arm(false);
     }
 }

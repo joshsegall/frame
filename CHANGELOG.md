@@ -15,6 +15,21 @@ All notable changes to frame will be documented in this file.
 
 ### Added
 
+- **`fr clean` names the files it changed.** It closes with the list and says what it is:
+
+  ```
+  Files changed:
+    frame/archive/backend.md
+    frame/tracks/backend.md
+  Routine maintenance, not damage — commit these with your next change.
+  ```
+
+  `--json` carries the same list as `files_changed`, which under `--dry-run` is what the run *would* have changed. Clean is the command that writes files nobody named — it archives, renumbers and re-sections on its own schedule, `auto_clean` runs it after every TUI reload, and `doc/agent-setup.md` puts it in the standard agent loop — so its diff lands in someone's working copy attached to work that has nothing to do with it. The report described the change in task terms only, and "28 tasks archived" says nothing about which files moved: a reader who then found two unexpected files in `git status` had to work out for themselves whether frame had done something wrong.
+
+  The list comes from the write ledger `--dry-run` already kept, now recording on live runs too, so a file laid down with the bytes it already held is not in it — clean's habit of saving every track is not mistaken for changing every track, and a clean with nothing to do says nothing. Working-copy-local files and the global registry are left out: the list is what you are about to commit, and `frame/.actor` is not.
+
+  In the TUI the same write is announced in the status line, which now names the tracks: `Auto-cleaned: 5 fixes — wrote main, backend`. The reload that triggered it may have been someone else's `git pull`.
+
 - **`fr note --file PATH` reads note text from a file.** A note is markdown, and markdown starts lists with `-` — which the argument parser reads as a flag, so `fr note EFF-014 "- found it in layout.rs"` was rejected outright. Passing a bulleted note as an argument was not awkward, it was impossible, and that is the pressure that sends people looking for a stdin form frame does not have.
 
   The path resolves against the working directory and may live anywhere, including outside the project and in directories git ignores: it is text on its way into a note, not a `ref:`, so none of the containment rules that govern those apply. A file that is empty or only whitespace is refused — that is an upstream step that produced nothing rather than a request to blank the note, and under `--replace` the difference is the whole note. One trailing newline is stripped; anything more is kept.
@@ -205,6 +220,16 @@ All notable changes to frame will be documented in this file.
   `--json` changes key order only — no keys added, removed or retyped. A consumer using a JSON parser is unaffected; one reading the bytes positionally is not.
 
 ### Fixed
+
+- **Archiving a done task no longer makes `fr check` fail on the tasks that depended on it.** A `dep:` now resolves against the archives as well as the live tracks, and a dep pointing into one is *satisfied*: archives hold finished work, which is the most benign state a dependency can be in.
+
+  Resolving against live tracks alone made maintenance manufacture errors. `fr clean` drains a Done section past the threshold, every dep on a drained task leaves the live id set, and the **next** `fr check` reports `dangling_dep` on a project nobody has touched since — naming a dependent whose blocker the run before it had filed away, with nothing to connect the two. Found after a clean archived 28 completed tasks and left one open subtask pointing at one of them. Nothing on disk has to change to fix it, which is the tell that this was a reader's mistake rather than damage: the same project passes now.
+
+  Both archive shapes count — `archive/<track>.md` and a whole track under `archive/_tracks/` — so `fr track archive` is covered by the same reading. A dep on an id that exists in neither a track nor an archive is still an error, unchanged. `fr deps` prints such a node as the done task it is with a new `(archived)` marker (`archived` in `--json`, carrying `track`, `title` and `state`) rather than `(not found)`, and the TUI's dep popup shows it as done with `<track> · archived` instead of a red `[?]`. The archives are read only when something misses the live tracks, so a healthy project never opens one — which matters because `auto_clean` runs a full clean after every file reload.
+
+  `tests/conservation.rs` had counted a dep into the archive as resolved since it was written (claim 5, "every `dep:` that resolved still resolves"). The repo held two definitions of "resolves" and the product had the worse one.
+
+- **`fr clean --dry-run` names the archive it would create.** The archive write was skipped ahead of the write barrier rather than by it, so it recorded nothing on its way past: a preview said it would archive 163 tasks and then listed only the track files. The write now goes to the ledger either way, and the trailer names `frame/archive/<track>.md` alongside the tracks.
 
 - **The TUI could mark a task active in a shelved track, which the CLI refuses.** A shelved track is paused work, so `fr state <id> active` and `fr start` will not put a `[>]` on anything in one: an in-progress task there is one `fr ready` does not look at, which makes the task claiming to be underway the only one nobody can see. The TUI had no such rule, and the Recent view is what put it in reach — it lists done tasks from every loaded track, shelved ones included, so opening one with `Enter` leaves a shelved track in the detail view, and that is the track the state keys write to. Two presses of `Space` (done → todo → active) started a task in a track `fr start` refuses.
 
