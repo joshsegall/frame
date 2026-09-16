@@ -125,6 +125,29 @@ pub fn accepts_active_tasks(state: &str) -> bool {
     state == "active"
 }
 
+/// Whether a track's content appears in the views that are asked for by
+/// default.
+///
+/// The third question about a shelved track, and the one that is not a refusal.
+/// [`accepts_new_tasks`] keeps new work out and [`accepts_active_tasks`] keeps
+/// the existing work from claiming to be underway; shelving is otherwise
+/// *paused, not frozen*, so a task already there can still be retitled, tagged,
+/// re-deped, closed out or annotated. Those writes are supported and stay
+/// supported — but every one of them lands somewhere `fr list`, `fr ready` and
+/// `fr search` all skip (each filters `state == "active"`), and the result line
+/// alone cannot be told apart from the same write to a live track.
+///
+/// So this gates an advisory rather than an error: the one consumer is
+/// `report_task_change_with`, the chokepoint every write to an *existing* task
+/// reports through, which appends one warning naming the track and how to get
+/// it back. Refusing instead would draw a line five sibling commands do not
+/// respect, and would cost three writes — activate, note, shelve — to record
+/// one sentence about why the work is paused, which is the sentence a shelved
+/// track most wants to carry.
+pub fn shows_in_default_views(state: &str) -> bool {
+    state == "active"
+}
+
 /// Whether a track can be renamed — its name, its id, or its ID prefix.
 ///
 /// **An archived track is frozen**, which is what every other mutation already

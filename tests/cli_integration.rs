@@ -3432,6 +3432,76 @@ fn test_add_to_shelved_track_blocked() {
     assert!(!side.contains("New task"));
 }
 
+/// A shelved track refuses *new tasks*, not every write — and says where the
+/// ones it takes went.
+///
+/// The companion to the four `*_to_shelved_track_blocked` cases above. Shelving
+/// is paused, not frozen: a task already in the track can still be annotated,
+/// re-stated, tagged and retitled, which is how the reason for the pause gets
+/// recorded without three writes to activate and re-shelve around it. What was
+/// missing is that the result line for those writes was identical to a live
+/// track's, while `fr list`, `fr ready` and `fr search` all hide the result.
+///
+/// So: every one of them succeeds, every one of them warns, and the warning is
+/// on both surfaces, because a caller that cannot see it is the caller most
+/// likely to be writing somewhere it did not mean to.
+#[test]
+fn test_writes_to_shelved_track_succeed_with_a_warning() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    run_fr_ok(tmp.path(), &["track", "shelve", "side"]);
+
+    for args in [
+        vec!["note", "S-001", "paused: waiting on the vendor"],
+        vec!["state", "S-001", "parked"],
+        vec!["tag", "S-001", "add", "urgent"],
+        vec!["title", "S-001", "Renamed while shelved"],
+    ] {
+        let (out, err, ok) = run_fr(tmp.path(), &args);
+        assert!(
+            ok,
+            "{args:?} must still be allowed on a shelved track: {err}"
+        );
+        assert!(
+            err.contains("shelved track 'side'"),
+            "{args:?} should name the shelved track: {err}"
+        );
+        assert!(
+            err.contains("fr track activate side"),
+            "{args:?} should say how to get it back into view: {err}"
+        );
+        // The advisory is advice — stdout still reports an ordinary write.
+        assert!(!out.is_empty(), "{args:?} should report its write: {out}");
+    }
+
+    // And the writes actually landed, which is the half a refusal would lose.
+    let side = fs::read_to_string(tmp.path().join("frame/tracks/side.md")).unwrap();
+    assert!(side.contains("Renamed while shelved"), "{side}");
+    assert!(side.contains("waiting on the vendor"), "{side}");
+    assert!(side.contains("#urgent"), "{side}");
+
+    // The same warning reaches a program, not just a terminal.
+    let out = run_fr_ok(tmp.path(), &["--json", "note", "S-001", "more"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let warnings = v["warnings"].as_array().expect("warnings array");
+    assert!(
+        warnings.iter().any(|w| w
+            .as_str()
+            .is_some_and(|w| w.contains("shelved track 'side'"))),
+        "the shelved advisory should travel in the JSON object: {out}"
+    );
+
+    // An active track says nothing — the advisory is about the destination, so
+    // a false positive here would make it noise on every write frame does.
+    let (_out, err, ok) = run_fr(tmp.path(), &["note", "M-001", "on a live track"]);
+    assert!(ok, "{err}");
+    assert!(
+        !err.contains("shelved"),
+        "an active track must not warn: {err}"
+    );
+}
+
 #[test]
 fn test_push_to_shelved_track_blocked() {
     let tmp = tempfile::TempDir::new().unwrap();

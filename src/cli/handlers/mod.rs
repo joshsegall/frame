@@ -2500,12 +2500,34 @@ fn report_task_change_with(
     track_id: &str,
     task_id: &str,
     before: Option<Task>,
-    notice: WriteNotice,
+    mut notice: WriteNotice,
     human: impl FnOnce(),
 ) -> Result<(), Box<dyn std::error::Error>> {
     let after =
         find_track(project, track_id).and_then(|t| task_ops::find_task_in_track(t, task_id));
     let changed = before.as_ref() != after;
+
+    // Where the write landed, when that is somewhere nobody is looking. A
+    // shelved track still takes every write to a task already in it — that is
+    // `track_ops::shows_in_default_views`, not a refusal — but `fr list`,
+    // `fr ready` and `fr search` all skip it, and `WOR-1 note updated` reads
+    // exactly like the same line from a live track. Said here rather than in
+    // each handler because the question is about the destination, which is a
+    // property of this call's `track_id` and of nothing the seven commands
+    // reporting through here disagree about.
+    //
+    // Stated as a location and not as an outcome, so it holds for the write
+    // that changed nothing as well; `--dry-run` gets it too, since arriving
+    // before the write is the whole point of an advisory.
+    if let Some(state) = track_state(project, track_id)
+        && !track_ops::shows_in_default_views(state)
+    {
+        notice.warnings.push(format!(
+            "{task_id} is in {state} track '{track_id}' — `fr list`, `fr ready` \
+             and `fr search` hide it until `fr track activate {track_id}`"
+        ));
+    }
+
     report_task_write_with(
         json,
         command,

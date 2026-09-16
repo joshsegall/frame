@@ -412,6 +412,8 @@ Auto-generates a task ID using the track's configured prefix, minted in this wor
 
 A [shelved](concepts.md#tracks) track rejects new tasks: `fr add`, `fr push`, `fr sub`, `fr import`, `fr triage`, and `fr mv --track` into it fail with a message pointing to `fr track activate`. Re-activate the track first.
 
+Writes to a task **already** in a shelved track are not rejected — `fr note`, `fr state` (other than `active`), `fr tag`, `fr dep`, `fr title`, `fr ref` and `fr spec` all go through, so the reason work was paused can be recorded without activating and re-shelving around it. Each one warns, on stderr and in `warnings[]` under `--json`, that the task is in a shelved track and that `fr list`, `fr ready` and `fr search` hide it until `fr track activate`. The warning names the destination, so it fires on a write that changed nothing and under `--dry-run` too.
+
 ### `fr push TRACK TITLE`
 
 Add a task to the **top** of a track's Backlog.
@@ -453,7 +455,7 @@ Change a task's state.
 fr state EFF-014 active
 ```
 
-States: `todo`, `active`, `blocked`, `done`, `parked`. Setting a top-level Backlog task to `done` moves it to the Done section immediately. Marking a task `active` is rejected when its track is [shelved](concepts.md#tracks) (re-activate the track first with `fr track activate`); other transitions on a shelved track's tasks are allowed.
+States: `todo`, `active`, `blocked`, `done`, `parked`. Setting a top-level Backlog task to `done` moves it to the Done section immediately. Marking a task `active` is rejected when its track is [shelved](concepts.md#tracks) (re-activate the track first with `fr track activate`); other transitions on a shelved track's tasks are allowed, with a [warning naming the track](#fr-add-track-title).
 
 ### `fr start ID`
 

@@ -185,6 +185,17 @@ All notable changes to frame will be documented in this file.
 
 ### Changed
 
+- **A write to a task in a shelved track now says the track is shelved.** Shelving rejects new tasks (`fr add`/`push`/`sub`/`triage`/`import`/`mv --track`) and refuses to mark one active, but it has never frozen the tasks already there: `fr note`, `fr state` (other than `active`), `fr tag`, `fr dep`, `fr title`, `fr ref` and `fr spec` all go through. That is deliberate — recording *why* work is paused should not cost an activate and a re-shelve around it — but the result line was identical to a live track's, while `fr list`, `fr ready` and `fr search` all hide the result. Reported as `fr note` "keeping accepting content indefinitely and nothing says so".
+
+  Nothing is refused. Each of those writes now closes with the track it landed in and the way back:
+
+  ```
+  WOR-001 note updated
+  warning: WOR-001 is in shelved track 'work' — `fr list`, `fr ready` and `fr search` hide it until `fr track activate work`
+  ```
+
+  Under `--json` the same string travels in `warnings[]`, because a caller that cannot see the advisory is the one most likely to be writing somewhere it did not mean to. It states a location rather than an outcome, so it fires on a write that changed nothing and under `--dry-run` too — arriving before the write is the point. `track_ops::shows_in_default_views` is the predicate, the third question about a shelved track after `accepts_new_tasks` and `accepts_active_tasks`, and it is asked once, at the chokepoint every write to an existing task already reports through.
+
 - **A project in a temporary directory is no longer registered automatically.** Any `fr` command run inside a project registers it in the global list — silently, as a side effect — which is right for a project somebody works in and wrong for one that will not exist tomorrow. The list's whole value is being short, and a throwaway project touched once by one command stayed in it forever. Reported after four such entries accumulated from agent scratch directories.
 
   Automatic registration now skips anything under `$TMPDIR`, `/tmp` or `/var/tmp`. The path is resolved before the question is asked, because macOS records `/tmp/x` as `/private/tmp/x` and puts the per-user `$TMPDIR` under `/var/folders` — a literal prefix test misses both, which is exactly how the reported entries got in.

@@ -60,7 +60,7 @@ Track states:
 | State | Meaning |
 |-------|---------|
 | `active` | Shown in tabs, included in listings |
-| `shelved` | Hidden from default views, preserved for later. Rejects new tasks (`fr add`/`push`/`sub`/`triage`/`mv --track`) and task activation (`fr state active`/`fr start`, and the TUI's state keys) until re-activated with `fr track activate`. Existing tasks can still be closed out or re-opened (done/parked/todo). |
+| `shelved` | Hidden from default views, preserved for later. Rejects new tasks (`fr add`/`push`/`sub`/`triage`/`mv --track`) and task activation (`fr state active`/`fr start`, and the TUI's state keys) until re-activated with `fr track activate`. Existing tasks can still be closed out or re-opened (done/parked/todo), retitled, tagged, re-deped and annotated — shelving is paused, not frozen. Those writes warn that the track is shelved and name `fr track activate`, because the track stays hidden from `fr list`, `fr ready` and `fr search` until it is. |
 | `archived` | Moved to `frame/archive/`, read-only |
 
 Each track file has three sections: **Backlog** (todo/active/blocked tasks), **Parked** (intentionally paused), and **Done** (completed).
