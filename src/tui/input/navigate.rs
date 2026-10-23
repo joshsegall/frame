@@ -503,6 +503,11 @@ pub(super) fn handle_navigate(app: &mut App, key: KeyEvent) {
             }
         }
 
+        // Full-task edit in an external editor (track/board/detail view)
+        (KeyModifiers::SHIFT, KeyCode::Char('E')) => {
+            edit_in_external_editor(app);
+        }
+
         // Inline title edit (track/board view), edit (inbox view), edit track name (tracks view), or enter edit mode (detail view)
         (KeyModifiers::NONE, KeyCode::Char('e')) => {
             if matches!(app.view, View::Detail { .. }) {

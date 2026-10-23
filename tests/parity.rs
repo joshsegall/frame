@@ -892,6 +892,7 @@ const CLASSIFICATION: &[(&str, Class)] = &[
     ("ref", Class::Write),
     ("spec", Class::Write),
     ("title", Class::Write),
+    ("edit", Class::Write),
     ("mv", Class::Write),
     ("triage", Class::Write),
     ("track", Class::Write),
@@ -1595,6 +1596,7 @@ const JSON_SURFACE: &[JsonRow] = &[
     jrow(&["ref", "M-001", "add", "frame/inbox.md"], Json::Yes),
     jrow(&["spec", "M-001", "add", "frame/inbox.md"], Json::Yes),
     jrow(&["title", "M-001", "x"], Json::Yes),
+    jrow(&["edit", "M-001"], Json::Yes),
     jrow(&["mv", "M-001", "--top"], Json::Yes),
     jrow(&["triage", "1", "--track", "main"], Json::Yes),
     jrow(&["delete", "M-001", "--yes"], Json::Yes),
@@ -1644,11 +1646,23 @@ const JSON_SURFACE: &[JsonRow] = &[
 
 /// Run `fr` without requiring success — a row may legitimately fail, and what
 /// this test asks is only whether the output is JSON.
+/// `fr edit` without a terminal: an editor that renames the task, run through
+/// `sh` as `EDITOR` is (`f` gets the file). Debug builds only accept the bypass.
+const SCRIPTED_EDITOR: [(&str, &str); 3] = [
+    ("VISUAL", ""),
+    (
+        "EDITOR",
+        r#"f() { sed 's/^title: .*/title: edited/' "$1" > "$1.n" && mv "$1.n" "$1"; }; f"#,
+    ),
+    ("FRAME_EDITOR_NO_TTY", "1"),
+];
+
 fn run_fr_raw(dir: &Path, args: &[&str]) -> String {
     let output = Command::new(fr_bin())
         .args(args)
         .current_dir(dir)
         .env("XDG_CONFIG_HOME", dir.join(".xdg-config"))
+        .envs(SCRIPTED_EDITOR)
         .output()
         .expect("failed to run fr");
     String::from_utf8_lossy(&output.stdout).to_string()
@@ -1860,6 +1874,7 @@ const DRY_RUN_SURFACE: &[DryRunRow] = &[
     drow(&["ref", "M-001", "add", "frame/inbox.md"], DryRun::Yes),
     drow(&["spec", "M-001", "add", "frame/inbox.md"], DryRun::Yes),
     drow(&["title", "M-001", "x"], DryRun::Yes),
+    drow(&["edit", "M-001"], DryRun::Yes),
     drow(&["mv", "M-003", "--top"], DryRun::Yes),
     drow(&["mv", "M-001", "--track", "side"], DryRun::Yes),
     drow(&["triage", "1", "--track", "main"], DryRun::Yes),
@@ -2001,6 +2016,7 @@ fn run_fr_status(dir: &Path, args: &[&str]) -> (i32, String) {
         .args(args)
         .current_dir(dir)
         .env("XDG_CONFIG_HOME", dir.join(".xdg-config"))
+        .envs(SCRIPTED_EDITOR)
         .output()
         .expect("failed to run fr");
     (

@@ -4,24 +4,24 @@ expression: output
 ---
 
    ┌ ▲ ────────────────────────────────────────────────────────────────────┐
-   │ ▶/l        Expand / child            a          Add task (bottom)     │
-   │ g/G        Top / bottom              =          Append to group       │
-   │ Enter      Open detail               -          Insert after cursor   │
-   │ Esc        Back / close              p          Push to top           │
-   │                                      A          Add subtask           │
-   │ Task State                           m          Move mode             │
-   │ Space      Cycle state               M          Move to track         │
-   │ o          Set todo                                                   │
-   │ x          Mark done                 Select (v)                       │
-   │ b          Set blocked               v          Toggle select         │
-   │ ~          Set parked                V          Range select          │
-   │ c          Toggle cc tag             Ctrl+A     Select all            │
-   │                                      N          Select none           │
-   │ Filter (f+key)                       x/b/o/~    Bulk state            │
-   │ fa         Active only               t/d/m/M    Bulk tag/dep/move     │
-   │ fo         Todo only                                                  │
-   │ fb         Blocked only              Other                            │
-   │ fp         Parked only               /          Search                │
+   │ ▶/l        Expand / child            E          Edit in $EDITOR       │
+   │ g/G        Top / bottom              a          Add task (bottom)     │
+   │ Enter      Open detail               =          Append to group       │
+   │ Esc        Back / close              -          Insert after cursor   │
+   │                                      p          Push to top           │
+   │ Task State                           A          Add subtask           │
+   │ Space      Cycle state               m          Move mode             │
+   │ o          Set todo                  M          Move to track         │
+   │ x          Mark done                                                  │
+   │ b          Set blocked               Select (v)                       │
+   │ ~          Set parked                v          Toggle select         │
+   │ c          Toggle cc tag             V          Range select          │
+   │                                      Ctrl+A     Select all            │
+   │ Filter (f+key)                       N          Select none           │
+   │ fa         Active only               x/b/o/~    Bulk state            │
+   │ fo         Todo only                 t/d/m/M    Bulk tag/dep/move     │
+   │ fb         Blocked only                                               │
+   │ fp         Parked only               Other                            │
    │                                                                       │
    │ [>] frame v0.2.0                          github.com/joshsegall/frame │
    └ ▼ ────────────────────────────────────────────────────────────────────┘

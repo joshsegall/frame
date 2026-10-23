@@ -216,6 +216,7 @@ next to the files it shadows is where someone will actually look.
 |-----|--------|
 | `e` | Edit task title |
 | `t` | Edit task tags |
+| `E` | Edit the whole task in `$VISUAL`/`$EDITOR` (see below) |
 | `Enter` | Open detail view |
 | `m` | Enter move mode |
 | `M` | Cross-track move |
@@ -280,6 +281,7 @@ With selection active (Select mode):
 | `~` | Toggle parked |
 | `e` | Edit task title |
 | `t` | Edit task tags |
+| `E` | Edit the whole task in `$VISUAL`/`$EDITOR` (see below) |
 | `M` | Cross-track move |
 | `D` | Show dependency graph |
 | `ft` | Filter by tag |
@@ -378,8 +380,26 @@ With selection active (Select mode):
 | `t` | Jump to Tags and edit |
 | `@` | Jump to Refs and edit |
 | `d` | Jump to Deps and edit |
+| `E` | Edit the whole task in `$VISUAL`/`$EDITOR` (see below) |
 | `n` | Jump to Note and edit, cursor at end |
 | `N` | Jump to Note and edit, cursor at start |
+
+**Editing in an external editor (`E`):**
+
+`E` opens the task in `$VISUAL`, then `$EDITOR`, then `vi`. The file has a
+header of `key: value` lines (`title`, `tags`, `deps`, `spec`, `refs`) between
+two `---` lines, and the note below the second `---`. Lines starting with `#`
+in the header are hints and are removed. An empty value removes that attribute.
+
+- If the file does not parse, the editor opens again on your text, with the
+  error on the first line.
+- To cancel, exit the editor with a non-zero status (`:cq` in Vim), or save
+  the file unchanged or empty.
+- A `#tag` typed into the title is moved to the tags.
+- Set `[ui] editor_hints = false` to leave out the `#` hint lines.
+- One `u` undoes the whole edit.
+- If the task was deleted while the editor was open, the edit is kept in the
+  temp file, and the status line names it.
 
 **State changes (same as Track view):**
 
@@ -736,6 +756,7 @@ note_wrap = true           # soft word wrap for note editing (toggle with w / Al
 board_done_days = 7        # days of done tasks to show on board (0 = hide done column)
 ref_extensions = ["md"]    # file types for ref/spec autocomplete
 ref_paths = ["doc"]        # directories for ref/spec autocomplete
+editor_hints = true        # hint comments in the external editor (E) template
 
 [ui.tag_colors]
 bug = "#FF4444"

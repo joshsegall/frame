@@ -69,6 +69,8 @@ pub enum Commands {
     Spec(PathFieldArgs),
     /// Change task title
     Title(TitleArgs),
+    /// Edit a task's title, tags, deps, refs, specs and note in $VISUAL/$EDITOR
+    Edit(EditArgs),
     /// Move a task (reorder or cross-track)
     Mv(MvArgs),
     /// Triage an inbox item to a track
@@ -416,6 +418,16 @@ pub struct TitleArgs {
     /// New title
     pub title: String,
     /// Preview without writing: report what would change, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Args)]
+pub struct EditArgs {
+    /// Task ID
+    pub id: String,
+    /// Preview without writing: open the editor, report what would change, and
+    /// change nothing
     #[arg(long)]
     pub dry_run: bool,
 }

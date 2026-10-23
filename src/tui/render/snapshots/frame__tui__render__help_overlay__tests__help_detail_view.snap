@@ -11,17 +11,17 @@ expression: output
    │ Tab/S-Tab  Next / prev region        t          Edit tags             │
    │ g/G        Top / bottom              @          Edit refs             │
    │ Esc        Back / close              d          Edit deps             │
-   │                                      n/N        Edit note             │
-   │ Task State                           w/Alt+w    Toggle note wrap      │
-   │ Space      Cycle state               y          Copy task md          │
-   │ x          Mark done                                                  │
-   │ o          Set todo                  Other                            │
-   │ b          Set blocked               /          Search                │
-   │ ~          Set parked                >          Command palette       │
-   │ c          Toggle cc tag             J          Jump to task          │
-   │ M          Move to track             D          Show deps             │
-   │                                      .          Repeat last action    │
-   │ Views                                T          Tag colors            │
+   │                                      E          Edit in $EDITOR       │
+   │ Task State                           n/N        Edit note             │
+   │ Space      Cycle state               w/Alt+w    Toggle note wrap      │
+   │ x          Mark done                 y          Copy task md          │
+   │ o          Set todo                                                   │
+   │ b          Set blocked               Other                            │
+   │ ~          Set parked                /          Search                │
+   │ c          Toggle cc tag             >          Command palette       │
+   │ M          Move to track             J          Jump to task          │
+   │                                      D          Show deps             │
+   │ Views                                .          Repeat last action    │
    │                                                                       │
    │ [>] frame v0.2.0                          github.com/joshsegall/frame │
    └ ▼ ────────────────────────────────────────────────────────────────────┘

@@ -368,6 +368,7 @@ kitty_keyboard = true      # Kitty keyboard protocol for reliable key detection 
 ref_extensions = ["md"]    # file extensions for ref/spec autocomplete (empty = all)
 ref_paths = ["doc", "spec", "docs", "design", "papers"]  # directories for ref/spec autocomplete (empty = whole project)
 default_tags = ["cc"]      # tags always shown in autocomplete (even if no tasks use them yet)
+editor_hints = true        # hint comments in the external editor (E) template (default: true)
 
 [ui.tag_colors]
 bug = "#FF4444"

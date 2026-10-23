@@ -3208,6 +3208,135 @@ fn test_title() {
     assert!(!track.contains("First task"));
 }
 
+/// Run `fr edit` with `body` as the editor: a shell script whose `$f` is the
+/// file being edited, run from the project root.
+fn run_fr_edit(root: &Path, args: &[&str], body: &str) -> (String, String, bool) {
+    let script = root.join("editor.sh");
+    fs::write(&script, format!("f=\"$1\"\n{body}\n")).unwrap();
+    let editor = format!("sh {}", script.display());
+    run_fr_env(
+        root,
+        args,
+        &[
+            ("VISUAL", ""),
+            ("EDITOR", &editor),
+            ("FRAME_EDITOR_NO_TTY", "1"),
+        ],
+    )
+}
+
+/// Replace the `title:` line and append a note, portably (no `sed -i`).
+const EDIT_TITLE_AND_NOTE: &str = "\
+sed 's/^title: .*/title: Edited #urgent/' \"$f\" > \"$f.new\" && mv \"$f.new\" \"$f\"
+echo 'my note' >> \"$f\"";
+
+#[test]
+fn edit_applies_what_the_editor_saved() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    let (stdout, stderr, ok) = run_fr_edit(
+        tmp.path(),
+        &["edit", "M-001", "--json"],
+        EDIT_TITLE_AND_NOTE,
+    );
+    assert!(ok, "{stderr}");
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["changed"], true, "{stdout}");
+
+    let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    assert!(track.contains("`M-001` Edited #core #urgent"), "{track}");
+    assert!(track.contains("my note"), "{track}");
+}
+
+#[test]
+fn edit_keeps_a_write_made_while_the_editor_was_open() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    let meanwhile = "\
+sed 's/Second task/Second task renamed/' frame/tracks/main.md > m.new && mv m.new frame/tracks/main.md\n";
+    let (_, stderr, ok) = run_fr_edit(
+        tmp.path(),
+        &["edit", "M-001"],
+        &format!("{meanwhile}{EDIT_TITLE_AND_NOTE}"),
+    );
+    assert!(ok, "{stderr}");
+    let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    assert!(track.contains("`M-001` Edited"), "{track}");
+    assert!(track.contains("Second task renamed"), "{track}");
+}
+
+#[test]
+fn edit_of_a_task_deleted_meanwhile_keeps_the_text() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    let delete = "\
+grep -v -e '`M-001`' -e '2025-05-01' frame/tracks/main.md > m.new && mv m.new frame/tracks/main.md\n";
+    let (_, stderr, ok) = run_fr_edit(
+        tmp.path(),
+        &["edit", "M-001"],
+        &format!("{delete}{EDIT_TITLE_AND_NOTE}"),
+    );
+    assert!(!ok);
+    let kept = stderr
+        .split("your edit is kept in ")
+        .nth(1)
+        .unwrap_or_else(|| panic!("{stderr}"))
+        .trim();
+    let text = fs::read_to_string(kept).unwrap();
+    assert!(text.contains("title: Edited #urgent"), "{text}");
+    fs::remove_file(kept).unwrap();
+}
+
+#[test]
+fn edit_cancelled_or_unchanged_writes_nothing() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+    let path = tmp.path().join("frame/tracks/main.md");
+    let before = fs::read_to_string(&path).unwrap();
+
+    let (_, stderr, ok) = run_fr_edit(tmp.path(), &["edit", "M-001"], "exit 1");
+    assert!(!ok);
+    assert!(stderr.contains("cancelled"), "{stderr}");
+
+    let (stdout, stderr, ok) = run_fr_edit(tmp.path(), &["edit", "M-001"], "true");
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("M-001 unchanged"), "{stdout}");
+
+    assert_eq!(fs::read_to_string(&path).unwrap(), before);
+}
+
+#[test]
+fn edit_reopens_on_a_parse_error_with_the_users_text() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    // First run breaks a key; the second sees the error and the broken text,
+    // and fixes it.
+    let body = "\
+if grep -q '^# ERROR: unknown attribute `tagz`' \"$f\" && grep -q '^tagz:' \"$f\"; then
+  sed 's/^tagz:/tags:/' \"$f\" > \"$f.new\" && mv \"$f.new\" \"$f\"
+else
+  sed 's/^tags:/tagz:/; s/^title: .*/title: Fixed/' \"$f\" > \"$f.new\" && mv \"$f.new\" \"$f\"
+fi";
+    let (_, stderr, ok) = run_fr_edit(tmp.path(), &["edit", "M-001"], body);
+    assert!(ok, "{stderr}");
+    let track = fs::read_to_string(tmp.path().join("frame/tracks/main.md")).unwrap();
+    assert!(track.contains("`M-001` Fixed #core"), "{track}");
+}
+
+#[test]
+fn edit_without_a_terminal_is_refused() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    create_test_project(tmp.path());
+
+    let (_, stderr, ok) = run_fr_env(tmp.path(), &["edit", "M-001"], &[("EDITOR", "true")]);
+    assert!(!ok);
+    assert!(stderr.contains("terminal"), "{stderr}");
+}
+
 #[test]
 fn test_mv_top() {
     let tmp = tempfile::TempDir::new().unwrap();

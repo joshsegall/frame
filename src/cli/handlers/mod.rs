@@ -125,6 +125,7 @@ fn dispatch_command(
             Commands::Ref(args) => cmd_ref(args, json),
             Commands::Spec(args) => cmd_spec(args, json),
             Commands::Title(args) => cmd_title(args, json),
+            Commands::Edit(args) => cmd_edit(args, json),
             Commands::Mv(args) => cmd_mv(args, json),
             Commands::Triage(args) => cmd_triage(args, json),
 
@@ -3284,6 +3285,76 @@ fn cmd_title(args: TitleArgs, json: bool) -> Result<(), Box<dyn std::error::Erro
     save_track(&project, &track_id)?;
     report_task_change(json, "title", &project, &track_id, &args.id, before, || {
         println!("{} title updated", args.id)
+    })
+}
+
+fn cmd_edit(args: EditArgs, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::io::editor::{self, Edited};
+    use crate::tui::fields;
+
+    dryrun::arm(args.dry_run);
+    editor::require_terminal()?;
+    // Read without the lock: the editor stays open as long as the user likes,
+    // and holding the lock that long would stall every other writer.
+    let project = load_project_cwd()?;
+    let track_id = find_task_track(&project, &args.id)
+        .ok_or_else(|| task_not_found(&project.frame_dir, &args.id))?
+        .to_string();
+    let task = snapshot(&project, &track_id, &args.id)
+        .ok_or_else(|| task_not_found(&project.frame_dir, &args.id))?;
+    let hints = project.config.ui.editor_hints.unwrap_or(true);
+    let tags = if hints {
+        let theme = crate::tui::theme::Theme::from_config(&project.config.ui);
+        crate::tui::app::all_tags(&project, &theme)
+    } else {
+        Vec::new()
+    };
+    let template = fields::template_for_task(&task, hints, &tags);
+
+    let (parsed, tmp) =
+        match editor::edit_until_valid(&template, |run| run(), fields::parse_template)? {
+            Edited::Saved(parsed, tmp) => (parsed, tmp),
+            Edited::Unchanged => {
+                return report_task_change(
+                    json,
+                    "edit",
+                    &project,
+                    &track_id,
+                    &args.id,
+                    Some(task),
+                    || println!("{} unchanged", args.id),
+                );
+            }
+            Edited::Cancelled => {
+                return Err("edit cancelled: the editor exited non-zero; nothing was saved".into());
+            }
+        };
+    // The temp file holds the only copy of the user's text once a step fails.
+    let keep = |tmp: tempfile::NamedTempFile| {
+        tmp.keep()
+            .map(|(_, p)| p.display().to_string())
+            .unwrap_or_else(|e| format!("nowhere ({e})"))
+    };
+
+    // Re-read under the lock, so anything written while the editor was open
+    // stays, and the task is found wherever it is now.
+    let (mut project, _lock) = lock_and_load()?;
+    let Some(track_id) = find_task_track(&project, &args.id).map(str::to_string) else {
+        let gone = task_not_found(&project.frame_dir, &args.id);
+        return Err(format!("{gone}; your edit is kept in {}", keep(tmp)).into());
+    };
+    let before = snapshot(&project, &track_id, &args.id);
+    let track = find_track_mut(&mut project, &track_id)
+        .ok_or_else(|| format!("track not found: {}", track_id))?;
+    let task = task_ops::find_task_mut_in_track(track, &args.id)
+        .ok_or_else(|| format!("task not found: {}", args.id))?;
+    if fields::apply_template(task, &parsed)
+        && let Err(e) = save_track(&project, &track_id)
+    {
+        return Err(format!("{e}; your edit is kept in {}", keep(tmp)).into());
+    }
+    report_task_change(json, "edit", &project, &track_id, &args.id, before, || {
+        println!("{} updated", args.id)
     })
 }
 

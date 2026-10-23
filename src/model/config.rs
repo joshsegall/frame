@@ -548,6 +548,10 @@ pub struct UiConfig {
     /// Days of done tasks to show on the board view (default: 7, 0 = hide done column).
     #[serde(default = "default_board_done_days")]
     pub board_done_days: u32,
+    /// Hint comments in the external editor (`E`) template: true or absent = shown
+    /// (default), false = hidden.
+    #[serde(default)]
+    pub editor_hints: Option<bool>,
 }
 
 #[cfg(test)]
@@ -590,6 +594,7 @@ mod tests {
         assert!(u.ref_paths.is_empty());
         assert!(u.default_tags.is_empty());
         assert!(u.kitty_keyboard.is_none());
+        assert!(u.editor_hints.is_none());
         // note_wrap default via Default trait is false (bool default)
         assert!(!u.note_wrap);
     }

@@ -2410,42 +2410,7 @@ impl App {
 
     /// Collect all unique tags from config tag_colors + all tasks in the project
     pub fn collect_all_tags(&self) -> Vec<String> {
-        let mut tags: HashSet<String> = HashSet::new();
-
-        // Tags from config tag_colors keys
-        for key in self.project.config.ui.tag_colors.keys() {
-            tags.insert(key.clone());
-        }
-
-        // Tags from theme tag_colors (includes hardcoded defaults like 'cc')
-        for key in self.theme.tag_colors.keys() {
-            tags.insert(key.clone());
-        }
-
-        // Tags from UI default_tags
-        for tag in &self.project.config.ui.default_tags {
-            tags.insert(tag.clone());
-        }
-
-        // Tags from all tasks across all tracks
-        for (_, track) in &self.project.tracks {
-            Self::collect_tags_from_tasks(track.backlog(), &mut tags);
-            Self::collect_tags_from_tasks(track.parked(), &mut tags);
-            Self::collect_tags_from_tasks(track.done(), &mut tags);
-        }
-
-        // Tags from inbox items
-        if let Some(inbox) = &self.project.inbox {
-            for item in &inbox.items {
-                for tag in &item.tags {
-                    tags.insert(tag.clone());
-                }
-            }
-        }
-
-        let mut sorted: Vec<String> = tags.into_iter().collect();
-        sorted.sort();
-        sorted
+        all_tags(&self.project, &self.theme)
     }
 
     fn collect_tags_from_tasks(tasks: &[Task], tags: &mut HashSet<String>) {
@@ -6043,6 +6008,47 @@ fn run_auto_clean(app: &mut App, changed: &[PathBuf]) {
 // ---------------------------------------------------------------------------
 // File-watcher path resolution helpers
 // ---------------------------------------------------------------------------
+
+/// Every tag the project knows of, sorted: config and theme tag colors, default
+/// tags, and the tags on every task and inbox item. Shared with `fr edit`.
+pub fn all_tags(project: &Project, theme: &Theme) -> Vec<String> {
+    let mut tags: HashSet<String> = HashSet::new();
+
+    // Tags from config tag_colors keys
+    for key in project.config.ui.tag_colors.keys() {
+        tags.insert(key.clone());
+    }
+
+    // Tags from theme tag_colors (includes hardcoded defaults like 'cc')
+    for key in theme.tag_colors.keys() {
+        tags.insert(key.clone());
+    }
+
+    // Tags from UI default_tags
+    for tag in &project.config.ui.default_tags {
+        tags.insert(tag.clone());
+    }
+
+    // Tags from all tasks across all tracks
+    for (_, track) in &project.tracks {
+        App::collect_tags_from_tasks(track.backlog(), &mut tags);
+        App::collect_tags_from_tasks(track.parked(), &mut tags);
+        App::collect_tags_from_tasks(track.done(), &mut tags);
+    }
+
+    // Tags from inbox items
+    if let Some(inbox) = &project.inbox {
+        for item in &inbox.items {
+            for tag in &item.tags {
+                tags.insert(tag.clone());
+            }
+        }
+    }
+
+    let mut sorted: Vec<String> = tags.into_iter().collect();
+    sorted.sort();
+    sorted
+}
 
 /// Check whether a changed file is the real top-level inbox.md (not archive/inbox.md).
 fn is_inbox_path(file_name: &str, rel_path: Option<&str>) -> bool {

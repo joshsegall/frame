@@ -544,6 +544,13 @@ fn static_actions() -> Vec<PaletteAction> {
             category: ActionCategory::Edit,
         },
         PaletteAction {
+            id: "edit_in_editor",
+            label: "Edit task in $EDITOR".into(),
+            shortcut: Some("E"),
+            contexts: &[ViewContext::TrackView, ViewContext::DetailView],
+            category: ActionCategory::Edit,
+        },
+        PaletteAction {
             id: "edit_tags",
             label: "Edit tags".into(),
             shortcut: Some("t"),

@@ -251,6 +251,9 @@ pub(super) fn dispatch_palette_action(app: &mut App, action_id: &str, track_inde
                 enter_title_edit(app);
             }
         }
+        "edit_in_editor" => {
+            edit_in_external_editor(app);
+        }
         "edit_tags" => {
             if matches!(app.view, View::Detail { .. }) {
                 detail_jump_to_region_and_edit(app, DetailRegion::Tags, false);

@@ -2,6 +2,7 @@ mod command;
 mod common;
 mod confirm;
 mod edit;
+mod ext_edit;
 mod move_mode;
 mod navigate;
 mod popups;
@@ -25,6 +26,7 @@ use common::*;
 use confirm::*;
 #[allow(unused_imports)]
 use edit::*;
+use ext_edit::*;
 #[allow(unused_imports)]
 use move_mode::*;
 #[allow(unused_imports)]

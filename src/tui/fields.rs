@@ -464,3 +464,292 @@ mod tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// External-editor template
+// ---------------------------------------------------------------------------
+
+/// Build the external-editor template for `task`: a header of `key: value`
+/// lines, separator lines, and the note body below.
+///
+/// With `hints`, `#` hint lines follow the header, including all project tags
+/// from `available_tags` — they answer "what tags can I use?". Parse strips them.
+pub(crate) fn template_for_task(task: &Task, hints: bool, available_tags: &[String]) -> String {
+    let mut out = String::new();
+    if let Some(id) = &task.id {
+        out.push_str(&id.to_string());
+        out.push('\n');
+    }
+    out.push_str("---\n");
+    for (key, region) in [
+        ("title", DetailRegion::Title),
+        ("tags", DetailRegion::Tags),
+        ("deps", DetailRegion::Deps),
+        ("spec", DetailRegion::Spec),
+        ("refs", DetailRegion::Refs),
+    ] {
+        out.push_str(&format!("{key}: {}\n", field_to_buffer(task, region)));
+    }
+    if hints {
+        out.push_str("# Available attributes — edit the values, keep the keys.\n");
+        out.push_str(
+            "#   title: <text> <#tag1> <#tag2>   (a #tag in the title is added to tags)\n",
+        );
+        out.push_str("#   tags: <#tag #tag ...>\n");
+        out.push_str("#   deps: <T-001, T-002 ...>\n");
+        out.push_str("#   spec: <path#anchor, path ...>\n");
+        out.push_str("#   refs: <path:line, path ...>\n");
+        if !available_tags.is_empty() {
+            let tags = available_tags
+                .iter()
+                .map(|t| format!("#{t}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            out.push_str(&format!("# available tags: {tags}\n"));
+        }
+        out.push_str("# Leave a value empty to remove that attribute.\n");
+        out.push_str("# Lines starting with \"#\" are hints — they are removed on save.\n");
+    }
+    out.push_str("---\n");
+    out.push_str(&field_to_buffer(task, DetailRegion::Note));
+    out.push('\n');
+    out
+}
+
+/// Errors from parsing an external-editor template.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TemplateError {
+    /// A required field line is missing.
+    MissingField(String),
+    /// A field key is not a known editable attribute.
+    UnknownField(String),
+    /// A line is not `key: value`, or a separator is missing.
+    BadFormat(String),
+    /// The title was emptied.
+    EmptyTitle,
+}
+
+impl std::fmt::Display for TemplateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TemplateError::MissingField(key) => write!(f, "missing field `{key}`"),
+            TemplateError::UnknownField(key) => write!(f, "unknown attribute `{key}`"),
+            TemplateError::BadFormat(msg) => write!(f, "{msg}"),
+            TemplateError::EmptyTitle => write!(f, "title cannot be empty"),
+        }
+    }
+}
+
+/// A parsed external-editor template: per-field buffers in apply order, plus
+/// the note body below the second separator.
+pub(crate) type ParsedTemplate = (Vec<(DetailRegion, String)>, String);
+
+/// Parse the external-editor template. Lines starting with `#` are stripped;
+/// every known key must be present; `note` lives below the second `---`.
+pub(crate) fn parse_template(text: &str) -> Result<ParsedTemplate, TemplateError> {
+    let lines: Vec<&str> = text.lines().collect();
+    let first = lines
+        .iter()
+        .position(|l| l.trim() == "---")
+        .ok_or_else(|| TemplateError::BadFormat("missing first `---` separator".into()))?;
+    let after = &lines[first + 1..];
+    let second = after
+        .iter()
+        .position(|l| l.trim() == "---")
+        .ok_or_else(|| TemplateError::BadFormat("missing second `---` separator".into()))?;
+    let header = &after[..second];
+    let note = after[second + 1..].join("\n");
+
+    let mut fields: Vec<(DetailRegion, String)> = Vec::new();
+    for raw in header {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            return Err(TemplateError::BadFormat(format!(
+                "line is not `key: value`: {line}"
+            )));
+        };
+        let key = key.trim();
+        if key == "note" {
+            return Err(TemplateError::BadFormat(
+                "the note goes below the second `---`, not as a header field".into(),
+            ));
+        }
+        let region = region_from_field_name(key)
+            .ok_or_else(|| TemplateError::UnknownField(key.to_string()))?;
+        if !region.is_editable() {
+            return Err(TemplateError::UnknownField(key.to_string()));
+        }
+        let value = value.trim().to_string();
+        // Last occurrence wins, so a duplicated key cannot double-apply.
+        if let Some(slot) = fields.iter_mut().find(|(r, _)| r == &region) {
+            slot.1 = value;
+        } else {
+            fields.push((region, value));
+        }
+    }
+
+    for key in ["title", "tags", "deps", "spec", "refs"] {
+        let region = region_from_field_name(key).unwrap();
+        if !fields.iter().any(|(r, _)| r == &region) {
+            return Err(TemplateError::MissingField(key.to_string()));
+        }
+    }
+    if fields
+        .iter()
+        .any(|(r, v)| *r == DetailRegion::Title && v.trim().is_empty())
+    {
+        return Err(TemplateError::EmptyTitle);
+    }
+
+    Ok((fields, note))
+}
+
+/// The fields a template sets, in the order they are applied. Tags before
+/// title: a `#tag` typed into the title joins the tags, instead of being
+/// overwritten by the `tags:` line.
+pub(crate) const TEMPLATE_APPLY_ORDER: [DetailRegion; 6] = [
+    DetailRegion::Tags,
+    DetailRegion::Title,
+    DetailRegion::Deps,
+    DetailRegion::Spec,
+    DetailRegion::Refs,
+    DetailRegion::Note,
+];
+
+/// Apply every field of a parsed template to `task`. Returns whether it changed.
+pub(crate) fn apply_template(task: &mut Task, (header, note): &ParsedTemplate) -> bool {
+    let mut changed = false;
+    for region in TEMPLATE_APPLY_ORDER {
+        let buffer = match region {
+            DetailRegion::Note => note.as_str(),
+            // `parse_template` guarantees every header field is present.
+            _ => header
+                .iter()
+                .find(|(r, _)| *r == region)
+                .map_or("", |(_, v)| v.as_str()),
+        };
+        changed |= apply_buffer(task, region, buffer);
+    }
+    changed
+}
+
+#[cfg(test)]
+mod ext_template_tests {
+    use super::*;
+    use crate::model::task::{Task, TaskState};
+
+    fn sample_task() -> Task {
+        let mut t = Task::new(
+            TaskState::Todo,
+            Some(crate::model::task_id::TaskId::parse("T-001")),
+            "Fix auth bug".to_string(),
+        );
+        t.tags = vec!["design".to_string(), "urgent".to_string()];
+        t.metadata = vec![Metadata::Dep(vec![
+            "T-002".to_string(),
+            "T-003".to_string(),
+        ])];
+        t
+    }
+
+    fn field(parsed: &ParsedTemplate, region: DetailRegion) -> &str {
+        parsed
+            .0
+            .iter()
+            .find(|(r, _)| *r == region)
+            .map(|(_, v)| v.as_str())
+            .unwrap()
+    }
+
+    #[test]
+    fn round_trip_preserves_every_field() {
+        let task = sample_task();
+        let parsed = parse_template(&template_for_task(&task, true, &[])).unwrap();
+        assert_eq!(field(&parsed, DetailRegion::Title), "Fix auth bug");
+        assert_eq!(field(&parsed, DetailRegion::Tags), "#design #urgent");
+        assert_eq!(field(&parsed, DetailRegion::Deps), "T-002, T-003");
+        assert_eq!(field(&parsed, DetailRegion::Spec), "");
+        assert_eq!(field(&parsed, DetailRegion::Refs), "");
+        assert_eq!(parsed.1, "");
+    }
+
+    #[test]
+    fn hint_lines_are_stripped() {
+        let task = sample_task();
+        let template = template_for_task(&task, true, &["urgent".to_string()]);
+        assert!(template.contains("# available tags: #urgent"));
+        let parsed = parse_template(&template).unwrap();
+        assert_eq!(parsed.0.len(), 5, "hints must not become fields");
+    }
+
+    #[test]
+    fn hints_can_be_turned_off() {
+        let task = sample_task();
+        let with = template_for_task(&task, true, &["urgent".to_string()]);
+        assert!(with.contains("#   title: <text> <#tag1> <#tag2>"));
+        let without = template_for_task(&task, false, &["urgent".to_string()]);
+        assert!(!without.lines().any(|l| l.starts_with('#')), "{without}");
+        assert_eq!(
+            parse_template(&with).unwrap(),
+            parse_template(&without).unwrap()
+        );
+    }
+
+    #[test]
+    fn note_body_preserves_hash_lines() {
+        let text = "T-001\n---\ntitle: x\ntags: \ndeps: \nspec: \nrefs: \n---\n# heading\nbody\n# another\n";
+        let parsed = parse_template(text).unwrap();
+        assert_eq!(parsed.1, "# heading\nbody\n# another");
+    }
+
+    #[test]
+    fn unknown_field_is_rejected() {
+        let text = "---\ntitle: x\ntags: \ndeps: \nspec: \nrefs: \nbogus: y\n---\n";
+        assert!(matches!(
+            parse_template(text),
+            Err(TemplateError::UnknownField(k)) if k == "bogus"
+        ));
+    }
+
+    #[test]
+    fn missing_field_is_rejected() {
+        let text = "---\ntitle: x\ntags: \ndeps: \nspec: \n---\n";
+        assert!(matches!(
+            parse_template(text),
+            Err(TemplateError::MissingField(k)) if k == "refs"
+        ));
+    }
+
+    #[test]
+    fn note_as_header_field_is_rejected() {
+        let text = "---\ntitle: x\ntags: \ndeps: \nspec: \nrefs: \nnote: y\n---\n";
+        assert!(matches!(
+            parse_template(text),
+            Err(TemplateError::BadFormat(_))
+        ));
+    }
+
+    #[test]
+    fn empty_title_is_rejected() {
+        let text = "---\ntitle:  \ntags: \ndeps: \nspec: \nrefs: \n---\n";
+        assert_eq!(parse_template(text), Err(TemplateError::EmptyTitle));
+    }
+
+    #[test]
+    fn duplicate_key_last_wins() {
+        let text = "---\ntitle: first\ntitle: second\ntags: \ndeps: \nspec: \nrefs: \n---\n";
+        let parsed = parse_template(text).unwrap();
+        assert_eq!(field(&parsed, DetailRegion::Title), "second");
+        assert_eq!(parsed.0.len(), 5);
+    }
+
+    #[test]
+    fn empty_value_clears_a_field() {
+        let text = "---\ntitle: x\ntags: \ndeps: \nspec: \nrefs: \n---\n";
+        let parsed = parse_template(text).unwrap();
+        assert_eq!(field(&parsed, DetailRegion::Tags), "");
+    }
+}
